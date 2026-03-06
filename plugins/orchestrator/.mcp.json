@@ -1,6 +1,6 @@
 {
   "memory": {
-    "command": "bash",
-    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/start-server.sh"]
+    "command": "npx",
+    "args": ["-y", "bun", "run", "${CLAUDE_PLUGIN_ROOT}/dist/server.js"]
   }
 }
