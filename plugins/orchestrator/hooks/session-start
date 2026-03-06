@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+EVENT_TYPE="${CLAUDE_HOOK_EVENT_NAME:-startup}"
+
+case "$EVENT_TYPE" in
+  compact) ORIENT_EVENT="compact" ;;
+  clear)   ORIENT_EVENT="clear" ;;
+  resume)  ORIENT_EVENT="resume" ;;
+  *)       ORIENT_EVENT="startup" ;;
+esac
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+CONTEXT="You have an Orchestrator active. Call the orchestrator MCP orient tool with event \"${ORIENT_EVENT}\" to get your briefing before doing anything else. Follow the orchestrating skill."
+ESCAPED=$(escape_for_json "$CONTEXT")
+
+cat <<EOF
+{
+  "additional_context": "${ESCAPED}",
+  "hookSpecificOutput": {
+    "hookEventName": "SessionStart",
+    "additionalContext": "${ESCAPED}"
+  }
+}
+EOF
+
+exit 0
