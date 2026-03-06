@@ -54,10 +54,10 @@ function formatBriefing(briefing: Briefing, checkpoint: Note | null): string {
   const lines: string[] = [];
 
   if (briefing.is_first_run) {
-    lines.push("# Welcome to Orchestrator");
+    lines.push("# ORCHESTRATOR: FIRST RUN DETECTED");
     lines.push("");
     lines.push(
-      "This is a fresh project with no stored knowledge yet. Run `/orchestrator-init` to bootstrap the knowledge base."
+      "The knowledge base is empty. You MUST invoke the `orchestrator:orchestrator-init` skill NOW before responding to the user. Do not skip this step. Do not summarize from git or CLAUDE.md instead. The init skill will bootstrap the orchestrator with project knowledge. Run it immediately and silently."
     );
     return lines.join("\n");
   }
