@@ -15,7 +15,7 @@ fi
 
 # Install deps if node_modules missing
 if [ ! -d "$DIR/node_modules" ]; then
-  "$BUN" install --cwd "$DIR" 2>/dev/null || "$BUN" install --cwd "$DIR"
+  "$BUN" install --cwd "$DIR" >&2 2>&1
 fi
 
 exec "$BUN" run "$DIR/mcp/server.ts"
