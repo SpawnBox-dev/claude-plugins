@@ -9,7 +9,7 @@
     {
       "name": "orchestrator",
       "description": "A persistent product co-pilot that learns your project and you. Maintains three models (product, user, work) across sessions. Agent-first design with progressive disclosure.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "SpawnBox-dev"
       },

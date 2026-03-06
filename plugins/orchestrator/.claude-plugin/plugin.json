@@ -1,7 +1,6 @@
 {
   "name": "orchestrator",
   "description": "A persistent product co-pilot that learns your project and you. Maintains three models (product, user, work) across sessions. Agent-first design with progressive disclosure.",
-  "version": "0.1.0",
-  "keywords": ["orchestrator", "memory", "agent", "context", "product-management"],
-  "postinstall": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/postinstall.sh"
+  "version": "0.1.1",
+  "keywords": ["orchestrator", "memory", "agent", "context", "product-management"]
 }
