@@ -13,9 +13,9 @@ if [ -z "$BUN" ]; then
   exit 1
 fi
 
-# Install deps if node_modules missing
+# Install deps if node_modules missing (detach from stdio so MCP channel isn't disrupted)
 if [ ! -d "$DIR/node_modules" ]; then
-  "$BUN" install --cwd "$DIR" >&2 2>&1
+  "$BUN" install --cwd "$DIR" </dev/null >&2 2>&1
 fi
 
 exec "$BUN" run "$DIR/mcp/server.ts"
