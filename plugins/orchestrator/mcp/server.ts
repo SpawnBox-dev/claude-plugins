@@ -19,10 +19,10 @@ server.tool(
   "orient",
   "Get a session briefing with open threads, recent decisions, neglected areas, and drift warnings. Call this at the start of every conversation or when resuming work to understand current project state.",
   {
-    event: z.enum(["startup", "resume", "clear", "compact"]),
+    event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
   },
   async ({ event }) => {
-    const result = handleOrient(getProjectDb(), getGlobalDb(), { event });
+    const result = handleOrient(getProjectDb(), getGlobalDb(), { event: event ?? "startup" });
     return {
       content: [{ type: "text" as const, text: result.formatted }],
     };
