@@ -7014,22 +7014,25 @@ function promoteConfidence(db, noteId) {
 }
 function computeAutonomyScore(db, domain) {
   const pattern = `%${domain}%`;
-  const recipeCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'autonomy_recipe'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const gateCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'quality_gate'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const antiPatternCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'anti_pattern'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const total = recipeCount + gateCount + antiPatternCount;
+  function countByType(type) {
+    return db.query(`SELECT COUNT(*) as cnt FROM notes
+           WHERE type = ?
+             AND (tags LIKE ? OR keywords LIKE ?)`).get(type, pattern, pattern).cnt;
+  }
+  const recipeCount = countByType("autonomy_recipe");
+  const gateCount = countByType("quality_gate");
+  const antiPatternCount = countByType("anti_pattern");
+  const conventionCount = countByType("convention");
+  const architectureCount = countByType("architecture");
+  const total = recipeCount + gateCount + antiPatternCount + Math.floor((conventionCount + architectureCount) / 2);
   const score = total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
   return {
     score,
     recipe_count: recipeCount,
     gate_count: gateCount,
-    anti_pattern_count: antiPatternCount
+    anti_pattern_count: antiPatternCount,
+    convention_count: conventionCount,
+    architecture_count: architectureCount
   };
 }
 var init_scorer = __esm(() => {

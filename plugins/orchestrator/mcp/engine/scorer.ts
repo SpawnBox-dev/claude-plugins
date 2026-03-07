@@ -54,6 +54,11 @@ export function promoteConfidence(
 /**
  * Compute an autonomy score for a given domain.
  * Counts relevant notes by type and returns a maturity assessment.
+ *
+ * Primary types (autonomy_recipe, quality_gate, anti_pattern) represent
+ * actionable domain knowledge. Secondary types (convention, architecture)
+ * contribute at half weight since they represent understanding rather than
+ * operational recipes.
  */
 export function computeAutonomyScore(
   db: Database,
@@ -63,40 +68,36 @@ export function computeAutonomyScore(
   recipe_count: number;
   gate_count: number;
   anti_pattern_count: number;
+  convention_count: number;
+  architecture_count: number;
 } {
   const pattern = `%${domain}%`;
 
-  const recipeCount = (
-    db
-      .query(
-        `SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'autonomy_recipe'
-           AND (tags LIKE ? OR keywords LIKE ?)`
-      )
-      .get(pattern, pattern) as { cnt: number }
-  ).cnt;
+  function countByType(type: string): number {
+    return (
+      db
+        .query(
+          `SELECT COUNT(*) as cnt FROM notes
+           WHERE type = ?
+             AND (tags LIKE ? OR keywords LIKE ?)`
+        )
+        .get(type, pattern, pattern) as { cnt: number }
+    ).cnt;
+  }
 
-  const gateCount = (
-    db
-      .query(
-        `SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'quality_gate'
-           AND (tags LIKE ? OR keywords LIKE ?)`
-      )
-      .get(pattern, pattern) as { cnt: number }
-  ).cnt;
+  const recipeCount = countByType("autonomy_recipe");
+  const gateCount = countByType("quality_gate");
+  const antiPatternCount = countByType("anti_pattern");
+  const conventionCount = countByType("convention");
+  const architectureCount = countByType("architecture");
 
-  const antiPatternCount = (
-    db
-      .query(
-        `SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'anti_pattern'
-           AND (tags LIKE ? OR keywords LIKE ?)`
-      )
-      .get(pattern, pattern) as { cnt: number }
-  ).cnt;
+  // Primary types count fully, secondary types at half weight
+  const total =
+    recipeCount +
+    gateCount +
+    antiPatternCount +
+    Math.floor((conventionCount + architectureCount) / 2);
 
-  const total = recipeCount + gateCount + antiPatternCount;
   const score: AutonomyLevel =
     total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
 
@@ -105,5 +106,7 @@ export function computeAutonomyScore(
     recipe_count: recipeCount,
     gate_count: gateCount,
     anti_pattern_count: antiPatternCount,
+    convention_count: conventionCount,
+    architecture_count: architectureCount,
   };
 }
