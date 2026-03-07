@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import type { AutonomyLevel } from "../types";
+import type { AutonomyLevel, ConfidenceLevel } from "../types";
+import { now } from "../utils";
 
 /**
  * Decay confidence of stale, unresolved notes to 'low'.
@@ -20,6 +21,34 @@ export function decayConfidence(db: Database, staleDays = 30): number {
   );
 
   return result.changes;
+}
+
+/**
+ * Promote confidence of an existing note when a near-duplicate is found.
+ * low -> medium -> high. Also refreshes last_validated.
+ * Returns the new confidence level.
+ */
+export function promoteConfidence(
+  db: Database,
+  noteId: string
+): ConfidenceLevel {
+  const row = db
+    .query(`SELECT confidence FROM notes WHERE id = ?`)
+    .get(noteId) as { confidence: string } | null;
+
+  if (!row) return "medium";
+
+  const current = row.confidence as ConfidenceLevel;
+  const promoted: ConfidenceLevel =
+    current === "low" ? "medium" : current === "medium" ? "high" : "high";
+
+  const timestamp = now();
+  db.run(
+    `UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`,
+    [promoted, timestamp, timestamp, noteId]
+  );
+
+  return promoted;
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "orchestrator",
   "description": "A persistent product co-pilot that learns your project and you. Maintains three models (product, user, work) across sessions. Agent-first design with progressive disclosure.",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "keywords": ["orchestrator", "memory", "agent", "context", "product-management"]
 }

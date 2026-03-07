@@ -30,9 +30,50 @@ const STOP_WORDS = new Set([
 ]);
 
 /**
+ * Synonym map for domain-specific terms.
+ * When a keyword matches a synonym group, all terms in that group
+ * are added as keywords, improving cross-note linking.
+ */
+const SYNONYM_GROUPS: string[][] = [
+  ["backup", "snapshot", "restore", "archive"],
+  ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
+  ["billing", "payment", "subscription", "stripe", "lemon"],
+  ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
+  ["docker", "container", "image", "compose"],
+  ["wsl", "linux", "distro", "ubuntu"],
+  ["frontend", "ui", "component", "react", "tsx"],
+  ["backend", "rust", "tauri", "handler", "command"],
+  ["database", "sqlite", "db", "migration", "schema", "query"],
+  ["player", "user", "session", "uuid"],
+  ["event", "eventbus", "broadcast", "listener", "emit"],
+  ["poller", "polling", "telemetry", "datapack", "rcon"],
+  ["discord", "bot", "webhook", "guild"],
+  ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
+  ["test", "testing", "vitest", "spec", "assertion"],
+  ["map", "tile", "region", "atlas", "chunk"],
+  ["perf", "performance", "latency", "throughput", "instrument"],
+  ["error", "bug", "fix", "issue", "broken"],
+  ["config", "settings", "configuration", "preference"],
+  ["encrypt", "encryption", "aes", "decrypt"],
+  ["hibernate", "hibernation", "compress", "archive"],
+  ["observer", "connect", "disconnect", "reconnect", "visibility"],
+  ["http", "api", "endpoint", "route", "request"],
+  ["store", "zustand", "state", "selector"],
+];
+
+// Build a lookup: word -> set of synonyms
+const synonymLookup = new Map<string, Set<string>>();
+for (const group of SYNONYM_GROUPS) {
+  const groupSet = new Set(group);
+  for (const word of group) {
+    synonymLookup.set(word, groupSet);
+  }
+}
+
+/**
  * Extract meaningful keywords from text.
  * Lowercases, strips punctuation, filters stop words,
- * counts frequency, and returns the top 15 keywords.
+ * expands synonyms, counts frequency, and returns the top 20 keywords.
  */
 export function extractKeywords(text: string): string[] {
   if (!text.trim()) return [];
@@ -46,11 +87,21 @@ export function extractKeywords(text: string): string[] {
   const freq = new Map<string, number>();
   for (const word of words) {
     freq.set(word, (freq.get(word) ?? 0) + 1);
+
+    // Expand synonyms (add related terms with lower weight)
+    const synonyms = synonymLookup.get(word);
+    if (synonyms) {
+      for (const syn of synonyms) {
+        if (syn !== word && !freq.has(syn)) {
+          freq.set(syn, 0.5);
+        }
+      }
+    }
   }
 
   return [...freq.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 15)
+    .slice(0, 20)
     .map(([word]) => word);
 }
 

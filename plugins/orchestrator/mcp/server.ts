@@ -11,7 +11,7 @@ import { handleReflect } from "./tools/reflect";
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 // ── orient ──────────────────────────────────────────────────────────────
@@ -57,19 +57,21 @@ server.tool(
 // ── recall ──────────────────────────────────────────────────────────────
 server.tool(
   "recall",
-  "Search stored knowledge by query or retrieve a specific note by ID. Searches both project and global databases using full-text search with BM25 ranking. Use this before making decisions to check for existing context.",
+  "Search stored knowledge by query or retrieve a specific note by ID. Searches both project and global databases using full-text search with BM25 ranking. Use depth > 1 to traverse the knowledge graph for progressive disclosure.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
     type: z.enum(NOTE_TYPES).optional(),
     limit: z.number().optional(),
+    depth: z.number().min(1).max(5).optional(),
   },
-  async ({ query, id, type, limit }) => {
+  async ({ query, id, type, limit, depth }) => {
     const result = handleRecall(getProjectDb(), getGlobalDb(), {
       query,
       id,
       type,
       limit,
+      depth,
     });
     let text = result.message;
     if (result.detail) {
@@ -77,7 +79,8 @@ server.tool(
       if (result.detail.links.length > 0) {
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
-          text += `\n- [${link.relationship}] ${link.note.content}`;
+          const indent = "  ".repeat(link.depth - 1);
+          text += `\n${indent}- [${link.relationship}] ${link.note.content}`;
         }
       }
     } else if (result.results.length > 0) {
@@ -107,6 +110,67 @@ server.tool(
     });
     return {
       content: [{ type: "text" as const, text: result.formatted }],
+    };
+  }
+);
+
+// ── resolve ─────────────────────────────────────────────────────────────
+server.tool(
+  "resolve",
+  "Mark an open_thread or commitment as resolved. Use this when a thread has been addressed or a commitment fulfilled.",
+  {
+    id: z.string(),
+    resolution: z.string().optional(),
+  },
+  async ({ id, resolution }) => {
+    const projectDb = getProjectDb();
+    const globalDb = getGlobalDb();
+
+    // Try project DB first, then global
+    let db = projectDb;
+    let row = db
+      .query(`SELECT id, type, content FROM notes WHERE id = ?`)
+      .get(id) as { id: string; type: string; content: string } | null;
+
+    if (!row) {
+      db = globalDb;
+      row = db
+        .query(`SELECT id, type, content FROM notes WHERE id = ?`)
+        .get(id) as { id: string; type: string; content: string } | null;
+    }
+
+    if (!row) {
+      return {
+        content: [
+          { type: "text" as const, text: `No note found with id "${id}".` },
+        ],
+      };
+    }
+
+    const timestamp = new Date().toISOString();
+    db.run(
+      `UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`,
+      [timestamp, id]
+    );
+
+    // If resolution context provided, store it as a decision note
+    if (resolution) {
+      const { handleRemember } = await import("./tools/remember");
+      handleRemember(projectDb, globalDb, {
+        content: resolution,
+        type: "decision",
+        context: `Resolved ${row.type}: ${row.content}`,
+        tags: row.type,
+      });
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Resolved ${row.type} note "${id}".${resolution ? " Decision recorded." : ""}`,
+        },
+      ],
     };
   }
 );

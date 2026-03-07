@@ -43,6 +43,7 @@ var __export = (target, all) => {
       set: __exportSetter.bind(all, name)
     });
 };
+var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
 // node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS((exports) => {
@@ -6514,6 +6515,618 @@ var require_dist = __commonJS((exports, module) => {
   module.exports = exports = formatsPlugin;
   Object.defineProperty(exports, "__esModule", { value: true });
   exports.default = formatsPlugin;
+});
+
+// mcp/types.ts
+var NOTE_TYPES, GLOBAL_TYPES;
+var init_types = __esm(() => {
+  NOTE_TYPES = [
+    "decision",
+    "commitment",
+    "insight",
+    "architecture",
+    "open_thread",
+    "risk",
+    "dependency",
+    "convention",
+    "anti_pattern",
+    "autonomy_recipe",
+    "quality_gate",
+    "tool_capability",
+    "user_pattern",
+    "checkpoint"
+  ];
+  GLOBAL_TYPES = ["user_pattern", "tool_capability"];
+});
+
+// node_modules/uuid/dist/esm/native.js
+import { randomUUID } from "crypto";
+var native_default;
+var init_native = __esm(() => {
+  native_default = { randomUUID };
+});
+
+// node_modules/uuid/dist/esm/rng.js
+import { randomFillSync } from "crypto";
+function rng() {
+  if (poolPtr > rnds8Pool.length - 16) {
+    randomFillSync(rnds8Pool);
+    poolPtr = 0;
+  }
+  return rnds8Pool.slice(poolPtr, poolPtr += 16);
+}
+var rnds8Pool, poolPtr;
+var init_rng = __esm(() => {
+  rnds8Pool = new Uint8Array(256);
+  poolPtr = rnds8Pool.length;
+});
+
+// node_modules/uuid/dist/esm/stringify.js
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
+var byteToHex;
+var init_stringify = __esm(() => {
+  byteToHex = [];
+  for (let i = 0;i < 256; ++i) {
+    byteToHex.push((i + 256).toString(16).slice(1));
+  }
+});
+
+// node_modules/uuid/dist/esm/v4.js
+function v4(options, buf, offset) {
+  if (native_default.randomUUID && !buf && !options) {
+    return native_default.randomUUID();
+  }
+  options = options || {};
+  const rnds = options.random ?? options.rng?.() ?? rng();
+  if (rnds.length < 16) {
+    throw new Error("Random bytes length must be >= 16");
+  }
+  rnds[6] = rnds[6] & 15 | 64;
+  rnds[8] = rnds[8] & 63 | 128;
+  if (buf) {
+    offset = offset || 0;
+    if (offset < 0 || offset + 16 > buf.length) {
+      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+    }
+    for (let i = 0;i < 16; ++i) {
+      buf[offset + i] = rnds[i];
+    }
+    return buf;
+  }
+  return unsafeStringify(rnds);
+}
+var v4_default;
+var init_v4 = __esm(() => {
+  init_native();
+  init_rng();
+  init_stringify();
+  v4_default = v4;
+});
+
+// node_modules/uuid/dist/esm/index.js
+var init_esm = __esm(() => {
+  init_v4();
+});
+
+// mcp/utils.ts
+function generateId() {
+  return v4_default();
+}
+function now() {
+  return new Date().toISOString();
+}
+function extractKeywords(text) {
+  if (!text.trim())
+    return [];
+  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+  const freq = new Map;
+  for (const word of words) {
+    freq.set(word, (freq.get(word) ?? 0) + 1);
+    const synonyms = synonymLookup.get(word);
+    if (synonyms) {
+      for (const syn of synonyms) {
+        if (syn !== word && !freq.has(syn)) {
+          freq.set(syn, 0.5);
+        }
+      }
+    }
+  }
+  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([word]) => word);
+}
+function truncate(text, maxLength = 100) {
+  if (text.length <= maxLength)
+    return text;
+  return text.slice(0, maxLength - 3) + "...";
+}
+function summarizeForBriefing(notes, maxTokens = 200) {
+  const maxChars = maxTokens * 4;
+  const lines = [];
+  let charCount = 0;
+  for (const note of notes) {
+    const line = `- [${note.type}] ${truncate(note.content, 120)}`;
+    if (charCount + line.length > maxChars)
+      break;
+    lines.push(line);
+    charCount += line.length + 1;
+  }
+  return lines.join(`
+`);
+}
+var STOP_WORDS, SYNONYM_GROUPS, synonymLookup;
+var init_utils = __esm(() => {
+  init_esm();
+  STOP_WORDS = new Set([
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "is",
+    "it",
+    "as",
+    "be",
+    "was",
+    "were",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "shall",
+    "can",
+    "need",
+    "dare",
+    "ought",
+    "used",
+    "not",
+    "no",
+    "nor",
+    "so",
+    "yet",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "than",
+    "too",
+    "very",
+    "just",
+    "about",
+    "above",
+    "after",
+    "again",
+    "all",
+    "also",
+    "am",
+    "any",
+    "are",
+    "because",
+    "before",
+    "below",
+    "between",
+    "during",
+    "here",
+    "how",
+    "if",
+    "into",
+    "its",
+    "let",
+    "me",
+    "my",
+    "myself",
+    "now",
+    "off",
+    "once",
+    "only",
+    "our",
+    "out",
+    "over",
+    "own",
+    "same",
+    "she",
+    "he",
+    "her",
+    "him",
+    "his",
+    "hers",
+    "that",
+    "their",
+    "them",
+    "then",
+    "there",
+    "these",
+    "they",
+    "this",
+    "those",
+    "through",
+    "under",
+    "until",
+    "up",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "whom",
+    "why",
+    "you",
+    "your",
+    "yours",
+    "i"
+  ]);
+  SYNONYM_GROUPS = [
+    ["backup", "snapshot", "restore", "archive"],
+    ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
+    ["billing", "payment", "subscription", "stripe", "lemon"],
+    ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
+    ["docker", "container", "image", "compose"],
+    ["wsl", "linux", "distro", "ubuntu"],
+    ["frontend", "ui", "component", "react", "tsx"],
+    ["backend", "rust", "tauri", "handler", "command"],
+    ["database", "sqlite", "db", "migration", "schema", "query"],
+    ["player", "user", "session", "uuid"],
+    ["event", "eventbus", "broadcast", "listener", "emit"],
+    ["poller", "polling", "telemetry", "datapack", "rcon"],
+    ["discord", "bot", "webhook", "guild"],
+    ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
+    ["test", "testing", "vitest", "spec", "assertion"],
+    ["map", "tile", "region", "atlas", "chunk"],
+    ["perf", "performance", "latency", "throughput", "instrument"],
+    ["error", "bug", "fix", "issue", "broken"],
+    ["config", "settings", "configuration", "preference"],
+    ["encrypt", "encryption", "aes", "decrypt"],
+    ["hibernate", "hibernation", "compress", "archive"],
+    ["observer", "connect", "disconnect", "reconnect", "visibility"],
+    ["http", "api", "endpoint", "route", "request"],
+    ["store", "zustand", "state", "selector"]
+  ];
+  synonymLookup = new Map;
+  for (const group of SYNONYM_GROUPS) {
+    const groupSet = new Set(group);
+    for (const word of group) {
+      synonymLookup.set(word, groupSet);
+    }
+  }
+});
+
+// mcp/engine/deduplicator.ts
+function findDuplicates(db, type, content, threshold = 0.6) {
+  const normalizedContent = content.trim().toLowerCase();
+  const inputKeywords = new Set(extractKeywords(content));
+  const matches = [];
+  const candidates = db.query(`SELECT id, content, keywords FROM notes WHERE type = ?`).all(type);
+  for (const candidate of candidates) {
+    if (candidate.content.trim().toLowerCase() === normalizedContent) {
+      matches.push({ id: candidate.id, content: candidate.content, similarity: 1 });
+      continue;
+    }
+    const candidateKeywords = new Set(candidate.keywords ? candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(candidate.content));
+    if (inputKeywords.size === 0 && candidateKeywords.size === 0)
+      continue;
+    const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
+    const union3 = new Set([...inputKeywords, ...candidateKeywords]);
+    const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
+    if (similarity >= threshold) {
+      matches.push({ id: candidate.id, content: candidate.content, similarity });
+    }
+  }
+  matches.sort((a, b) => b.similarity - a.similarity);
+  return matches;
+}
+function mergeDuplicates(db) {
+  const types2 = db.query(`SELECT DISTINCT type FROM notes`).all();
+  let totalMerged = 0;
+  for (const { type } of types2) {
+    const notes = db.query(`SELECT id, content, keywords, created_at FROM notes WHERE type = ? ORDER BY created_at DESC`).all(type);
+    const merged = new Set;
+    for (let i = 0;i < notes.length; i++) {
+      if (merged.has(notes[i].id))
+        continue;
+      const iKeywords = new Set(notes[i].keywords ? notes[i].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[i].content));
+      for (let j = i + 1;j < notes.length; j++) {
+        if (merged.has(notes[j].id))
+          continue;
+        const exactMatch = notes[i].content.trim().toLowerCase() === notes[j].content.trim().toLowerCase();
+        if (!exactMatch) {
+          const jKeywords = new Set(notes[j].keywords ? notes[j].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[j].content));
+          if (iKeywords.size === 0 && jKeywords.size === 0)
+            continue;
+          const intersection3 = new Set([...iKeywords].filter((k) => jKeywords.has(k)));
+          const union3 = new Set([...iKeywords, ...jKeywords]);
+          const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
+          if (similarity < 0.6)
+            continue;
+        }
+        const survivorId = notes[i].id;
+        const victimId = notes[j].id;
+        db.run(`UPDATE links SET from_note_id = ? WHERE from_note_id = ?`, [survivorId, victimId]);
+        db.run(`UPDATE links SET to_note_id = ? WHERE to_note_id = ?`, [survivorId, victimId]);
+        db.run(`DELETE FROM links WHERE from_note_id = to_note_id`);
+        db.run(`DELETE FROM links WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id
+           )`);
+        db.run(`DELETE FROM notes WHERE id = ?`, [victimId]);
+        merged.add(victimId);
+        totalMerged++;
+      }
+    }
+  }
+  return totalMerged;
+}
+var init_deduplicator = __esm(() => {
+  init_utils();
+});
+
+// mcp/engine/linker.ts
+function inferRelationship(fromType, toType) {
+  if (fromType === "decision" && toType === "open_thread")
+    return "supersedes";
+  if (fromType === "open_thread" && toType === "decision")
+    return "supersedes";
+  if (fromType === "quality_gate" || toType === "quality_gate")
+    return "blocks";
+  if (fromType === "dependency" || toType === "dependency")
+    return "depends_on";
+  if (fromType === "anti_pattern" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "conflicts_with";
+  if (toType === "anti_pattern" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "conflicts_with";
+  if (fromType === "architecture" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "enables";
+  if (toType === "architecture" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "enables";
+  if (fromType === "risk" && toType === "commitment")
+    return "blocks";
+  if (fromType === "commitment" && toType === "risk")
+    return "blocks";
+  return "related_to";
+}
+function findRelatedNotes(db, query, limit = 10) {
+  const terms = query.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
+  if (terms.length === 0)
+    return [];
+  const ftsQuery = terms.join(" OR ");
+  try {
+    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
+                bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
+         FROM notes_fts
+         JOIN notes n ON notes_fts.rowid = n.rowid
+         WHERE notes_fts MATCH ?
+         ORDER BY rank ASC
+         LIMIT ?`).all(ftsQuery, limit);
+    return rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      content: r.content,
+      confidence: r.confidence,
+      created_at: r.created_at,
+      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : []
+    }));
+  } catch {
+    return [];
+  }
+}
+function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
+  if (keywords.length === 0)
+    return [];
+  const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
+  const sourceRow = db.query(`SELECT type FROM notes WHERE id = ?`).get(noteId);
+  const sourceType = sourceRow?.type ?? "insight";
+  const candidates = db.query(`SELECT id, type, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`).all(noteId);
+  const links = [];
+  const timestamp = now();
+  for (const candidate of candidates) {
+    const candidateKeywords = candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0);
+    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
+    if (overlap.length >= minOverlap) {
+      const strength = overlap.length >= 5 ? "strong" : overlap.length >= 3 ? "moderate" : "weak";
+      const relationship = inferRelationship(sourceType, candidate.type);
+      const link = {
+        id: generateId(),
+        from_note_id: noteId,
+        to_note_id: candidate.id,
+        relationship,
+        strength,
+        created_at: timestamp
+      };
+      db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`, [
+        link.id,
+        link.from_note_id,
+        link.to_note_id,
+        link.relationship,
+        link.strength,
+        link.created_at
+      ]);
+      links.push(link);
+    }
+  }
+  return links;
+}
+var init_linker = __esm(() => {
+  init_utils();
+});
+
+// mcp/engine/scorer.ts
+function decayConfidence(db, staleDays = 30) {
+  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000).toISOString();
+  const result = db.run(`UPDATE notes
+     SET confidence = 'low', updated_at = ?
+     WHERE confidence != 'low'
+       AND last_validated < ?
+       AND resolved = 0`, [new Date().toISOString(), cutoff]);
+  return result.changes;
+}
+function promoteConfidence(db, noteId) {
+  const row = db.query(`SELECT confidence FROM notes WHERE id = ?`).get(noteId);
+  if (!row)
+    return "medium";
+  const current = row.confidence;
+  const promoted = current === "low" ? "medium" : current === "medium" ? "high" : "high";
+  const timestamp = now();
+  db.run(`UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`, [promoted, timestamp, timestamp, noteId]);
+  return promoted;
+}
+function computeAutonomyScore(db, domain) {
+  const pattern = `%${domain}%`;
+  const recipeCount = db.query(`SELECT COUNT(*) as cnt FROM notes
+         WHERE type = 'autonomy_recipe'
+           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
+  const gateCount = db.query(`SELECT COUNT(*) as cnt FROM notes
+         WHERE type = 'quality_gate'
+           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
+  const antiPatternCount = db.query(`SELECT COUNT(*) as cnt FROM notes
+         WHERE type = 'anti_pattern'
+           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
+  const total = recipeCount + gateCount + antiPatternCount;
+  const score = total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
+  return {
+    score,
+    recipe_count: recipeCount,
+    gate_count: gateCount,
+    anti_pattern_count: antiPatternCount
+  };
+}
+var init_scorer = __esm(() => {
+  init_utils();
+});
+
+// mcp/tools/remember.ts
+var exports_remember = {};
+__export(exports_remember, {
+  handleRemember: () => handleRemember
+});
+function handleRemember(projectDb2, globalDb2, input) {
+  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
+  const db = useGlobal ? globalDb2 : projectDb2;
+  const duplicates = findDuplicates(db, input.type, input.content);
+  if (duplicates.length > 0) {
+    const bestMatch = duplicates[0];
+    const newConfidence = promoteConfidence(db, bestMatch.id);
+    return {
+      stored: false,
+      note_id: bestMatch.id,
+      duplicate: true,
+      promoted: true,
+      links_created: 0,
+      message: `Near-duplicate ${input.type} found - promoted existing note confidence to ${newConfidence}.`
+    };
+  }
+  const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
+  const keywords = extractKeywords(textForKeywords);
+  const tagParts = [input.type];
+  if (input.tags) {
+    for (const t of input.tags.split(",").map((s) => s.trim())) {
+      if (t && !tagParts.includes(t))
+        tagParts.push(t);
+    }
+  }
+  const tagsStr = tagParts.join(",");
+  const noteId = generateId();
+  const timestamp = now();
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    noteId,
+    input.type,
+    input.content,
+    input.context ?? null,
+    keywords.join(","),
+    tagsStr,
+    "medium",
+    timestamp,
+    0,
+    timestamp,
+    timestamp
+  ]);
+  const links = createAutoLinks(db, noteId, keywords);
+  if (input.type === "user_pattern") {
+    writeUserModel(globalDb2, input.content, input.context);
+  }
+  return {
+    stored: true,
+    note_id: noteId,
+    duplicate: false,
+    promoted: false,
+    links_created: links.length,
+    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+  };
+}
+function inferDimension(content) {
+  const lower = content.toLowerCase();
+  if (/prefer|like|want|style|format|approach/i.test(lower))
+    return "preference";
+  if (/decide|decision|chose|choose|pick|select/i.test(lower))
+    return "decision_pattern";
+  if (/communicat|respond|explain|ask|tell|say/i.test(lower))
+    return "communication_style";
+  if (/strength|good at|excels?|strong/i.test(lower))
+    return "strength";
+  if (/blind spot|miss|overlook|forget|ignore/i.test(lower))
+    return "blind_spot";
+  if (/intent|goal|aim|want to|trying to|plan to/i.test(lower))
+    return "intent_pattern";
+  return "preference";
+}
+function writeUserModel(globalDb2, content, context) {
+  try {
+    const dimension = inferDimension(content);
+    const timestamp = now();
+    const existing = globalDb2.query(`SELECT id, evidence FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
+    if (existing) {
+      const evidenceList = existing.evidence ? existing.evidence.split(`
+`) : [];
+      if (context)
+        evidenceList.push(context);
+      globalDb2.run(`UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [evidenceList.join(`
+`), timestamp, existing.id]);
+    } else {
+      globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+        generateId(),
+        dimension,
+        content,
+        context ?? "",
+        "medium",
+        "stable",
+        timestamp,
+        timestamp
+      ]);
+    }
+  } catch {}
+}
+var init_remember = __esm(() => {
+  init_types();
+  init_utils();
+  init_deduplicator();
+  init_linker();
+  init_scorer();
 });
 
 // node_modules/zod/v3/external.js
@@ -19472,24 +20085,8 @@ class StdioServerTransport {
   }
 }
 
-// mcp/types.ts
-var NOTE_TYPES = [
-  "decision",
-  "commitment",
-  "insight",
-  "architecture",
-  "open_thread",
-  "risk",
-  "dependency",
-  "convention",
-  "anti_pattern",
-  "autonomy_recipe",
-  "quality_gate",
-  "tool_capability",
-  "user_pattern",
-  "checkpoint"
-];
-var GLOBAL_TYPES = ["user_pattern", "tool_capability"];
+// mcp/server.ts
+init_types();
 
 // mcp/db/connection.ts
 import { Database } from "bun:sqlite";
@@ -19677,356 +20274,12 @@ function getProjectDb() {
   }
   return projectDb;
 }
-// node_modules/uuid/dist/esm/native.js
-import { randomUUID } from "crypto";
-var native_default = { randomUUID };
 
-// node_modules/uuid/dist/esm/rng.js
-import { randomFillSync } from "crypto";
-var rnds8Pool = new Uint8Array(256);
-var poolPtr = rnds8Pool.length;
-function rng() {
-  if (poolPtr > rnds8Pool.length - 16) {
-    randomFillSync(rnds8Pool);
-    poolPtr = 0;
-  }
-  return rnds8Pool.slice(poolPtr, poolPtr += 16);
-}
-
-// node_modules/uuid/dist/esm/stringify.js
-var byteToHex = [];
-for (let i = 0;i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-// node_modules/uuid/dist/esm/v4.js
-function v4(options, buf, offset) {
-  if (native_default.randomUUID && !buf && !options) {
-    return native_default.randomUUID();
-  }
-  options = options || {};
-  const rnds = options.random ?? options.rng?.() ?? rng();
-  if (rnds.length < 16) {
-    throw new Error("Random bytes length must be >= 16");
-  }
-  rnds[6] = rnds[6] & 15 | 64;
-  rnds[8] = rnds[8] & 63 | 128;
-  if (buf) {
-    offset = offset || 0;
-    if (offset < 0 || offset + 16 > buf.length) {
-      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-    }
-    for (let i = 0;i < 16; ++i) {
-      buf[offset + i] = rnds[i];
-    }
-    return buf;
-  }
-  return unsafeStringify(rnds);
-}
-var v4_default = v4;
-// mcp/utils.ts
-function generateId() {
-  return v4_default();
-}
-function now() {
-  return new Date().toISOString();
-}
-var STOP_WORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "but",
-  "in",
-  "on",
-  "at",
-  "to",
-  "for",
-  "of",
-  "with",
-  "by",
-  "from",
-  "is",
-  "it",
-  "as",
-  "be",
-  "was",
-  "were",
-  "been",
-  "being",
-  "have",
-  "has",
-  "had",
-  "do",
-  "does",
-  "did",
-  "will",
-  "would",
-  "could",
-  "should",
-  "may",
-  "might",
-  "shall",
-  "can",
-  "need",
-  "dare",
-  "ought",
-  "used",
-  "not",
-  "no",
-  "nor",
-  "so",
-  "yet",
-  "both",
-  "each",
-  "few",
-  "more",
-  "most",
-  "other",
-  "some",
-  "such",
-  "than",
-  "too",
-  "very",
-  "just",
-  "about",
-  "above",
-  "after",
-  "again",
-  "all",
-  "also",
-  "am",
-  "any",
-  "are",
-  "because",
-  "before",
-  "below",
-  "between",
-  "during",
-  "here",
-  "how",
-  "if",
-  "into",
-  "its",
-  "let",
-  "me",
-  "my",
-  "myself",
-  "now",
-  "off",
-  "once",
-  "only",
-  "our",
-  "out",
-  "over",
-  "own",
-  "same",
-  "she",
-  "he",
-  "her",
-  "him",
-  "his",
-  "hers",
-  "that",
-  "their",
-  "them",
-  "then",
-  "there",
-  "these",
-  "they",
-  "this",
-  "those",
-  "through",
-  "under",
-  "until",
-  "up",
-  "we",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "who",
-  "whom",
-  "why",
-  "you",
-  "your",
-  "yours",
-  "i"
-]);
-function extractKeywords(text) {
-  if (!text.trim())
-    return [];
-  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-  const freq = new Map;
-  for (const word of words) {
-    freq.set(word, (freq.get(word) ?? 0) + 1);
-  }
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([word]) => word);
-}
-function truncate(text, maxLength = 100) {
-  if (text.length <= maxLength)
-    return text;
-  return text.slice(0, maxLength - 3) + "...";
-}
-function summarizeForBriefing(notes, maxTokens = 200) {
-  const maxChars = maxTokens * 4;
-  const lines = [];
-  let charCount = 0;
-  for (const note of notes) {
-    const line = `- [${note.type}] ${truncate(note.content, 120)}`;
-    if (charCount + line.length > maxChars)
-      break;
-    lines.push(line);
-    charCount += line.length + 1;
-  }
-  return lines.join(`
-`);
-}
-
-// mcp/engine/deduplicator.ts
-function isDuplicate(db, type, content, threshold = 0.6) {
-  return findDuplicates(db, type, content, threshold).length > 0;
-}
-function findDuplicates(db, type, content, threshold = 0.6) {
-  const normalizedContent = content.trim().toLowerCase();
-  const inputKeywords = new Set(extractKeywords(content));
-  const matches = [];
-  const candidates = db.query(`SELECT id, content, keywords FROM notes WHERE type = ?`).all(type);
-  for (const candidate of candidates) {
-    if (candidate.content.trim().toLowerCase() === normalizedContent) {
-      matches.push({ id: candidate.id, content: candidate.content, similarity: 1 });
-      continue;
-    }
-    const candidateKeywords = new Set(candidate.keywords ? candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(candidate.content));
-    if (inputKeywords.size === 0 && candidateKeywords.size === 0)
-      continue;
-    const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
-    const union3 = new Set([...inputKeywords, ...candidateKeywords]);
-    const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-    if (similarity >= threshold) {
-      matches.push({ id: candidate.id, content: candidate.content, similarity });
-    }
-  }
-  matches.sort((a, b) => b.similarity - a.similarity);
-  return matches;
-}
-
-// mcp/engine/linker.ts
-function findRelatedNotes(db, query, limit = 10) {
-  const terms = query.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
-  if (terms.length === 0)
-    return [];
-  const ftsQuery = terms.join(" OR ");
-  try {
-    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
-                bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
-         FROM notes_fts
-         JOIN notes n ON notes_fts.rowid = n.rowid
-         WHERE notes_fts MATCH ?
-         ORDER BY rank ASC
-         LIMIT ?`).all(ftsQuery, limit);
-    return rows.map((r) => ({
-      id: r.id,
-      type: r.type,
-      content: r.content,
-      confidence: r.confidence,
-      created_at: r.created_at,
-      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : []
-    }));
-  } catch {
-    return [];
-  }
-}
-function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
-  if (keywords.length === 0)
-    return [];
-  const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
-  const candidates = db.query(`SELECT id, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`).all(noteId);
-  const links = [];
-  const timestamp = now();
-  for (const candidate of candidates) {
-    const candidateKeywords = candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0);
-    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
-    if (overlap.length >= minOverlap) {
-      const strength = overlap.length >= 5 ? "strong" : overlap.length >= 3 ? "moderate" : "weak";
-      const link = {
-        id: generateId(),
-        from_note_id: noteId,
-        to_note_id: candidate.id,
-        relationship: "related_to",
-        strength,
-        created_at: timestamp
-      };
-      db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`, [
-        link.id,
-        link.from_note_id,
-        link.to_note_id,
-        link.relationship,
-        link.strength,
-        link.created_at
-      ]);
-      links.push(link);
-    }
-  }
-  return links;
-}
-
-// mcp/tools/remember.ts
-function handleRemember(projectDb2, globalDb2, input) {
-  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
-  const db = useGlobal ? globalDb2 : projectDb2;
-  if (isDuplicate(db, input.type, input.content)) {
-    return {
-      stored: false,
-      note_id: null,
-      duplicate: true,
-      links_created: 0,
-      message: `Duplicate ${input.type} detected - skipped storage.`
-    };
-  }
-  const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
-  const keywords = extractKeywords(textForKeywords);
-  const tagParts = [input.type];
-  if (input.tags) {
-    for (const t of input.tags.split(",").map((s) => s.trim())) {
-      if (t && !tagParts.includes(t))
-        tagParts.push(t);
-    }
-  }
-  const tagsStr = tagParts.join(",");
-  const noteId = generateId();
-  const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-    noteId,
-    input.type,
-    input.content,
-    input.context ?? null,
-    keywords.join(","),
-    tagsStr,
-    "medium",
-    timestamp,
-    0,
-    timestamp,
-    timestamp
-  ]);
-  const links = createAutoLinks(db, noteId, keywords);
-  return {
-    stored: true,
-    note_id: noteId,
-    duplicate: false,
-    links_created: links.length,
-    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
-  };
-}
+// mcp/server.ts
+init_remember();
 
 // mcp/tools/recall.ts
+init_linker();
 function tryFetchNote(db, id) {
   const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
               source AS source_conversation, context, resolved
@@ -20046,25 +20299,42 @@ function tryFetchNote(db, id) {
     is_global: false
   };
 }
-function fetchLinkedNotes(db, noteId) {
-  const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id,
-              n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
-       FROM links l
-       JOIN notes n ON (
-         CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
-       )
-       WHERE l.from_note_id = ? OR l.to_note_id = ?`).all(noteId, noteId, noteId);
-  return rows.map((r) => ({
-    relationship: r.relationship,
-    note: {
-      id: r.id,
-      type: r.type,
-      content: r.content,
-      confidence: r.confidence,
-      created_at: r.created_at,
-      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : []
+function fetchLinkedNotes(db, noteId, maxDepth = 1) {
+  const results = [];
+  const visited = new Set([noteId]);
+  function traverse(currentId, currentDepth) {
+    if (currentDepth > maxDepth)
+      return;
+    const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id,
+                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
+         FROM links l
+         JOIN notes n ON (
+           CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
+         )
+         WHERE l.from_note_id = ? OR l.to_note_id = ?`).all(currentId, currentId, currentId);
+    for (const r of rows) {
+      if (visited.has(r.id))
+        continue;
+      visited.add(r.id);
+      results.push({
+        relationship: r.relationship,
+        depth: currentDepth,
+        note: {
+          id: r.id,
+          type: r.type,
+          content: r.content,
+          confidence: r.confidence,
+          created_at: r.created_at,
+          keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : []
+        }
+      });
+      if (currentDepth < maxDepth) {
+        traverse(r.id, currentDepth + 1);
+      }
     }
-  }));
+  }
+  traverse(noteId, 1);
+  return results;
 }
 function handleRecall(projectDb2, globalDb2, input) {
   const limit = input.limit ?? 10;
@@ -20085,7 +20355,8 @@ function handleRecall(projectDb2, globalDb2, input) {
       };
     }
     note.is_global = isGlobal;
-    const links = fetchLinkedNotes(db, input.id);
+    const depth = input.depth ?? 1;
+    const links = fetchLinkedNotes(db, input.id, depth);
     return {
       results: [],
       detail: { ...note, links },
@@ -20122,6 +20393,7 @@ function handleRecall(projectDb2, globalDb2, input) {
 }
 
 // mcp/engine/composer.ts
+init_utils();
 function toSummary(row) {
   return {
     id: row.id,
@@ -20247,6 +20519,7 @@ function composeContextPackage(projectDb2, globalDb2, domain) {
 }
 
 // mcp/tools/orient.ts
+init_utils();
 function fetchLatestCheckpoint(db) {
   try {
     const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
@@ -20335,6 +20608,7 @@ function handleOrient(projectDb2, globalDb2, input) {
 }
 
 // mcp/tools/prepare.ts
+init_utils();
 var DOMAIN_PATTERNS = [
   [/\b(react|component|tsx|jsx|frontend|ui|tailwind|daisyui|zustand)\b/i, "frontend"],
   [/\b(rust|tauri|cargo|backend|command|handler)\b/i, "backend"],
@@ -20386,43 +20660,18 @@ function handlePrepare(projectDb2, globalDb2, input) {
   return { package: pkg, formatted };
 }
 
-// mcp/engine/scorer.ts
-function decayConfidence(db, staleDays = 30) {
-  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000).toISOString();
-  const result = db.run(`UPDATE notes
-     SET confidence = 'low', updated_at = ?
-     WHERE confidence != 'low'
-       AND last_validated < ?
-       AND resolved = 0`, [new Date().toISOString(), cutoff]);
-  return result.changes;
-}
-function computeAutonomyScore(db, domain) {
-  const pattern = `%${domain}%`;
-  const recipeCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'autonomy_recipe'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const gateCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'quality_gate'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const antiPatternCount = db.query(`SELECT COUNT(*) as cnt FROM notes
-         WHERE type = 'anti_pattern'
-           AND (tags LIKE ? OR keywords LIKE ?)`).get(pattern, pattern).cnt;
-  const total = recipeCount + gateCount + antiPatternCount;
-  const score = total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
-  return {
-    score,
-    recipe_count: recipeCount,
-    gate_count: gateCount,
-    anti_pattern_count: antiPatternCount
-  };
-}
-
 // mcp/tools/reflect.ts
+init_scorer();
+init_deduplicator();
+init_utils();
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
   const projectDecayed = decayConfidence(projectDb2);
   const globalDecayed = decayConfidence(globalDb2);
   const totalDecayed = projectDecayed + globalDecayed;
+  const projectMerged = mergeDuplicates(projectDb2);
+  const globalMerged = mergeDuplicates(globalDb2);
+  const totalMerged = projectMerged + globalMerged;
   const orphanCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes n
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`).get().cnt;
   const revalidationRows = projectDb2.query(`SELECT id, content, type FROM notes
@@ -20457,13 +20706,14 @@ function handleReflect(projectDb2, globalDb2, input) {
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
+    totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null
   ].filter(Boolean).join(" ");
   return {
     confidence_decayed: totalDecayed,
-    duplicates_found: 0,
-    duplicates_merged: 0,
+    duplicates_found: totalMerged,
+    duplicates_merged: totalMerged,
     orphan_notes: orphanCount,
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,
@@ -20474,7 +20724,7 @@ function handleReflect(projectDb2, globalDb2, input) {
 // mcp/server.ts
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.1.0"
+  version: "0.2.0"
 });
 server.tool("orient", "Get a session briefing with open threads, recent decisions, neglected areas, and drift warnings. Call this at the start of every conversation or when resuming work to understand current project state.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup")
@@ -20502,17 +20752,19 @@ server.tool("remember", "Store a piece of knowledge - decisions, insights, conve
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("recall", "Search stored knowledge by query or retrieve a specific note by ID. Searches both project and global databases using full-text search with BM25 ranking. Use this before making decisions to check for existing context.", {
+server.tool("recall", "Search stored knowledge by query or retrieve a specific note by ID. Searches both project and global databases using full-text search with BM25 ranking. Use depth > 1 to traverse the knowledge graph for progressive disclosure.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
-  limit: exports_external.number().optional()
-}, async ({ query, id, type, limit }) => {
+  limit: exports_external.number().optional(),
+  depth: exports_external.number().min(1).max(5).optional()
+}, async ({ query, id, type, limit, depth }) => {
   const result = handleRecall(getProjectDb(), getGlobalDb(), {
     query,
     id,
     type,
-    limit
+    limit,
+    depth
   });
   let text = result.message;
   if (result.detail) {
@@ -20525,8 +20777,9 @@ ${result.detail.content}`;
 
 Linked notes:`;
       for (const link of result.detail.links) {
+        const indent = "  ".repeat(link.depth - 1);
         text += `
-- [${link.relationship}] ${link.note.content}`;
+${indent}- [${link.relationship}] ${link.note.content}`;
       }
     }
   } else if (result.results.length > 0) {
@@ -20551,6 +20804,45 @@ server.tool("prepare", "Gather domain-specific context before starting a task. R
   });
   return {
     content: [{ type: "text", text: result.formatted }]
+  };
+});
+server.tool("resolve", "Mark an open_thread or commitment as resolved. Use this when a thread has been addressed or a commitment fulfilled.", {
+  id: exports_external.string(),
+  resolution: exports_external.string().optional()
+}, async ({ id, resolution }) => {
+  const projectDb2 = getProjectDb();
+  const globalDb2 = getGlobalDb();
+  let db = projectDb2;
+  let row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+  if (!row) {
+    db = globalDb2;
+    row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+  }
+  if (!row) {
+    return {
+      content: [
+        { type: "text", text: `No note found with id "${id}".` }
+      ]
+    };
+  }
+  const timestamp = new Date().toISOString();
+  db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, id]);
+  if (resolution) {
+    const { handleRemember: handleRemember2 } = await Promise.resolve().then(() => (init_remember(), exports_remember));
+    handleRemember2(projectDb2, globalDb2, {
+      content: resolution,
+      type: "decision",
+      context: `Resolved ${row.type}: ${row.content}`,
+      tags: row.type
+    });
+  }
+  return {
+    content: [
+      {
+        type: "text",
+        text: `Resolved ${row.type} note "${id}".${resolution ? " Decision recorded." : ""}`
+      }
+    ]
   };
 });
 server.tool("reflect", "Run maintenance on the knowledge base: decay confidence on stale notes, identify orphan notes with no links, queue low-confidence notes for revalidation, and compute autonomy scores across domains. Call periodically to keep knowledge fresh.", {

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { NoteSummary } from "../types";
 import { decayConfidence, computeAutonomyScore } from "../engine/scorer";
+import { mergeDuplicates } from "../engine/deduplicator";
 import { now } from "../utils";
 
 export interface ReflectInput {
@@ -28,6 +29,11 @@ export function handleReflect(
   const projectDecayed = decayConfidence(projectDb);
   const globalDecayed = decayConfidence(globalDb);
   const totalDecayed = projectDecayed + globalDecayed;
+
+  // Merge duplicate notes in both DBs
+  const projectMerged = mergeDuplicates(projectDb);
+  const globalMerged = mergeDuplicates(globalDb);
+  const totalMerged = projectMerged + globalMerged;
 
   // Count orphan notes (notes with no links in either direction)
   const orphanCount = (
@@ -87,6 +93,7 @@ export function handleReflect(
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
+    totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0
       ? `${revalidationRows.length} note(s) queued for revalidation.`
@@ -97,8 +104,8 @@ export function handleReflect(
 
   return {
     confidence_decayed: totalDecayed,
-    duplicates_found: 0,
-    duplicates_merged: 0,
+    duplicates_found: totalMerged,
+    duplicates_merged: totalMerged,
     orphan_notes: orphanCount,
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,

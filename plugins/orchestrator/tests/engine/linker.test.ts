@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { findRelatedNotes, createAutoLinks } from "../../mcp/engine/linker";
+import { findRelatedNotes, createAutoLinks, inferRelationship } from "../../mcp/engine/linker";
 import { generateId, now } from "../../mcp/utils";
 
 function insertNote(
@@ -106,6 +106,40 @@ describe("linker", () => {
       .query("SELECT * FROM links WHERE from_note_id = ?")
       .all(id1) as any[];
     expect(dbLinks.length).toBe(links.length);
+  });
+
+  test("infers relationship types based on note types", () => {
+    expect(inferRelationship("decision", "open_thread")).toBe("supersedes");
+    expect(inferRelationship("quality_gate", "convention")).toBe("blocks");
+    expect(inferRelationship("dependency", "architecture")).toBe("depends_on");
+    expect(inferRelationship("anti_pattern", "convention")).toBe("conflicts_with");
+    expect(inferRelationship("architecture", "convention")).toBe("enables");
+    expect(inferRelationship("risk", "commitment")).toBe("blocks");
+    expect(inferRelationship("insight", "insight")).toBe("related_to");
+  });
+
+  test("auto-links use inferred relationship types", () => {
+    const decisionId = insertNote(db, {
+      type: "decision",
+      content: "decided to use backup snapshots for data",
+      keywords: "backup,snapshot,data,decided",
+    });
+    insertNote(db, {
+      type: "open_thread",
+      content: "need to figure out backup strategy for data",
+      keywords: "backup,strategy,data,figure",
+    });
+
+    const links = createAutoLinks(db, decisionId, [
+      "backup",
+      "snapshot",
+      "data",
+      "decided",
+    ]);
+
+    expect(links.length).toBeGreaterThanOrEqual(1);
+    // Decision -> open_thread should be "supersedes"
+    expect(links[0].relationship).toBe("supersedes");
   });
 
   test("does not self-link", () => {

@@ -97,4 +97,45 @@ describe("recall tool", () => {
     expect(result.detail!.type).toBe("decision");
     expect(Array.isArray(result.detail!.links)).toBe(true);
   });
+
+  test("supports depth parameter for multi-hop graph traversal", () => {
+    // Create a chain: A -> B -> C via shared keywords
+    handleRemember(projectDb, globalDb, {
+      content: "Backup engine design for incremental snapshot storage",
+      type: "architecture",
+      tags: "backup",
+    });
+    handleRemember(projectDb, globalDb, {
+      content: "Snapshot storage uses content-addressable blobs for backup data",
+      type: "architecture",
+      tags: "backup",
+    });
+    handleRemember(projectDb, globalDb, {
+      content: "Content-addressable blob deduplication in storage layer",
+      type: "architecture",
+      tags: "storage",
+    });
+
+    // Get the first note's ID
+    const firstNote = projectDb
+      .query("SELECT id FROM notes ORDER BY created_at ASC LIMIT 1")
+      .get() as { id: string };
+
+    // Depth 1: only direct links
+    const shallow = handleRecall(projectDb, globalDb, {
+      id: firstNote.id,
+      depth: 1,
+    });
+
+    // Depth 3: multi-hop traversal
+    const deep = handleRecall(projectDb, globalDb, {
+      id: firstNote.id,
+      depth: 3,
+    });
+
+    // Deep traversal should find at least as many links as shallow
+    expect(deep.detail!.links.length).toBeGreaterThanOrEqual(
+      shallow.detail!.links.length
+    );
+  });
 });

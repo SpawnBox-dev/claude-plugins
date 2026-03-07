@@ -12,10 +12,18 @@ describe("extractKeywords", () => {
     expect(keywords).not.toContain("for");
   });
 
-  it("returns at most 15 keywords", () => {
+  it("returns at most 20 keywords", () => {
     const text = Array.from({ length: 50 }, (_, i) => `word${i}`).join(" ");
     const keywords = extractKeywords(text);
-    expect(keywords.length).toBeLessThanOrEqual(15);
+    expect(keywords.length).toBeLessThanOrEqual(20);
+  });
+
+  it("expands synonyms for domain terms", () => {
+    const text = "backup engine handles data";
+    const keywords = extractKeywords(text);
+    // "backup" should trigger synonym expansion
+    expect(keywords).toContain("backup");
+    expect(keywords).toContain("snapshot");
   });
 
   it("handles empty string", () => {

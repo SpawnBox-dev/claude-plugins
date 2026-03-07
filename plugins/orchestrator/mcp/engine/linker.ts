@@ -1,6 +1,43 @@
 import type { Database } from "bun:sqlite";
-import type { NoteSummary, Link } from "../types";
+import type { NoteSummary, Link, RelationshipType, NoteType } from "../types";
 import { generateId, now } from "../utils";
+
+/**
+ * Infer relationship type based on note types.
+ * Falls back to "related_to" when no specific inference applies.
+ */
+export function inferRelationship(
+  fromType: NoteType,
+  toType: NoteType
+): RelationshipType {
+  // Decision supersedes open_thread (the thread was resolved by a decision)
+  if (fromType === "decision" && toType === "open_thread") return "supersedes";
+  if (fromType === "open_thread" && toType === "decision") return "supersedes";
+
+  // Quality gates block: they must be passed before proceeding
+  if (fromType === "quality_gate" || toType === "quality_gate") return "blocks";
+
+  // Dependencies create depends_on relationships
+  if (fromType === "dependency" || toType === "dependency") return "depends_on";
+
+  // Anti-patterns conflict with conventions and autonomy recipes
+  if (fromType === "anti_pattern" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "conflicts_with";
+  if (toType === "anti_pattern" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "conflicts_with";
+
+  // Architecture enables implementation patterns
+  if (fromType === "architecture" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "enables";
+  if (toType === "architecture" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "enables";
+
+  // Risk blocks commitments
+  if (fromType === "risk" && toType === "commitment") return "blocks";
+  if (fromType === "commitment" && toType === "risk") return "blocks";
+
+  return "related_to";
+}
 
 /**
  * Find notes related to the given query using FTS5 full-text search.
@@ -71,12 +108,18 @@ export function createAutoLinks(
 
   const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
 
+  // Get the type of the source note for relationship inference
+  const sourceRow = db
+    .query(`SELECT type FROM notes WHERE id = ?`)
+    .get(noteId) as { type: string } | null;
+  const sourceType = (sourceRow?.type ?? "insight") as NoteType;
+
   // Get all other notes that have keywords
   const candidates = db
     .query(
-      `SELECT id, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`
+      `SELECT id, type, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`
     )
-    .all(noteId) as Array<{ id: string; keywords: string }>;
+    .all(noteId) as Array<{ id: string; type: string; keywords: string }>;
 
   const links: Link[] = [];
   const timestamp = now();
@@ -98,11 +141,16 @@ export function createAutoLinks(
             ? "moderate"
             : "weak";
 
+      const relationship = inferRelationship(
+        sourceType,
+        candidate.type as NoteType
+      );
+
       const link: Link = {
         id: generateId(),
         from_note_id: noteId,
         to_note_id: candidate.id,
-        relationship: "related_to",
+        relationship,
         strength,
         created_at: timestamp,
       };

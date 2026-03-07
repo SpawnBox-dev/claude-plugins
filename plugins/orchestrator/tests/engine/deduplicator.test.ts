@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { isDuplicate, findDuplicates } from "../../mcp/engine/deduplicator";
+import { isDuplicate, findDuplicates, mergeDuplicates } from "../../mcp/engine/deduplicator";
 import { generateId, now } from "../../mcp/utils";
 
 function insertNote(
@@ -70,6 +70,34 @@ describe("deduplicator", () => {
     );
     expect(dupes.length).toBeGreaterThanOrEqual(1);
     expect(dupes[0].similarity).toBeGreaterThanOrEqual(0.4);
+  });
+
+  test("merges duplicate notes keeping the newest", () => {
+    const id1 = insertNote(db, {
+      type: "insight",
+      content: "backup snapshot engine handles incremental backups",
+      keywords: "backup,snapshot,engine,incremental",
+    });
+
+    // Insert older duplicate
+    const id2 = insertNote(db, {
+      type: "insight",
+      content: "backup snapshot engine handles incremental backups",
+      keywords: "backup,snapshot,engine,incremental",
+    });
+
+    const countBefore = (
+      db.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number }
+    ).cnt;
+    expect(countBefore).toBe(2);
+
+    const merged = mergeDuplicates(db);
+    expect(merged).toBe(1);
+
+    const countAfter = (
+      db.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number }
+    ).cnt;
+    expect(countAfter).toBe(1);
   });
 
   test("does not flag genuinely different notes", () => {

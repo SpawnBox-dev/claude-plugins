@@ -71,7 +71,7 @@ describe("remember tool", () => {
     expect(projectNote).toBeNull();
   });
 
-  test("detects and skips duplicates", () => {
+  test("detects duplicates and promotes confidence", () => {
     const first = handleRemember(projectDb, globalDb, {
       content: "Always use TypeScript strict mode",
       type: "convention",
@@ -84,7 +84,32 @@ describe("remember tool", () => {
     });
     expect(second.stored).toBe(false);
     expect(second.duplicate).toBe(true);
-    expect(second.note_id).toBeNull();
+    expect(second.promoted).toBe(true);
+    expect(second.note_id).toBe(first.note_id);
+
+    // Verify confidence was promoted from medium to high
+    const note = projectDb
+      .query("SELECT confidence FROM notes WHERE id = ?")
+      .get(first.note_id!) as any;
+    expect(note.confidence).toBe("high");
+  });
+
+  test("writes user_model entry for user_pattern notes", () => {
+    const result = handleRemember(projectDb, globalDb, {
+      content: "User prefers complete removals in one pass",
+      type: "user_pattern",
+      context: "Observed during code refactoring session",
+    });
+
+    expect(result.stored).toBe(true);
+
+    // Check user_model table in global DB
+    const entry = globalDb
+      .query("SELECT * FROM user_model WHERE observation = ?")
+      .get("User prefers complete removals in one pass") as any;
+    expect(entry).toBeTruthy();
+    expect(entry.dimension).toBe("preference");
+    expect(entry.confidence).toBe("medium");
   });
 
   test("auto-generates keywords", () => {

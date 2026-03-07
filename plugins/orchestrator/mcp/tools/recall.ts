@@ -7,13 +7,18 @@ export interface RecallInput {
   id?: string;
   type?: NoteType;
   limit?: number;
+  depth?: number;
+}
+
+export interface LinkedNote {
+  relationship: string;
+  note: NoteSummary;
+  depth: number;
 }
 
 export interface RecallResult {
   results: NoteSummary[];
-  detail:
-    | (Note & { links: Array<{ relationship: string; note: NoteSummary }> })
-    | null;
+  detail: (Note & { links: LinkedNote[] }) | null;
   message: string;
 }
 
@@ -49,36 +54,58 @@ function tryFetchNote(db: Database, id: string): Note | null {
 
 function fetchLinkedNotes(
   db: Database,
-  noteId: string
-): Array<{ relationship: string; note: NoteSummary }> {
-  const rows = db
-    .query(
-      `SELECT l.relationship, l.from_note_id, l.to_note_id,
-              n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
-       FROM links l
-       JOIN notes n ON (
-         CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
-       )
-       WHERE l.from_note_id = ? OR l.to_note_id = ?`
-    )
-    .all(noteId, noteId, noteId) as any[];
+  noteId: string,
+  maxDepth = 1
+): LinkedNote[] {
+  const results: LinkedNote[] = [];
+  const visited = new Set<string>([noteId]);
 
-  return rows.map((r: any) => ({
-    relationship: r.relationship,
-    note: {
-      id: r.id,
-      type: r.type,
-      content: r.content,
-      confidence: r.confidence,
-      created_at: r.created_at,
-      keywords: r.keywords
-        ? r.keywords
-            .split(",")
-            .map((k: string) => k.trim())
-            .filter((k: string) => k.length > 0)
-        : [],
-    },
-  }));
+  function traverse(currentId: string, currentDepth: number) {
+    if (currentDepth > maxDepth) return;
+
+    const rows = db
+      .query(
+        `SELECT l.relationship, l.from_note_id, l.to_note_id,
+                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
+         FROM links l
+         JOIN notes n ON (
+           CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
+         )
+         WHERE l.from_note_id = ? OR l.to_note_id = ?`
+      )
+      .all(currentId, currentId, currentId) as any[];
+
+    for (const r of rows) {
+      if (visited.has(r.id)) continue;
+      visited.add(r.id);
+
+      results.push({
+        relationship: r.relationship,
+        depth: currentDepth,
+        note: {
+          id: r.id,
+          type: r.type,
+          content: r.content,
+          confidence: r.confidence,
+          created_at: r.created_at,
+          keywords: r.keywords
+            ? r.keywords
+                .split(",")
+                .map((k: string) => k.trim())
+                .filter((k: string) => k.length > 0)
+            : [],
+        },
+      });
+
+      // Recurse for deeper hops
+      if (currentDepth < maxDepth) {
+        traverse(r.id, currentDepth + 1);
+      }
+    }
+  }
+
+  traverse(noteId, 1);
+  return results;
 }
 
 export function handleRecall(
@@ -109,7 +136,8 @@ export function handleRecall(
     }
 
     note.is_global = isGlobal;
-    const links = fetchLinkedNotes(db, input.id);
+    const depth = input.depth ?? 1;
+    const links = fetchLinkedNotes(db, input.id, depth);
 
     return {
       results: [],
