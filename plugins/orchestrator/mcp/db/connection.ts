@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { applyMigrations } from "./schema";
@@ -40,8 +40,11 @@ export function getProjectDbPath(): string {
 }
 
 function initDb(path: string, dbType: "project" | "global"): Database {
-  // Ensure parent directory exists
-  mkdirSync(dirname(path), { recursive: true });
+  // Ensure parent directory exists (try/catch: bun's mkdirSync throws EEXIST on Windows)
+  const dir = dirname(path);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
 
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");

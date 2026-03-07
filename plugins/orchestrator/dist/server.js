@@ -20090,7 +20090,7 @@ init_types();
 
 // mcp/db/connection.ts
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 import { homedir } from "os";
 
@@ -20258,7 +20258,10 @@ function getProjectDbPath() {
   return join(root, ".orchestrator", "project.db");
 }
 function initDb(path, dbType) {
-  mkdirSync(dirname(path), { recursive: true });
+  const dir = dirname(path);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
