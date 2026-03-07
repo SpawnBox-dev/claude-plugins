@@ -17,10 +17,25 @@ export function getGlobalDbPath(): string {
 
 /**
  * Returns the path to the project-scoped orchestrator database.
- * $ORCHESTRATOR_PROJECT_ROOT/.orchestrator/project.db (fallback to cwd)
+ * Checks env vars in order: ORCHESTRATOR_PROJECT_ROOT, CLAUDE_PROJECT_DIR, then cwd.
+ * CRITICAL: process.cwd() for plugin MCP servers resolves to the plugin cache
+ * directory, NOT the user's project. Plugin updates wipe the cache, destroying
+ * any DB stored there. We MUST use an env var to find the real project root.
  */
 export function getProjectDbPath(): string {
-  const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.cwd();
+  const root =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+
+  // Safety check: if we're inside a plugin cache directory, warn loudly
+  if (root.includes(".claude/plugins/cache") || root.includes(".claude\\plugins\\cache")) {
+    console.error(
+      `[orchestrator] WARNING: Project DB path resolves to plugin cache (${root}). ` +
+      `DB will be lost on plugin update! Set ORCHESTRATOR_PROJECT_ROOT or ensure CLAUDE_PROJECT_DIR is available.`
+    );
+  }
+
   return join(root, ".orchestrator", "project.db");
 }
 

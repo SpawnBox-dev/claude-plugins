@@ -1,6 +1,9 @@
 {
   "memory": {
     "command": "npx",
-    "args": ["-y", "bun", "run", "${CLAUDE_PLUGIN_ROOT}/dist/server.js"]
+    "args": ["-y", "bun", "run", "${CLAUDE_PLUGIN_ROOT}/dist/server.js"],
+    "env": {
+      "ORCHESTRATOR_PROJECT_ROOT": "${CLAUDE_PROJECT_DIR}"
+    }
   }
 }

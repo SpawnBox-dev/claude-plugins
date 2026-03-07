@@ -13,33 +13,30 @@
     ],
     "PreCompact": [
       {
-        "matcher": "*",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "CRITICAL: Context is about to be compacted. You MUST call the orchestrator MCP `checkpoint` tool RIGHT NOW before any other action. Include: (1) summary of what was accomplished and current state, (2) any open questions, (3) next steps, (4) any in-flight work. This checkpoint will be your ONLY context after compaction. Do not skip this."
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact"
           }
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "*",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "Before ending this session, do these orchestrator housekeeping tasks:\n1. Call `checkpoint` with a summary of this session's work, open questions, and next steps.\n2. Call `remember` for any decisions, insights, conventions, or anti-patterns discovered this session that haven't been recorded yet.\n3. If any open_threads were resolved, call `resolve` on them.\nDo this quickly and silently - the user doesn't need to see the details."
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop"
           }
         ]
       }
     ],
     "SubagentStop": [
       {
-        "matcher": "*",
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "The subagent has finished. If it discovered any reusable patterns, conventions, anti-patterns, or made architectural decisions, use the orchestrator `remember` tool to persist them. If it encountered errors worth noting, record those too. Be selective - only record things that will matter in future sessions."
+            "type": "command",
+            "command": "bash -c 'exit 0'"
           }
         ]
       }

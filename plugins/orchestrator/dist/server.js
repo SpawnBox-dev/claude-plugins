@@ -20251,7 +20251,10 @@ function getGlobalDbPath() {
   return join(homedir(), ".orchestrator", "global.db");
 }
 function getProjectDbPath() {
-  const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.cwd();
+  const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  if (root.includes(".claude/plugins/cache") || root.includes(".claude\\plugins\\cache")) {
+    console.error(`[orchestrator] WARNING: Project DB path resolves to plugin cache (${root}). ` + `DB will be lost on plugin update! Set ORCHESTRATOR_PROJECT_ROOT or ensure CLAUDE_PROJECT_DIR is available.`);
+  }
   return join(root, ".orchestrator", "project.db");
 }
 function initDb(path, dbType) {

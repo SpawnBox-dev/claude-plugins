@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# PreCompact has no decision control - it's for side effects only.
+# We output a systemMessage as a warning to the user that compaction is happening.
+# The SessionStart hook (which fires after compaction with event="compact")
+# handles the recovery by telling Claude to orient.
+cat <<'EOF'
+{
+  "systemMessage": "Context compaction in progress. Orchestrator will recover via orient on restart."
+}
+EOF
+
+exit 0

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Read hook input from stdin
+INPUT=$(cat)
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+
+# Marker file to track if we've already blocked once this session
+MARKER="/tmp/orchestrator-stop-${SESSION_ID}"
+
+if [ ! -f "$MARKER" ]; then
+  # First stop attempt: block it and tell Claude to do housekeeping
+  touch "$MARKER"
+  cat <<'EOF'
+{
+  "decision": "block",
+  "reason": "Before ending this session, complete orchestrator housekeeping:\n1. Call the orchestrator `checkpoint` tool with a summary of work done, open questions, and next steps.\n2. Call `remember` for any decisions, conventions, or anti-patterns discovered this session.\n3. If any open_threads were resolved, call `resolve` on them.\nDo this quickly, then you can stop."
+}
+EOF
+else
+  # Already blocked once - allow the stop
+  exit 0
+fi
