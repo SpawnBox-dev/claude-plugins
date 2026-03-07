@@ -116,6 +116,7 @@ export function truncate(text: string, maxLength = 100): string {
 /**
  * Summarize notes as a bullet list for briefings,
  * respecting an approximate token budget (1 token ~= 4 chars).
+ * Includes note IDs so resolve workflow works without DB queries.
  */
 export function summarizeForBriefing(
   notes: NoteSummary[],
@@ -126,11 +127,29 @@ export function summarizeForBriefing(
   let charCount = 0;
 
   for (const note of notes) {
-    const line = `- [${note.type}] ${truncate(note.content, 120)}`;
+    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
     if (charCount + line.length > maxChars) break;
     lines.push(line);
     charCount += line.length + 1; // +1 for newline
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Format a relative time string from an ISO timestamp.
+ */
+export function relativeTime(isoTimestamp: string): string {
+  const then = new Date(isoTimestamp).getTime();
+  const now = Date.now();
+  const diffMs = now - then;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return `${Math.floor(diffDay / 7)}w ago`;
 }

@@ -184,13 +184,13 @@ export function composeContextPackage(
       .query(
         `SELECT id, type, content, confidence, created_at, keywords
          FROM notes
-         WHERE type = ? AND (tags LIKE ? OR keywords LIKE ?)
+         WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
            CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
            updated_at DESC
          LIMIT ?`
       )
-      .all(type, pattern, pattern, limit)
+      .all(type, pattern, pattern, pattern, limit)
       .map((row: any) => ({
         ...toSummary(row),
         content: truncate(row.content, 100),

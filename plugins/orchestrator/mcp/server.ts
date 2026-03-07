@@ -11,7 +11,7 @@ import { handleReflect } from "./tools/reflect";
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.2.0",
+  version: "0.3.3",
 });
 
 // ── orient ──────────────────────────────────────────────────────────────
@@ -80,13 +80,13 @@ server.tool(
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
           const indent = "  ".repeat(link.depth - 1);
-          text += `\n${indent}- [${link.relationship}] ${link.note.content}`;
+          text += `\n${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
         }
       }
     } else if (result.results.length > 0) {
       text += "\n";
       for (const r of result.results) {
-        text += `\n- [${r.type}/${r.confidence}] ${r.content}`;
+        text += `\n- **${r.id}** [${r.type}/${r.confidence}] ${r.content}`;
       }
     }
     return {

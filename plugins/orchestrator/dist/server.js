@@ -6645,7 +6645,7 @@ function summarizeForBriefing(notes, maxTokens = 200) {
   const lines = [];
   let charCount = 0;
   for (const note of notes) {
-    const line = `- [${note.type}] ${truncate(note.content, 120)}`;
+    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
     if (charCount + line.length > maxChars)
       break;
     lines.push(line);
@@ -6653,6 +6653,23 @@ function summarizeForBriefing(notes, maxTokens = 200) {
   }
   return lines.join(`
 `);
+}
+function relativeTime(isoTimestamp) {
+  const then = new Date(isoTimestamp).getTime();
+  const now2 = Date.now();
+  const diffMs = now2 - then;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffMin < 1)
+    return "just now";
+  if (diffMin < 60)
+    return `${diffMin}m ago`;
+  if (diffHr < 24)
+    return `${diffHr}h ago`;
+  if (diffDay < 7)
+    return `${diffDay}d ago`;
+  return `${Math.floor(diffDay / 7)}w ago`;
 }
 var STOP_WORDS, SYNONYM_GROUPS, synonymLookup;
 var init_utils = __esm(() => {
@@ -20497,11 +20514,11 @@ function composeContextPackage(projectDb2, globalDb2, domain) {
   function queryByType(db, type, limit = 5) {
     return db.query(`SELECT id, type, content, confidence, created_at, keywords
          FROM notes
-         WHERE type = ? AND (tags LIKE ? OR keywords LIKE ?)
+         WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
            CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
            updated_at DESC
-         LIMIT ?`).all(type, pattern, pattern, limit).map((row) => ({
+         LIMIT ?`).all(type, pattern, pattern, pattern, limit).map((row) => ({
       ...toSummary(row),
       content: truncate(row.content, 100)
     }));
@@ -20576,7 +20593,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event) {
   lines.push("# Session Briefing");
   lines.push("");
   if (checkpoint) {
-    lines.push("## Recovery Checkpoint");
+    const age = relativeTime(checkpoint.created_at);
+    lines.push(`## Recovery Checkpoint (${age})`);
     lines.push(checkpoint.content);
     lines.push("");
   }
@@ -20761,7 +20779,7 @@ function handleReflect(projectDb2, globalDb2, input) {
 // mcp/server.ts
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.2.0"
+  version: "0.3.3"
 });
 server.tool("orient", "Get a session briefing with open threads, recent decisions, neglected areas, and drift warnings. Call this at the start of every conversation or when resuming work to understand current project state.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup")
@@ -20816,7 +20834,7 @@ Linked notes:`;
       for (const link of result.detail.links) {
         const indent = "  ".repeat(link.depth - 1);
         text += `
-${indent}- [${link.relationship}] ${link.note.content}`;
+${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
       }
     }
   } else if (result.results.length > 0) {
@@ -20824,7 +20842,7 @@ ${indent}- [${link.relationship}] ${link.note.content}`;
 `;
     for (const r of result.results) {
       text += `
-- [${r.type}/${r.confidence}] ${r.content}`;
+- **${r.id}** [${r.type}/${r.confidence}] ${r.content}`;
     }
   }
   return {

@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Briefing, Note } from "../types";
 import { composeBriefing } from "../engine/composer";
-import { summarizeForBriefing } from "../utils";
+import { summarizeForBriefing, relativeTime } from "../utils";
 
 export interface OrientInput {
   event: "startup" | "resume" | "clear" | "compact";
@@ -88,7 +88,8 @@ function formatBriefing(
   lines.push("");
 
   if (checkpoint) {
-    lines.push("## Recovery Checkpoint");
+    const age = relativeTime(checkpoint.created_at);
+    lines.push(`## Recovery Checkpoint (${age})`);
     lines.push(checkpoint.content);
     lines.push("");
   }

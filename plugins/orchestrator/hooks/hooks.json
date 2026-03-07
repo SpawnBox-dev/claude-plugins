@@ -31,15 +31,6 @@
         ]
       }
     ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash -c 'exit 0'"
-          }
-        ]
-      }
-    ]
+    "SubagentStop": []
   }
 }
