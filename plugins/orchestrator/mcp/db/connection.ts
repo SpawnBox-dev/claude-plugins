@@ -9,10 +9,31 @@ let projectDb: Database | null = null;
 
 /**
  * Returns the path to the global orchestrator database.
- * ~/.orchestrator/global.db
+ * ~/.claude/orchestrator/global.db
+ * Migrates from legacy ~/.orchestrator/global.db if it exists.
  */
 export function getGlobalDbPath(): string {
-  return join(homedir(), ".orchestrator", "global.db");
+  const newPath = join(homedir(), ".claude", "orchestrator", "global.db");
+  const legacyPath = join(homedir(), ".orchestrator", "global.db");
+
+  // Migrate from legacy location if new doesn't exist but old does
+  if (!existsSync(newPath) && existsSync(legacyPath)) {
+    const newDir = dirname(newPath);
+    if (!existsSync(newDir)) {
+      mkdirSync(newDir, { recursive: true });
+    }
+    // Copy DB + WAL + SHM files
+    const { copyFileSync } = require("node:fs") as typeof import("node:fs");
+    copyFileSync(legacyPath, newPath);
+    for (const suffix of ["-wal", "-shm"]) {
+      const src = legacyPath + suffix;
+      if (existsSync(src)) {
+        copyFileSync(src, newPath + suffix);
+      }
+    }
+  }
+
+  return newPath;
 }
 
 /**

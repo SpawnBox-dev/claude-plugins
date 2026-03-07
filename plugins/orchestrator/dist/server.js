@@ -44,6 +44,7 @@ var __export = (target, all) => {
     });
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var __require = import.meta.require;
 
 // node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS((exports) => {
@@ -20265,7 +20266,23 @@ function applyMigrations(db, dbType = "project") {
 var globalDb = null;
 var projectDb = null;
 function getGlobalDbPath() {
-  return join(homedir(), ".orchestrator", "global.db");
+  const newPath = join(homedir(), ".claude", "orchestrator", "global.db");
+  const legacyPath = join(homedir(), ".orchestrator", "global.db");
+  if (!existsSync(newPath) && existsSync(legacyPath)) {
+    const newDir = dirname(newPath);
+    if (!existsSync(newDir)) {
+      mkdirSync(newDir, { recursive: true });
+    }
+    const { copyFileSync } = __require("fs");
+    copyFileSync(legacyPath, newPath);
+    for (const suffix of ["-wal", "-shm"]) {
+      const src = legacyPath + suffix;
+      if (existsSync(src)) {
+        copyFileSync(src, newPath + suffix);
+      }
+    }
+  }
+  return newPath;
 }
 function getProjectDbPath() {
   const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
