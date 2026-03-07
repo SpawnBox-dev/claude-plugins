@@ -1,6 +1,6 @@
 {
   "name": "docs-manager",
   "description": "AI-optimized documentation management with schema validation, staleness tracking, templates, backups, archiving, and index management. Auto-detects project type and docs folder.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "keywords": ["docs", "documentation", "staleness", "validation", "template", "index", "archive", "backup"]
 }
