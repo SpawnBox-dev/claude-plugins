@@ -116,10 +116,14 @@ describe("full session lifecycle", () => {
     });
     expect(checkpoint.stored).toBe(true);
 
-    // 8. Orient with event "compact" - should return recovery_checkpoint containing "orchestrator plugin"
+    // 8. Orient with any event now returns checkpoint (always fetched)
     const compactOrient = handleOrient(projectDb, globalDb, { event: "compact" });
     expect(compactOrient.recovery_checkpoint).toBeTruthy();
     expect(compactOrient.recovery_checkpoint!.content).toContain("orchestrator plugin");
+
+    // Startup also gets checkpoint now
+    const startupOrient = handleOrient(projectDb, globalDb, { event: "startup" });
+    expect(startupOrient.recovery_checkpoint).toBeTruthy();
 
     // 9. Reflect - should have autonomy_scores defined
     const reflectResult = handleReflect(projectDb, globalDb, {});
@@ -152,6 +156,74 @@ describe("full session lifecycle", () => {
       .query("SELECT * FROM notes WHERE type = 'tool_capability'")
       .all() as any[];
     expect(projectToolCaps.length).toBe(0);
+  });
+
+  test("prepare returns autonomy level", () => {
+    // With no knowledge, domain should be sparse
+    const result = handlePrepare(projectDb, globalDb, {
+      task: "Build a React component for player list",
+    });
+    expect(result.autonomy).toBe("sparse");
+    expect(result.formatted).toContain("SPARSE");
+
+    // Add frontend knowledge (autonomy counts: recipe + gate + anti_pattern, threshold 5)
+    // Each note must be distinct enough to avoid dedup (Jaccard > 0.6 = duplicate)
+    const frontendNotes = [
+      { content: "Always use semantic HTML elements with aria labels for accessibility in frontend", type: "autonomy_recipe" as const },
+      { content: "DaisyUI tooltip component is buggy, use SmartTooltip wrapper instead", type: "autonomy_recipe" as const },
+      { content: "Zustand selectors must never return new objects, use module-level EMPTY constants", type: "autonomy_recipe" as const },
+      { content: "Verify rendered page loads via Tauri MCP webview before marking frontend done", type: "quality_gate" as const },
+      { content: "Never use inline styles, always Tailwind utility classes for consistency", type: "anti_pattern" as const },
+    ];
+    for (const note of frontendNotes) {
+      handleRemember(projectDb, globalDb, {
+        content: note.content,
+        type: note.type,
+        tags: "frontend",
+      });
+    }
+
+    // Now should be developing (total = 5)
+    const result2 = handlePrepare(projectDb, globalDb, {
+      task: "Build a React component for server status",
+    });
+    expect(result2.autonomy).toBe("developing");
+    expect(result2.formatted).toContain("DEVELOPING");
+  });
+
+  test("checkpoint tool creates recoverable state", () => {
+    // Create a checkpoint
+    const cp = handleRemember(projectDb, globalDb, {
+      content: "## Work State\nImplemented all 7 knowledge engine gaps\n\n## Next Steps\n- Rebuild bundle\n- Push to marketplace",
+      type: "checkpoint",
+      context: "Checkpoint created at end of session",
+    });
+    expect(cp.stored).toBe(true);
+
+    // Orient should find it
+    const orient = handleOrient(projectDb, globalDb, { event: "startup" });
+    expect(orient.recovery_checkpoint).toBeTruthy();
+    expect(orient.recovery_checkpoint!.content).toContain("knowledge engine gaps");
+    expect(orient.formatted).toContain("Recovery Checkpoint");
+  });
+
+  test("cross-project patterns appear in orient", () => {
+    // Add a global convention
+    handleRemember(projectDb, globalDb, {
+      content: "Always use TypeScript strict mode across all projects",
+      type: "convention",
+      scope: "global",
+    });
+
+    // Add some project notes so it's not first_run
+    handleRemember(projectDb, globalDb, {
+      content: "Project uses React 18",
+      type: "architecture",
+    });
+
+    const orient = handleOrient(projectDb, globalDb, { event: "startup" });
+    expect(orient.formatted).toContain("Cross-Project Patterns");
+    expect(orient.formatted).toContain("TypeScript strict mode");
   });
 
   test("handles the recursive improvement pattern", () => {

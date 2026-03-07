@@ -114,6 +114,41 @@ server.tool(
   }
 );
 
+// ── checkpoint ──────────────────────────────────────────────────────────
+server.tool(
+  "checkpoint",
+  "Create a checkpoint capturing current work state. MUST be called before context compaction and at the end of sessions. Captures summary, open questions, and next steps so the next session can pick up seamlessly.",
+  {
+    summary: z.string().describe("What was accomplished and current state"),
+    open_questions: z.array(z.string()).optional().describe("Unresolved questions"),
+    next_steps: z.array(z.string()).optional().describe("What should happen next"),
+    in_flight: z.string().optional().describe("Work currently in progress, if any"),
+  },
+  async ({ summary, open_questions, next_steps, in_flight }) => {
+    const parts = [`## Work State\n${summary}`];
+    if (in_flight) parts.push(`\n## In Flight\n${in_flight}`);
+    if (open_questions?.length) parts.push(`\n## Open Questions\n${open_questions.map(q => `- ${q}`).join("\n")}`);
+    if (next_steps?.length) parts.push(`\n## Next Steps\n${next_steps.map(s => `- ${s}`).join("\n")}`);
+
+    const content = parts.join("\n");
+    const result = handleRemember(getProjectDb(), getGlobalDb(), {
+      content,
+      type: "checkpoint",
+      context: `Checkpoint created at ${new Date().toISOString()}`,
+      tags: "checkpoint",
+    });
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: result.stored
+          ? `Checkpoint saved (${result.note_id}). Next session will recover from here.`
+          : `Checkpoint updated (existing checkpoint promoted).`,
+      }],
+    };
+  }
+);
+
 // ── resolve ─────────────────────────────────────────────────────────────
 server.tool(
   "resolve",

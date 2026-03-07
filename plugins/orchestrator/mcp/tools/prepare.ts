@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
-import type { ContextPackage } from "../types";
+import type { ContextPackage, AutonomyLevel } from "../types";
 import { composeContextPackage } from "../engine/composer";
+import { computeAutonomyScore } from "../engine/scorer";
 import { truncate } from "../utils";
 
 export interface PrepareInput {
@@ -10,6 +11,7 @@ export interface PrepareInput {
 
 export interface PrepareResult {
   package: ContextPackage;
+  autonomy: AutonomyLevel;
   formatted: string;
 }
 
@@ -29,16 +31,26 @@ function inferDomain(task: string): string {
   return "general";
 }
 
-function formatPackage(pkg: ContextPackage, domain: string): string {
+function formatPackage(pkg: ContextPackage, domain: string, autonomy: AutonomyLevel): string {
   const lines: string[] = [];
   lines.push(`# Context Package: ${domain}`);
+  lines.push("");
+
+  // Autonomy guidance based on domain maturity
+  if (autonomy === "mature") {
+    lines.push(`**Autonomy: MATURE** - This domain has rich context. Proceed confidently using established patterns. Only escalate on conflicts with existing conventions or novel architectural decisions.`);
+  } else if (autonomy === "developing") {
+    lines.push(`**Autonomy: DEVELOPING** - Some patterns established. Follow existing conventions where they exist. For gaps, propose approaches and record decisions.`);
+  } else {
+    lines.push(`**Autonomy: SPARSE** - Limited context for this domain. Be cautious - ask before making architectural decisions. Record everything you learn for future sessions.`);
+  }
   lines.push("");
 
   const sections: Array<[string, typeof pkg.conventions]> = [
     ["Conventions", pkg.conventions],
     ["Tool Capabilities", pkg.tool_capabilities],
-    ["Anti-Patterns", pkg.anti_patterns],
-    ["Quality Gates", pkg.quality_gates],
+    ["Anti-Patterns (DO NOT)", pkg.anti_patterns],
+    ["Quality Gates (MUST PASS)", pkg.quality_gates],
     ["Architecture", pkg.architecture],
     ["Constraints", pkg.constraints],
     ["Recent Decisions", pkg.recent_decisions],
@@ -54,7 +66,7 @@ function formatPackage(pkg: ContextPackage, domain: string): string {
     }
   }
 
-  if (lines.length <= 2) {
+  if (lines.length <= 4) {
     lines.push("No domain-specific context found. Knowledge will accumulate as you work.");
     lines.push("");
   }
@@ -69,7 +81,8 @@ export function handlePrepare(
 ): PrepareResult {
   const domain = input.domain ?? inferDomain(input.task);
   const pkg = composeContextPackage(projectDb, globalDb, domain);
-  const formatted = formatPackage(pkg, domain);
+  const autonomyResult = computeAutonomyScore(projectDb, domain);
+  const formatted = formatPackage(pkg, domain, autonomyResult.score);
 
-  return { package: pkg, formatted };
+  return { package: pkg, autonomy: autonomyResult.score, formatted };
 }

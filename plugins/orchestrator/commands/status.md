@@ -1,7 +1,15 @@
 ---
-description: "Show current orchestrator state: open threads, in-flight work, neglected areas, autonomy scores"
+description: "Show current orchestrator state: open threads, checkpoint, neglected areas, autonomy scores"
 ---
 
-Call the orchestrator MCP `orient` tool with event "startup" to get the current state.
-Present the results clearly to the user, organized by section.
-Also call `reflect` with no focus to show autonomy scores alongside the briefing.
+Show the user a comprehensive view of orchestrator state:
+
+1. Call `orient` with event "startup" to get the current briefing (includes checkpoint, open threads, decisions, drift warnings, user patterns, cross-project patterns)
+2. Call `reflect` to get autonomy scores and knowledge health metrics
+3. Present both results clearly, organized by section
+
+Highlight any areas needing attention:
+- Open threads that have been open for a long time
+- Domains with "sparse" autonomy (need more knowledge)
+- Drift warnings (too much focus in one area)
+- Notes queued for revalidation

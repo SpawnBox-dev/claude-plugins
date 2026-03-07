@@ -20546,7 +20546,19 @@ function fetchLatestCheckpoint(db) {
     return null;
   }
 }
-function formatBriefing(briefing, checkpoint) {
+function fetchGlobalPatterns(globalDb2) {
+  try {
+    const rows = globalDb2.query(`SELECT content FROM notes
+         WHERE type IN ('convention', 'anti_pattern', 'quality_gate')
+         AND confidence IN ('high', 'medium')
+         ORDER BY updated_at DESC
+         LIMIT 5`).all();
+    return rows.map((r) => r.content);
+  } catch {
+    return [];
+  }
+}
+function formatBriefing(briefing, checkpoint, globalPatterns, event) {
   const lines = [];
   if (briefing.is_first_run) {
     lines.push("# ORCHESTRATOR: FIRST RUN DETECTED");
@@ -20557,6 +20569,11 @@ function formatBriefing(briefing, checkpoint) {
   }
   lines.push("# Session Briefing");
   lines.push("");
+  if (checkpoint) {
+    lines.push("## Recovery Checkpoint");
+    lines.push(checkpoint.content);
+    lines.push("");
+  }
   if (briefing.open_threads.length > 0) {
     lines.push("## Open Threads");
     lines.push(summarizeForBriefing(briefing.open_threads));
@@ -20584,14 +20601,20 @@ function formatBriefing(briefing, checkpoint) {
 `));
     lines.push("");
   }
+  if (globalPatterns.length > 0) {
+    lines.push("## Cross-Project Patterns");
+    lines.push(globalPatterns.map((p) => `- ${p}`).join(`
+`));
+    lines.push("");
+  }
   if (briefing.suggested_focus) {
     lines.push(`**Suggested focus:** ${briefing.suggested_focus}`);
     lines.push(`**Intensity:** ${briefing.suggested_intensity}`);
     lines.push("");
   }
-  if (checkpoint) {
-    lines.push("## Recovery Checkpoint");
-    lines.push(checkpoint.content);
+  if (event === "compact") {
+    lines.push("---");
+    lines.push("*Context was just compacted. Review the checkpoint above carefully. If anything is unclear, use `recall` to search for more context before proceeding.*");
     lines.push("");
   }
   return lines.join(`
@@ -20599,15 +20622,14 @@ function formatBriefing(briefing, checkpoint) {
 }
 function handleOrient(projectDb2, globalDb2, input) {
   const briefing = composeBriefing(projectDb2, globalDb2);
-  let checkpoint = null;
-  if (input.event === "compact" || input.event === "clear") {
-    checkpoint = fetchLatestCheckpoint(projectDb2);
-  }
-  const formatted = formatBriefing(briefing, checkpoint);
+  const checkpoint = fetchLatestCheckpoint(projectDb2);
+  const globalPatterns = fetchGlobalPatterns(globalDb2);
+  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event);
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }
 
 // mcp/tools/prepare.ts
+init_scorer();
 init_utils();
 var DOMAIN_PATTERNS = [
   [/\b(react|component|tsx|jsx|frontend|ui|tailwind|daisyui|zustand)\b/i, "frontend"],
@@ -20624,15 +20646,23 @@ function inferDomain(task) {
   }
   return "general";
 }
-function formatPackage(pkg, domain) {
+function formatPackage(pkg, domain, autonomy) {
   const lines = [];
   lines.push(`# Context Package: ${domain}`);
+  lines.push("");
+  if (autonomy === "mature") {
+    lines.push(`**Autonomy: MATURE** - This domain has rich context. Proceed confidently using established patterns. Only escalate on conflicts with existing conventions or novel architectural decisions.`);
+  } else if (autonomy === "developing") {
+    lines.push(`**Autonomy: DEVELOPING** - Some patterns established. Follow existing conventions where they exist. For gaps, propose approaches and record decisions.`);
+  } else {
+    lines.push(`**Autonomy: SPARSE** - Limited context for this domain. Be cautious - ask before making architectural decisions. Record everything you learn for future sessions.`);
+  }
   lines.push("");
   const sections = [
     ["Conventions", pkg.conventions],
     ["Tool Capabilities", pkg.tool_capabilities],
-    ["Anti-Patterns", pkg.anti_patterns],
-    ["Quality Gates", pkg.quality_gates],
+    ["Anti-Patterns (DO NOT)", pkg.anti_patterns],
+    ["Quality Gates (MUST PASS)", pkg.quality_gates],
     ["Architecture", pkg.architecture],
     ["Constraints", pkg.constraints],
     ["Recent Decisions", pkg.recent_decisions]
@@ -20646,7 +20676,7 @@ function formatPackage(pkg, domain) {
       lines.push("");
     }
   }
-  if (lines.length <= 2) {
+  if (lines.length <= 4) {
     lines.push("No domain-specific context found. Knowledge will accumulate as you work.");
     lines.push("");
   }
@@ -20656,8 +20686,9 @@ function formatPackage(pkg, domain) {
 function handlePrepare(projectDb2, globalDb2, input) {
   const domain = input.domain ?? inferDomain(input.task);
   const pkg = composeContextPackage(projectDb2, globalDb2, domain);
-  const formatted = formatPackage(pkg, domain);
-  return { package: pkg, formatted };
+  const autonomyResult = computeAutonomyScore(projectDb2, domain);
+  const formatted = formatPackage(pkg, domain, autonomyResult.score);
+  return { package: pkg, autonomy: autonomyResult.score, formatted };
 }
 
 // mcp/tools/reflect.ts
@@ -20804,6 +20835,43 @@ server.tool("prepare", "Gather domain-specific context before starting a task. R
   });
   return {
     content: [{ type: "text", text: result.formatted }]
+  };
+});
+server.tool("checkpoint", "Create a checkpoint capturing current work state. MUST be called before context compaction and at the end of sessions. Captures summary, open questions, and next steps so the next session can pick up seamlessly.", {
+  summary: exports_external.string().describe("What was accomplished and current state"),
+  open_questions: exports_external.array(exports_external.string()).optional().describe("Unresolved questions"),
+  next_steps: exports_external.array(exports_external.string()).optional().describe("What should happen next"),
+  in_flight: exports_external.string().optional().describe("Work currently in progress, if any")
+}, async ({ summary, open_questions, next_steps, in_flight }) => {
+  const parts = [`## Work State
+${summary}`];
+  if (in_flight)
+    parts.push(`
+## In Flight
+${in_flight}`);
+  if (open_questions?.length)
+    parts.push(`
+## Open Questions
+${open_questions.map((q) => `- ${q}`).join(`
+`)}`);
+  if (next_steps?.length)
+    parts.push(`
+## Next Steps
+${next_steps.map((s) => `- ${s}`).join(`
+`)}`);
+  const content = parts.join(`
+`);
+  const result = handleRemember(getProjectDb(), getGlobalDb(), {
+    content,
+    type: "checkpoint",
+    context: `Checkpoint created at ${new Date().toISOString()}`,
+    tags: "checkpoint"
+  });
+  return {
+    content: [{
+      type: "text",
+      text: result.stored ? `Checkpoint saved (${result.note_id}). Next session will recover from here.` : `Checkpoint updated (existing checkpoint promoted).`
+    }]
   };
 });
 server.tool("resolve", "Mark an open_thread or commitment as resolved. Use this when a thread has been addressed or a commitment fulfilled.", {

@@ -50,7 +50,29 @@ function fetchLatestCheckpoint(db: Database): Note | null {
   }
 }
 
-function formatBriefing(briefing: Briefing, checkpoint: Note | null): string {
+function fetchGlobalPatterns(globalDb: Database): string[] {
+  try {
+    const rows = globalDb
+      .query(
+        `SELECT content FROM notes
+         WHERE type IN ('convention', 'anti_pattern', 'quality_gate')
+         AND confidence IN ('high', 'medium')
+         ORDER BY updated_at DESC
+         LIMIT 5`
+      )
+      .all() as Array<{ content: string }>;
+    return rows.map((r) => r.content);
+  } catch {
+    return [];
+  }
+}
+
+function formatBriefing(
+  briefing: Briefing,
+  checkpoint: Note | null,
+  globalPatterns: string[],
+  event: string
+): string {
   const lines: string[] = [];
 
   if (briefing.is_first_run) {
@@ -64,6 +86,12 @@ function formatBriefing(briefing: Briefing, checkpoint: Note | null): string {
 
   lines.push("# Session Briefing");
   lines.push("");
+
+  if (checkpoint) {
+    lines.push("## Recovery Checkpoint");
+    lines.push(checkpoint.content);
+    lines.push("");
+  }
 
   if (briefing.open_threads.length > 0) {
     lines.push("## Open Threads");
@@ -95,15 +123,22 @@ function formatBriefing(briefing: Briefing, checkpoint: Note | null): string {
     lines.push("");
   }
 
+  if (globalPatterns.length > 0) {
+    lines.push("## Cross-Project Patterns");
+    lines.push(globalPatterns.map((p) => `- ${p}`).join("\n"));
+    lines.push("");
+  }
+
   if (briefing.suggested_focus) {
     lines.push(`**Suggested focus:** ${briefing.suggested_focus}`);
     lines.push(`**Intensity:** ${briefing.suggested_intensity}`);
     lines.push("");
   }
 
-  if (checkpoint) {
-    lines.push("## Recovery Checkpoint");
-    lines.push(checkpoint.content);
+  // Behavioral reminders based on event type
+  if (event === "compact") {
+    lines.push("---");
+    lines.push("*Context was just compacted. Review the checkpoint above carefully. If anything is unclear, use `recall` to search for more context before proceeding.*");
     lines.push("");
   }
 
@@ -117,12 +152,10 @@ export function handleOrient(
 ): OrientResult {
   const briefing = composeBriefing(projectDb, globalDb);
 
-  let checkpoint: Note | null = null;
-  if (input.event === "compact" || input.event === "clear") {
-    checkpoint = fetchLatestCheckpoint(projectDb);
-  }
-
-  const formatted = formatBriefing(briefing, checkpoint);
+  // Always fetch checkpoint - it provides continuity across sessions
+  const checkpoint = fetchLatestCheckpoint(projectDb);
+  const globalPatterns = fetchGlobalPatterns(globalDb);
+  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event);
 
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }
