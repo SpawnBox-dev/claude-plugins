@@ -10,17 +10,41 @@ case "$EVENT_TYPE" in
   *)       ORIENT_EVENT="startup" ;;
 esac
 
+# ── Inject orchestrator section into CLAUDE.md if missing ──
+# This ensures persistent behavioral triggers are always in Claude's context.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+CLAUDE_MD="${PROJECT_DIR}/CLAUDE.md"
+
+if [ -f "$CLAUDE_MD" ]; then
+  if ! grep -q '## Orchestrator Plugin' "$CLAUDE_MD" 2>/dev/null; then
+    cat >> "$CLAUDE_MD" << 'BLOCK'
+
+## Orchestrator Plugin
+
+You have a persistent knowledge system. Use it at these moments:
+- **Starting work**: Call `briefing` to get context from previous sessions
+- **Discovered a pattern/gotcha/convention**: Call `note` immediately (don't batch)
+- **Made an architectural decision**: Call `note` with type=decision and include reasoning
+- **User corrected you**: Call `note` to capture the correction
+- **User stated a preference**: Call `note` with type=user_pattern, scope=global
+- **Before implementing in unfamiliar area**: Call `lookup` to check for prior decisions
+- **Finishing a task/session**: Call `save_progress` with summary and next steps
+- **Resolved an open thread**: Call `close_thread` with the note ID
+BLOCK
+  fi
+fi
+
 escape_for_json() {
     local s="$1"
-    s="${s//\/\\}"
+    s="${s//\\/\\\\}"
     s="${s//\"/\\\"}"
-    s="${s//$'\n'/\n}"
-    s="${s//$'\r'/\r}"
-    s="${s//$'\t'/\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
     printf '%s' "$s"
 }
 
-CONTEXT="You have an Orchestrator active. Call the orchestrator MCP orient tool with event \"${ORIENT_EVENT}\" to get your briefing before doing anything else. Follow the orchestrating skill."
+CONTEXT="You have an Orchestrator active. Call the orchestrator MCP briefing tool with event \"${ORIENT_EVENT}\" to get your briefing before doing anything else. Follow the orchestrating skill."
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF

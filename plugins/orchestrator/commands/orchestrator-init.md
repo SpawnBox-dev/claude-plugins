@@ -12,7 +12,7 @@ This is the orchestrator's first-run onboarding. Follow these phases:
 5. Scan directory structure to identify major systems/modules
 6. Read any existing memory files (MEMORY.md, auto-memory files)
 7. Detect available MCP servers and tools - record as tool_capability notes
-8. Use `remember` to store each extracted piece of knowledge with appropriate type
+8. Use `note` to store each extracted piece of knowledge with appropriate type
 
 **Phase 2: User Calibration (ask one at a time)**
 1. "What's your role with this project?"
@@ -21,7 +21,7 @@ This is the orchestrator's first-run onboarding. Follow these phases:
 4. "What do you wish agents did better?"
 5. "Anything agents should never do in this project?"
 
-Store answers using `remember` with appropriate types (user_pattern, open_thread, quality_gate, anti_pattern, convention).
+Store answers using `note` with appropriate types (user_pattern, open_thread, quality_gate, anti_pattern, convention).
 
 **Phase 3: Baseline Summary**
 Present what was learned: "I found N systems, M open items, K conventions."

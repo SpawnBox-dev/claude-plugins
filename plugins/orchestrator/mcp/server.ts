@@ -11,13 +11,13 @@ import { handleReflect } from "./tools/reflect";
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.3.3",
+  version: "0.5.0",
 });
 
-// ── orient ──────────────────────────────────────────────────────────────
+// ── briefing ────────────────────────────────────────────────────────────
 server.tool(
-  "orient",
-  "Get a session briefing with open threads, recent decisions, neglected areas, and drift warnings. Call this at the start of every conversation or when resuming work to understand current project state.",
+  "briefing",
+  "Get up to speed on the current project. Returns open threads, recent decisions, neglected areas, and your last checkpoint so you can pick up where the previous session left off. Use at session start, after context compaction, or whenever you feel you're missing context about the project's state.",
   {
     event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
   },
@@ -29,10 +29,10 @@ server.tool(
   }
 );
 
-// ── remember ────────────────────────────────────────────────────────────
+// ── note ────────────────────────────────────────────────────────────────
 server.tool(
-  "remember",
-  "Store a piece of knowledge - decisions, insights, conventions, risks, architecture notes, open threads, or patterns. The system auto-links related notes, detects duplicates, and routes global knowledge (user patterns, tool capabilities) to the cross-project database.",
+  "note",
+  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. The system auto-links related notes and detects duplicates.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -54,10 +54,10 @@ server.tool(
   }
 );
 
-// ── recall ──────────────────────────────────────────────────────────────
+// ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
-  "recall",
-  "Search stored knowledge by query or retrieve a specific note by ID. Searches both project and global databases using full-text search with BM25 ranking. Use depth > 1 to traverse the knowledge graph for progressive disclosure.",
+  "lookup",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
@@ -95,10 +95,10 @@ server.tool(
   }
 );
 
-// ── prepare ─────────────────────────────────────────────────────────────
+// ── plan ─────────────────────────────────────────────────────────────────
 server.tool(
-  "prepare",
-  "Gather domain-specific context before starting a task. Returns relevant conventions, anti-patterns, quality gates, architecture notes, and recent decisions for the inferred or specified domain (frontend, backend, cloud, infra, testing, discord).",
+  "plan",
+  "Gather domain-specific context before starting a complex task. Returns relevant conventions, anti-patterns, quality gates, architecture notes, and recent decisions so you don't contradict past work or re-learn solved problems. Use when facing multi-step work or entering an unfamiliar domain.",
   {
     task: z.string(),
     domain: z.string().optional(),
@@ -114,10 +114,10 @@ server.tool(
   }
 );
 
-// ── checkpoint ──────────────────────────────────────────────────────────
+// ── save_progress ───────────────────────────────────────────────────────
 server.tool(
-  "checkpoint",
-  "Create a checkpoint capturing current work state. MUST be called before context compaction and at the end of sessions. Captures summary, open questions, and next steps so the next session can pick up seamlessly.",
+  "save_progress",
+  "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends.",
   {
     summary: z.string().describe("What was accomplished and current state"),
     open_questions: z.array(z.string()).optional().describe("Unresolved questions"),
@@ -142,17 +142,17 @@ server.tool(
       content: [{
         type: "text" as const,
         text: result.stored
-          ? `Checkpoint saved (${result.note_id}). Next session will recover from here.`
-          : `Checkpoint updated (existing checkpoint promoted).`,
+          ? `Progress saved (${result.note_id}). Next session will recover from here.`
+          : `Progress updated (existing checkpoint promoted).`,
       }],
     };
   }
 );
 
-// ── resolve ─────────────────────────────────────────────────────────────
+// ── close_thread ────────────────────────────────────────────────────────
 server.tool(
-  "resolve",
-  "Mark an open_thread or commitment as resolved. Use this when a thread has been addressed or a commitment fulfilled.",
+  "close_thread",
+  "Mark an open thread or commitment as resolved. Use when a tracked issue has been addressed, a question has been answered, or a commitment has been fulfilled. This keeps the knowledge base clean and prevents future sessions from revisiting solved problems.",
   {
     id: z.string(),
     resolution: z.string().optional(),
@@ -210,10 +210,10 @@ server.tool(
   }
 );
 
-// ── reflect ─────────────────────────────────────────────────────────────
+// ── retro ───────────────────────────────────────────────────────────────
 server.tool(
-  "reflect",
-  "Run maintenance on the knowledge base: decay confidence on stale notes, identify orphan notes with no links, queue low-confidence notes for revalidation, and compute autonomy scores across domains. Call periodically to keep knowledge fresh.",
+  "retro",
+  "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, and computes autonomy scores across domains. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.",
   {
     focus: z.string().optional(),
   },
