@@ -1,0 +1,40 @@
+{
+  "name": "@minecraft-server-admin/docs-manager-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for managing AI-optimized documentation with frontmatter schema validation, staleness tracking, and template generation",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "docs-manager-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "yaml": "^2.3.4",
+    "glob": "^10.3.10",
+    "simple-git": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "documentation",
+    "frontmatter",
+    "validation",
+    "staleness",
+    "ai-first"
+  ],
+  "author": "Minecraft Server Admin Project",
+  "license": "MIT"
+}

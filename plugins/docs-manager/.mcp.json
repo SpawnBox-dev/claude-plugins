@@ -1,0 +1,6 @@
+{
+  "docs-manager": {
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/dist/server.cjs"]
+  }
+}
