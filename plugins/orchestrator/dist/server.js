@@ -43,7 +43,6 @@ var __export = (target, all) => {
       set: __exportSetter.bind(all, name)
     });
 };
-var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = import.meta.require;
 
 // node_modules/ajv/dist/compile/codegen/code.js
@@ -6516,638 +6515,6 @@ var require_dist = __commonJS((exports, module) => {
   module.exports = exports = formatsPlugin;
   Object.defineProperty(exports, "__esModule", { value: true });
   exports.default = formatsPlugin;
-});
-
-// mcp/types.ts
-var NOTE_TYPES, GLOBAL_TYPES;
-var init_types = __esm(() => {
-  NOTE_TYPES = [
-    "decision",
-    "commitment",
-    "insight",
-    "architecture",
-    "open_thread",
-    "risk",
-    "dependency",
-    "convention",
-    "anti_pattern",
-    "autonomy_recipe",
-    "quality_gate",
-    "tool_capability",
-    "user_pattern",
-    "checkpoint"
-  ];
-  GLOBAL_TYPES = ["user_pattern", "tool_capability"];
-});
-
-// node_modules/uuid/dist/esm/native.js
-import { randomUUID } from "crypto";
-var native_default;
-var init_native = __esm(() => {
-  native_default = { randomUUID };
-});
-
-// node_modules/uuid/dist/esm/rng.js
-import { randomFillSync } from "crypto";
-function rng() {
-  if (poolPtr > rnds8Pool.length - 16) {
-    randomFillSync(rnds8Pool);
-    poolPtr = 0;
-  }
-  return rnds8Pool.slice(poolPtr, poolPtr += 16);
-}
-var rnds8Pool, poolPtr;
-var init_rng = __esm(() => {
-  rnds8Pool = new Uint8Array(256);
-  poolPtr = rnds8Pool.length;
-});
-
-// node_modules/uuid/dist/esm/stringify.js
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-var byteToHex;
-var init_stringify = __esm(() => {
-  byteToHex = [];
-  for (let i = 0;i < 256; ++i) {
-    byteToHex.push((i + 256).toString(16).slice(1));
-  }
-});
-
-// node_modules/uuid/dist/esm/v4.js
-function v4(options, buf, offset) {
-  if (native_default.randomUUID && !buf && !options) {
-    return native_default.randomUUID();
-  }
-  options = options || {};
-  const rnds = options.random ?? options.rng?.() ?? rng();
-  if (rnds.length < 16) {
-    throw new Error("Random bytes length must be >= 16");
-  }
-  rnds[6] = rnds[6] & 15 | 64;
-  rnds[8] = rnds[8] & 63 | 128;
-  if (buf) {
-    offset = offset || 0;
-    if (offset < 0 || offset + 16 > buf.length) {
-      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-    }
-    for (let i = 0;i < 16; ++i) {
-      buf[offset + i] = rnds[i];
-    }
-    return buf;
-  }
-  return unsafeStringify(rnds);
-}
-var v4_default;
-var init_v4 = __esm(() => {
-  init_native();
-  init_rng();
-  init_stringify();
-  v4_default = v4;
-});
-
-// node_modules/uuid/dist/esm/index.js
-var init_esm = __esm(() => {
-  init_v4();
-});
-
-// mcp/utils.ts
-function generateId() {
-  return v4_default();
-}
-function now() {
-  return new Date().toISOString();
-}
-function extractKeywords(text) {
-  if (!text.trim())
-    return [];
-  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-  const freq = new Map;
-  for (const word of words) {
-    freq.set(word, (freq.get(word) ?? 0) + 1);
-    const synonyms = synonymLookup.get(word);
-    if (synonyms) {
-      for (const syn of synonyms) {
-        if (syn !== word && !freq.has(syn)) {
-          freq.set(syn, 0.5);
-        }
-      }
-    }
-  }
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([word]) => word);
-}
-function truncate(text, maxLength = 100) {
-  if (text.length <= maxLength)
-    return text;
-  return text.slice(0, maxLength - 3) + "...";
-}
-function summarizeForBriefing(notes, maxTokens = 200) {
-  const maxChars = maxTokens * 4;
-  const lines = [];
-  let charCount = 0;
-  for (const note of notes) {
-    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
-    if (charCount + line.length > maxChars)
-      break;
-    lines.push(line);
-    charCount += line.length + 1;
-  }
-  return lines.join(`
-`);
-}
-function relativeTime(isoTimestamp) {
-  const then = new Date(isoTimestamp).getTime();
-  const now2 = Date.now();
-  const diffMs = now2 - then;
-  const diffMin = Math.floor(diffMs / 60000);
-  const diffHr = Math.floor(diffMin / 60);
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffMin < 1)
-    return "just now";
-  if (diffMin < 60)
-    return `${diffMin}m ago`;
-  if (diffHr < 24)
-    return `${diffHr}h ago`;
-  if (diffDay < 7)
-    return `${diffDay}d ago`;
-  return `${Math.floor(diffDay / 7)}w ago`;
-}
-var STOP_WORDS, SYNONYM_GROUPS, synonymLookup;
-var init_utils = __esm(() => {
-  init_esm();
-  STOP_WORDS = new Set([
-    "a",
-    "an",
-    "the",
-    "and",
-    "or",
-    "but",
-    "in",
-    "on",
-    "at",
-    "to",
-    "for",
-    "of",
-    "with",
-    "by",
-    "from",
-    "is",
-    "it",
-    "as",
-    "be",
-    "was",
-    "were",
-    "been",
-    "being",
-    "have",
-    "has",
-    "had",
-    "do",
-    "does",
-    "did",
-    "will",
-    "would",
-    "could",
-    "should",
-    "may",
-    "might",
-    "shall",
-    "can",
-    "need",
-    "dare",
-    "ought",
-    "used",
-    "not",
-    "no",
-    "nor",
-    "so",
-    "yet",
-    "both",
-    "each",
-    "few",
-    "more",
-    "most",
-    "other",
-    "some",
-    "such",
-    "than",
-    "too",
-    "very",
-    "just",
-    "about",
-    "above",
-    "after",
-    "again",
-    "all",
-    "also",
-    "am",
-    "any",
-    "are",
-    "because",
-    "before",
-    "below",
-    "between",
-    "during",
-    "here",
-    "how",
-    "if",
-    "into",
-    "its",
-    "let",
-    "me",
-    "my",
-    "myself",
-    "now",
-    "off",
-    "once",
-    "only",
-    "our",
-    "out",
-    "over",
-    "own",
-    "same",
-    "she",
-    "he",
-    "her",
-    "him",
-    "his",
-    "hers",
-    "that",
-    "their",
-    "them",
-    "then",
-    "there",
-    "these",
-    "they",
-    "this",
-    "those",
-    "through",
-    "under",
-    "until",
-    "up",
-    "we",
-    "what",
-    "when",
-    "where",
-    "which",
-    "while",
-    "who",
-    "whom",
-    "why",
-    "you",
-    "your",
-    "yours",
-    "i"
-  ]);
-  SYNONYM_GROUPS = [
-    ["backup", "snapshot", "restore", "archive"],
-    ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
-    ["billing", "payment", "subscription", "stripe", "lemon"],
-    ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
-    ["docker", "container", "image", "compose"],
-    ["wsl", "linux", "distro", "ubuntu"],
-    ["frontend", "ui", "component", "react", "tsx"],
-    ["backend", "rust", "tauri", "handler", "command"],
-    ["database", "sqlite", "db", "migration", "schema", "query"],
-    ["player", "user", "session", "uuid"],
-    ["event", "eventbus", "broadcast", "listener", "emit"],
-    ["poller", "polling", "telemetry", "datapack", "rcon"],
-    ["discord", "bot", "webhook", "guild"],
-    ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
-    ["test", "testing", "vitest", "spec", "assertion"],
-    ["map", "tile", "region", "atlas", "chunk"],
-    ["perf", "performance", "latency", "throughput", "instrument"],
-    ["error", "bug", "fix", "issue", "broken"],
-    ["config", "settings", "configuration", "preference"],
-    ["encrypt", "encryption", "aes", "decrypt"],
-    ["hibernate", "hibernation", "compress", "archive"],
-    ["observer", "connect", "disconnect", "reconnect", "visibility"],
-    ["http", "api", "endpoint", "route", "request"],
-    ["store", "zustand", "state", "selector"]
-  ];
-  synonymLookup = new Map;
-  for (const group of SYNONYM_GROUPS) {
-    const groupSet = new Set(group);
-    for (const word of group) {
-      synonymLookup.set(word, groupSet);
-    }
-  }
-});
-
-// mcp/engine/deduplicator.ts
-function findDuplicates(db, type, content, threshold = 0.6) {
-  const normalizedContent = content.trim().toLowerCase();
-  const inputKeywords = new Set(extractKeywords(content));
-  const matches = [];
-  const candidates = db.query(`SELECT id, content, keywords FROM notes WHERE type = ?`).all(type);
-  for (const candidate of candidates) {
-    if (candidate.content.trim().toLowerCase() === normalizedContent) {
-      matches.push({ id: candidate.id, content: candidate.content, similarity: 1 });
-      continue;
-    }
-    const candidateKeywords = new Set(candidate.keywords ? candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(candidate.content));
-    if (inputKeywords.size === 0 && candidateKeywords.size === 0)
-      continue;
-    const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
-    const union3 = new Set([...inputKeywords, ...candidateKeywords]);
-    const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-    if (similarity >= threshold) {
-      matches.push({ id: candidate.id, content: candidate.content, similarity });
-    }
-  }
-  matches.sort((a, b) => b.similarity - a.similarity);
-  return matches;
-}
-function mergeDuplicates(db) {
-  const types2 = db.query(`SELECT DISTINCT type FROM notes`).all();
-  let totalMerged = 0;
-  for (const { type } of types2) {
-    const notes = db.query(`SELECT id, content, keywords, created_at FROM notes WHERE type = ? ORDER BY created_at DESC`).all(type);
-    const merged = new Set;
-    for (let i = 0;i < notes.length; i++) {
-      if (merged.has(notes[i].id))
-        continue;
-      const iKeywords = new Set(notes[i].keywords ? notes[i].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[i].content));
-      for (let j = i + 1;j < notes.length; j++) {
-        if (merged.has(notes[j].id))
-          continue;
-        const exactMatch = notes[i].content.trim().toLowerCase() === notes[j].content.trim().toLowerCase();
-        if (!exactMatch) {
-          const jKeywords = new Set(notes[j].keywords ? notes[j].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[j].content));
-          if (iKeywords.size === 0 && jKeywords.size === 0)
-            continue;
-          const intersection3 = new Set([...iKeywords].filter((k) => jKeywords.has(k)));
-          const union3 = new Set([...iKeywords, ...jKeywords]);
-          const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-          if (similarity < 0.6)
-            continue;
-        }
-        const survivorId = notes[i].id;
-        const victimId = notes[j].id;
-        db.run(`UPDATE links SET from_note_id = ? WHERE from_note_id = ?`, [survivorId, victimId]);
-        db.run(`UPDATE links SET to_note_id = ? WHERE to_note_id = ?`, [survivorId, victimId]);
-        db.run(`DELETE FROM links WHERE from_note_id = to_note_id`);
-        db.run(`DELETE FROM links WHERE rowid NOT IN (
-             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id
-           )`);
-        db.run(`DELETE FROM notes WHERE id = ?`, [victimId]);
-        merged.add(victimId);
-        totalMerged++;
-      }
-    }
-  }
-  return totalMerged;
-}
-var init_deduplicator = __esm(() => {
-  init_utils();
-});
-
-// mcp/engine/linker.ts
-function inferRelationship(fromType, toType) {
-  if (fromType === "decision" && toType === "open_thread")
-    return "supersedes";
-  if (fromType === "open_thread" && toType === "decision")
-    return "supersedes";
-  if (fromType === "quality_gate" || toType === "quality_gate")
-    return "blocks";
-  if (fromType === "dependency" || toType === "dependency")
-    return "depends_on";
-  if (fromType === "anti_pattern" && (toType === "convention" || toType === "autonomy_recipe"))
-    return "conflicts_with";
-  if (toType === "anti_pattern" && (fromType === "convention" || fromType === "autonomy_recipe"))
-    return "conflicts_with";
-  if (fromType === "architecture" && (toType === "convention" || toType === "autonomy_recipe"))
-    return "enables";
-  if (toType === "architecture" && (fromType === "convention" || fromType === "autonomy_recipe"))
-    return "enables";
-  if (fromType === "risk" && toType === "commitment")
-    return "blocks";
-  if (fromType === "commitment" && toType === "risk")
-    return "blocks";
-  return "related_to";
-}
-function findRelatedNotes(db, query, limit = 10) {
-  const terms = query.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
-  if (terms.length === 0)
-    return [];
-  const ftsQuery = terms.join(" OR ");
-  try {
-    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
-                bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
-         FROM notes_fts
-         JOIN notes n ON notes_fts.rowid = n.rowid
-         WHERE notes_fts MATCH ?
-         ORDER BY rank ASC
-         LIMIT ?`).all(ftsQuery, limit);
-    return rows.map((r) => ({
-      id: r.id,
-      type: r.type,
-      content: r.content,
-      confidence: r.confidence,
-      created_at: r.created_at,
-      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : []
-    }));
-  } catch {
-    return [];
-  }
-}
-function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
-  if (keywords.length === 0)
-    return [];
-  const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
-  const sourceRow = db.query(`SELECT type FROM notes WHERE id = ?`).get(noteId);
-  const sourceType = sourceRow?.type ?? "insight";
-  const candidates = db.query(`SELECT id, type, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`).all(noteId);
-  const links = [];
-  const timestamp = now();
-  for (const candidate of candidates) {
-    const candidateKeywords = candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0);
-    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
-    if (overlap.length >= minOverlap) {
-      const strength = overlap.length >= 5 ? "strong" : overlap.length >= 3 ? "moderate" : "weak";
-      const relationship = inferRelationship(sourceType, candidate.type);
-      const link = {
-        id: generateId(),
-        from_note_id: noteId,
-        to_note_id: candidate.id,
-        relationship,
-        strength,
-        created_at: timestamp
-      };
-      db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`, [
-        link.id,
-        link.from_note_id,
-        link.to_note_id,
-        link.relationship,
-        link.strength,
-        link.created_at
-      ]);
-      links.push(link);
-    }
-  }
-  return links;
-}
-var init_linker = __esm(() => {
-  init_utils();
-});
-
-// mcp/engine/scorer.ts
-function decayConfidence(db, staleDays = 30) {
-  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000).toISOString();
-  const result = db.run(`UPDATE notes
-     SET confidence = 'low', updated_at = ?
-     WHERE confidence != 'low'
-       AND last_validated < ?
-       AND resolved = 0`, [new Date().toISOString(), cutoff]);
-  return result.changes;
-}
-function promoteConfidence(db, noteId) {
-  const row = db.query(`SELECT confidence FROM notes WHERE id = ?`).get(noteId);
-  if (!row)
-    return "medium";
-  const current = row.confidence;
-  const promoted = current === "low" ? "medium" : current === "medium" ? "high" : "high";
-  const timestamp = now();
-  db.run(`UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`, [promoted, timestamp, timestamp, noteId]);
-  return promoted;
-}
-function computeAutonomyScore(db, domain) {
-  const pattern = `%${domain}%`;
-  function countByType(type) {
-    return db.query(`SELECT COUNT(*) as cnt FROM notes
-           WHERE type = ?
-             AND (tags LIKE ? OR keywords LIKE ?)`).get(type, pattern, pattern).cnt;
-  }
-  const recipeCount = countByType("autonomy_recipe");
-  const gateCount = countByType("quality_gate");
-  const antiPatternCount = countByType("anti_pattern");
-  const conventionCount = countByType("convention");
-  const architectureCount = countByType("architecture");
-  const total = recipeCount + gateCount + antiPatternCount + Math.floor((conventionCount + architectureCount) / 2);
-  const score = total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
-  return {
-    score,
-    recipe_count: recipeCount,
-    gate_count: gateCount,
-    anti_pattern_count: antiPatternCount,
-    convention_count: conventionCount,
-    architecture_count: architectureCount
-  };
-}
-var init_scorer = __esm(() => {
-  init_utils();
-});
-
-// mcp/tools/remember.ts
-var exports_remember = {};
-__export(exports_remember, {
-  handleRemember: () => handleRemember
-});
-function handleRemember(projectDb2, globalDb2, input) {
-  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
-  const db = useGlobal ? globalDb2 : projectDb2;
-  const duplicates = findDuplicates(db, input.type, input.content);
-  if (duplicates.length > 0) {
-    const bestMatch = duplicates[0];
-    const newConfidence = promoteConfidence(db, bestMatch.id);
-    return {
-      stored: false,
-      note_id: bestMatch.id,
-      duplicate: true,
-      promoted: true,
-      links_created: 0,
-      message: `Near-duplicate ${input.type} found - promoted existing note confidence to ${newConfidence}.`
-    };
-  }
-  const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
-  const keywords = extractKeywords(textForKeywords);
-  const tagParts = [input.type];
-  if (input.tags) {
-    for (const t of input.tags.split(",").map((s) => s.trim())) {
-      if (t && !tagParts.includes(t))
-        tagParts.push(t);
-    }
-  }
-  const tagsStr = tagParts.join(",");
-  const noteId = generateId();
-  const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-    noteId,
-    input.type,
-    input.content,
-    input.context ?? null,
-    keywords.join(","),
-    tagsStr,
-    "medium",
-    timestamp,
-    0,
-    timestamp,
-    timestamp
-  ]);
-  const links = createAutoLinks(db, noteId, keywords);
-  if (input.type === "user_pattern") {
-    writeUserModel(globalDb2, input.content, input.context);
-  }
-  return {
-    stored: true,
-    note_id: noteId,
-    duplicate: false,
-    promoted: false,
-    links_created: links.length,
-    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
-  };
-}
-function inferDimension(content) {
-  const lower = content.toLowerCase();
-  if (/prefer|like|want|style|format|approach/i.test(lower))
-    return "preference";
-  if (/decide|decision|chose|choose|pick|select/i.test(lower))
-    return "decision_pattern";
-  if (/communicat|respond|explain|ask|tell|say/i.test(lower))
-    return "communication_style";
-  if (/strength|good at|excels?|strong/i.test(lower))
-    return "strength";
-  if (/blind spot|miss|overlook|forget|ignore/i.test(lower))
-    return "blind_spot";
-  if (/intent|goal|aim|want to|trying to|plan to/i.test(lower))
-    return "intent_pattern";
-  return "preference";
-}
-function writeUserModel(globalDb2, content, context) {
-  try {
-    const dimension = inferDimension(content);
-    const timestamp = now();
-    const existing = globalDb2.query(`SELECT id, evidence FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
-    if (existing) {
-      const evidenceList = existing.evidence ? existing.evidence.split(`
-`) : [];
-      if (context)
-        evidenceList.push(context);
-      globalDb2.run(`UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [evidenceList.join(`
-`), timestamp, existing.id]);
-    } else {
-      globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
-        generateId(),
-        dimension,
-        content,
-        context ?? "",
-        "medium",
-        "stable",
-        timestamp,
-        timestamp
-      ]);
-    }
-  } catch {}
-}
-var init_remember = __esm(() => {
-  init_types();
-  init_utils();
-  init_deduplicator();
-  init_linker();
-  init_scorer();
 });
 
 // node_modules/zod/v3/external.js
@@ -20106,8 +19473,39 @@ class StdioServerTransport {
   }
 }
 
-// mcp/server.ts
-init_types();
+// mcp/types.ts
+var NOTE_TYPES = [
+  "decision",
+  "commitment",
+  "insight",
+  "architecture",
+  "open_thread",
+  "risk",
+  "dependency",
+  "convention",
+  "anti_pattern",
+  "autonomy_recipe",
+  "quality_gate",
+  "tool_capability",
+  "user_pattern",
+  "checkpoint",
+  "work_item"
+];
+var WORK_ITEM_STATUSES = [
+  "proposed",
+  "planned",
+  "active",
+  "blocked",
+  "done"
+];
+var WORK_ITEM_PRIORITIES = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "backlog"
+];
+var GLOBAL_TYPES = ["user_pattern", "tool_capability"];
 
 // mcp/db/connection.ts
 import { Database } from "bun:sqlite";
@@ -20194,6 +19592,16 @@ CREATE TABLE IF NOT EXISTS migrations (
     name TEXT NOT NULL,
     applied_at TEXT NOT NULL
 );
+`
+  },
+  {
+    version: 5,
+    name: "add_work_item_fields",
+    sql: `
+ALTER TABLE notes ADD COLUMN status TEXT;
+ALTER TABLE notes ADD COLUMN priority TEXT;
+CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
+CREATE INDEX IF NOT EXISTS idx_notes_priority ON notes(priority);
 `
   }
 ];
@@ -20317,12 +19725,578 @@ function getProjectDb() {
   }
   return projectDb;
 }
+// node_modules/uuid/dist/esm/native.js
+import { randomUUID } from "crypto";
+var native_default = { randomUUID };
 
-// mcp/server.ts
-init_remember();
+// node_modules/uuid/dist/esm/rng.js
+import { randomFillSync } from "crypto";
+var rnds8Pool = new Uint8Array(256);
+var poolPtr = rnds8Pool.length;
+function rng() {
+  if (poolPtr > rnds8Pool.length - 16) {
+    randomFillSync(rnds8Pool);
+    poolPtr = 0;
+  }
+  return rnds8Pool.slice(poolPtr, poolPtr += 16);
+}
+
+// node_modules/uuid/dist/esm/stringify.js
+var byteToHex = [];
+for (let i = 0;i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
+
+// node_modules/uuid/dist/esm/v4.js
+function v4(options, buf, offset) {
+  if (native_default.randomUUID && !buf && !options) {
+    return native_default.randomUUID();
+  }
+  options = options || {};
+  const rnds = options.random ?? options.rng?.() ?? rng();
+  if (rnds.length < 16) {
+    throw new Error("Random bytes length must be >= 16");
+  }
+  rnds[6] = rnds[6] & 15 | 64;
+  rnds[8] = rnds[8] & 63 | 128;
+  if (buf) {
+    offset = offset || 0;
+    if (offset < 0 || offset + 16 > buf.length) {
+      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+    }
+    for (let i = 0;i < 16; ++i) {
+      buf[offset + i] = rnds[i];
+    }
+    return buf;
+  }
+  return unsafeStringify(rnds);
+}
+var v4_default = v4;
+// mcp/utils.ts
+function generateId() {
+  return v4_default();
+}
+function now() {
+  return new Date().toISOString();
+}
+var STOP_WORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "but",
+  "in",
+  "on",
+  "at",
+  "to",
+  "for",
+  "of",
+  "with",
+  "by",
+  "from",
+  "is",
+  "it",
+  "as",
+  "be",
+  "was",
+  "were",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "shall",
+  "can",
+  "need",
+  "dare",
+  "ought",
+  "used",
+  "not",
+  "no",
+  "nor",
+  "so",
+  "yet",
+  "both",
+  "each",
+  "few",
+  "more",
+  "most",
+  "other",
+  "some",
+  "such",
+  "than",
+  "too",
+  "very",
+  "just",
+  "about",
+  "above",
+  "after",
+  "again",
+  "all",
+  "also",
+  "am",
+  "any",
+  "are",
+  "because",
+  "before",
+  "below",
+  "between",
+  "during",
+  "here",
+  "how",
+  "if",
+  "into",
+  "its",
+  "let",
+  "me",
+  "my",
+  "myself",
+  "now",
+  "off",
+  "once",
+  "only",
+  "our",
+  "out",
+  "over",
+  "own",
+  "same",
+  "she",
+  "he",
+  "her",
+  "him",
+  "his",
+  "hers",
+  "that",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "those",
+  "through",
+  "under",
+  "until",
+  "up",
+  "we",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "whom",
+  "why",
+  "you",
+  "your",
+  "yours",
+  "i"
+]);
+var SYNONYM_GROUPS = [
+  ["backup", "snapshot", "restore", "archive"],
+  ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
+  ["billing", "payment", "subscription", "stripe", "lemon"],
+  ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
+  ["docker", "container", "image", "compose"],
+  ["wsl", "linux", "distro", "ubuntu"],
+  ["frontend", "ui", "component", "react", "tsx"],
+  ["backend", "rust", "tauri", "handler", "command"],
+  ["database", "sqlite", "db", "migration", "schema", "query"],
+  ["player", "user", "session", "uuid"],
+  ["event", "eventbus", "broadcast", "listener", "emit"],
+  ["poller", "polling", "telemetry", "datapack", "rcon"],
+  ["discord", "bot", "webhook", "guild"],
+  ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
+  ["test", "testing", "vitest", "spec", "assertion"],
+  ["map", "tile", "region", "atlas", "chunk"],
+  ["perf", "performance", "latency", "throughput", "instrument"],
+  ["error", "bug", "fix", "issue", "broken"],
+  ["config", "settings", "configuration", "preference"],
+  ["encrypt", "encryption", "aes", "decrypt"],
+  ["hibernate", "hibernation", "compress", "archive"],
+  ["observer", "connect", "disconnect", "reconnect", "visibility"],
+  ["http", "api", "endpoint", "route", "request"],
+  ["store", "zustand", "state", "selector"]
+];
+var synonymLookup = new Map;
+for (const group of SYNONYM_GROUPS) {
+  const groupSet = new Set(group);
+  for (const word of group) {
+    synonymLookup.set(word, groupSet);
+  }
+}
+function extractKeywords(text) {
+  if (!text.trim())
+    return [];
+  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+  const freq = new Map;
+  for (const word of words) {
+    freq.set(word, (freq.get(word) ?? 0) + 1);
+    const synonyms = synonymLookup.get(word);
+    if (synonyms) {
+      for (const syn of synonyms) {
+        if (syn !== word && !freq.has(syn)) {
+          freq.set(syn, 0.5);
+        }
+      }
+    }
+  }
+  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([word]) => word);
+}
+function truncate(text, maxLength = 100) {
+  if (text.length <= maxLength)
+    return text;
+  return text.slice(0, maxLength - 3) + "...";
+}
+function summarizeForBriefing(notes, maxTokens = 200) {
+  const maxChars = maxTokens * 4;
+  const lines = [];
+  let charCount = 0;
+  for (const note of notes) {
+    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
+    if (charCount + line.length > maxChars)
+      break;
+    lines.push(line);
+    charCount += line.length + 1;
+  }
+  return lines.join(`
+`);
+}
+function relativeTime(isoTimestamp) {
+  const then = new Date(isoTimestamp).getTime();
+  const now2 = Date.now();
+  const diffMs = now2 - then;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffMin < 1)
+    return "just now";
+  if (diffMin < 60)
+    return `${diffMin}m ago`;
+  if (diffHr < 24)
+    return `${diffHr}h ago`;
+  if (diffDay < 7)
+    return `${diffDay}d ago`;
+  return `${Math.floor(diffDay / 7)}w ago`;
+}
+
+// mcp/engine/deduplicator.ts
+function findDuplicates(db, type, content, threshold = 0.6) {
+  const normalizedContent = content.trim().toLowerCase();
+  const inputKeywords = new Set(extractKeywords(content));
+  const matches = [];
+  const candidates = db.query(`SELECT id, content, keywords FROM notes WHERE type = ?`).all(type);
+  for (const candidate of candidates) {
+    if (candidate.content.trim().toLowerCase() === normalizedContent) {
+      matches.push({ id: candidate.id, content: candidate.content, similarity: 1 });
+      continue;
+    }
+    const candidateKeywords = new Set(candidate.keywords ? candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(candidate.content));
+    if (inputKeywords.size === 0 && candidateKeywords.size === 0)
+      continue;
+    const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
+    const union3 = new Set([...inputKeywords, ...candidateKeywords]);
+    const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
+    if (similarity >= threshold) {
+      matches.push({ id: candidate.id, content: candidate.content, similarity });
+    }
+  }
+  matches.sort((a, b) => b.similarity - a.similarity);
+  return matches;
+}
+function mergeDuplicates(db) {
+  const types2 = db.query(`SELECT DISTINCT type FROM notes`).all();
+  let totalMerged = 0;
+  for (const { type } of types2) {
+    const notes = db.query(`SELECT id, content, keywords, created_at FROM notes WHERE type = ? ORDER BY created_at DESC`).all(type);
+    const merged = new Set;
+    for (let i = 0;i < notes.length; i++) {
+      if (merged.has(notes[i].id))
+        continue;
+      const iKeywords = new Set(notes[i].keywords ? notes[i].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[i].content));
+      for (let j = i + 1;j < notes.length; j++) {
+        if (merged.has(notes[j].id))
+          continue;
+        const exactMatch = notes[i].content.trim().toLowerCase() === notes[j].content.trim().toLowerCase();
+        if (!exactMatch) {
+          const jKeywords = new Set(notes[j].keywords ? notes[j].keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0) : extractKeywords(notes[j].content));
+          if (iKeywords.size === 0 && jKeywords.size === 0)
+            continue;
+          const intersection3 = new Set([...iKeywords].filter((k) => jKeywords.has(k)));
+          const union3 = new Set([...iKeywords, ...jKeywords]);
+          const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
+          if (similarity < 0.6)
+            continue;
+        }
+        const survivorId = notes[i].id;
+        const victimId = notes[j].id;
+        db.run(`UPDATE links SET from_note_id = ? WHERE from_note_id = ?`, [survivorId, victimId]);
+        db.run(`UPDATE links SET to_note_id = ? WHERE to_note_id = ?`, [survivorId, victimId]);
+        db.run(`DELETE FROM links WHERE from_note_id = to_note_id`);
+        db.run(`DELETE FROM links WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id
+           )`);
+        db.run(`DELETE FROM notes WHERE id = ?`, [victimId]);
+        merged.add(victimId);
+        totalMerged++;
+      }
+    }
+  }
+  return totalMerged;
+}
+
+// mcp/engine/linker.ts
+function inferRelationship(fromType, toType) {
+  if (fromType === "decision" && toType === "open_thread")
+    return "supersedes";
+  if (fromType === "open_thread" && toType === "decision")
+    return "supersedes";
+  if (fromType === "quality_gate" || toType === "quality_gate")
+    return "blocks";
+  if (fromType === "dependency" || toType === "dependency")
+    return "depends_on";
+  if (fromType === "anti_pattern" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "conflicts_with";
+  if (toType === "anti_pattern" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "conflicts_with";
+  if (fromType === "architecture" && (toType === "convention" || toType === "autonomy_recipe"))
+    return "enables";
+  if (toType === "architecture" && (fromType === "convention" || fromType === "autonomy_recipe"))
+    return "enables";
+  if (fromType === "risk" && (toType === "commitment" || toType === "work_item"))
+    return "blocks";
+  if ((fromType === "commitment" || fromType === "work_item") && toType === "risk")
+    return "blocks";
+  if (fromType === "work_item" && toType === "decision")
+    return "depends_on";
+  if (fromType === "decision" && toType === "work_item")
+    return "enables";
+  return "related_to";
+}
+function findRelatedNotes(db, query, limit = 10) {
+  const terms = query.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
+  if (terms.length === 0)
+    return [];
+  const ftsQuery = terms.join(" OR ");
+  try {
+    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
+                bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
+         FROM notes_fts
+         JOIN notes n ON notes_fts.rowid = n.rowid
+         WHERE notes_fts MATCH ?
+         ORDER BY rank ASC
+         LIMIT ?`).all(ftsQuery, limit);
+    return rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      content: r.content,
+      confidence: r.confidence,
+      created_at: r.created_at,
+      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : []
+    }));
+  } catch {
+    return [];
+  }
+}
+function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
+  if (keywords.length === 0)
+    return [];
+  const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
+  const sourceRow = db.query(`SELECT type FROM notes WHERE id = ?`).get(noteId);
+  const sourceType = sourceRow?.type ?? "insight";
+  const candidates = db.query(`SELECT id, type, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`).all(noteId);
+  const links = [];
+  const timestamp = now();
+  for (const candidate of candidates) {
+    const candidateKeywords = candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0);
+    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
+    if (overlap.length >= minOverlap) {
+      const strength = overlap.length >= 5 ? "strong" : overlap.length >= 3 ? "moderate" : "weak";
+      const relationship = inferRelationship(sourceType, candidate.type);
+      const link = {
+        id: generateId(),
+        from_note_id: noteId,
+        to_note_id: candidate.id,
+        relationship,
+        strength,
+        created_at: timestamp
+      };
+      db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`, [
+        link.id,
+        link.from_note_id,
+        link.to_note_id,
+        link.relationship,
+        link.strength,
+        link.created_at
+      ]);
+      links.push(link);
+    }
+  }
+  return links;
+}
+
+// mcp/engine/scorer.ts
+function decayConfidence(db, staleDays = 30) {
+  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000).toISOString();
+  const result = db.run(`UPDATE notes
+     SET confidence = 'low', updated_at = ?
+     WHERE confidence != 'low'
+       AND last_validated < ?
+       AND resolved = 0`, [new Date().toISOString(), cutoff]);
+  return result.changes;
+}
+function promoteConfidence(db, noteId) {
+  const row = db.query(`SELECT confidence FROM notes WHERE id = ?`).get(noteId);
+  if (!row)
+    return "medium";
+  const current = row.confidence;
+  const promoted = current === "low" ? "medium" : current === "medium" ? "high" : "high";
+  const timestamp = now();
+  db.run(`UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`, [promoted, timestamp, timestamp, noteId]);
+  return promoted;
+}
+function computeAutonomyScore(db, domain) {
+  const pattern = `%${domain}%`;
+  function countByType(type) {
+    return db.query(`SELECT COUNT(*) as cnt FROM notes
+           WHERE type = ?
+             AND (tags LIKE ? OR keywords LIKE ?)`).get(type, pattern, pattern).cnt;
+  }
+  const recipeCount = countByType("autonomy_recipe");
+  const gateCount = countByType("quality_gate");
+  const antiPatternCount = countByType("anti_pattern");
+  const conventionCount = countByType("convention");
+  const architectureCount = countByType("architecture");
+  const total = recipeCount + gateCount + antiPatternCount + Math.floor((conventionCount + architectureCount) / 2);
+  const score = total >= 15 ? "mature" : total >= 5 ? "developing" : "sparse";
+  return {
+    score,
+    recipe_count: recipeCount,
+    gate_count: gateCount,
+    anti_pattern_count: antiPatternCount,
+    convention_count: conventionCount,
+    architecture_count: architectureCount
+  };
+}
+
+// mcp/tools/remember.ts
+function handleRemember(projectDb2, globalDb2, input) {
+  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
+  const db = useGlobal ? globalDb2 : projectDb2;
+  const duplicates = findDuplicates(db, input.type, input.content);
+  if (duplicates.length > 0) {
+    const bestMatch = duplicates[0];
+    const newConfidence = promoteConfidence(db, bestMatch.id);
+    return {
+      stored: false,
+      note_id: bestMatch.id,
+      duplicate: true,
+      promoted: true,
+      links_created: 0,
+      message: `Near-duplicate ${input.type} found - promoted existing note confidence to ${newConfidence}.`
+    };
+  }
+  const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
+  const keywords = extractKeywords(textForKeywords);
+  const tagParts = [input.type];
+  if (input.tags) {
+    for (const t of input.tags.split(",").map((s) => s.trim())) {
+      if (t && !tagParts.includes(t))
+        tagParts.push(t);
+    }
+  }
+  const tagsStr = tagParts.join(",");
+  const noteId = generateId();
+  const timestamp = now();
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    noteId,
+    input.type,
+    input.content,
+    input.context ?? null,
+    keywords.join(","),
+    tagsStr,
+    "medium",
+    timestamp,
+    0,
+    null,
+    null,
+    timestamp,
+    timestamp
+  ]);
+  const links = createAutoLinks(db, noteId, keywords);
+  if (input.type === "user_pattern") {
+    writeUserModel(globalDb2, input.content, input.context);
+  }
+  return {
+    stored: true,
+    note_id: noteId,
+    duplicate: false,
+    promoted: false,
+    links_created: links.length,
+    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+  };
+}
+function inferDimension(content) {
+  const lower = content.toLowerCase();
+  if (/prefer|like|want|style|format|approach/i.test(lower))
+    return "preference";
+  if (/decide|decision|chose|choose|pick|select/i.test(lower))
+    return "decision_pattern";
+  if (/communicat|respond|explain|ask|tell|say/i.test(lower))
+    return "communication_style";
+  if (/strength|good at|excels?|strong/i.test(lower))
+    return "strength";
+  if (/blind spot|miss|overlook|forget|ignore/i.test(lower))
+    return "blind_spot";
+  if (/intent|goal|aim|want to|trying to|plan to/i.test(lower))
+    return "intent_pattern";
+  return "preference";
+}
+function writeUserModel(globalDb2, content, context) {
+  try {
+    const dimension = inferDimension(content);
+    const timestamp = now();
+    const existing = globalDb2.query(`SELECT id, evidence FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
+    if (existing) {
+      const evidenceList = existing.evidence ? existing.evidence.split(`
+`) : [];
+      if (context)
+        evidenceList.push(context);
+      globalDb2.run(`UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [evidenceList.join(`
+`), timestamp, existing.id]);
+    } else {
+      globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+        generateId(),
+        dimension,
+        content,
+        context ?? "",
+        "medium",
+        "stable",
+        timestamp,
+        timestamp
+      ]);
+    }
+  } catch {}
+}
 
 // mcp/tools/recall.ts
-init_linker();
 function tryFetchNote(db, id) {
   const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
               source AS source_conversation, context, resolved
@@ -20436,7 +20410,6 @@ function handleRecall(projectDb2, globalDb2, input) {
 }
 
 // mcp/engine/composer.ts
-init_utils();
 function toSummary(row) {
   return {
     id: row.id,
@@ -20444,7 +20417,9 @@ function toSummary(row) {
     content: row.content,
     confidence: row.confidence,
     created_at: row.created_at,
-    keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : []
+    keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
+    status: row.status ?? null,
+    priority: row.priority ?? null
   };
 }
 function composeBriefing(projectDb2, globalDb2) {
@@ -20453,6 +20428,9 @@ function composeBriefing(projectDb2, globalDb2) {
     return {
       open_threads: [],
       recent_decisions: [],
+      active_work: [],
+      blocked_work: [],
+      recently_completed: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
@@ -20516,11 +20494,33 @@ function composeBriefing(projectDb2, globalDb2) {
       userModelSummary.push(obs.observation);
     }
   } catch {}
-  const suggestedFocus = openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
-  const suggestedIntensity = openThreads.length > 3 ? "strategic" : "tactical";
+  const activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
+       FROM notes
+       WHERE type = 'work_item' AND status IN ('active', 'planned')
+       ORDER BY
+         CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+         updated_at DESC
+       LIMIT 10`).all().map(toSummary);
+  const blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
+       FROM notes
+       WHERE type = 'work_item' AND status = 'blocked'
+       ORDER BY updated_at DESC
+       LIMIT 5`).all().map(toSummary);
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
+       FROM notes
+       WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
+       ORDER BY updated_at DESC
+       LIMIT 5`).all(oneDayAgo).map(toSummary);
+  const suggestedFocus = activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
+  const totalActive = openThreads.length + activeWork.length;
+  const suggestedIntensity = totalActive > 5 ? "strategic" : totalActive > 2 ? "tactical" : "trivial";
   return {
     open_threads: openThreads,
     recent_decisions: recentDecisions,
+    active_work: activeWork,
+    blocked_work: blockedWork,
+    recently_completed: recentlyCompleted,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,
@@ -20562,7 +20562,6 @@ function composeContextPackage(projectDb2, globalDb2, domain) {
 }
 
 // mcp/tools/orient.ts
-init_utils();
 function fetchLatestCheckpoint(db) {
   try {
     const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
@@ -20616,6 +20615,33 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event) {
     const age = relativeTime(checkpoint.created_at);
     lines.push(`## Recovery Checkpoint (${age})`);
     lines.push(checkpoint.content);
+    lines.push("");
+  }
+  if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
+    lines.push("## Work Items");
+    if (briefing.active_work.length > 0) {
+      lines.push("### Active");
+      for (const item of briefing.active_work) {
+        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+        const status = item.status === "active" ? "\uD83D\uDD04" : "\u2B1C";
+        lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+      }
+      lines.push("");
+    }
+    if (briefing.blocked_work.length > 0) {
+      lines.push("### Blocked");
+      for (const item of briefing.blocked_work) {
+        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+        lines.push(`- \uD83D\uDEAB ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+      }
+      lines.push("");
+    }
+  }
+  if (briefing.recently_completed.length > 0) {
+    lines.push("## Recently Completed");
+    for (const item of briefing.recently_completed) {
+      lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
+    }
     lines.push("");
   }
   if (briefing.open_threads.length > 0) {
@@ -20673,8 +20699,6 @@ function handleOrient(projectDb2, globalDb2, input) {
 }
 
 // mcp/tools/prepare.ts
-init_scorer();
-init_utils();
 var DOMAIN_PATTERNS = [
   [/\b(react|component|tsx|jsx|frontend|ui|tailwind|daisyui|zustand)\b/i, "frontend"],
   [/\b(rust|tauri|cargo|backend|command|handler)\b/i, "backend"],
@@ -20736,9 +20760,6 @@ function handlePrepare(projectDb2, globalDb2, input) {
 }
 
 // mcp/tools/reflect.ts
-init_scorer();
-init_deduplicator();
-init_utils();
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
   const projectDecayed = decayConfidence(projectDb2);
@@ -20799,7 +20820,7 @@ function handleReflect(projectDb2, globalDb2, input) {
 // mcp/server.ts
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.5.0"
+  version: "0.7.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, neglected areas, and your last checkpoint so you can pick up where the previous session left off. Use at session start, after context compaction, or whenever you feel you're missing context about the project's state.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup")
@@ -20918,43 +20939,221 @@ ${next_steps.map((s) => `- ${s}`).join(`
     }]
   };
 });
-server.tool("close_thread", "Mark an open thread or commitment as resolved. Use when a tracked issue has been addressed, a question has been answered, or a commitment has been fulfilled. This keeps the knowledge base clean and prevents future sessions from revisiting solved problems.", {
+server.tool("close_thread", "Mark an open thread, commitment, or work item as resolved/done. Cascades through the knowledge graph: unblocks blocked items, auto-completes parents when all children are done, auto-resolves superseded notes. Use when a tracked issue has been addressed, a question answered, a commitment fulfilled, or a task completed.", {
   id: exports_external.string(),
   resolution: exports_external.string().optional()
 }, async ({ id, resolution }) => {
   const projectDb2 = getProjectDb();
   const globalDb2 = getGlobalDb();
   let db = projectDb2;
-  let row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+  let row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
   if (!row) {
     db = globalDb2;
-    row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+    row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
   }
   if (!row) {
     return {
-      content: [
-        { type: "text", text: `No note found with id "${id}".` }
-      ]
+      content: [{ type: "text", text: `No note found with id "${id}".` }]
     };
   }
   const timestamp = new Date().toISOString();
-  db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, id]);
+  if (row.type === "work_item") {
+    db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, id]);
+  } else {
+    db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, id]);
+  }
+  const cascadeResults = cascadeResolution(db, id, timestamp);
   if (resolution) {
-    const { handleRemember: handleRemember2 } = await Promise.resolve().then(() => (init_remember(), exports_remember));
-    handleRemember2(projectDb2, globalDb2, {
+    handleRemember(projectDb2, globalDb2, {
       content: resolution,
       type: "decision",
       context: `Resolved ${row.type}: ${row.content}`,
       tags: row.type
     });
   }
+  let message = `Resolved ${row.type} note "${id}".`;
+  if (resolution)
+    message += " Decision recorded.";
+  if (cascadeResults.length > 0) {
+    message += `
+
+Cascade effects:
+` + cascadeResults.map((r) => `- ${r}`).join(`
+`);
+  }
   return {
-    content: [
-      {
-        type: "text",
-        text: `Resolved ${row.type} note "${id}".${resolution ? " Decision recorded." : ""}`
-      }
-    ]
+    content: [{ type: "text", text: message }]
+  };
+});
+server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, and parent relationships for breaking down larger work.", {
+  content: exports_external.string().describe("What needs to be done - be specific and actionable"),
+  priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional().default("medium"),
+  status: exports_external.enum(WORK_ITEM_STATUSES).optional().default("planned"),
+  parent_id: exports_external.string().optional().describe("ID of parent work_item this belongs to (creates part_of link)"),
+  tags: exports_external.string().optional(),
+  context: exports_external.string().optional()
+}, async ({ content, priority, status, parent_id, tags, context }) => {
+  const projectDb2 = getProjectDb();
+  const noteId = generateId();
+  const timestamp = now();
+  const textForKeywords = [content, context].filter(Boolean).join(" ");
+  const keywords = extractKeywords(textForKeywords);
+  const tagParts = ["work_item"];
+  if (tags) {
+    for (const t of tags.split(",").map((s) => s.trim())) {
+      if (t && !tagParts.includes(t))
+        tagParts.push(t);
+    }
+  }
+  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    noteId,
+    "work_item",
+    content,
+    context ?? null,
+    keywords.join(","),
+    tagParts.join(","),
+    "high",
+    timestamp,
+    0,
+    status ?? "planned",
+    priority ?? "medium",
+    timestamp,
+    timestamp
+  ]);
+  const links = createAutoLinks(projectDb2, noteId, keywords);
+  if (parent_id) {
+    const parent = projectDb2.query(`SELECT id FROM notes WHERE id = ?`).get(parent_id);
+    if (parent) {
+      projectDb2.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+           VALUES (?, ?, ?, 'part_of', 'strong', ?)`, [generateId(), noteId, parent_id, timestamp]);
+    }
+  }
+  return {
+    content: [{
+      type: "text",
+      text: `Created work_item "${noteId}" [${priority}/${status}]${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+    }]
+  };
+});
+server.tool("update_work_item", "Update the status or priority of a work item. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.", {
+  id: exports_external.string(),
+  status: exports_external.enum(WORK_ITEM_STATUSES).optional(),
+  priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional(),
+  blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
+}, async ({ id, status, priority, blocked_by }) => {
+  const projectDb2 = getProjectDb();
+  const row = projectDb2.query(`SELECT id, type, content, status, priority FROM notes WHERE id = ?`).get(id);
+  if (!row) {
+    return {
+      content: [{ type: "text", text: `No note found with id "${id}".` }]
+    };
+  }
+  const timestamp = now();
+  const updates = [];
+  const changes = [];
+  if (status) {
+    updates.push(`status = '${status}'`);
+    changes.push(`status: ${row.status} -> ${status}`);
+  }
+  if (priority) {
+    updates.push(`priority = '${priority}'`);
+    changes.push(`priority: ${row.priority} -> ${priority}`);
+  }
+  if (updates.length > 0) {
+    updates.push(`updated_at = '${timestamp}'`);
+    if (status === "done")
+      updates.push("resolved = 1");
+    projectDb2.run(`UPDATE notes SET ${updates.join(", ")} WHERE id = ?`, [id]);
+  }
+  if (blocked_by) {
+    const blocker = projectDb2.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);
+    if (blocker) {
+      projectDb2.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+           VALUES (?, ?, ?, 'blocks', 'strong', ?)`, [generateId(), blocked_by, id, timestamp]);
+      changes.push(`blocked by: ${blocked_by}`);
+    }
+  }
+  if (status === "done") {
+    const cascadeResults = cascadeResolution(projectDb2, id, timestamp);
+    if (cascadeResults.length > 0) {
+      changes.push("Cascade: " + cascadeResults.join(", "));
+    }
+  }
+  return {
+    content: [{
+      type: "text",
+      text: `Updated work_item "${id}": ${changes.join("; ")}.`
+    }]
+  };
+});
+server.tool("breakdown", "Break down a work item or plan into child work items. Creates multiple work_items linked to a parent via part_of relationships. Use when you have a complex task that needs to be split into concrete steps.", {
+  parent_id: exports_external.string().optional().describe("ID of parent work_item. If omitted, creates a new parent from the title."),
+  parent_title: exports_external.string().optional().describe("Title for a new parent work_item (used when parent_id is omitted)"),
+  items: exports_external.array(exports_external.object({
+    content: exports_external.string(),
+    priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional()
+  })),
+  tags: exports_external.string().optional()
+}, async ({ parent_id, parent_title, items, tags }) => {
+  const projectDb2 = getProjectDb();
+  const timestamp = now();
+  let actualParentId = parent_id;
+  if (!actualParentId && parent_title) {
+    actualParentId = generateId();
+    const keywords = extractKeywords(parent_title);
+    const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      actualParentId,
+      "work_item",
+      parent_title,
+      keywords.join(","),
+      tagParts.join(","),
+      "high",
+      timestamp,
+      0,
+      "planned",
+      "high",
+      timestamp,
+      timestamp
+    ]);
+    createAutoLinks(projectDb2, actualParentId, keywords);
+  }
+  const created = [];
+  for (const item of items) {
+    const childId = generateId();
+    const keywords = extractKeywords(item.content);
+    const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      childId,
+      "work_item",
+      item.content,
+      keywords.join(","),
+      tagParts.join(","),
+      "high",
+      timestamp,
+      0,
+      "planned",
+      item.priority ?? "medium",
+      timestamp,
+      timestamp
+    ]);
+    createAutoLinks(projectDb2, childId, keywords);
+    if (actualParentId) {
+      projectDb2.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+           VALUES (?, ?, ?, 'part_of', 'strong', ?)`, [generateId(), childId, actualParentId, timestamp]);
+    }
+    created.push(`"${childId}" - ${item.content}`);
+  }
+  return {
+    content: [{
+      type: "text",
+      text: `Created ${created.length} work items${actualParentId ? ` under parent "${actualParentId}"` : ""}:
+${created.map((c) => `- ${c}`).join(`
+`)}`
+    }]
   };
 });
 server.tool("retro", "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, and computes autonomy scores across domains. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.", {
@@ -20982,6 +21181,53 @@ Revalidation queue:`;
     content: [{ type: "text", text }]
   };
 });
+function cascadeResolution(db, noteId, timestamp) {
+  const results = [];
+  const blockedItems = db.query(`SELECT DISTINCT n.id, n.type, n.status FROM links l
+       JOIN notes n ON (
+         (l.from_note_id = ? AND l.to_note_id = n.id) OR
+         (l.to_note_id = ? AND l.from_note_id = n.id)
+       )
+       WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`).all(noteId, noteId, noteId);
+  for (const blocked of blockedItems) {
+    const otherBlockers = db.query(`SELECT COUNT(*) as cnt FROM links l
+         JOIN notes n ON (
+           (l.from_note_id = n.id AND l.to_note_id = ?) OR
+           (l.to_note_id = n.id AND l.from_note_id = ?)
+         )
+         WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`).get(blocked.id, blocked.id, noteId);
+    if (otherBlockers.cnt === 0 && blocked.type === "work_item" && blocked.status === "blocked") {
+      db.run(`UPDATE notes SET status = 'planned', updated_at = ? WHERE id = ?`, [timestamp, blocked.id]);
+      results.push(`Unblocked "${blocked.id}"`);
+    }
+  }
+  const parentLinks = db.query(`SELECT l.to_note_id FROM links l WHERE l.from_note_id = ? AND l.relationship = 'part_of'`).all(noteId);
+  for (const parentLink of parentLinks) {
+    const unresolvedSiblings = db.query(`SELECT COUNT(*) as cnt FROM links l
+         JOIN notes n ON l.from_note_id = n.id
+         WHERE l.to_note_id = ? AND l.relationship = 'part_of'
+         AND n.id != ? AND (n.resolved = 0 OR (n.type = 'work_item' AND n.status != 'done'))`).get(parentLink.to_note_id, noteId);
+    if (unresolvedSiblings.cnt === 0) {
+      const parent = db.query(`SELECT id, type, status FROM notes WHERE id = ?`).get(parentLink.to_note_id);
+      if (parent && parent.status !== "done") {
+        if (parent.type === "work_item") {
+          db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
+        } else {
+          db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
+        }
+        results.push(`Auto-completed parent "${parent.id}" (all children done)`);
+      }
+    }
+  }
+  const superseded = db.query(`SELECT n.id FROM links l
+       JOIN notes n ON l.to_note_id = n.id
+       WHERE l.from_note_id = ? AND l.relationship = 'supersedes' AND n.resolved = 0`).all(noteId);
+  for (const sup of superseded) {
+    db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, sup.id]);
+    results.push(`Auto-resolved superseded "${sup.id}"`);
+  }
+  return results;
+}
 async function main() {
   const transport = new StdioServerTransport;
   await server.connect(transport);

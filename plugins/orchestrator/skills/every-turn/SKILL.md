@@ -28,6 +28,11 @@ Scan what just happened. Did any of these occur?
 
 | What happened | Action |
 |--------------|--------|
+| You completed a task or step | → `update_work_item` status=done (cascades automatically) |
+| You started working on something trackable | → `update_work_item` status=active, or `create_work_item` if it doesn't exist |
+| You're blocked on something | → `update_work_item` status=blocked, blocked_by=ID |
+| You identified new work that needs doing | → `create_work_item` with priority |
+| A complex task needs breakdown | → `breakdown` to create parent + children |
 | You made an architectural or design choice | → invoke `orchestrator:made-a-decision` |
 | You discovered a pattern, convention, or gotcha | → invoke `orchestrator:learned-something` |
 | You found a bug, footgun, or limitation | → invoke `orchestrator:found-a-problem` |
