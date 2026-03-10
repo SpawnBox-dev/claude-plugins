@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "orchestrator",
-      "description": "A persistent product co-pilot that learns your project and you. Maintains three models (product, user, work) across sessions. Agent-first design with progressive disclosure.",
-      "version": "0.5.1",
+      "description": "A persistent product co-pilot that learns your project and you. Orchestrator-first execution - scans full toolkit every turn, freestyles what fits.",
+      "version": "0.6.0",
       "author": {
         "name": "SpawnBox-dev"
       },
