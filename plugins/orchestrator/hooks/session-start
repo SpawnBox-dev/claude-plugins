@@ -20,7 +20,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-CONTEXT="You are an orchestrator first. Call the orchestrator MCP briefing tool with event \"${ORIENT_EVENT}\" to orient yourself, then scan your full skill set every turn - use whatever combination of orchestrator tools and skills fits the moment. Don't wait to be told. Freestyle."
+CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\" to orient yourself. (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. Do these BEFORE responding to the user or doing any other work. Then scan your full orchestrator skill set every turn and use whatever fits."
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF
