@@ -19505,6 +19505,24 @@ var WORK_ITEM_PRIORITIES = [
   "low",
   "backlog"
 ];
+var BRIEFING_SECTIONS = [
+  "work_items",
+  "open_threads",
+  "decisions",
+  "neglected",
+  "drift",
+  "user_model",
+  "cross_project",
+  "checkpoint"
+];
+var DIMENSIONS = [
+  "communication_style",
+  "decision_pattern",
+  "strength",
+  "blind_spot",
+  "preference",
+  "intent_pattern"
+];
 var GLOBAL_TYPES = ["user_pattern", "tool_capability"];
 
 // mcp/db/connection.ts
@@ -19602,6 +19620,14 @@ ALTER TABLE notes ADD COLUMN status TEXT;
 ALTER TABLE notes ADD COLUMN priority TEXT;
 CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
 CREATE INDEX IF NOT EXISTS idx_notes_priority ON notes(priority);
+`
+  },
+  {
+    version: 6,
+    name: "add_due_date",
+    sql: `
+ALTER TABLE notes ADD COLUMN due_date TEXT;
+CREATE INDEX IF NOT EXISTS idx_notes_due_date ON notes(due_date);
 `
   }
 ];
@@ -20106,7 +20132,10 @@ function findRelatedNotes(db, query, limit = 10) {
       content: r.content,
       confidence: r.confidence,
       created_at: r.created_at,
-      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : []
+      keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
+      status: r.status ?? null,
+      priority: r.priority ?? null,
+      due_date: r.due_date ?? null
     }));
   } catch {
     return [];
@@ -20223,8 +20252,8 @@ function handleRemember(projectDb2, globalDb2, input) {
   const tagsStr = tagParts.join(",");
   const noteId = generateId();
   const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     input.type,
     input.content,
@@ -20236,12 +20265,13 @@ function handleRemember(projectDb2, globalDb2, input) {
     0,
     null,
     null,
+    null,
     timestamp,
     timestamp
   ]);
   const links = createAutoLinks(db, noteId, keywords);
   if (input.type === "user_pattern") {
-    writeUserModel(globalDb2, input.content, input.context);
+    writeUserModel(globalDb2, input.content, input.context, input.dimension);
   }
   return {
     stored: true,
@@ -20254,39 +20284,40 @@ function handleRemember(projectDb2, globalDb2, input) {
 }
 function inferDimension(content) {
   const lower = content.toLowerCase();
-  if (/prefer|like|want|style|format|approach/i.test(lower))
+  if (/prefer|like|want|style|format|approach|always|never/i.test(lower))
     return "preference";
-  if (/decide|decision|chose|choose|pick|select/i.test(lower))
+  if (/decide|decision|chose|choose|pick|select|weigh|trade-?off/i.test(lower))
     return "decision_pattern";
-  if (/communicat|respond|explain|ask|tell|say/i.test(lower))
+  if (/communicat|respond|explain|ask|tell|say|verbose|concise|brief/i.test(lower))
     return "communication_style";
-  if (/strength|good at|excels?|strong/i.test(lower))
+  if (/strength|good at|excels?|strong|skilled|expert/i.test(lower))
     return "strength";
-  if (/blind spot|miss|overlook|forget|ignore/i.test(lower))
+  if (/blind spot|miss|overlook|forget|ignore|weak|struggle/i.test(lower))
     return "blind_spot";
-  if (/intent|goal|aim|want to|trying to|plan to/i.test(lower))
+  if (/intent|goal|aim|want to|trying to|plan to|vision|aspir/i.test(lower))
     return "intent_pattern";
   return "preference";
 }
-function writeUserModel(globalDb2, content, context) {
+function writeUserModel(globalDb2, content, context, explicitDimension) {
   try {
-    const dimension = inferDimension(content);
+    const dimension = explicitDimension ?? inferDimension(content);
     const timestamp = now();
-    const existing = globalDb2.query(`SELECT id, evidence FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
+    const existing = globalDb2.query(`SELECT id, evidence, observation FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
     if (existing) {
       const evidenceList = existing.evidence ? existing.evidence.split(`
-`) : [];
+`).filter(Boolean) : [];
       if (context)
-        evidenceList.push(context);
+        evidenceList.push(`[${timestamp}] ${context}`);
       globalDb2.run(`UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [evidenceList.join(`
 `), timestamp, existing.id]);
     } else {
+      const evidence = context ? `[${timestamp}] ${context}` : "";
       globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
         generateId(),
         dimension,
         content,
-        context ?? "",
+        evidence,
         "medium",
         "stable",
         timestamp,
@@ -20313,7 +20344,10 @@ function tryFetchNote(db, id) {
     updated_at: row.updated_at,
     source_conversation: row.source_conversation ?? null,
     superseded_by: null,
-    is_global: false
+    is_global: false,
+    status: row.status ?? null,
+    priority: row.priority ?? null,
+    due_date: row.due_date ?? null
   };
 }
 function fetchLinkedNotes(db, noteId, maxDepth = 1) {
@@ -20342,7 +20376,10 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
           content: r.content,
           confidence: r.confidence,
           created_at: r.created_at,
-          keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : []
+          keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
+          status: r.status ?? null,
+          priority: r.priority ?? null,
+          due_date: r.due_date ?? null
         }
       });
       if (currentDepth < maxDepth) {
@@ -20419,10 +20456,12 @@ function toSummary(row) {
     created_at: row.created_at,
     keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
     status: row.status ?? null,
-    priority: row.priority ?? null
+    priority: row.priority ?? null,
+    due_date: row.due_date ?? null
   };
 }
-function composeBriefing(projectDb2, globalDb2) {
+function composeBriefing(projectDb2, globalDb2, sections) {
+  const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const noteCount = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
   if (noteCount === 0) {
     return {
@@ -20431,89 +20470,124 @@ function composeBriefing(projectDb2, globalDb2) {
       active_work: [],
       blocked_work: [],
       recently_completed: [],
+      overdue_work: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
+      user_profile: [],
       suggested_focus: null,
       suggested_intensity: "tactical",
       is_first_run: true
     };
   }
-  const openThreads = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords
-       FROM notes
-       WHERE type IN ('open_thread', 'commitment') AND resolved = 0
-       ORDER BY updated_at DESC
-       LIMIT 5`).all().map(toSummary);
-  const recentDecisions = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords
-       FROM notes
-       WHERE type = 'decision'
-       ORDER BY created_at DESC
-       LIMIT 5`).all().map(toSummary);
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const allTagRows = projectDb2.query(`SELECT DISTINCT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
-  const tagSet = new Set;
-  for (const row of allTagRows) {
-    for (const tag of row.tags.split(",").map((t) => t.trim())) {
-      if (tag)
-        tagSet.add(tag);
+  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
+           FROM notes
+           WHERE type IN ('open_thread', 'commitment') AND resolved = 0
+           ORDER BY updated_at DESC
+           LIMIT 5`).all().map(toSummary) : [];
+  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
+           FROM notes
+           WHERE type = 'decision'
+           ORDER BY created_at DESC
+           LIMIT 5`).all().map(toSummary) : [];
+  let neglectedAreas = [];
+  if (include("neglected")) {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const allTagRows = projectDb2.query(`SELECT DISTINCT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
+    const tagSet = new Set;
+    for (const row of allTagRows) {
+      for (const tag of row.tags.split(",").map((t) => t.trim())) {
+        if (tag)
+          tagSet.add(tag);
+      }
     }
-  }
-  const neglectedAreas = [];
-  for (const tag of tagSet) {
-    const recentCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes
-           WHERE tags LIKE ? AND updated_at >= ?`).get(`%${tag}%`, sevenDaysAgo).cnt;
-    if (recentCount === 0) {
-      neglectedAreas.push(tag);
+    for (const tag of tagSet) {
+      const recentCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes
+             WHERE tags LIKE ? AND updated_at >= ?`).get(`%${tag}%`, sevenDaysAgo).cnt;
+      if (recentCount === 0) {
+        neglectedAreas.push(tag);
+      }
     }
   }
   let driftWarning = null;
-  const recentNotes = projectDb2.query(`SELECT tags FROM notes
-       WHERE tags IS NOT NULL AND tags != ''
-       ORDER BY created_at DESC
-       LIMIT 10`).all();
-  if (recentNotes.length >= 5) {
-    const tagFreq = new Map;
-    for (const row of recentNotes) {
-      for (const tag of row.tags.split(",").map((t) => t.trim())) {
-        if (tag)
-          tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
+  if (include("drift")) {
+    const recentNotes = projectDb2.query(`SELECT tags FROM notes
+         WHERE tags IS NOT NULL AND tags != ''
+         ORDER BY created_at DESC
+         LIMIT 10`).all();
+    if (recentNotes.length >= 5) {
+      const tagFreq = new Map;
+      for (const row of recentNotes) {
+        for (const tag of row.tags.split(",").map((t) => t.trim())) {
+          if (tag)
+            tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
+        }
       }
-    }
-    const topTag = [...tagFreq.entries()].sort((a, b) => b[1] - a[1])[0];
-    if (topTag && topTag[1] / recentNotes.length >= 0.8) {
-      driftWarning = `Focus drift detected: ${Math.round(topTag[1] / recentNotes.length * 100)}% of recent notes are about "${topTag[0]}"`;
+      const topTag = [...tagFreq.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (topTag && topTag[1] / recentNotes.length >= 0.8) {
+        driftWarning = `Focus drift detected: ${Math.round(topTag[1] / recentNotes.length * 100)}% of recent notes are about "${topTag[0]}"`;
+      }
     }
   }
   const userModelSummary = [];
-  try {
-    const observations = globalDb2.query(`SELECT observation FROM user_model
-         WHERE confidence = 'high'
+  let userProfile = [];
+  if (include("user_model")) {
+    try {
+      const observations = globalDb2.query(`SELECT observation FROM user_model
+           WHERE confidence = 'high'
+           ORDER BY updated_at DESC
+           LIMIT 3`).all();
+      for (const obs of observations) {
+        userModelSummary.push(obs.observation);
+      }
+      const profileRows = globalDb2.query(`SELECT dimension, observation, confidence, trajectory,
+                  (SELECT COUNT(*) FROM user_model um2 WHERE um2.dimension = user_model.dimension) as evidence_count
+           FROM user_model
+           ORDER BY
+             CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+             updated_at DESC`).all();
+      userProfile = profileRows.map((r) => ({
+        dimension: r.dimension,
+        observation: r.observation,
+        confidence: r.confidence,
+        trajectory: r.trajectory,
+        evidence_count: r.evidence_count
+      }));
+    } catch {}
+  }
+  let activeWork = [];
+  let blockedWork = [];
+  let recentlyCompleted = [];
+  let overdueWork = [];
+  if (include("work_items")) {
+    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+         FROM notes
+         WHERE type = 'work_item' AND status IN ('active', 'planned')
+         ORDER BY
+           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+           updated_at DESC
+         LIMIT 10`).all().map(toSummary);
+    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+         FROM notes
+         WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY updated_at DESC
-         LIMIT 3`).all();
-    for (const obs of observations) {
-      userModelSummary.push(obs.observation);
-    }
-  } catch {}
-  const activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
-       FROM notes
-       WHERE type = 'work_item' AND status IN ('active', 'planned')
-       ORDER BY
-         CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
-         updated_at DESC
-       LIMIT 10`).all().map(toSummary);
-  const blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
-       FROM notes
-       WHERE type = 'work_item' AND status = 'blocked'
-       ORDER BY updated_at DESC
-       LIMIT 5`).all().map(toSummary);
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority
-       FROM notes
-       WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
-       ORDER BY updated_at DESC
-       LIMIT 5`).all(oneDayAgo).map(toSummary);
-  const suggestedFocus = activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
-  const totalActive = openThreads.length + activeWork.length;
+         LIMIT 5`).all().map(toSummary);
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+         FROM notes
+         WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
+         ORDER BY updated_at DESC
+         LIMIT 5`).all(oneDayAgo).map(toSummary);
+    const todayStr = new Date().toISOString().slice(0, 10);
+    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+         FROM notes
+         WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
+         AND status != 'done' AND resolved = 0
+         ORDER BY due_date ASC
+         LIMIT 10`).all(todayStr).map(toSummary);
+  }
+  const suggestedFocus = overdueWork.length > 0 ? truncate(overdueWork[0].content, 100) : activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
+  const totalActive = openThreads.length + activeWork.length + overdueWork.length;
   const suggestedIntensity = totalActive > 5 ? "strategic" : totalActive > 2 ? "tactical" : "trivial";
   return {
     open_threads: openThreads,
@@ -20521,9 +20595,11 @@ function composeBriefing(projectDb2, globalDb2) {
     active_work: activeWork,
     blocked_work: blockedWork,
     recently_completed: recentlyCompleted,
+    overdue_work: overdueWork,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,
+    user_profile: userProfile,
     suggested_focus: suggestedFocus,
     suggested_intensity: suggestedIntensity,
     is_first_run: false
@@ -20532,7 +20608,7 @@ function composeBriefing(projectDb2, globalDb2) {
 function composeContextPackage(projectDb2, globalDb2, domain) {
   const pattern = `%${domain}%`;
   function queryByType(db, type, limit = 5) {
-    return db.query(`SELECT id, type, content, confidence, created_at, keywords
+    return db.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
@@ -20560,6 +20636,50 @@ function composeContextPackage(projectDb2, globalDb2, domain) {
     recent_decisions: recentDecisions
   };
 }
+function composeUserProfile(globalDb2) {
+  try {
+    const rows = globalDb2.query(`SELECT dimension, observation, confidence, trajectory, evidence,
+                created_at, updated_at
+         FROM user_model
+         ORDER BY dimension,
+           CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+           updated_at DESC`).all();
+    const entries = rows.map((r) => ({
+      dimension: r.dimension,
+      observation: r.observation,
+      confidence: r.confidence,
+      trajectory: r.trajectory,
+      evidence_count: r.evidence ? r.evidence.split(`
+`).filter(Boolean).length : 0
+    }));
+    const byDimension = new Map;
+    for (const entry of entries) {
+      const existing = byDimension.get(entry.dimension) ?? [];
+      existing.push(entry);
+      byDimension.set(entry.dimension, existing);
+    }
+    const summaryLines = [];
+    for (const [dim, dimEntries] of byDimension) {
+      const label = dim.replace(/_/g, " ");
+      const highConf = dimEntries.filter((e) => e.confidence === "high");
+      const items = highConf.length > 0 ? highConf : dimEntries.slice(0, 2);
+      for (const item of items) {
+        const traj = item.trajectory !== "stable" ? ` (${item.trajectory})` : "";
+        summaryLines.push(`**${label}**: ${item.observation}${traj}`);
+      }
+    }
+    return {
+      entries,
+      summary: summaryLines.length > 0 ? summaryLines.join(`
+`) : "No user profile data yet. User patterns will be captured as the agent learns preferences."
+    };
+  } catch {
+    return {
+      entries: [],
+      summary: "User model table not initialized."
+    };
+  }
+}
 
 // mcp/tools/orient.ts
 function fetchLatestCheckpoint(db) {
@@ -20582,7 +20702,10 @@ function fetchLatestCheckpoint(db) {
       updated_at: row.updated_at,
       source_conversation: row.source_conversation ?? null,
       superseded_by: null,
-      is_global: false
+      is_global: false,
+      status: null,
+      priority: null,
+      due_date: null
     };
   } catch {
     return null;
@@ -20600,7 +20723,22 @@ function fetchGlobalPatterns(globalDb2) {
     return [];
   }
 }
-function formatBriefing(briefing, checkpoint, globalPatterns, event) {
+function formatDueDate(dueDate) {
+  if (!dueDate)
+    return "";
+  const due = new Date(dueDate);
+  const now3 = new Date;
+  const diffDays = Math.ceil((due.getTime() - now3.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays < 0)
+    return ` (OVERDUE by ${Math.abs(diffDays)}d)`;
+  if (diffDays === 0)
+    return " (due TODAY)";
+  if (diffDays <= 3)
+    return ` (due in ${diffDays}d)`;
+  return ` (due ${dueDate})`;
+}
+function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
+  const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const lines = [];
   if (briefing.is_first_run) {
     lines.push("# ORCHESTRATOR: FIRST RUN DETECTED");
@@ -20611,67 +20749,97 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event) {
   }
   lines.push("# Session Briefing");
   lines.push("");
-  if (checkpoint) {
+  if (include("checkpoint") && checkpoint) {
     const age = relativeTime(checkpoint.created_at);
     lines.push(`## Recovery Checkpoint (${age})`);
     lines.push(checkpoint.content);
     lines.push("");
   }
-  if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
-    lines.push("## Work Items");
-    if (briefing.active_work.length > 0) {
-      lines.push("### Active");
-      for (const item of briefing.active_work) {
+  if (include("work_items")) {
+    if (briefing.overdue_work.length > 0) {
+      lines.push("## OVERDUE");
+      for (const item of briefing.overdue_work) {
         const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-        const status = item.status === "active" ? "\uD83D\uDD04" : "\u2B1C";
-        lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+        lines.push(`- \u26A0\uFE0F ${pri} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
       }
       lines.push("");
     }
-    if (briefing.blocked_work.length > 0) {
-      lines.push("### Blocked");
-      for (const item of briefing.blocked_work) {
-        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-        lines.push(`- \uD83D\uDEAB ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+    if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
+      lines.push("## Work Items");
+      if (briefing.active_work.length > 0) {
+        lines.push("### Active");
+        for (const item of briefing.active_work) {
+          const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+          const status = item.status === "active" ? "\uD83D\uDD04" : "\u2B1C";
+          const due = formatDueDate(item.due_date);
+          lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}${due}`);
+        }
+        lines.push("");
+      }
+      if (briefing.blocked_work.length > 0) {
+        lines.push("### Blocked");
+        for (const item of briefing.blocked_work) {
+          const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+          lines.push(`- \uD83D\uDEAB ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+        }
+        lines.push("");
+      }
+    }
+    if (briefing.recently_completed.length > 0) {
+      lines.push("## Recently Completed");
+      for (const item of briefing.recently_completed) {
+        lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
       }
       lines.push("");
     }
   }
-  if (briefing.recently_completed.length > 0) {
-    lines.push("## Recently Completed");
-    for (const item of briefing.recently_completed) {
-      lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
-    }
-    lines.push("");
-  }
-  if (briefing.open_threads.length > 0) {
+  if (include("open_threads") && briefing.open_threads.length > 0) {
     lines.push("## Open Threads");
     lines.push(summarizeForBriefing(briefing.open_threads));
     lines.push("");
   }
-  if (briefing.recent_decisions.length > 0) {
+  if (include("decisions") && briefing.recent_decisions.length > 0) {
     lines.push("## Recent Decisions");
     lines.push(summarizeForBriefing(briefing.recent_decisions));
     lines.push("");
   }
-  if (briefing.neglected_areas.length > 0) {
+  if (include("neglected") && briefing.neglected_areas.length > 0) {
     lines.push("## Neglected Areas");
     lines.push(briefing.neglected_areas.map((a) => `- ${a}`).join(`
 `));
     lines.push("");
   }
-  if (briefing.drift_warning) {
+  if (include("drift") && briefing.drift_warning) {
     lines.push(`## Drift Warning`);
     lines.push(briefing.drift_warning);
     lines.push("");
   }
-  if (briefing.user_model_summary.length > 0) {
-    lines.push("## User Patterns");
-    lines.push(briefing.user_model_summary.map((s) => `- ${s}`).join(`
+  if (include("user_model")) {
+    if (briefing.user_profile.length > 0) {
+      lines.push("## User Profile");
+      const byDim = new Map;
+      for (const entry of briefing.user_profile) {
+        const existing = byDim.get(entry.dimension) ?? [];
+        existing.push(entry);
+        byDim.set(entry.dimension, existing);
+      }
+      for (const [dim, entries] of byDim) {
+        const label = dim.replace(/_/g, " ");
+        for (const entry of entries.slice(0, 2)) {
+          const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
+          const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
+          lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);
+        }
+      }
+      lines.push("");
+    } else if (briefing.user_model_summary.length > 0) {
+      lines.push("## User Patterns");
+      lines.push(briefing.user_model_summary.map((s) => `- ${s}`).join(`
 `));
-    lines.push("");
+      lines.push("");
+    }
   }
-  if (globalPatterns.length > 0) {
+  if (include("cross_project") && globalPatterns.length > 0) {
     lines.push("## Cross-Project Patterns");
     lines.push(globalPatterns.map((p) => `- ${p}`).join(`
 `));
@@ -20691,10 +20859,11 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event) {
 `);
 }
 function handleOrient(projectDb2, globalDb2, input) {
-  const briefing = composeBriefing(projectDb2, globalDb2);
-  const checkpoint = fetchLatestCheckpoint(projectDb2);
-  const globalPatterns = fetchGlobalPatterns(globalDb2);
-  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event);
+  const briefing = composeBriefing(projectDb2, globalDb2, input.sections);
+  const include = (section) => !input.sections || input.sections.length === 0 || input.sections.includes(section);
+  const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb2) : null;
+  const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb2) : [];
+  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }
 
@@ -20799,12 +20968,34 @@ function handleReflect(projectDb2, globalDb2, input) {
       ]);
     } catch {}
   }
+  let trajectoryUpdates = 0;
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentPatterns = globalDb2.query(`SELECT content FROM notes
+         WHERE type = 'user_pattern' AND created_at >= ?
+         ORDER BY created_at DESC`).all(sevenDaysAgo);
+    if (recentPatterns.length >= 3) {
+      const entries = globalDb2.query(`SELECT id, dimension, trajectory, updated_at FROM user_model`).all();
+      for (const entry of entries) {
+        const entryAge = Date.now() - new Date(entry.updated_at).getTime();
+        const staleMs = 14 * 24 * 60 * 60 * 1000;
+        if (entryAge > staleMs && entry.trajectory !== "regressing") {
+          globalDb2.run(`UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
+          trajectoryUpdates++;
+        } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
+          globalDb2.run(`UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
+          trajectoryUpdates++;
+        }
+      }
+    }
+  } catch {}
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
     totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
-    revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null
+    revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null,
+    trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null
   ].filter(Boolean).join(" ");
   return {
     confidence_decayed: totalDecayed,
@@ -20813,6 +21004,7 @@ function handleReflect(projectDb2, globalDb2, input) {
     orphan_notes: orphanCount,
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,
+    trajectory_updates: trajectoryUpdates,
     message
   };
 }
@@ -20820,12 +21012,16 @@ function handleReflect(projectDb2, globalDb2, input) {
 // mcp/server.ts
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.7.0"
+  version: "0.9.0"
 });
-server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, neglected areas, and your last checkpoint so you can pick up where the previous session left off. Use at session start, after context compaction, or whenever you feel you're missing context about the project's state.", {
-  event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup")
-}, async ({ event }) => {
-  const result = handleOrient(getProjectDb(), getGlobalDb(), { event: event ?? "startup" });
+server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
+  event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
+  sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, checkpoint")
+}, async ({ event, sections }) => {
+  const result = handleOrient(getProjectDb(), getGlobalDb(), {
+    event: event ?? "startup",
+    sections: sections ?? undefined
+  });
   return {
     content: [{ type: "text", text: result.formatted }]
   };
@@ -20835,14 +21031,16 @@ server.tool("note", "Save a piece of knowledge you've just learned, decided, or 
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
   tags: exports_external.string().optional(),
-  scope: exports_external.enum(["global", "project"]).optional()
-}, async ({ content, type, context, tags, scope }) => {
+  scope: exports_external.enum(["global", "project"]).optional(),
+  dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference")
+}, async ({ content, type, context, tags, scope, dimension }) => {
   const result = handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type,
     context,
     tags,
-    scope
+    scope,
+    dimension
   });
   return {
     content: [{ type: "text", text: result.message }]
@@ -20985,14 +21183,148 @@ Cascade effects:
     content: [{ type: "text", text: message }]
   };
 });
-server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, and parent relationships for breaking down larger work.", {
+server.tool("update_note", "Modify an existing note's content, context, or tags. Use when knowledge evolves, a preference changes, or a note needs correction. Preserves the note's ID, creation date, and links. Re-indexes keywords for search.", {
+  id: exports_external.string(),
+  content: exports_external.string().optional().describe("New content (replaces existing)"),
+  context: exports_external.string().optional().describe("New context (replaces existing)"),
+  tags: exports_external.string().optional().describe("New tags (replaces existing)"),
+  confidence: exports_external.enum(["low", "medium", "high"]).optional()
+}, async ({ id, content, context, tags, confidence }) => {
+  const projectDb2 = getProjectDb();
+  const globalDb2 = getGlobalDb();
+  let db = projectDb2;
+  let row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`).get(id);
+  if (!row) {
+    db = globalDb2;
+    row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`).get(id);
+  }
+  if (!row) {
+    return { content: [{ type: "text", text: `No note found with id "${id}".` }] };
+  }
+  const updates = [];
+  const timestamp = now();
+  const newContent = content ?? row.content;
+  const newContext = context ?? row.context;
+  if (content)
+    updates.push("content");
+  if (context !== undefined)
+    updates.push("context");
+  if (tags !== undefined)
+    updates.push("tags");
+  if (confidence)
+    updates.push("confidence");
+  if (updates.length === 0) {
+    return { content: [{ type: "text", text: "No fields to update." }] };
+  }
+  const newKeywords = content || context !== undefined ? extractKeywords([newContent, newContext].filter(Boolean).join(" ")) : null;
+  db.run(`UPDATE notes SET
+        content = ?,
+        context = ?,
+        tags = ?,
+        keywords = ?,
+        confidence = ?,
+        last_validated = ?,
+        updated_at = ?
+       WHERE id = ?`, [
+    newContent,
+    newContext ?? null,
+    tags ?? row.tags,
+    newKeywords ? newKeywords.join(",") : row.keywords,
+    confidence ?? row.confidence ?? "medium",
+    timestamp,
+    timestamp,
+    id
+  ]);
+  return {
+    content: [{
+      type: "text",
+      text: `Updated note "${id}" (${updates.join(", ")} changed).`
+    }]
+  };
+});
+server.tool("delete_note", "Permanently delete a note from the knowledge base. Use when a note is wrong, outdated, or no longer relevant. Links to/from this note are also removed (CASCADE). Prefer close_thread for resolving issues - use delete_note only for genuinely incorrect or harmful knowledge.", {
+  id: exports_external.string(),
+  reason: exports_external.string().optional().describe("Why this note is being deleted")
+}, async ({ id, reason }) => {
+  const projectDb2 = getProjectDb();
+  const globalDb2 = getGlobalDb();
+  let db = projectDb2;
+  let row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+  if (!row) {
+    db = globalDb2;
+    row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
+  }
+  if (!row) {
+    return { content: [{ type: "text", text: `No note found with id "${id}".` }] };
+  }
+  db.run(`DELETE FROM links WHERE from_note_id = ? OR to_note_id = ?`, [id, id]);
+  db.run(`DELETE FROM notes WHERE id = ?`, [id]);
+  const reasonStr = reason ? ` Reason: ${reason}` : "";
+  return {
+    content: [{
+      type: "text",
+      text: `Deleted ${row.type} note "${id}".${reasonStr}`
+    }]
+  };
+});
+server.tool("user_profile", "View or update the structured user profile. Shows all learned observations about the user grouped by dimension (preferences, communication style, decision patterns, strengths, blind spots, intent). Use to understand the user better or to explicitly record a user trait.", {
+  action: exports_external.enum(["view", "set", "remove"]).optional().default("view"),
+  dimension: exports_external.enum(DIMENSIONS).optional().describe("Which dimension to set/remove"),
+  observation: exports_external.string().optional().describe("The observation to record (for 'set' action)"),
+  id: exports_external.string().optional().describe("ID of user_model entry to remove (for 'remove' action)")
+}, async ({ action, dimension, observation, id }) => {
+  const globalDb2 = getGlobalDb();
+  if (action === "view") {
+    const profile = composeUserProfile(globalDb2);
+    let text = `# User Profile
+
+`;
+    if (profile.entries.length === 0) {
+      text += "No user profile data yet. Observations are captured automatically from `user_pattern` notes and can be set explicitly with `user_profile({ action: 'set', ... })`.";
+    } else {
+      text += profile.summary;
+      text += `
+
+*${profile.entries.length} total observations across ${new Set(profile.entries.map((e) => e.dimension)).size} dimensions*`;
+    }
+    return { content: [{ type: "text", text }] };
+  }
+  if (action === "set") {
+    if (!dimension || !observation) {
+      return { content: [{ type: "text", text: "Both `dimension` and `observation` are required for 'set' action." }] };
+    }
+    const timestamp = now();
+    const existing = globalDb2.query(`SELECT id FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, observation);
+    if (existing) {
+      globalDb2.run(`UPDATE user_model SET confidence = 'high', updated_at = ? WHERE id = ?`, [timestamp, existing.id]);
+      return { content: [{ type: "text", text: `Promoted existing observation confidence to high.` }] };
+    }
+    globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [generateId(), dimension, observation, "", "high", "stable", timestamp, timestamp]);
+    return { content: [{ type: "text", text: `Recorded ${dimension}: "${observation}"` }] };
+  }
+  if (action === "remove") {
+    if (!id) {
+      return { content: [{ type: "text", text: "`id` is required for 'remove' action. Use `user_profile({ action: 'view' })` to see entries." }] };
+    }
+    const row = globalDb2.query(`SELECT id, dimension, observation FROM user_model WHERE id = ?`).get(id);
+    if (!row) {
+      return { content: [{ type: "text", text: `No user_model entry found with id "${id}".` }] };
+    }
+    globalDb2.run(`DELETE FROM user_model WHERE id = ?`, [id]);
+    return { content: [{ type: "text", text: `Removed ${row.dimension}: "${row.observation}"` }] };
+  }
+  return { content: [{ type: "text", text: "Unknown action." }] };
+});
+server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work.", {
   content: exports_external.string().describe("What needs to be done - be specific and actionable"),
   priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional().default("medium"),
   status: exports_external.enum(WORK_ITEM_STATUSES).optional().default("planned"),
   parent_id: exports_external.string().optional().describe("ID of parent work_item this belongs to (creates part_of link)"),
+  due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format"),
   tags: exports_external.string().optional(),
   context: exports_external.string().optional()
-}, async ({ content, priority, status, parent_id, tags, context }) => {
+}, async ({ content, priority, status, parent_id, due_date, tags, context }) => {
   const projectDb2 = getProjectDb();
   const noteId = generateId();
   const timestamp = now();
@@ -21005,8 +21337,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
         tagParts.push(t);
     }
   }
-  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     "work_item",
     content,
@@ -21018,6 +21350,7 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
     0,
     status ?? "planned",
     priority ?? "medium",
+    due_date ?? null,
     timestamp,
     timestamp
   ]);
@@ -21029,21 +21362,24 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
            VALUES (?, ?, ?, 'part_of', 'strong', ?)`, [generateId(), noteId, parent_id, timestamp]);
     }
   }
+  const dueStr = due_date ? ` due ${due_date}` : "";
   return {
     content: [{
       type: "text",
-      text: `Created work_item "${noteId}" [${priority}/${status}]${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+      text: `Created work_item "${noteId}" [${priority}/${status}]${dueStr}${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
     }]
   };
 });
-server.tool("update_work_item", "Update the status or priority of a work item. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.", {
+server.tool("update_work_item", "Update a work item's status, priority, due date, or content. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.", {
   id: exports_external.string(),
   status: exports_external.enum(WORK_ITEM_STATUSES).optional(),
   priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional(),
+  due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format, or empty string to clear"),
+  content: exports_external.string().optional().describe("Updated description"),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
-}, async ({ id, status, priority, blocked_by }) => {
+}, async ({ id, status, priority, due_date, content, blocked_by }) => {
   const projectDb2 = getProjectDb();
-  const row = projectDb2.query(`SELECT id, type, content, status, priority FROM notes WHERE id = ?`).get(id);
+  const row = projectDb2.query(`SELECT id, type, content, status, priority, due_date FROM notes WHERE id = ?`).get(id);
   if (!row) {
     return {
       content: [{ type: "text", text: `No note found with id "${id}".` }]
@@ -21059,6 +21395,17 @@ server.tool("update_work_item", "Update the status or priority of a work item. T
   if (priority) {
     updates.push(`priority = '${priority}'`);
     changes.push(`priority: ${row.priority} -> ${priority}`);
+  }
+  if (due_date !== undefined) {
+    const newDue = due_date === "" ? null : due_date;
+    updates.push(`due_date = ${newDue ? `'${newDue}'` : "NULL"}`);
+    changes.push(`due_date: ${row.due_date ?? "none"} -> ${newDue ?? "cleared"}`);
+  }
+  if (content) {
+    updates.push(`content = '${content.replace(/'/g, "''")}'`);
+    const newKeywords = extractKeywords(content);
+    updates.push(`keywords = '${newKeywords.join(",")}'`);
+    changes.push("content updated");
   }
   if (updates.length > 0) {
     updates.push(`updated_at = '${timestamp}'`);
@@ -21092,10 +21439,12 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   parent_title: exports_external.string().optional().describe("Title for a new parent work_item (used when parent_id is omitted)"),
   items: exports_external.array(exports_external.object({
     content: exports_external.string(),
-    priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional()
+    priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional(),
+    due_date: exports_external.string().optional()
   })),
-  tags: exports_external.string().optional()
-}, async ({ parent_id, parent_title, items, tags }) => {
+  tags: exports_external.string().optional(),
+  due_date: exports_external.string().optional().describe("Default due date for all items (individual items can override)")
+}, async ({ parent_id, parent_title, items, tags, due_date }) => {
   const projectDb2 = getProjectDb();
   const timestamp = now();
   let actualParentId = parent_id;
@@ -21103,8 +21452,8 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     actualParentId = generateId();
     const keywords = extractKeywords(parent_title);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       actualParentId,
       "work_item",
       parent_title,
@@ -21115,6 +21464,7 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
       0,
       "planned",
       "high",
+      due_date ?? null,
       timestamp,
       timestamp
     ]);
@@ -21125,8 +21475,8 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     const childId = generateId();
     const keywords = extractKeywords(item.content);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       childId,
       "work_item",
       item.content,
@@ -21137,6 +21487,7 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
       0,
       "planned",
       item.priority ?? "medium",
+      item.due_date ?? due_date ?? null,
       timestamp,
       timestamp
     ]);
@@ -21156,7 +21507,7 @@ ${created.map((c) => `- ${c}`).join(`
     }]
   };
 });
-server.tool("retro", "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, and computes autonomy scores across domains. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.", {
+server.tool("retro", "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, computes autonomy scores, and analyzes user model trajectories. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.", {
   focus: exports_external.string().optional()
 }, async ({ focus }) => {
   const result = handleReflect(getProjectDb(), getGlobalDb(), { focus });
@@ -21176,6 +21527,11 @@ Revalidation queue:`;
       text += `
 - [${item.type}] ${item.content}`;
     }
+  }
+  if (result.trajectory_updates > 0) {
+    text += `
+
+User model: ${result.trajectory_updates} trajectory update(s).`;
   }
   return {
     content: [{ type: "text", text }]

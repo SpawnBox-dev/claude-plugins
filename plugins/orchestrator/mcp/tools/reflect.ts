@@ -15,6 +15,7 @@ export interface ReflectResult {
   orphan_notes: number;
   autonomy_scores: Record<string, string>;
   revalidation_queue: Array<{ id: string; content: string; type: string }>;
+  trajectory_updates: number;
   message: string;
 }
 
@@ -90,6 +91,50 @@ export function handleReflect(
     }
   }
 
+  // User model trajectory analysis
+  let trajectoryUpdates = 0;
+  try {
+    // Look at user_pattern notes created in last 7 days
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentPatterns = globalDb
+      .query(
+        `SELECT content FROM notes
+         WHERE type = 'user_pattern' AND created_at >= ?
+         ORDER BY created_at DESC`
+      )
+      .all(sevenDaysAgo) as Array<{ content: string }>;
+
+    if (recentPatterns.length >= 3) {
+      // If there are many recent user_pattern notes, user preferences are evolving
+      const entries = globalDb
+        .query(`SELECT id, dimension, trajectory, updated_at FROM user_model`)
+        .all() as Array<{ id: string; dimension: string; trajectory: string; updated_at: string }>;
+
+      for (const entry of entries) {
+        const entryAge = Date.now() - new Date(entry.updated_at).getTime();
+        const staleMs = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+        if (entryAge > staleMs && entry.trajectory !== "regressing") {
+          // Old entry not reinforced - might be regressing
+          globalDb.run(
+            `UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`,
+            [timestamp, entry.id]
+          );
+          trajectoryUpdates++;
+        } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
+          // Recently reinforced - improving
+          globalDb.run(
+            `UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`,
+            [timestamp, entry.id]
+          );
+          trajectoryUpdates++;
+        }
+      }
+    }
+  } catch {
+    // user_model operations are best-effort
+  }
+
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
@@ -97,6 +142,9 @@ export function handleReflect(
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0
       ? `${revalidationRows.length} note(s) queued for revalidation.`
+      : null,
+    trajectoryUpdates > 0
+      ? `${trajectoryUpdates} user model trajectory update(s).`
       : null,
   ]
     .filter(Boolean)
@@ -109,6 +157,7 @@ export function handleReflect(
     orphan_notes: orphanCount,
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,
+    trajectory_updates: trajectoryUpdates,
     message,
   };
 }

@@ -89,6 +89,24 @@ CREATE TABLE IF NOT EXISTS migrations (
 );
 `,
   },
+  {
+    version: 5,
+    name: "add_work_item_fields",
+    sql: `
+ALTER TABLE notes ADD COLUMN status TEXT;
+ALTER TABLE notes ADD COLUMN priority TEXT;
+CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
+CREATE INDEX IF NOT EXISTS idx_notes_priority ON notes(priority);
+`,
+  },
+  {
+    version: 6,
+    name: "add_due_date",
+    sql: `
+ALTER TABLE notes ADD COLUMN due_date TEXT;
+CREATE INDEX IF NOT EXISTS idx_notes_due_date ON notes(due_date);
+`,
+  },
 ];
 
 /**

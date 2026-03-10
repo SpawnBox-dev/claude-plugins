@@ -12,6 +12,7 @@ export interface RememberInput {
   context?: string;
   tags?: string;
   scope?: "global" | "project";
+  dimension?: Dimension;
 }
 
 export interface RememberResult {
@@ -68,8 +69,8 @@ export function handleRemember(
   const timestamp = now();
 
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       noteId,
       input.type,
@@ -80,6 +81,9 @@ export function handleRemember(
       "medium",
       timestamp,
       0,
+      null,
+      null,
+      null,
       timestamp,
       timestamp,
     ]
@@ -90,7 +94,7 @@ export function handleRemember(
 
   // Write to user_model if this is a user_pattern note
   if (input.type === "user_pattern") {
-    writeUserModel(globalDb, input.content, input.context);
+    writeUserModel(globalDb, input.content, input.context, input.dimension);
   }
 
   return {
@@ -104,44 +108,48 @@ export function handleRemember(
 }
 
 /**
- * Infer dimension from user_pattern content and upsert into user_model table.
+ * Infer dimension from user_pattern content.
+ * Used as fallback when no explicit dimension is provided.
  */
 function inferDimension(content: string): Dimension {
   const lower = content.toLowerCase();
-  if (/prefer|like|want|style|format|approach/i.test(lower)) return "preference";
-  if (/decide|decision|chose|choose|pick|select/i.test(lower)) return "decision_pattern";
-  if (/communicat|respond|explain|ask|tell|say/i.test(lower)) return "communication_style";
-  if (/strength|good at|excels?|strong/i.test(lower)) return "strength";
-  if (/blind spot|miss|overlook|forget|ignore/i.test(lower)) return "blind_spot";
-  if (/intent|goal|aim|want to|trying to|plan to/i.test(lower)) return "intent_pattern";
+  if (/prefer|like|want|style|format|approach|always|never/i.test(lower)) return "preference";
+  if (/decide|decision|chose|choose|pick|select|weigh|trade-?off/i.test(lower)) return "decision_pattern";
+  if (/communicat|respond|explain|ask|tell|say|verbose|concise|brief/i.test(lower)) return "communication_style";
+  if (/strength|good at|excels?|strong|skilled|expert/i.test(lower)) return "strength";
+  if (/blind spot|miss|overlook|forget|ignore|weak|struggle/i.test(lower)) return "blind_spot";
+  if (/intent|goal|aim|want to|trying to|plan to|vision|aspir/i.test(lower)) return "intent_pattern";
   return "preference";
 }
 
 function writeUserModel(
   globalDb: Database,
   content: string,
-  context?: string
+  context?: string,
+  explicitDimension?: Dimension
 ): void {
   try {
-    const dimension = inferDimension(content);
+    const dimension = explicitDimension ?? inferDimension(content);
     const timestamp = now();
 
     // Check if a similar observation exists for this dimension
+    // Use fuzzy match: same dimension and content starts the same way
     const existing = globalDb
       .query(
-        `SELECT id, evidence FROM user_model WHERE dimension = ? AND observation = ?`
+        `SELECT id, evidence, observation FROM user_model WHERE dimension = ? AND observation = ?`
       )
-      .get(dimension, content) as { id: string; evidence: string } | null;
+      .get(dimension, content) as { id: string; evidence: string; observation: string } | null;
 
     if (existing) {
       // Increment evidence and update
-      const evidenceList = existing.evidence ? existing.evidence.split("\n") : [];
-      if (context) evidenceList.push(context);
+      const evidenceList = existing.evidence ? existing.evidence.split("\n").filter(Boolean) : [];
+      if (context) evidenceList.push(`[${timestamp}] ${context}`);
       globalDb.run(
         `UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`,
         [evidenceList.join("\n"), timestamp, existing.id]
       );
     } else {
+      const evidence = context ? `[${timestamp}] ${context}` : "";
       globalDb.run(
         `INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -149,7 +157,7 @@ function writeUserModel(
           generateId(),
           dimension,
           content,
-          context ?? "",
+          evidence,
           "medium",
           "stable",
           timestamp,

@@ -15,6 +15,7 @@ export const NOTE_TYPES = [
   "tool_capability",
   "user_pattern",
   "checkpoint",
+  "work_item",
 ] as const;
 export type NoteType = (typeof NOTE_TYPES)[number];
 
@@ -25,14 +26,45 @@ export const RELATIONSHIP_TYPES = [
   "related_to",
   "blocks",
   "enables",
+  "part_of",
 ] as const;
 export type RelationshipType = (typeof RELATIONSHIP_TYPES)[number];
+
+export const WORK_ITEM_STATUSES = [
+  "proposed",
+  "planned",
+  "active",
+  "blocked",
+  "done",
+] as const;
+export type WorkItemStatus = (typeof WORK_ITEM_STATUSES)[number];
+
+export const WORK_ITEM_PRIORITIES = [
+  "critical",
+  "high",
+  "medium",
+  "low",
+  "backlog",
+] as const;
+export type WorkItemPriority = (typeof WORK_ITEM_PRIORITIES)[number];
 
 export const CONFIDENCE_LEVELS = ["low", "medium", "high"] as const;
 export type ConfidenceLevel = (typeof CONFIDENCE_LEVELS)[number];
 
 export const STRENGTH_LEVELS = ["weak", "moderate", "strong"] as const;
 export type StrengthLevel = (typeof STRENGTH_LEVELS)[number];
+
+export const BRIEFING_SECTIONS = [
+  "work_items",
+  "open_threads",
+  "decisions",
+  "neglected",
+  "drift",
+  "user_model",
+  "cross_project",
+  "checkpoint",
+] as const;
+export type BriefingSection = (typeof BRIEFING_SECTIONS)[number];
 
 export const DIMENSIONS = [
   "communication_style",
@@ -76,6 +108,9 @@ export interface Note {
   source_conversation: string | null;
   superseded_by: string | null;
   is_global: boolean;
+  status: WorkItemStatus | null;
+  priority: WorkItemPriority | null;
+  due_date: string | null;
 }
 
 export interface NoteSummary {
@@ -85,6 +120,9 @@ export interface NoteSummary {
   confidence: ConfidenceLevel;
   created_at: string;
   keywords: string[];
+  status: WorkItemStatus | null;
+  priority: WorkItemPriority | null;
+  due_date: string | null;
 }
 
 export interface Link {
@@ -117,12 +155,25 @@ export interface AutonomyScore {
 export interface Briefing {
   open_threads: NoteSummary[];
   recent_decisions: NoteSummary[];
+  active_work: NoteSummary[];
+  blocked_work: NoteSummary[];
+  recently_completed: NoteSummary[];
+  overdue_work: NoteSummary[];
   neglected_areas: string[];
   drift_warning: string | null;
   user_model_summary: string[];
+  user_profile: UserProfileEntry[];
   suggested_focus: string | null;
   suggested_intensity: "strategic" | "tactical" | "trivial";
   is_first_run: boolean;
+}
+
+export interface UserProfileEntry {
+  dimension: Dimension;
+  observation: string;
+  confidence: ConfidenceLevel;
+  trajectory: Trajectory;
+  evidence_count: number;
 }
 
 export interface Checkpoint {

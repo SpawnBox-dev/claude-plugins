@@ -1,10 +1,11 @@
 import type { Database } from "bun:sqlite";
-import type { Briefing, Note } from "../types";
+import type { Briefing, BriefingSection, Note, NoteSummary } from "../types";
 import { composeBriefing } from "../engine/composer";
-import { summarizeForBriefing, relativeTime } from "../utils";
+import { summarizeForBriefing, relativeTime, truncate } from "../utils";
 
 export interface OrientInput {
   event: "startup" | "resume" | "clear" | "compact";
+  sections?: BriefingSection[];
 }
 
 export interface OrientResult {
@@ -44,6 +45,9 @@ function fetchLatestCheckpoint(db: Database): Note | null {
       source_conversation: row.source_conversation ?? null,
       superseded_by: null,
       is_global: false,
+      status: null,
+      priority: null,
+      due_date: null,
     };
   } catch {
     return null;
@@ -67,12 +71,26 @@ function fetchGlobalPatterns(globalDb: Database): string[] {
   }
 }
 
+function formatDueDate(dueDate: string | null): string {
+  if (!dueDate) return "";
+  const due = new Date(dueDate);
+  const now = new Date();
+  const diffDays = Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  if (diffDays < 0) return ` (OVERDUE by ${Math.abs(diffDays)}d)`;
+  if (diffDays === 0) return " (due TODAY)";
+  if (diffDays <= 3) return ` (due in ${diffDays}d)`;
+  return ` (due ${dueDate})`;
+}
+
 function formatBriefing(
   briefing: Briefing,
   checkpoint: Note | null,
   globalPatterns: string[],
-  event: string
+  event: string,
+  sections?: BriefingSection[]
 ): string {
+  const include = (section: BriefingSection) =>
+    !sections || sections.length === 0 || sections.includes(section);
   const lines: string[] = [];
 
   if (briefing.is_first_run) {
@@ -87,44 +105,106 @@ function formatBriefing(
   lines.push("# Session Briefing");
   lines.push("");
 
-  if (checkpoint) {
+  if (include("checkpoint") && checkpoint) {
     const age = relativeTime(checkpoint.created_at);
     lines.push(`## Recovery Checkpoint (${age})`);
     lines.push(checkpoint.content);
     lines.push("");
   }
 
-  if (briefing.open_threads.length > 0) {
+  if (include("work_items")) {
+    // Overdue items get top billing
+    if (briefing.overdue_work.length > 0) {
+      lines.push("## OVERDUE");
+      for (const item of briefing.overdue_work) {
+        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+        lines.push(`- \u26a0\ufe0f ${pri} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
+      }
+      lines.push("");
+    }
+
+    if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
+      lines.push("## Work Items");
+      if (briefing.active_work.length > 0) {
+        lines.push("### Active");
+        for (const item of briefing.active_work) {
+          const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+          const status = item.status === "active" ? "\ud83d\udd04" : "\u2b1c";
+          const due = formatDueDate(item.due_date);
+          lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}${due}`);
+        }
+        lines.push("");
+      }
+      if (briefing.blocked_work.length > 0) {
+        lines.push("### Blocked");
+        for (const item of briefing.blocked_work) {
+          const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+          lines.push(`- \ud83d\udeab ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+        }
+        lines.push("");
+      }
+    }
+
+    if (briefing.recently_completed.length > 0) {
+      lines.push("## Recently Completed");
+      for (const item of briefing.recently_completed) {
+        lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
+      }
+      lines.push("");
+    }
+  }
+
+  if (include("open_threads") && briefing.open_threads.length > 0) {
     lines.push("## Open Threads");
     lines.push(summarizeForBriefing(briefing.open_threads));
     lines.push("");
   }
 
-  if (briefing.recent_decisions.length > 0) {
+  if (include("decisions") && briefing.recent_decisions.length > 0) {
     lines.push("## Recent Decisions");
     lines.push(summarizeForBriefing(briefing.recent_decisions));
     lines.push("");
   }
 
-  if (briefing.neglected_areas.length > 0) {
+  if (include("neglected") && briefing.neglected_areas.length > 0) {
     lines.push("## Neglected Areas");
     lines.push(briefing.neglected_areas.map((a) => `- ${a}`).join("\n"));
     lines.push("");
   }
 
-  if (briefing.drift_warning) {
+  if (include("drift") && briefing.drift_warning) {
     lines.push(`## Drift Warning`);
     lines.push(briefing.drift_warning);
     lines.push("");
   }
 
-  if (briefing.user_model_summary.length > 0) {
-    lines.push("## User Patterns");
-    lines.push(briefing.user_model_summary.map((s) => `- ${s}`).join("\n"));
-    lines.push("");
+  if (include("user_model")) {
+    if (briefing.user_profile.length > 0) {
+      lines.push("## User Profile");
+      // Group by dimension
+      const byDim = new Map<string, typeof briefing.user_profile>();
+      for (const entry of briefing.user_profile) {
+        const existing = byDim.get(entry.dimension) ?? [];
+        existing.push(entry);
+        byDim.set(entry.dimension, existing);
+      }
+      for (const [dim, entries] of byDim) {
+        const label = dim.replace(/_/g, " ");
+        for (const entry of entries.slice(0, 2)) {
+          const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
+          const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
+          lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);
+        }
+      }
+      lines.push("");
+    } else if (briefing.user_model_summary.length > 0) {
+      lines.push("## User Patterns");
+      lines.push(briefing.user_model_summary.map((s) => `- ${s}`).join("\n"));
+      lines.push("");
+    }
   }
 
-  if (globalPatterns.length > 0) {
+  if (include("cross_project") && globalPatterns.length > 0) {
     lines.push("## Cross-Project Patterns");
     lines.push(globalPatterns.map((p) => `- ${p}`).join("\n"));
     lines.push("");
@@ -151,12 +231,15 @@ export function handleOrient(
   globalDb: Database,
   input: OrientInput
 ): OrientResult {
-  const briefing = composeBriefing(projectDb, globalDb);
+  const briefing = composeBriefing(projectDb, globalDb, input.sections);
+
+  const include = (section: BriefingSection) =>
+    !input.sections || input.sections.length === 0 || input.sections.includes(section);
 
   // Always fetch checkpoint - it provides continuity across sessions
-  const checkpoint = fetchLatestCheckpoint(projectDb);
-  const globalPatterns = fetchGlobalPatterns(globalDb);
-  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event);
+  const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb) : null;
+  const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb) : [];
+  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
 
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }

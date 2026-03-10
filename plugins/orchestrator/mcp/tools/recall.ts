@@ -49,6 +49,9 @@ function tryFetchNote(db: Database, id: string): Note | null {
     source_conversation: row.source_conversation ?? null,
     superseded_by: null,
     is_global: false,
+    status: row.status ?? null,
+    priority: row.priority ?? null,
+    due_date: row.due_date ?? null,
   };
 }
 
@@ -94,6 +97,9 @@ function fetchLinkedNotes(
                 .map((k: string) => k.trim())
                 .filter((k: string) => k.length > 0)
             : [],
+          status: r.status ?? null,
+          priority: r.priority ?? null,
+          due_date: r.due_date ?? null,
         },
       });
 

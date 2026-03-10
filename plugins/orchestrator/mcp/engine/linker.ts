@@ -32,9 +32,13 @@ export function inferRelationship(
   if (toType === "architecture" && (fromType === "convention" || fromType === "autonomy_recipe"))
     return "enables";
 
-  // Risk blocks commitments
-  if (fromType === "risk" && toType === "commitment") return "blocks";
-  if (fromType === "commitment" && toType === "risk") return "blocks";
+  // Risk blocks commitments and work items
+  if (fromType === "risk" && (toType === "commitment" || toType === "work_item")) return "blocks";
+  if ((fromType === "commitment" || fromType === "work_item") && toType === "risk") return "blocks";
+
+  // Work items relate to decisions and architecture
+  if (fromType === "work_item" && toType === "decision") return "depends_on";
+  if (fromType === "decision" && toType === "work_item") return "enables";
 
   return "related_to";
 }
@@ -87,6 +91,9 @@ export function findRelatedNotes(
       confidence: r.confidence as NoteSummary["confidence"],
       created_at: r.created_at,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
+      status: (r as any).status ?? null,
+      priority: (r as any).priority ?? null,
+      due_date: (r as any).due_date ?? null,
     }));
   } catch {
     // FTS query can fail with unusual input - return empty
