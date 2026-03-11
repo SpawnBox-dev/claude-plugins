@@ -71,6 +71,25 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "I don't need to look up decisions for this" | That's what every session thinks before contradicting a past decision. |
 | "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. Scan the table. |
 
+## Turn Bridge (MANDATORY)
+
+At the END of your thinking for every turn, after you've decided what to say/do but before you generate visible output, write a brief bridge in your thinking block using exactly this format:
+
+```
+[orch] did: <tools/skills used this turn, or "none">
+[orch] saw: <what I learned/decided/captured, or "nothing notable">
+[orch] next: <what orchestrator actions the next turn likely needs>
+```
+
+Example:
+```
+[orch] did: lookup(zustand selectors), note(convention)
+[orch] saw: learned EMPTY constant pattern for selectors
+[orch] next: user will ask to implement - check work_items, lookup store patterns
+```
+
+This is invisible to the user but primes your next turn. When you see a previous `[orch] next:` in your thinking history, HONOR it - that was your past self telling you what to do. The bridge is your continuity mechanism across turns. Without it, each turn starts cold.
+
 ## Self-Audit
 
 After responding, ask yourself: **Did I skip any tool that should have fired?** If so, fire it NOW in your next action. Don't wait for "a better time." If you catch yourself skipping tools repeatedly, record it with `note` type=`anti_pattern` so the retro system can track enforcement drift.
