@@ -3,8 +3,19 @@ name: getting-started
 description: >
   Use when beginning any task, switching to an unfamiliar area of the codebase,
   or when context from previous sessions would help. Also use when resuming after
-  context compaction. Gets you up to speed immediately.
+  context compaction.
 ---
+
+<SUBAGENT-STOP>
+If you were dispatched as a subagent to execute a specific task, skip this skill.
+Subagents work from the context given to them, not from the full knowledge base.
+</SUBAGENT-STOP>
+
+<HARD-GATE>
+Do NOT respond to the user's first message until you have called `briefing` and
+reviewed the result. Do NOT skip this because the user's request seems simple or
+urgent. A 3-second briefing prevents 30 minutes of contradicting past decisions.
+</HARD-GATE>
 
 # Getting Started
 

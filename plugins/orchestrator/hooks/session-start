@@ -20,7 +20,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\". (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional."
+CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\". (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional.\n\nRED FLAGS - if you think any of these, you are rationalizing and MUST stop:\n- \"This is just a quick fix\" -> Quick fixes create decisions. Lookup first.\n- \"I already know this codebase\" -> You know THIS context window. Previous sessions knew more.\n- \"I'll note it later\" -> Later never comes. Context compaction erases your memory. Note NOW.\n- \"Nothing noteworthy happened\" -> Re-evaluate. Zero-signal turns are rare.\n- \"The user just wants speed\" -> Speed without context causes rework.\n- \"I'll check the knowledge base after\" -> Checking AFTER means you already contradicted past decisions."
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF

@@ -2,9 +2,14 @@
 name: wrapping-up
 description: >
   Use when finishing a task, completing a significant milestone, or when the
-  conversation is ending. Saves progress so the next session picks up seamlessly
-  without re-discovering context.
+  conversation is ending. Saves progress so the next session picks up seamlessly.
 ---
+
+<HARD-GATE>
+Do NOT end a session or declare a task complete without calling `save_progress`.
+If the session ends without a checkpoint, the next session starts blind - no context,
+no continuity, no memory of what happened here. This is not optional.
+</HARD-GATE>
 
 # Wrapping Up
 

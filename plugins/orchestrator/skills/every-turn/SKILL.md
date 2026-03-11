@@ -6,6 +6,13 @@ description: >
   This is your orchestrator intercept - run it before and after acting.
 ---
 
+<HARD-GATE>
+Do NOT skip this evaluation. If you catch yourself about to respond without scanning
+the action table below, STOP and scan it. This is not optional. This is not negotiable.
+Every turn means every turn - including "simple" ones, "quick" ones, and ones where
+you think nothing noteworthy happened.
+</HARD-GATE>
+
 # Orchestrator Turn Evaluation
 
 Run this evaluation every turn. It takes seconds and prevents you from missing context, losing knowledge, or contradicting past work.
@@ -47,6 +54,27 @@ Scan what just happened. Did any of these occur?
 
 **Multiple can apply in one turn.** If you made a decision AND learned a pattern AND the user stated a preference, invoke all three. Don't pick one.
 
+## Red Flags
+
+These thoughts mean STOP - you are rationalizing your way out of using the orchestrator:
+
+| Thought | Reality |
+|---------|---------|
+| "This is just a quick fix" | Quick fixes create decisions. Lookup first. |
+| "I already know this codebase" | You know THIS context window. Previous sessions knew more. Lookup. |
+| "I'll note it later" | Later never comes. Context compaction erases your memory. Note NOW. |
+| "Nothing noteworthy happened" | A turn with no knowledge capture is rarely zero-signal. Re-evaluate. |
+| "The user just wants speed" | Speed without context causes rework. 2 seconds of lookup saves 20 minutes. |
+| "This doesn't affect future sessions" | If you touched code, made a choice, or learned something - it does. |
+| "I'll check the knowledge base after I'm done" | Checking AFTER means you've already contradicted past decisions. Check BEFORE. |
+| "The briefing didn't mention this area" | Absence of knowledge is the strongest signal TO capture knowledge. |
+| "I don't need to look up decisions for this" | That's what every session thinks before contradicting a past decision. |
+| "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. Scan the table. |
+
+## Self-Audit
+
+After responding, ask yourself: **Did I skip any tool that should have fired?** If so, fire it NOW in your next action. Don't wait for "a better time." If you catch yourself skipping tools repeatedly, record it with `note` type=`anti_pattern` so the retro system can track enforcement drift.
+
 ## Primitives (compose these freely)
 
 These are your building blocks. Combine them however the situation demands:
@@ -66,7 +94,3 @@ These are your building blocks. Combine them however the situation demands:
 | `update_work_item` | Change status/priority/content/due date |
 | `breakdown` | Split complex work into children |
 | `retro` | Maintenance: decay, dedup, trajectories |
-
-## The bar is LOW
-
-If there's even a small chance one of these applies, invoke it. A skill that turns out to be irrelevant costs nothing. A missed capture is knowledge lost forever.
