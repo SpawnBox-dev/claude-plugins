@@ -20,6 +20,18 @@ Your FIRST action in every session MUST be calling the `briefing` MCP tool, then
 
 Before the session ends, you MUST call `save_progress` with what was accomplished, open questions, and next steps. A session without a checkpoint is knowledge lost.
 
+### Turn Bridge
+
+At the end of your thinking block every turn, write this bridge to prime your next turn:
+
+```
+[orch] did: <tools/skills used, or "none">
+[orch] saw: <what you learned/decided/captured, or "nothing notable">
+[orch] next: <what orchestrator actions the next turn likely needs>
+```
+
+When you see a previous `[orch] next:` in your thinking history, HONOR it. Your past self is telling you what to do. If `[orch] next:` says to invoke every-turn, you invoke every-turn.
+
 ### The Goal
 
 Context windows are temporary. The orchestrator is permanent. Every session should leave the knowledge base richer than it found it.
