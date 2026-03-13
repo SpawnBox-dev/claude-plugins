@@ -16,7 +16,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-CONTEXT="[orch] Scan the every-turn action table. BEFORE: lookup needed? decisions to check? AFTER: what did you learn, decide, or complete? Fire the tools that apply."
+CONTEXT="[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? If you used 0 orchestrator tools, ask yourself why - most turns have signal. THEN for this turn: lookup needed? Decisions to check? Scan the every-turn action table."
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF
