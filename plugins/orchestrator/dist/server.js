@@ -21026,7 +21026,7 @@ server.tool("briefing", "Get up to speed on the current project. Returns open th
     content: [{ type: "text", text: result.formatted }]
   };
 });
-server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. The system auto-links related notes and detects duplicates.", {
+server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes.", {
   content: exports_external.string(),
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
