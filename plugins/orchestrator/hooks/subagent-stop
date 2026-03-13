@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Fires before a subagent exits.
-# Blocks once to prompt knowledge capture - subagents discover
-# patterns, hit gotchas, and make decisions that would otherwise
-# evaporate when they exit.
+# Blocks once to prompt knowledge capture. Subagents work in isolation
+# and their context vanishes on exit - any discoveries not captured
+# with note() are lost permanently.
 
 INPUT=$(cat)
 
@@ -13,9 +13,21 @@ SID="${SID:-unknown}"
 
 MARKER="${TMPDIR:-/tmp}/orchestrator-subagent-stop-${SID}"
 
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
 if [ ! -f "$MARKER" ]; then
   touch "$MARKER"
-  printf '{"decision":"block","reason":"Before exiting, check: did you discover any patterns, conventions, gotchas, or make any decisions during this work? If so, call note to capture them - your context window is about to disappear. Then you can exit."}'
+  REASON="Before exiting, scan your work for knowledge that would be lost. Call \`note\` for anything that matches:\n\n- A decision you made or recommended (type=decision) - what you chose, what you rejected, why\n- A pattern or convention you followed or established (type=convention)\n- A gotcha, footgun, or thing that broke unexpectedly (type=anti_pattern)\n- An architectural insight about how systems connect (type=architecture)\n- A risk or limitation you discovered (type=risk)\n- Work you completed (call update_work_item status=done if a tracked item)\n\nIf nothing applies, exit. But most implementation work produces at least one decision or gotcha worth preserving."
+  ESCAPED=$(escape_for_json "$REASON")
+  printf '{"decision":"block","reason":"%s"}' "$ESCAPED"
 else
   exit 0
 fi
