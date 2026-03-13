@@ -11,6 +11,16 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit"
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
@@ -31,6 +41,15 @@
         ]
       }
     ],
-    "SubagentStop": []
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop"
+          }
+        ]
+      }
+    ]
   }
 }

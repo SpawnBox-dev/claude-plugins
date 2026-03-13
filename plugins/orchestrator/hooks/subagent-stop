@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fires before a subagent exits.
+# Blocks once to prompt knowledge capture - subagents discover
+# patterns, hit gotchas, and make decisions that would otherwise
+# evaporate when they exit.
+
+INPUT=$(cat)
+
+SID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+SID="${SID:-unknown}"
+
+MARKER="${TMPDIR:-/tmp}/orchestrator-subagent-stop-${SID}"
+
+if [ ! -f "$MARKER" ]; then
+  touch "$MARKER"
+  printf '{"decision":"block","reason":"Before exiting, check: did you discover any patterns, conventions, gotchas, or make any decisions during this work? If so, call note to capture them - your context window is about to disappear. Then you can exit."}'
+else
+  exit 0
+fi

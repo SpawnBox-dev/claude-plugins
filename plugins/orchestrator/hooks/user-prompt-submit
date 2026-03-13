@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fires before Claude processes every user message.
+# Injects a lightweight every-turn prompt into context.
+# This is the "pre-turn" enforcement hook - the model sees this
+# reminder right before it thinks, every single turn.
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+CONTEXT="[orch] Scan the every-turn action table. BEFORE: lookup needed? decisions to check? AFTER: what did you learn, decide, or complete? Fire the tools that apply."
+ESCAPED=$(escape_for_json "$CONTEXT")
+
+cat <<EOF
+{
+  "additional_context": "${ESCAPED}",
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "${ESCAPED}"
+  }
+}
+EOF
+
+exit 0
