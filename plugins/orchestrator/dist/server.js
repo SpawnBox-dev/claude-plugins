@@ -20667,9 +20667,20 @@ function handleRecall(projectDb2, globalDb2, input) {
   if (input.query) {
     const projectResults = findRelatedNotes(projectDb2, input.query, limit);
     const globalResults = findRelatedNotes(globalDb2, input.query, limit);
+    const GLOBAL_RESERVED = Math.min(3, globalResults.length);
     const seen = new Set;
     const merged = [];
-    for (const r of [...projectResults, ...globalResults]) {
+    for (let i = 0;i < GLOBAL_RESERVED; i++) {
+      if (!seen.has(globalResults[i].id)) {
+        seen.add(globalResults[i].id);
+        merged.push({ ...globalResults[i], is_global: true });
+      }
+    }
+    const remaining = [
+      ...projectResults,
+      ...globalResults.slice(GLOBAL_RESERVED)
+    ];
+    for (const r of remaining) {
       if (!seen.has(r.id)) {
         seen.add(r.id);
         merged.push(r);
@@ -21459,7 +21470,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.12.6"
+  version: "0.12.7"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),

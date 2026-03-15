@@ -157,11 +157,28 @@ export function handleRecall(
     const projectResults = findRelatedNotes(projectDb, input.query, limit);
     const globalResults = findRelatedNotes(globalDb, input.query, limit);
 
-    // Merge and deduplicate by id
+    // Interleave with reserved slots for global results.
+    // Global DB has user_patterns, cross-project conventions, tool_capabilities -
+    // these are few in number but high in value. Without reserved slots, the
+    // larger project DB drowns them out in unfiltered queries.
+    const GLOBAL_RESERVED = Math.min(3, globalResults.length);
     const seen = new Set<string>();
     const merged: NoteSummary[] = [];
 
-    for (const r of [...projectResults, ...globalResults]) {
+    // Reserve top global results first
+    for (let i = 0; i < GLOBAL_RESERVED; i++) {
+      if (!seen.has(globalResults[i].id)) {
+        seen.add(globalResults[i].id);
+        merged.push({ ...globalResults[i], is_global: true } as any);
+      }
+    }
+
+    // Interleave remaining: project results, then remaining global
+    const remaining = [
+      ...projectResults,
+      ...globalResults.slice(GLOBAL_RESERVED),
+    ];
+    for (const r of remaining) {
       if (!seen.has(r.id)) {
         seen.add(r.id);
         merged.push(r);
