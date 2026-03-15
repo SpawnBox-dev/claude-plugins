@@ -28,6 +28,8 @@ import { SessionTracker } from "./engine/session_tracker";
 let embeddingClient: EmbeddingClient | null = null;
 let sidecarProcess: ReturnType<typeof Bun.spawn> | null = null;
 let sessionTracker: SessionTracker | null = null;
+let sidecarStatus: "ready" | "starting" | "unavailable" | "error" = "starting";
+let sidecarError: string | null = null;
 
 async function trySpawn(
   cmd: string[],
@@ -127,8 +129,37 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   }
 
   if (!result) {
+    // Determine why we failed - check what's available
+    let hasUv = false;
+    let hasPython = false;
+    try {
+      const p = Bun.spawn(["uv", "--version"], { stdout: "pipe", stderr: "pipe" });
+      await p.exited;
+      if (p.exitCode === 0) hasUv = true;
+    } catch {}
+    try {
+      const p = Bun.spawn(["python", "--version"], { stdout: "pipe", stderr: "pipe" });
+      await p.exited;
+      if (p.exitCode === 0) hasPython = true;
+    } catch {}
+    if (!hasPython) {
+      try {
+        const p = Bun.spawn(["python3", "--version"], { stdout: "pipe", stderr: "pipe" });
+        await p.exited;
+        if (p.exitCode === 0) hasPython = true;
+      } catch {}
+    }
+
+    if (!hasPython) {
+      sidecarError = "Python not installed";
+    } else if (!hasUv) {
+      sidecarError = "uv/uvx not installed";
+    } else {
+      sidecarError = "sidecar process failed to start";
+    }
+
     console.error(
-      "[embed] Sidecar unavailable: install uv (https://docs.astral.sh/uv/) for automatic embedding support, " +
+      `[embed] Sidecar unavailable (${sidecarError}): install uv (https://docs.astral.sh/uv/) for automatic embedding support, ` +
       "or install Python with: pip install -r sidecar/requirements.txt"
     );
     return null;
@@ -140,7 +171,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.12.2",
+  version: "0.12.3",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -159,9 +190,214 @@ server.tool(
       event: event ?? "startup",
       sections: sections ?? undefined,
     });
+
+    // Append system status when embeddings need attention
+    let text = result.formatted;
+    if (sidecarStatus !== "ready" && event === "startup") {
+      text += "\n## Setup Available\n";
+      text += "Semantic search (embeddings) is not active. Call `install_embeddings` to check dependencies and enable it.\n";
+    }
+
     return {
-      content: [{ type: "text" as const, text: result.formatted }],
+      content: [{ type: "text" as const, text }],
     };
+  }
+);
+
+// ── system_status ────────────────────────────────────────────────────────
+server.tool(
+  "system_status",
+  "Check the health of the orchestrator system: embedding sidecar, note counts, embedding coverage, session tracking.",
+  {},
+  async () => {
+    const projectDb = getProjectDb();
+    const globalDb = getGlobalDb();
+
+    // Note counts
+    const projectNotes = (projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
+    const globalNotes = (globalDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
+
+    // Embedding coverage
+    let embeddedCount = 0;
+    try {
+      embeddedCount = (projectDb.query("SELECT COUNT(*) as cnt FROM embeddings").get() as any).cnt;
+    } catch {}
+
+    const coveragePct = projectNotes > 0 ? Math.round((embeddedCount / projectNotes) * 100) : 0;
+
+    // Session count
+    let activeSessions = 0;
+    try {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      activeSessions = (projectDb.query("SELECT COUNT(*) as cnt FROM session_registry WHERE last_active_at >= ?").get(oneDayAgo) as any).cnt;
+    } catch {}
+
+    const lines: string[] = [];
+    lines.push("## System Status");
+    lines.push("");
+    lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
+
+    if (sidecarStatus === "ready") {
+      lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)`);
+    } else if (sidecarStatus === "starting") {
+      lines.push("- **Embeddings**: starting up...");
+    } else {
+      lines.push("- **Embeddings**: unavailable - semantic search disabled, using keyword-only (FTS5)");
+      if (sidecarError) {
+        lines.push(`  - Reason: ${sidecarError}`);
+      }
+      lines.push("  - To enable: call `install_embeddings` tool, or manually install uv (https://docs.astral.sh/uv/)");
+    }
+
+    lines.push(`- **Active sessions** (24h): ${activeSessions}`);
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+);
+
+// ── install_embeddings ──────────────────────────────────────────────────
+server.tool(
+  "install_embeddings",
+  "Check and install dependencies needed for semantic search embeddings. Detects Python and uv availability, installs uv via pip if Python is available, and verifies the embedding sidecar can start.",
+  {
+    action: z.enum(["check", "install"]).optional().default("check"),
+  },
+  async ({ action }) => {
+    const lines: string[] = [];
+
+    // Check what's available
+    const checks = {
+      python: false,
+      pythonPath: "",
+      uv: false,
+      uvPath: "",
+    };
+
+    // Check python
+    try {
+      const proc = Bun.spawn(["python", "--version"], { stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      if (proc.exitCode === 0) {
+        const stdout = await new Response(proc.stdout).text();
+        checks.python = true;
+        checks.pythonPath = stdout.trim();
+      }
+    } catch {}
+
+    if (!checks.python) {
+      try {
+        const proc = Bun.spawn(["python3", "--version"], { stdout: "pipe", stderr: "pipe" });
+        await proc.exited;
+        if (proc.exitCode === 0) {
+          const stdout = await new Response(proc.stdout).text();
+          checks.python = true;
+          checks.pythonPath = stdout.trim();
+        }
+      } catch {}
+    }
+
+    // Check uv
+    try {
+      const proc = Bun.spawn(["uv", "--version"], { stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      if (proc.exitCode === 0) {
+        const stdout = await new Response(proc.stdout).text();
+        checks.uv = true;
+        checks.uvPath = stdout.trim();
+      }
+    } catch {}
+
+    if (action === "check") {
+      lines.push("## Embedding Dependencies Check");
+      lines.push("");
+      lines.push(`- Python: ${checks.python ? `installed (${checks.pythonPath})` : "NOT FOUND"}`);
+      lines.push(`- uv: ${checks.uv ? `installed (${checks.uvPath})` : "NOT FOUND"}`);
+      lines.push(`- Sidecar: ${sidecarStatus}`);
+      lines.push("");
+
+      if (checks.python && checks.uv) {
+        lines.push("All dependencies are installed. If the sidecar isn't running, it may need a restart.");
+        if (sidecarStatus !== "ready") {
+          lines.push("Try restarting the session to trigger sidecar startup.");
+        }
+      } else if (checks.python && !checks.uv) {
+        lines.push("Python is installed but uv is missing. uv manages the sidecar's virtual environment and dependencies automatically.");
+        lines.push("");
+        lines.push("To install uv, call this tool again with action='install', which will run: `pip install uv`");
+      } else {
+        lines.push("Python is not installed. The embedding sidecar requires Python 3.10+.");
+        lines.push("");
+        lines.push("Install Python from https://www.python.org/downloads/ then restart the session.");
+        lines.push("After Python is installed, call this tool again to install uv.");
+      }
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    }
+
+    // action === "install"
+    if (!checks.python) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: "Cannot install uv: Python is not available. Please install Python 3.10+ from https://www.python.org/downloads/ first, then call this tool again."
+        }]
+      };
+    }
+
+    if (checks.uv) {
+      lines.push("uv is already installed. Attempting to start the embedding sidecar...");
+      // Try starting the sidecar
+      const client = await startSidecar();
+      if (client) {
+        embeddingClient = client;
+        sidecarStatus = "ready";
+        sidecarError = null;
+        // Trigger backfill
+        client.backfill(getProjectDb()).catch(console.error);
+        lines.push("Sidecar started successfully! Semantic search is now active.");
+        lines.push("Backfilling embeddings for existing notes in the background.");
+      } else {
+        lines.push("Sidecar failed to start. Check the logs for details.");
+      }
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    }
+
+    // Install uv via pip
+    lines.push("Installing uv via pip...");
+    try {
+      const cmd = checks.pythonPath.includes("python3") ? "python3" : "python";
+      const proc = Bun.spawn([cmd, "-m", "pip", "install", "uv"], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      await proc.exited;
+
+      if (proc.exitCode === 0) {
+        lines.push("uv installed successfully!");
+        lines.push("");
+        lines.push("Now attempting to start the embedding sidecar...");
+
+        const client = await startSidecar();
+        if (client) {
+          embeddingClient = client;
+          sidecarStatus = "ready";
+          sidecarError = null;
+          client.backfill(getProjectDb()).catch(console.error);
+          lines.push("Sidecar started! Semantic search is now active.");
+          lines.push("First run will download the bge-m3 model (~1.5GB). This happens once and is cached.");
+        } else {
+          lines.push("uv installed but sidecar didn't start. Try restarting the session.");
+        }
+      } else {
+        const stderr = await new Response(proc.stderr).text();
+        lines.push(`pip install failed: ${stderr.slice(0, 200)}`);
+        lines.push("Try running manually: python -m pip install uv");
+      }
+    } catch (err) {
+      lines.push(`Installation error: ${err}`);
+    }
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   }
 );
 
@@ -982,12 +1218,19 @@ async function main() {
   startSidecar().then((client) => {
     embeddingClient = client;
     if (client) {
+      sidecarStatus = "ready";
+      sidecarError = null;
       client.backfill(getProjectDb()).catch((err) => {
         console.error("[embed] Backfill failed:", err);
       });
+    } else {
+      sidecarStatus = "unavailable";
+      // sidecarError already set by startSidecar()
     }
   }).catch((err) => {
     console.error("[embed] Sidecar startup failed:", err);
+    sidecarStatus = "error";
+    sidecarError = String(err);
   });
 }
 
