@@ -51,6 +51,14 @@ def load_model(model_id: str) -> None:
         repo_id=model_id,
         filename="onnx/model.onnx",
     )
+    # bge-m3 stores tensor weights in a separate external data file
+    try:
+        hf_hub_download(
+            repo_id=model_id,
+            filename="onnx/model.onnx_data",
+        )
+    except Exception:
+        pass  # Some models don't have external data files
     tokenizer_path = hf_hub_download(
         repo_id=model_id,
         filename="tokenizer.json",
