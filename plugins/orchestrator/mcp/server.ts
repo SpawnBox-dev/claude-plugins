@@ -29,28 +29,23 @@ let embeddingClient: EmbeddingClient | null = null;
 let sidecarProcess: ReturnType<typeof Bun.spawn> | null = null;
 let sessionTracker: SessionTracker | null = null;
 
-async function startSidecar(): Promise<EmbeddingClient | null> {
+async function trySpawn(
+  cmd: string[],
+  portFile: string,
+  label: string,
+  timeoutMs: number,
+): Promise<{ proc: ReturnType<typeof Bun.spawn>; port: number } | null> {
   try {
-    const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
-    const portFile = resolve(import.meta.dir, "../../.sidecar-port");
-
-    // Clean up stale port file
-    try {
-      const { unlinkSync } = await import("node:fs");
-      unlinkSync(portFile);
-    } catch {
-      // File may not exist, that's fine
-    }
-
-    sidecarProcess = Bun.spawn(["python", sidecarPath, "--port", "0", "--port-file", portFile], {
+    const proc = Bun.spawn(cmd, {
       stdout: "ignore",
       stderr: "ignore",
     });
 
-    // Wait for port file to appear (retry 3x with 1s delay)
+    // Wait for port file to appear, polling every 2s up to timeoutMs
+    const maxAttempts = Math.ceil(timeoutMs / 2000);
     let port: number | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      await new Promise((r) => setTimeout(r, 1000));
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await new Promise((r) => setTimeout(r, 2000));
       try {
         const content = await Bun.file(portFile).text();
         port = parseInt(content.trim(), 10);
@@ -62,27 +57,85 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     }
 
     if (!port) {
-      console.error("[embed] Sidecar did not write port file after 3 attempts");
+      try { proc.kill(); } catch { /* already dead */ }
       return null;
     }
 
+    // Verify health (retry 3x with 2s delay)
     const client = new EmbeddingClient(`http://127.0.0.1:${port}`);
-
-    // Verify health (retry 3x with 1s delay)
     for (let attempt = 0; attempt < 3; attempt++) {
       if (await client.isAvailable()) {
-        console.error(`[embed] Sidecar ready on port ${port}`);
-        return client;
+        console.error(`[embed] Sidecar ready on port ${port} via ${label}`);
+        return { proc, port };
       }
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 2000));
     }
 
-    console.error("[embed] Sidecar started but health check failed after 3 attempts");
+    // Health check failed - kill the process
+    try { proc.kill(); } catch { /* already dead */ }
     return null;
-  } catch (err) {
-    console.error("[embed] Failed to start sidecar:", err);
+  } catch {
+    // Command not found or spawn failed
     return null;
   }
+}
+
+async function startSidecar(): Promise<EmbeddingClient | null> {
+  const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
+  const requirementsPath = resolve(import.meta.dir, "../../sidecar/requirements.txt");
+  const portFile = resolve(import.meta.dir, "../../.sidecar-port");
+
+  // Clean up stale port file
+  try {
+    const { unlinkSync } = await import("node:fs");
+    unlinkSync(portFile);
+  } catch {
+    // File may not exist, that's fine
+  }
+
+  const baseArgs = ["--port", "0", "--port-file", portFile];
+
+  // Try uvx first (handles Python + deps automatically, longer timeout for first-run downloads)
+  let result = await trySpawn(
+    ["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs],
+    portFile,
+    "uvx",
+    60000,
+  );
+
+  // Fall back to direct python
+  if (!result) {
+    // Clean port file between attempts
+    try { const { unlinkSync } = await import("node:fs"); unlinkSync(portFile); } catch {}
+    result = await trySpawn(
+      ["python", sidecarPath, ...baseArgs],
+      portFile,
+      "python",
+      30000,
+    );
+  }
+
+  // Fall back to python3
+  if (!result) {
+    try { const { unlinkSync } = await import("node:fs"); unlinkSync(portFile); } catch {}
+    result = await trySpawn(
+      ["python3", sidecarPath, ...baseArgs],
+      portFile,
+      "python3",
+      30000,
+    );
+  }
+
+  if (!result) {
+    console.error(
+      "[embed] Sidecar unavailable: install uv (https://docs.astral.sh/uv/) for automatic embedding support, " +
+      "or install Python with: pip install -r sidecar/requirements.txt"
+    );
+    return null;
+  }
+
+  sidecarProcess = result.proc;
+  return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
 
 const server = new McpServer({
