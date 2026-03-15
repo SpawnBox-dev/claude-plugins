@@ -7,8 +7,10 @@ Use the Agent tool to spawn or resume the memory concierge:
 
 1. Check if you have a concierge agent ID from a prior turn in this conversation (it will be in your context from when you last invoked this skill)
 2. If found, resume it with your query using the `resume` parameter
-3. If not found, spawn a new `memory-concierge` agent
+3. If not found, spawn a new agent using `subagent_type: "orchestrator:memory-concierge"` with `model: "sonnet"`
 4. After the concierge responds, note its agent ID in your context for future resumption - no need to persist externally since the concierge only lives within one session
+
+**Default model: Sonnet.** Only use Opus when the concierge itself says to escalate (genuine contradictions, complex cross-domain synthesis).
 
 **When to use this skill:**
 - Starting work on an unfamiliar area ("what should I know about combat?")
@@ -23,8 +25,12 @@ Use the Agent tool to spawn or resume the memory concierge:
 
 **Example invocation:**
 
-Spawn or resume the memory-concierge agent with your query:
-- For routine queries (progressive disclosure, briefing): use model sonnet
-- For complex queries (contradiction detection, cross-session synthesis): use model opus
+```
+Agent tool:
+  subagent_type: "orchestrator:memory-concierge"
+  model: "sonnet"
+  prompt: "I'm about to work on [topic]. What decisions, conventions, and anti-patterns should I know about?"
+  resume: <agent_id from prior invocation, if available>
+```
 
-After the concierge responds, remember its agent ID for future `resume` calls this session.
+After the concierge responds, save its agent ID for future `resume` calls this session.

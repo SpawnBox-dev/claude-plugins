@@ -22,7 +22,7 @@ urgent. A 3-second briefing prevents 30 minutes of contradicting past decisions.
 You're entering a task and need context. Do this quickly and silently:
 
 1. Call `briefing` to get the session briefing (open threads, recent decisions, last checkpoint)
-2. If the task involves a specific domain or topic, call `lookup` with relevant keywords to check for existing conventions, decisions, or anti-patterns
+2. If the task involves a specific domain or topic, invoke `orchestrator:consult-concierge` with a query like "What should I know about [topic]?" - the concierge searches conventions, decisions, anti-patterns, and architecture notes, then returns a curated summary. For simple lookups, call `lookup` directly instead.
 3. Scan the briefing for anything relevant to your current task
 4. If the briefing shows a recovery checkpoint, honor it - that's where the last session left off
 

@@ -24,11 +24,13 @@ Run this evaluation every turn. It takes seconds and prevents you from missing c
 - To save context, use `briefing({ sections: ["work_items"] })` for just work items
 
 **About to implement something?**
-- Call `lookup` with relevant keywords → invoke `orchestrator:what-was-decided` if you find prior decisions
+- For complex/broad queries ("what should I know about combat?", "brief me on this area"): invoke `orchestrator:consult-concierge` — the concierge searches, curates, and returns the most relevant 3-5 items with strategic framing. It tracks what it already told you and won't repeat itself.
+- For simple/specific lookups ("find the broker convention"): call `lookup` directly — faster, no subagent overhead.
 - Call `plan` if the task is complex → invoke `orchestrator:planning-approach`
+- If you find prior decisions → invoke `orchestrator:what-was-decided`
 
 **About to touch unfamiliar code?**
-- Call `lookup` for conventions, anti-patterns, architecture notes about that area
+- Invoke `orchestrator:consult-concierge` with "What conventions, anti-patterns, and architecture notes exist for [area]?" — the concierge handles the multi-query search and cross-references results.
 
 ## AFTER you act this turn
 
@@ -113,3 +115,7 @@ These are your building blocks. Combine them however the situation demands:
 | `update_work_item` | Change status/priority/content/due date |
 | `breakdown` | Split complex work into children |
 | `retro` | Maintenance: decay, dedup, trajectories |
+| `system_status` | Check sidecar health, embedding coverage, session counts |
+| `check_similar` | Find prior art before implementing (needs sidecar) |
+| `install_embeddings` | Check/install embedding dependencies |
+| concierge (skill) | Curated, context-aware knowledge retrieval via `orchestrator:consult-concierge` |
