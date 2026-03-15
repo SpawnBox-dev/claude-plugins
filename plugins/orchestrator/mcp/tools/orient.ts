@@ -190,7 +190,7 @@ function formatBriefing(
       }
       for (const [dim, entries] of byDim) {
         const label = dim.replace(/_/g, " ");
-        for (const entry of entries.slice(0, 2)) {
+        for (const entry of entries.slice(0, 4)) {
           const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
           const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
           lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);

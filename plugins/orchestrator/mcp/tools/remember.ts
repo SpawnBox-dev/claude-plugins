@@ -131,22 +131,48 @@ function writeUserModel(
   try {
     const dimension = explicitDimension ?? inferDimension(content);
     const timestamp = now();
+    const inputKeywords = new Set(extractKeywords(content));
 
-    // Check if a similar observation exists for this dimension
-    // Use fuzzy match: same dimension and content starts the same way
-    const existing = globalDb
+    // Find best match in same dimension using Jaccard similarity
+    const candidates = globalDb
       .query(
-        `SELECT id, evidence, observation FROM user_model WHERE dimension = ? AND observation = ?`
+        `SELECT id, observation, evidence FROM user_model WHERE dimension = ?`
       )
-      .get(dimension, content) as { id: string; evidence: string; observation: string } | null;
+      .all(dimension) as Array<{ id: string; observation: string; evidence: string }>;
 
-    if (existing) {
-      // Increment evidence and update
-      const evidenceList = existing.evidence ? existing.evidence.split("\n").filter(Boolean) : [];
+    let bestMatch: { id: string; observation: string; evidence: string; similarity: number } | null = null;
+
+    for (const candidate of candidates) {
+      // Exact match
+      if (candidate.observation.trim().toLowerCase() === content.trim().toLowerCase()) {
+        bestMatch = { ...candidate, similarity: 1.0 };
+        break;
+      }
+
+      // Jaccard similarity on keywords
+      const candidateKeywords = new Set(extractKeywords(candidate.observation));
+      if (inputKeywords.size === 0 && candidateKeywords.size === 0) continue;
+
+      const intersection = new Set(
+        [...inputKeywords].filter((k) => candidateKeywords.has(k))
+      );
+      const union = new Set([...inputKeywords, ...candidateKeywords]);
+      const similarity = union.size > 0 ? intersection.size / union.size : 0;
+
+      if (similarity >= 0.5 && (!bestMatch || similarity > bestMatch.similarity)) {
+        bestMatch = { ...candidate, similarity };
+      }
+    }
+
+    if (bestMatch) {
+      // Update existing: append evidence, promote confidence, keep the longer/newer observation
+      const evidenceList = bestMatch.evidence ? bestMatch.evidence.split("\n").filter(Boolean) : [];
       if (context) evidenceList.push(`[${timestamp}] ${context}`);
+      // Keep whichever observation is longer (more detailed)
+      const observation = content.length > bestMatch.observation.length ? content : bestMatch.observation;
       globalDb.run(
-        `UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`,
-        [evidenceList.join("\n"), timestamp, existing.id]
+        `UPDATE user_model SET observation = ?, evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`,
+        [observation, evidenceList.join("\n"), timestamp, bestMatch.id]
       );
     } else {
       const evidence = context ? `[${timestamp}] ${context}` : "";

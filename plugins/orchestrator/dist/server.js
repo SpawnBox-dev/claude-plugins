@@ -20302,14 +20302,32 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
   try {
     const dimension = explicitDimension ?? inferDimension(content);
     const timestamp = now();
-    const existing = globalDb2.query(`SELECT id, evidence, observation FROM user_model WHERE dimension = ? AND observation = ?`).get(dimension, content);
-    if (existing) {
-      const evidenceList = existing.evidence ? existing.evidence.split(`
+    const inputKeywords = new Set(extractKeywords(content));
+    const candidates = globalDb2.query(`SELECT id, observation, evidence FROM user_model WHERE dimension = ?`).all(dimension);
+    let bestMatch = null;
+    for (const candidate of candidates) {
+      if (candidate.observation.trim().toLowerCase() === content.trim().toLowerCase()) {
+        bestMatch = { ...candidate, similarity: 1 };
+        break;
+      }
+      const candidateKeywords = new Set(extractKeywords(candidate.observation));
+      if (inputKeywords.size === 0 && candidateKeywords.size === 0)
+        continue;
+      const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
+      const union3 = new Set([...inputKeywords, ...candidateKeywords]);
+      const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
+      if (similarity >= 0.5 && (!bestMatch || similarity > bestMatch.similarity)) {
+        bestMatch = { ...candidate, similarity };
+      }
+    }
+    if (bestMatch) {
+      const evidenceList = bestMatch.evidence ? bestMatch.evidence.split(`
 `).filter(Boolean) : [];
       if (context)
         evidenceList.push(`[${timestamp}] ${context}`);
-      globalDb2.run(`UPDATE user_model SET evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [evidenceList.join(`
-`), timestamp, existing.id]);
+      const observation = content.length > bestMatch.observation.length ? content : bestMatch.observation;
+      globalDb2.run(`UPDATE user_model SET observation = ?, evidence = ?, confidence = 'high', updated_at = ? WHERE id = ?`, [observation, evidenceList.join(`
+`), timestamp, bestMatch.id]);
     } else {
       const evidence = context ? `[${timestamp}] ${context}` : "";
       globalDb2.run(`INSERT INTO user_model (id, dimension, observation, evidence, confidence, trajectory, created_at, updated_at)
@@ -20825,7 +20843,7 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
       }
       for (const [dim, entries] of byDim) {
         const label = dim.replace(/_/g, " ");
-        for (const entry of entries.slice(0, 2)) {
+        for (const entry of entries.slice(0, 4)) {
           const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
           const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
           lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);
