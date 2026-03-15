@@ -974,18 +974,21 @@ async function main() {
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
 
-  // Start embedding sidecar (non-blocking, never prevents server startup)
-  embeddingClient = await startSidecar();
-
-  if (embeddingClient) {
-    // Backfill embeddings for existing notes (fire-and-forget)
-    embeddingClient.backfill(getProjectDb()).catch((err) => {
-      console.error("[embed] Backfill failed:", err);
-    });
-  }
-
+  // Connect transport FIRST so MCP tools are available immediately
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  // Start embedding sidecar in background (never blocks MCP availability)
+  startSidecar().then((client) => {
+    embeddingClient = client;
+    if (client) {
+      client.backfill(getProjectDb()).catch((err) => {
+        console.error("[embed] Backfill failed:", err);
+      });
+    }
+  }).catch((err) => {
+    console.error("[embed] Sidecar startup failed:", err);
+  });
 }
 
 // Cleanup sidecar on exit

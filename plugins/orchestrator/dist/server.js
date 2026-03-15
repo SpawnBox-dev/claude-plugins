@@ -22064,14 +22064,18 @@ function cascadeResolution(db, noteId, timestamp) {
 async function main() {
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
-  embeddingClient = await startSidecar();
-  if (embeddingClient) {
-    embeddingClient.backfill(getProjectDb()).catch((err) => {
-      console.error("[embed] Backfill failed:", err);
-    });
-  }
   const transport = new StdioServerTransport;
   await server.connect(transport);
+  startSidecar().then((client) => {
+    embeddingClient = client;
+    if (client) {
+      client.backfill(getProjectDb()).catch((err) => {
+        console.error("[embed] Backfill failed:", err);
+      });
+    }
+  }).catch((err) => {
+    console.error("[embed] Sidecar startup failed:", err);
+  });
 }
 process.on("exit", () => {
   if (sidecarProcess) {
