@@ -20207,25 +20207,36 @@ class EmbeddingClient {
        VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
     return true;
   }
-  async backfill(db, batchSize = 100) {
-    const rows = db.query(`SELECT n.id, n.content FROM notes n
+  async backfill(db, batchSize = 32) {
+    const allRows = db.query(`SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL
-         LIMIT ?`).all(batchSize);
-    if (rows.length === 0)
+         WHERE e.note_id IS NULL`).all();
+    if (allRows.length === 0)
       return 0;
-    const texts = rows.map((r) => r.content);
-    const vectors = await this.embed(texts);
-    if (!vectors || vectors.length !== rows.length)
-      return 0;
-    const ts = new Date().toISOString();
+    let totalEmbedded = 0;
     const stmt = db.prepare(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`);
-    for (let i = 0;i < rows.length; i++) {
-      const blob = Buffer.from(vectors[i].buffer);
-      stmt.run(rows[i].id, blob, "bge-m3", ts);
+    for (let i = 0;i < allRows.length; i += batchSize) {
+      const batch = allRows.slice(i, i + batchSize);
+      const texts = batch.map((r) => r.content);
+      try {
+        const vectors = await this.embed(texts);
+        if (!vectors || vectors.length !== batch.length) {
+          console.error(`[embed] Backfill batch ${i / batchSize + 1} returned unexpected result, skipping ${batch.length} notes`);
+          continue;
+        }
+        const ts = new Date().toISOString();
+        for (let j = 0;j < batch.length; j++) {
+          const blob = Buffer.from(vectors[j].buffer);
+          stmt.run(batch[j].id, blob, "bge-m3", ts);
+        }
+        totalEmbedded += batch.length;
+      } catch (err) {
+        console.error(`[embed] Backfill batch ${i / batchSize + 1} failed, skipping ${batch.length} notes:`, err);
+        continue;
+      }
     }
-    return rows.length;
+    return totalEmbedded;
   }
   removeEmbedding(db, noteId) {
     db.run("DELETE FROM embeddings WHERE note_id = ?", [noteId]);
@@ -21448,7 +21459,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.12.4"
+  version: "0.12.5"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),

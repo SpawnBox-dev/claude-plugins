@@ -82,36 +82,51 @@ export class EmbeddingClient {
 
   /**
    * Find all notes without embeddings, batch embed them, and store.
-   * Returns the count of newly embedded notes (0 on failure or nothing to do).
+   * Loops through all un-embedded notes in chunks. Continues past
+   * failed batches (logs error, skips to next batch).
+   * Returns the total count of newly embedded notes.
    */
-  async backfill(db: Database, batchSize: number = 100): Promise<number> {
-    const rows = db
+  async backfill(db: Database, batchSize: number = 32): Promise<number> {
+    const allRows = db
       .query(
         `SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL
-         LIMIT ?`
+         WHERE e.note_id IS NULL`
       )
-      .all(batchSize) as Array<{ id: string; content: string }>;
+      .all() as Array<{ id: string; content: string }>;
 
-    if (rows.length === 0) return 0;
+    if (allRows.length === 0) return 0;
 
-    const texts = rows.map((r) => r.content);
-    const vectors = await this.embed(texts);
-    if (!vectors || vectors.length !== rows.length) return 0;
-
-    const ts = new Date().toISOString();
+    let totalEmbedded = 0;
     const stmt = db.prepare(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`
     );
 
-    for (let i = 0; i < rows.length; i++) {
-      const blob = Buffer.from(vectors[i].buffer);
-      stmt.run(rows[i].id, blob, "bge-m3", ts);
+    for (let i = 0; i < allRows.length; i += batchSize) {
+      const batch = allRows.slice(i, i + batchSize);
+      const texts = batch.map((r) => r.content);
+
+      try {
+        const vectors = await this.embed(texts);
+        if (!vectors || vectors.length !== batch.length) {
+          console.error(`[embed] Backfill batch ${i / batchSize + 1} returned unexpected result, skipping ${batch.length} notes`);
+          continue;
+        }
+
+        const ts = new Date().toISOString();
+        for (let j = 0; j < batch.length; j++) {
+          const blob = Buffer.from(vectors[j].buffer);
+          stmt.run(batch[j].id, blob, "bge-m3", ts);
+        }
+        totalEmbedded += batch.length;
+      } catch (err) {
+        console.error(`[embed] Backfill batch ${i / batchSize + 1} failed, skipping ${batch.length} notes:`, err);
+        continue;
+      }
     }
 
-    return rows.length;
+    return totalEmbedded;
   }
 
   /**
