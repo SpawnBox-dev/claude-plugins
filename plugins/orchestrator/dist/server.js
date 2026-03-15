@@ -21386,9 +21386,10 @@ async function trySpawn(cmd, portFile, label, timeoutMs) {
   }
 }
 async function startSidecar() {
-  const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
-  const requirementsPath = resolve(import.meta.dir, "../../sidecar/requirements.txt");
-  const portFile = resolve(import.meta.dir, "../../.sidecar-port");
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
+  const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
+  const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
+  const portFile = resolve(pluginRoot, ".sidecar-port");
   try {
     const { unlinkSync } = await import("fs");
     unlinkSync(portFile);
@@ -21447,7 +21448,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.12.3"
+  version: "0.12.4"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),

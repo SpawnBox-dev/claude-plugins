@@ -83,9 +83,11 @@ async function trySpawn(
 }
 
 async function startSidecar(): Promise<EmbeddingClient | null> {
-  const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
-  const requirementsPath = resolve(import.meta.dir, "../../sidecar/requirements.txt");
-  const portFile = resolve(import.meta.dir, "../../.sidecar-port");
+  // Use CLAUDE_PLUGIN_ROOT (set by Claude Code for plugins) or fall back to import.meta.dir
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
+  const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
+  const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
+  const portFile = resolve(pluginRoot, ".sidecar-port");
 
   // Clean up stale port file
   try {
@@ -171,7 +173,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.12.3",
+  version: "0.12.4",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
