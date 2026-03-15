@@ -107,6 +107,58 @@ ALTER TABLE notes ADD COLUMN due_date TEXT;
 CREATE INDEX IF NOT EXISTS idx_notes_due_date ON notes(due_date);
 `,
   },
+  {
+    version: 7,
+    name: "create_embeddings",
+    sql: `
+CREATE TABLE IF NOT EXISTS embeddings (
+  note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+  vector BLOB NOT NULL,
+  model TEXT NOT NULL,
+  embedded_at TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 8,
+    name: "add_activation_tracking",
+    sql: `
+ALTER TABLE notes ADD COLUMN access_count INTEGER DEFAULT 0;
+ALTER TABLE notes ADD COLUMN last_accessed_at TEXT;
+`,
+  },
+  {
+    version: 9,
+    name: "create_session_log",
+    sql: `
+CREATE TABLE IF NOT EXISTS session_log (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  note_id TEXT NOT NULL,
+  surfaced_at TEXT NOT NULL,
+  turn_number INTEGER,
+  delivery_type TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_log_note ON session_log(note_id);
+`,
+  },
+  {
+    version: 10,
+    name: "create_session_registry",
+    sql: `
+CREATE TABLE IF NOT EXISTS session_registry (
+  session_id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  last_active_at TEXT NOT NULL,
+  current_task TEXT,
+  agent_model TEXT,
+  notes_surfaced INTEGER DEFAULT 0,
+  compaction_count INTEGER DEFAULT 0,
+  concierge_agent_id TEXT
+);
+`,
+  },
 ];
 
 /**

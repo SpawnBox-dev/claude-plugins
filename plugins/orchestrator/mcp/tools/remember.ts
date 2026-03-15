@@ -5,6 +5,10 @@ import { generateId, now, extractKeywords } from "../utils";
 import { findDuplicates } from "../engine/deduplicator";
 import { createAutoLinks } from "../engine/linker";
 import { promoteConfidence } from "../engine/scorer";
+import { type EmbeddingClient, blobToVector } from "../engine/embeddings";
+import { cosineSimilarity } from "../engine/hybrid_search";
+import { handleCheckSimilar } from "./check_similar";
+import { truncate } from "../utils";
 
 export interface RememberInput {
   content: string;
@@ -24,11 +28,15 @@ export interface RememberResult {
   message: string;
 }
 
-export function handleRemember(
+const SIMILARITY_ALERT_TYPES: NoteType[] = ["decision", "convention", "anti_pattern"];
+const SIMILARITY_ALERT_THRESHOLD = 0.75;
+
+export async function handleRemember(
   projectDb: Database,
   globalDb: Database,
-  input: RememberInput
-): RememberResult {
+  input: RememberInput,
+  embeddingClient?: EmbeddingClient | null
+): Promise<RememberResult> {
   // Determine which DB to use
   const useGlobal =
     input.scope === "global" || GLOBAL_TYPES.includes(input.type);
@@ -92,6 +100,42 @@ export function handleRemember(
   // Create auto-links
   const links = createAutoLinks(db, noteId, keywords);
 
+  // Embed and check for similar prior knowledge
+  let similarityAlert = "";
+  if (embeddingClient) {
+    try {
+      const vecs = await embeddingClient.embed([input.content]);
+      if (vecs && vecs.length > 0) {
+        const queryVector = vecs[0];
+
+        // Store the embedding
+        const blob = Buffer.from(queryVector.buffer);
+        db.run(
+          `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+           VALUES (?, ?, ?, ?)`,
+          [noteId, blob, "bge-m3", new Date().toISOString()]
+        );
+
+        // Check for similar existing notes (excluding the one we just inserted)
+        const similar = handleCheckSimilar(db, queryVector, {
+          proposed_action: input.content,
+          types: SIMILARITY_ALERT_TYPES,
+          threshold: SIMILARITY_ALERT_THRESHOLD,
+        });
+
+        // Filter out the note we just inserted
+        const relatedNotes = similar.results.filter((r) => r.id !== noteId);
+
+        if (relatedNotes.length > 0) {
+          const top = relatedNotes[0];
+          similarityAlert = `\n!! RELATED PRIOR KNOWLEDGE: A similar ${top.type} already exists (id: ${top.id}):\n  "${truncate(top.content, 120)}"\n  Review for consistency. Call lookup(id: "${top.id}") for full context.`;
+        }
+      }
+    } catch (err) {
+      console.error(`[embed] Failed to embed note ${noteId}:`, err);
+    }
+  }
+
   // Write to user_model if this is a user_pattern note
   if (input.type === "user_pattern") {
     writeUserModel(globalDb, input.content, input.context, input.dimension);
@@ -103,7 +147,7 @@ export function handleRemember(
     duplicate: false,
     promoted: false,
     links_created: links.length,
-    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`,
+    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.${similarityAlert}`,
   };
 }
 

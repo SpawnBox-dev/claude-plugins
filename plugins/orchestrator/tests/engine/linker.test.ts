@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { findRelatedNotes, createAutoLinks, inferRelationship } from "../../mcp/engine/linker";
+import { findRelatedNotes, findRelatedNotesHybrid, createAutoLinks, inferRelationship } from "../../mcp/engine/linker";
 import { generateId, now } from "../../mcp/utils";
 
 function insertNote(
@@ -151,5 +151,84 @@ describe("linker", () => {
     const links = createAutoLinks(db, id1, ["backup", "snapshot", "engine"]);
     expect(links.every((l) => l.from_note_id !== l.to_note_id)).toBe(true);
     expect(links.every((l) => l.to_note_id !== id1)).toBe(true);
+  });
+
+  test("findRelatedNotesHybrid falls back to FTS5 when no queryVector provided", async () => {
+    insertNote(db, {
+      content: "broker convention for telemetry",
+      keywords: "broker,convention,telemetry",
+    });
+    const results = await findRelatedNotesHybrid(db, "broker telemetry", 10);
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0].content).toContain("broker");
+  });
+
+  test("findRelatedNotesHybrid uses vector similarity when queryVector provided", async () => {
+    const id = insertNote(db, {
+      content: "broker convention for telemetry",
+      keywords: "broker,convention,telemetry",
+    });
+    // Insert a mock embedding
+    const mockVec = new Float32Array(768).fill(0.5);
+    const blob = Buffer.from(mockVec.buffer);
+    db.run(
+      `INSERT INTO embeddings (note_id, vector, model, embedded_at) VALUES (?, ?, ?, ?)`,
+      [id, blob, "bge-m3", new Date().toISOString()]
+    );
+
+    const queryVec = new Float32Array(768).fill(0.5);
+    const results = await findRelatedNotesHybrid(db, "broker telemetry", 10, queryVec);
+    expect(results.length).toBeGreaterThan(0);
+  });
+
+  test("findRelatedNotesHybrid merges FTS and vector results via RRF", async () => {
+    // Note 1: strong FTS match, has embedding
+    const id1 = insertNote(db, {
+      content: "backup snapshot engine handles incremental backups",
+      keywords: "backup,snapshot,engine,incremental",
+    });
+    // Note 2: weaker FTS match, has embedding pointing same direction as query
+    const id2 = insertNote(db, {
+      content: "backup retention policy for old snapshots",
+      keywords: "backup,retention,policy,snapshots",
+    });
+    // Note 3: no FTS match, but has embedding
+    const id3 = insertNote(db, {
+      content: "discord bot sends notifications to channels",
+      keywords: "discord,bot,notifications,channels",
+    });
+
+    // Give all three embeddings
+    const vec1 = new Float32Array(768).fill(0.3);
+    const vec2 = new Float32Array(768).fill(0.6);
+    const vec3 = new Float32Array(768).fill(0.9);
+    const ts = new Date().toISOString();
+    for (const [id, vec] of [[id1, vec1], [id2, vec2], [id3, vec3]] as [string, Float32Array][]) {
+      db.run(
+        `INSERT INTO embeddings (note_id, vector, model, embedded_at) VALUES (?, ?, ?, ?)`,
+        [id, Buffer.from(vec.buffer), "bge-m3", ts]
+      );
+    }
+
+    // Query vector similar to vec2
+    const queryVec = new Float32Array(768).fill(0.6);
+    const results = await findRelatedNotesHybrid(db, "backup snapshot", 10, queryVec);
+    expect(results.length).toBeGreaterThanOrEqual(2);
+    // All returned results should have valid ids
+    for (const r of results) {
+      expect(r.id).toBeTruthy();
+      expect(r.content).toBeTruthy();
+    }
+  });
+
+  test("findRelatedNotesHybrid respects limit", async () => {
+    for (let i = 0; i < 5; i++) {
+      insertNote(db, {
+        content: `broker telemetry note number ${i}`,
+        keywords: "broker,telemetry",
+      });
+    }
+    const results = await findRelatedNotesHybrid(db, "broker telemetry", 2);
+    expect(results.length).toBeLessThanOrEqual(2);
   });
 });

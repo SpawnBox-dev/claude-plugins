@@ -19,8 +19,8 @@ describe("remember tool", () => {
     globalDb = makeDb("global");
   });
 
-  test("stores a decision note in project DB", () => {
-    const result = handleRemember(projectDb, globalDb, {
+  test("stores a decision note in project DB", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
       content: "Use event-driven architecture for all backend services",
       type: "decision",
       context: "Architecture discussion about backend design",
@@ -48,8 +48,8 @@ describe("remember tool", () => {
     expect(globalNote).toBeNull();
   });
 
-  test("stores user_pattern in global DB", () => {
-    const result = handleRemember(projectDb, globalDb, {
+  test("stores user_pattern in global DB", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
       content: "User prefers complete removals in one pass",
       type: "user_pattern",
     });
@@ -71,14 +71,14 @@ describe("remember tool", () => {
     expect(projectNote).toBeNull();
   });
 
-  test("detects duplicates and promotes confidence", () => {
-    const first = handleRemember(projectDb, globalDb, {
+  test("detects duplicates and promotes confidence", async () => {
+    const first = await handleRemember(projectDb, globalDb, {
       content: "Always use TypeScript strict mode",
       type: "convention",
     });
     expect(first.stored).toBe(true);
 
-    const second = handleRemember(projectDb, globalDb, {
+    const second = await handleRemember(projectDb, globalDb, {
       content: "Always use TypeScript strict mode",
       type: "convention",
     });
@@ -94,8 +94,8 @@ describe("remember tool", () => {
     expect(note.confidence).toBe("high");
   });
 
-  test("writes user_model entry for user_pattern notes", () => {
-    const result = handleRemember(projectDb, globalDb, {
+  test("writes user_model entry for user_pattern notes", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
       content: "User prefers complete removals in one pass",
       type: "user_pattern",
       context: "Observed during code refactoring session",
@@ -112,8 +112,8 @@ describe("remember tool", () => {
     expect(entry.confidence).toBe("medium");
   });
 
-  test("auto-generates keywords", () => {
-    const result = handleRemember(projectDb, globalDb, {
+  test("auto-generates keywords", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
       content: "Backup snapshot engine handles incremental backups efficiently",
       type: "architecture",
       context: "backup system design review",

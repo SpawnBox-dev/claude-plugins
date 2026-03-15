@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -16,13 +17,77 @@ import { handleRecall } from "./tools/recall";
 import { handleOrient } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
+import { handleCheckSimilar } from "./tools/check_similar";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords } from "./utils";
 import { createAutoLinks } from "./engine/linker";
+import { EmbeddingClient } from "./engine/embeddings";
+import { SessionTracker } from "./engine/session_tracker";
+
+// ── Sidecar lifecycle ────────────────────────────────────────────────────
+let embeddingClient: EmbeddingClient | null = null;
+let sidecarProcess: ReturnType<typeof Bun.spawn> | null = null;
+let sessionTracker: SessionTracker | null = null;
+
+async function startSidecar(): Promise<EmbeddingClient | null> {
+  try {
+    const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
+    const portFile = resolve(import.meta.dir, "../../.sidecar-port");
+
+    // Clean up stale port file
+    try {
+      const { unlinkSync } = await import("node:fs");
+      unlinkSync(portFile);
+    } catch {
+      // File may not exist, that's fine
+    }
+
+    sidecarProcess = Bun.spawn(["python", sidecarPath, "--port", "0", "--port-file", portFile], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+    // Wait for port file to appear (retry 3x with 1s delay)
+    let port: number | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const content = await Bun.file(portFile).text();
+        port = parseInt(content.trim(), 10);
+        if (!isNaN(port) && port > 0) break;
+        port = null;
+      } catch {
+        // Port file not ready yet
+      }
+    }
+
+    if (!port) {
+      console.error("[embed] Sidecar did not write port file after 3 attempts");
+      return null;
+    }
+
+    const client = new EmbeddingClient(`http://127.0.0.1:${port}`);
+
+    // Verify health (retry 3x with 1s delay)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await client.isAvailable()) {
+        console.error(`[embed] Sidecar ready on port ${port}`);
+        return client;
+      }
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    console.error("[embed] Sidecar started but health check failed after 3 attempts");
+    return null;
+  } catch (err) {
+    console.error("[embed] Failed to start sidecar:", err);
+    return null;
+  }
+}
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.9.0",
+  version: "0.12.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -63,14 +128,14 @@ server.tool(
       .describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference"),
   },
   async ({ content, type, context, tags, scope, dimension }) => {
-    const result = handleRemember(getProjectDb(), getGlobalDb(), {
+    const result = await handleRemember(getProjectDb(), getGlobalDb(), {
       content,
       type,
       context,
       tags,
       scope,
       dimension: dimension as Dimension | undefined,
-    });
+    }, embeddingClient);
     return {
       content: [{ type: "text" as const, text: result.message }],
     };
@@ -87,18 +152,73 @@ server.tool(
     type: z.enum(NOTE_TYPES).optional(),
     limit: z.number().optional(),
     depth: z.number().min(1).max(5).optional(),
+    session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, limit, depth }) => {
-    const result = handleRecall(getProjectDb(), getGlobalDb(), {
+  async ({ query, id, type, limit, depth, session_id }) => {
+    const projectDb = getProjectDb();
+    const result = handleRecall(projectDb, getGlobalDb(), {
       query,
       id,
       type,
       limit,
       depth,
     });
+
+    // Session tracking: register session, advance turn, annotate results
+    let turn: number | null = null;
+    const tracker = sessionTracker;
+    if (session_id && tracker) {
+      tracker.registerSession(session_id);
+      turn = tracker.nextTurn(session_id);
+    }
+
+    // Collect all note IDs from results for annotation
+    const noteIds: string[] = [];
+    if (result.detail) {
+      noteIds.push(result.detail.id);
+    }
+    for (const r of result.results) {
+      noteIds.push(r.id);
+    }
+
+    // Build annotation map if session tracking is active
+    const annotations = new Map<string, import("./engine/session_tracker").SessionAnnotation>();
+    if (session_id && tracker && turn !== null) {
+      for (const noteId of noteIds) {
+        // Annotate BEFORE logging (so "already_sent" reflects prior lookups, not this one)
+        const annotation = tracker.annotateResult(session_id, noteId, turn);
+        annotations.set(noteId, annotation);
+
+        // Log that we surfaced this note
+        const deliveryType = annotation.already_sent ? "refresh" : "fresh";
+        tracker.logSurfaced(session_id, noteId, turn, deliveryType);
+
+        // Update activation tracking on the note
+        const timestamp = now();
+        projectDb.run(
+          `UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`,
+          [timestamp, noteId]
+        );
+      }
+    }
+
+    // Format annotation marker for a note
+    function annotationMarker(noteId: string): string {
+      const ann = annotations.get(noteId);
+      if (!ann) return "";
+      const parts: string[] = [];
+      if (ann.already_sent && ann.sent_turns_ago !== null) {
+        parts.push(`already sent ${ann.sent_turns_ago} turn(s) ago`);
+      }
+      if (ann.sent_to_other_sessions.length > 0) {
+        parts.push(`sent to ${ann.sent_to_other_sessions.length} other session(s)`);
+      }
+      return parts.length > 0 ? ` [${parts.join("; ")}]` : "";
+    }
+
     let text = result.message;
     if (result.detail) {
-      text += `\n\n**${result.detail.type}** (${result.detail.confidence})\n${result.detail.content}`;
+      text += `\n\n**${result.detail.type}** (${result.detail.confidence})\n${result.detail.content}${annotationMarker(result.detail.id)}`;
       if (result.detail.links.length > 0) {
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
@@ -109,7 +229,7 @@ server.tool(
     } else if (result.results.length > 0) {
       text += "\n";
       for (const r of result.results) {
-        text += `\n- **${r.id}** [${r.type}/${r.confidence}] ${r.content}`;
+        text += `\n- **${r.id}** [${r.type}/${r.confidence}] ${r.content}${annotationMarker(r.id)}`;
       }
     }
     return {
@@ -154,12 +274,12 @@ server.tool(
     if (next_steps?.length) parts.push(`\n## Next Steps\n${next_steps.map(s => `- ${s}`).join("\n")}`);
 
     const content = parts.join("\n");
-    const result = handleRemember(getProjectDb(), getGlobalDb(), {
+    const result = await handleRemember(getProjectDb(), getGlobalDb(), {
       content,
       type: "checkpoint",
       context: `Checkpoint created at ${new Date().toISOString()}`,
       tags: "checkpoint",
-    });
+    }, embeddingClient);
 
     return {
       content: [{
@@ -219,12 +339,12 @@ server.tool(
     const cascadeResults = cascadeResolution(db, id, timestamp);
 
     if (resolution) {
-      handleRemember(projectDb, globalDb, {
+      await handleRemember(projectDb, globalDb, {
         content: resolution,
         type: "decision",
         context: `Resolved ${row.type}: ${row.content}`,
         tags: row.type,
-      });
+      }, embeddingClient);
     }
 
     let message = `Resolved ${row.type} note "${id}".`;
@@ -309,6 +429,13 @@ server.tool(
         id,
       ]
     );
+
+    // Re-embed if content changed
+    if (content && embeddingClient) {
+      embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
+        embeddingClient!.removeEmbedding(db, id);
+      });
+    }
 
     return {
       content: [{
@@ -642,6 +769,41 @@ server.tool(
   }
 );
 
+// ── check_similar ────────────────────────────────────────────────────────
+server.tool(
+  "check_similar",
+  "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use before implementing to catch prior art.",
+  {
+    proposed_action: z.string(),
+    types: z.array(z.enum(NOTE_TYPES)).optional(),
+    threshold: z.number().min(0).max(1).optional(),
+  },
+  async ({ proposed_action, types, threshold }) => {
+    let queryVector: Float32Array | null = null;
+    if (embeddingClient) {
+      const vecs = await embeddingClient.embed([proposed_action]);
+      if (vecs && vecs.length > 0) queryVector = vecs[0];
+    }
+    const result = handleCheckSimilar(getProjectDb(), queryVector, {
+      proposed_action,
+      types,
+      threshold,
+    });
+
+    let text = result.message;
+    if (result.results.length > 0) {
+      text += "\n";
+      for (const r of result.results) {
+        text += `\n- **${r.id}** [${r.type}] (${(r.similarity * 100).toFixed(1)}%) ${r.content}`;
+      }
+    }
+
+    return {
+      content: [{ type: "text" as const, text }],
+    };
+  }
+);
+
 // ── retro ───────────────────────────────────────────────────────────────
 server.tool(
   "retro",
@@ -755,9 +917,30 @@ function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, ti
 
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
+  // Initialize session tracker and clean up stale sessions
+  sessionTracker = new SessionTracker(getProjectDb());
+  sessionTracker.cleanup();
+
+  // Start embedding sidecar (non-blocking, never prevents server startup)
+  embeddingClient = await startSidecar();
+
+  if (embeddingClient) {
+    // Backfill embeddings for existing notes (fire-and-forget)
+    embeddingClient.backfill(getProjectDb()).catch((err) => {
+      console.error("[embed] Backfill failed:", err);
+    });
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
+
+// Cleanup sidecar on exit
+process.on("exit", () => {
+  if (sidecarProcess) {
+    try { sidecarProcess.kill(); } catch { /* already dead */ }
+  }
+});
 
 main().catch((err) => {
   console.error("Server failed to start:", err);

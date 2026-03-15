@@ -6517,6 +6517,9 @@ var require_dist = __commonJS((exports, module) => {
   exports.default = formatsPlugin;
 });
 
+// mcp/server.ts
+import { resolve } from "path";
+
 // node_modules/zod/v3/external.js
 var exports_external = {};
 __export(exports_external, {
@@ -19629,6 +19632,58 @@ CREATE INDEX IF NOT EXISTS idx_notes_priority ON notes(priority);
 ALTER TABLE notes ADD COLUMN due_date TEXT;
 CREATE INDEX IF NOT EXISTS idx_notes_due_date ON notes(due_date);
 `
+  },
+  {
+    version: 7,
+    name: "create_embeddings",
+    sql: `
+CREATE TABLE IF NOT EXISTS embeddings (
+  note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+  vector BLOB NOT NULL,
+  model TEXT NOT NULL,
+  embedded_at TEXT NOT NULL
+);
+`
+  },
+  {
+    version: 8,
+    name: "add_activation_tracking",
+    sql: `
+ALTER TABLE notes ADD COLUMN access_count INTEGER DEFAULT 0;
+ALTER TABLE notes ADD COLUMN last_accessed_at TEXT;
+`
+  },
+  {
+    version: 9,
+    name: "create_session_log",
+    sql: `
+CREATE TABLE IF NOT EXISTS session_log (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  note_id TEXT NOT NULL,
+  surfaced_at TEXT NOT NULL,
+  turn_number INTEGER,
+  delivery_type TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_log_session ON session_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_log_note ON session_log(note_id);
+`
+  },
+  {
+    version: 10,
+    name: "create_session_registry",
+    sql: `
+CREATE TABLE IF NOT EXISTS session_registry (
+  session_id TEXT PRIMARY KEY,
+  started_at TEXT NOT NULL,
+  last_active_at TEXT NOT NULL,
+  current_task TEXT,
+  agent_model TEXT,
+  notes_surfaced INTEGER DEFAULT 0,
+  compaction_count INTEGER DEFAULT 0,
+  concierge_agent_id TEXT
+);
+`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20085,6 +20140,102 @@ function mergeDuplicates(db) {
   return totalMerged;
 }
 
+// mcp/engine/hybrid_search.ts
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0;i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0)
+    return 0;
+  return dot / denom;
+}
+
+// mcp/engine/embeddings.ts
+class EmbeddingClient {
+  baseUrl;
+  constructor(baseUrl) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+  async isAvailable() {
+    try {
+      const controller = new AbortController;
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this.baseUrl}/health`, {
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      if (!res.ok)
+        return false;
+      const body = await res.json();
+      return body.status === "ready";
+    } catch {
+      return false;
+    }
+  }
+  async embed(texts) {
+    try {
+      const controller = new AbortController;
+      const timeout = setTimeout(() => controller.abort(), 30000);
+      const res = await fetch(`${this.baseUrl}/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texts }),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      if (!res.ok)
+        return null;
+      const body = await res.json();
+      return body.vectors.map((v) => new Float32Array(v));
+    } catch {
+      return null;
+    }
+  }
+  async embedIfAvailable(db, noteId, content) {
+    const vectors = await this.embed([content]);
+    if (!vectors || vectors.length === 0)
+      return false;
+    const vector = vectors[0];
+    const blob = Buffer.from(vector.buffer);
+    db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
+    return true;
+  }
+  async backfill(db, batchSize = 100) {
+    const rows = db.query(`SELECT n.id, n.content FROM notes n
+         LEFT JOIN embeddings e ON n.id = e.note_id
+         WHERE e.note_id IS NULL
+         LIMIT ?`).all(batchSize);
+    if (rows.length === 0)
+      return 0;
+    const texts = rows.map((r) => r.content);
+    const vectors = await this.embed(texts);
+    if (!vectors || vectors.length !== rows.length)
+      return 0;
+    const ts = new Date().toISOString();
+    const stmt = db.prepare(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?)`);
+    for (let i = 0;i < rows.length; i++) {
+      const blob = Buffer.from(vectors[i].buffer);
+      stmt.run(rows[i].id, blob, "bge-m3", ts);
+    }
+    return rows.length;
+  }
+  removeEmbedding(db, noteId) {
+    db.run("DELETE FROM embeddings WHERE note_id = ?", [noteId]);
+  }
+}
+function blobToVector(blob) {
+  const copy = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  return new Float32Array(copy);
+}
+
 // mcp/engine/linker.ts
 function inferRelationship(fromType, toType) {
   if (fromType === "decision" && toType === "open_thread")
@@ -20223,8 +20374,48 @@ function computeAutonomyScore(db, domain) {
   };
 }
 
+// mcp/tools/check_similar.ts
+var DEFAULT_TYPES = ["decision", "convention", "anti_pattern"];
+var DEFAULT_THRESHOLD = 0.5;
+var MAX_RESULTS = 10;
+function handleCheckSimilar(db, queryVector, input) {
+  if (queryVector === null) {
+    return {
+      results: [],
+      message: "Embedding sidecar unavailable"
+    };
+  }
+  const types2 = input.types ?? DEFAULT_TYPES;
+  const threshold = input.threshold ?? DEFAULT_THRESHOLD;
+  const placeholders = types2.map(() => "?").join(",");
+  const rows = db.query(`SELECT n.id, n.type, n.content, e.vector
+       FROM notes n
+       JOIN embeddings e ON n.id = e.note_id
+       WHERE n.type IN (${placeholders})
+         AND n.resolved = 0`).all(...types2);
+  const scored = [];
+  for (const row of rows) {
+    const noteVector = blobToVector(row.vector);
+    const similarity = cosineSimilarity(queryVector, noteVector);
+    if (similarity >= threshold) {
+      scored.push({
+        id: row.id,
+        type: row.type,
+        content: row.content,
+        similarity
+      });
+    }
+  }
+  scored.sort((a, b) => b.similarity - a.similarity);
+  const results = scored.slice(0, MAX_RESULTS);
+  const message = results.length > 0 ? `Found ${results.length} similar note(s).` : "No similar notes found.";
+  return { results, message };
+}
+
 // mcp/tools/remember.ts
-function handleRemember(projectDb2, globalDb2, input) {
+var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
+var SIMILARITY_ALERT_THRESHOLD = 0.75;
+async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
   const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
   const db = useGlobal ? globalDb2 : projectDb2;
   const duplicates = findDuplicates(db, input.type, input.content);
@@ -20270,6 +20461,33 @@ function handleRemember(projectDb2, globalDb2, input) {
     timestamp
   ]);
   const links = createAutoLinks(db, noteId, keywords);
+  let similarityAlert = "";
+  if (embeddingClient) {
+    try {
+      const vecs = await embeddingClient.embed([input.content]);
+      if (vecs && vecs.length > 0) {
+        const queryVector = vecs[0];
+        const blob = Buffer.from(queryVector.buffer);
+        db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+           VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
+        const similar = handleCheckSimilar(db, queryVector, {
+          proposed_action: input.content,
+          types: SIMILARITY_ALERT_TYPES,
+          threshold: SIMILARITY_ALERT_THRESHOLD
+        });
+        const relatedNotes = similar.results.filter((r) => r.id !== noteId);
+        if (relatedNotes.length > 0) {
+          const top = relatedNotes[0];
+          similarityAlert = `
+!! RELATED PRIOR KNOWLEDGE: A similar ${top.type} already exists (id: ${top.id}):
+  "${truncate(top.content, 120)}"
+  Review for consistency. Call lookup(id: "${top.id}") for full context.`;
+        }
+      }
+    } catch (err) {
+      console.error(`[embed] Failed to embed note ${noteId}:`, err);
+    }
+  }
   if (input.type === "user_pattern") {
     writeUserModel(globalDb2, input.content, input.context, input.dimension);
   }
@@ -20279,7 +20497,7 @@ function handleRemember(projectDb2, globalDb2, input) {
     duplicate: false,
     promoted: false,
     links_created: links.length,
-    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.${similarityAlert}`
   };
 }
 function inferDimension(content) {
@@ -21027,10 +21245,149 @@ function handleReflect(projectDb2, globalDb2, input) {
   };
 }
 
+// mcp/engine/session_tracker.ts
+class SessionTracker {
+  db;
+  turnCounters = new Map;
+  constructor(db) {
+    this.db = db;
+  }
+  nextTurn(sessionId) {
+    const current = this.turnCounters.get(sessionId) ?? 0;
+    const next = current + 1;
+    this.turnCounters.set(sessionId, next);
+    return next;
+  }
+  getCurrentTurn(sessionId) {
+    return this.turnCounters.get(sessionId) ?? 0;
+  }
+  registerSession(sessionId, model) {
+    const timestamp = now();
+    this.db.run(`INSERT OR IGNORE INTO session_registry
+       (session_id, started_at, last_active_at, agent_model, notes_surfaced, compaction_count)
+       VALUES (?, ?, ?, ?, 0, 0)`, [sessionId, timestamp, timestamp, model ?? null]);
+    this.db.run(`UPDATE session_registry SET last_active_at = ? WHERE session_id = ?`, [timestamp, sessionId]);
+  }
+  getSession(sessionId) {
+    return this.db.query(`SELECT * FROM session_registry WHERE session_id = ?`).get(sessionId);
+  }
+  logSurfaced(sessionId, noteId, turnNumber, deliveryType) {
+    const id = generateId();
+    const timestamp = now();
+    this.db.run(`INSERT INTO session_log (id, session_id, note_id, surfaced_at, turn_number, delivery_type)
+       VALUES (?, ?, ?, ?, ?, ?)`, [id, sessionId, noteId, timestamp, turnNumber, deliveryType]);
+    this.db.run(`UPDATE session_registry SET notes_surfaced = notes_surfaced + 1 WHERE session_id = ?`, [sessionId]);
+  }
+  getNotesSurfaced(sessionId) {
+    const rows = this.db.query(`SELECT note_id, turn_number, delivery_type
+         FROM session_log
+         WHERE session_id = ?
+         ORDER BY turn_number DESC`).all(sessionId);
+    const result = new Map;
+    for (const row of rows) {
+      if (!result.has(row.note_id)) {
+        result.set(row.note_id, {
+          turn: row.turn_number,
+          type: row.delivery_type
+        });
+      }
+    }
+    return result;
+  }
+  annotateResult(sessionId, noteId, currentTurn) {
+    const selfRow = this.db.query(`SELECT turn_number FROM session_log
+         WHERE session_id = ? AND note_id = ?
+         ORDER BY turn_number DESC LIMIT 1`).get(sessionId, noteId);
+    const already_sent = selfRow !== null;
+    const sent_turns_ago = selfRow !== null ? currentTurn - selfRow.turn_number : null;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const crossRows = this.db.query(`SELECT session_id, turn_number FROM session_log
+         WHERE note_id = ? AND session_id != ? AND surfaced_at > ?
+         ORDER BY surfaced_at DESC`).all(noteId, sessionId, sevenDaysAgo);
+    const sent_to_other_sessions = crossRows.map((r) => ({
+      session_id: r.session_id,
+      turn: r.turn_number
+    }));
+    const noteRow = this.db.query(`SELECT access_count FROM notes WHERE id = ?`).get(noteId);
+    const activation_score = noteRow?.access_count ?? 0;
+    return {
+      already_sent,
+      sent_turns_ago,
+      sent_to_other_sessions,
+      activation_score
+    };
+  }
+  updateCurrentTask(sessionId, task) {
+    this.db.run(`UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`, [task, now(), sessionId]);
+  }
+  setConciergeAgentId(sessionId, agentId) {
+    this.db.run(`UPDATE session_registry SET concierge_agent_id = ? WHERE session_id = ?`, [agentId, sessionId]);
+  }
+  getConciergeAgentId(sessionId) {
+    const row = this.db.query(`SELECT concierge_agent_id FROM session_registry WHERE session_id = ?`).get(sessionId);
+    return row?.concierge_agent_id ?? null;
+  }
+  cleanup() {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    this.db.run(`DELETE FROM session_log WHERE surfaced_at < ?`, [
+      sevenDaysAgo
+    ]);
+    this.db.run(`DELETE FROM session_registry WHERE last_active_at < ?`, [
+      sevenDaysAgo
+    ]);
+  }
+}
+
 // mcp/server.ts
+var embeddingClient = null;
+var sidecarProcess = null;
+var sessionTracker = null;
+async function startSidecar() {
+  try {
+    const sidecarPath = resolve(import.meta.dir, "../../sidecar/embed_server.py");
+    const portFile = resolve(import.meta.dir, "../../.sidecar-port");
+    try {
+      const { unlinkSync } = await import("fs");
+      unlinkSync(portFile);
+    } catch {}
+    sidecarProcess = Bun.spawn(["python", sidecarPath, "--port", "0", "--port-file", portFile], {
+      stdout: "ignore",
+      stderr: "ignore"
+    });
+    let port = null;
+    for (let attempt = 0;attempt < 3; attempt++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const content = await Bun.file(portFile).text();
+        port = parseInt(content.trim(), 10);
+        if (!isNaN(port) && port > 0)
+          break;
+        port = null;
+      } catch {}
+    }
+    if (!port) {
+      console.error("[embed] Sidecar did not write port file after 3 attempts");
+      return null;
+    }
+    const client = new EmbeddingClient(`http://127.0.0.1:${port}`);
+    for (let attempt = 0;attempt < 3; attempt++) {
+      if (await client.isAvailable()) {
+        console.error(`[embed] Sidecar ready on port ${port}`);
+        return client;
+      }
+      if (attempt < 2)
+        await new Promise((r) => setTimeout(r, 1000));
+    }
+    console.error("[embed] Sidecar started but health check failed after 3 attempts");
+    return null;
+  } catch (err) {
+    console.error("[embed] Failed to start sidecar:", err);
+    return null;
+  }
+}
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.9.0"
+  version: "0.12.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21052,14 +21409,14 @@ server.tool("note", "Save a piece of knowledge you've just learned, decided, or 
   scope: exports_external.enum(["global", "project"]).optional(),
   dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference")
 }, async ({ content, type, context, tags, scope, dimension }) => {
-  const result = handleRemember(getProjectDb(), getGlobalDb(), {
+  const result = await handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type,
     context,
     tags,
     scope,
     dimension
-  });
+  }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]
   };
@@ -21069,21 +21426,60 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
   limit: exports_external.number().optional(),
-  depth: exports_external.number().min(1).max(5).optional()
-}, async ({ query, id, type, limit, depth }) => {
-  const result = handleRecall(getProjectDb(), getGlobalDb(), {
+  depth: exports_external.number().min(1).max(5).optional(),
+  session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
+}, async ({ query, id, type, limit, depth, session_id }) => {
+  const projectDb2 = getProjectDb();
+  const result = handleRecall(projectDb2, getGlobalDb(), {
     query,
     id,
     type,
     limit,
     depth
   });
+  let turn = null;
+  const tracker = sessionTracker;
+  if (session_id && tracker) {
+    tracker.registerSession(session_id);
+    turn = tracker.nextTurn(session_id);
+  }
+  const noteIds = [];
+  if (result.detail) {
+    noteIds.push(result.detail.id);
+  }
+  for (const r of result.results) {
+    noteIds.push(r.id);
+  }
+  const annotations = new Map;
+  if (session_id && tracker && turn !== null) {
+    for (const noteId of noteIds) {
+      const annotation = tracker.annotateResult(session_id, noteId, turn);
+      annotations.set(noteId, annotation);
+      const deliveryType = annotation.already_sent ? "refresh" : "fresh";
+      tracker.logSurfaced(session_id, noteId, turn, deliveryType);
+      const timestamp = now();
+      projectDb2.run(`UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`, [timestamp, noteId]);
+    }
+  }
+  function annotationMarker(noteId) {
+    const ann = annotations.get(noteId);
+    if (!ann)
+      return "";
+    const parts = [];
+    if (ann.already_sent && ann.sent_turns_ago !== null) {
+      parts.push(`already sent ${ann.sent_turns_ago} turn(s) ago`);
+    }
+    if (ann.sent_to_other_sessions.length > 0) {
+      parts.push(`sent to ${ann.sent_to_other_sessions.length} other session(s)`);
+    }
+    return parts.length > 0 ? ` [${parts.join("; ")}]` : "";
+  }
   let text = result.message;
   if (result.detail) {
     text += `
 
 **${result.detail.type}** (${result.detail.confidence})
-${result.detail.content}`;
+${result.detail.content}${annotationMarker(result.detail.id)}`;
     if (result.detail.links.length > 0) {
       text += `
 
@@ -21099,7 +21495,7 @@ ${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
 `;
     for (const r of result.results) {
       text += `
-- **${r.id}** [${r.type}/${r.confidence}] ${r.content}`;
+- **${r.id}** [${r.type}/${r.confidence}] ${r.content}${annotationMarker(r.id)}`;
     }
   }
   return {
@@ -21142,12 +21538,12 @@ ${next_steps.map((s) => `- ${s}`).join(`
 `)}`);
   const content = parts.join(`
 `);
-  const result = handleRemember(getProjectDb(), getGlobalDb(), {
+  const result = await handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type: "checkpoint",
     context: `Checkpoint created at ${new Date().toISOString()}`,
     tags: "checkpoint"
-  });
+  }, embeddingClient);
   return {
     content: [{
       type: "text",
@@ -21180,12 +21576,12 @@ server.tool("close_thread", "Mark an open thread, commitment, or work item as re
   }
   const cascadeResults = cascadeResolution(db, id, timestamp);
   if (resolution) {
-    handleRemember(projectDb2, globalDb2, {
+    await handleRemember(projectDb2, globalDb2, {
       content: resolution,
       type: "decision",
       context: `Resolved ${row.type}: ${row.content}`,
       tags: row.type
-    });
+    }, embeddingClient);
   }
   let message = `Resolved ${row.type} note "${id}".`;
   if (resolution)
@@ -21253,6 +21649,11 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
     timestamp,
     id
   ]);
+  if (content && embeddingClient) {
+    embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
+      embeddingClient.removeEmbedding(db, id);
+    });
+  }
   return {
     content: [{
       type: "text",
@@ -21525,6 +21926,35 @@ ${created.map((c) => `- ${c}`).join(`
     }]
   };
 });
+server.tool("check_similar", "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use before implementing to catch prior art.", {
+  proposed_action: exports_external.string(),
+  types: exports_external.array(exports_external.enum(NOTE_TYPES)).optional(),
+  threshold: exports_external.number().min(0).max(1).optional()
+}, async ({ proposed_action, types: types2, threshold }) => {
+  let queryVector = null;
+  if (embeddingClient) {
+    const vecs = await embeddingClient.embed([proposed_action]);
+    if (vecs && vecs.length > 0)
+      queryVector = vecs[0];
+  }
+  const result = handleCheckSimilar(getProjectDb(), queryVector, {
+    proposed_action,
+    types: types2,
+    threshold
+  });
+  let text = result.message;
+  if (result.results.length > 0) {
+    text += `
+`;
+    for (const r of result.results) {
+      text += `
+- **${r.id}** [${r.type}] (${(r.similarity * 100).toFixed(1)}%) ${r.content}`;
+    }
+  }
+  return {
+    content: [{ type: "text", text }]
+  };
+});
 server.tool("retro", "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, computes autonomy scores, and analyzes user model trajectories. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.", {
   focus: exports_external.string().optional()
 }, async ({ focus }) => {
@@ -21603,9 +22033,24 @@ function cascadeResolution(db, noteId, timestamp) {
   return results;
 }
 async function main() {
+  sessionTracker = new SessionTracker(getProjectDb());
+  sessionTracker.cleanup();
+  embeddingClient = await startSidecar();
+  if (embeddingClient) {
+    embeddingClient.backfill(getProjectDb()).catch((err) => {
+      console.error("[embed] Backfill failed:", err);
+    });
+  }
   const transport = new StdioServerTransport;
   await server.connect(transport);
 }
+process.on("exit", () => {
+  if (sidecarProcess) {
+    try {
+      sidecarProcess.kill();
+    } catch {}
+  }
+});
 main().catch((err) => {
   console.error("Server failed to start:", err);
   process.exit(1);

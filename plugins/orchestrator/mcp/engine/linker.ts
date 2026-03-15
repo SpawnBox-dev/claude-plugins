@@ -1,6 +1,12 @@
 import type { Database } from "bun:sqlite";
 import type { NoteSummary, Link, RelationshipType, NoteType } from "../types";
 import { generateId, now } from "../utils";
+import {
+  cosineSimilarity,
+  reciprocalRankFusion,
+  maximalMarginalRelevance,
+} from "../engine/hybrid_search";
+import { blobToVector } from "../engine/embeddings";
 
 /**
  * Infer relationship type based on note types.
@@ -99,6 +105,137 @@ export function findRelatedNotes(
     // FTS query can fail with unusual input - return empty
     return [];
   }
+}
+
+/**
+ * Hybrid FTS5+vector search. When a queryVector is provided, merges FTS5
+ * and cosine-similarity rankings via Reciprocal Rank Fusion, then applies
+ * Maximal Marginal Relevance for diversity. Falls back to plain FTS5 when
+ * no queryVector is given.
+ */
+export async function findRelatedNotesHybrid(
+  db: Database,
+  query: string,
+  limit = 10,
+  queryVector?: Float32Array,
+  mmrLambda: number = 0.7
+): Promise<NoteSummary[]> {
+  // Fallback: no vector, just use existing FTS5 search
+  if (!queryVector) {
+    return findRelatedNotes(db, query, limit);
+  }
+
+  // 1. FTS5 ranked list
+  const ftsResults = findRelatedNotes(db, query, limit * 3);
+  const ftsRanks = new Map<string, number>();
+  ftsResults.forEach((r, i) => ftsRanks.set(r.id, i + 1));
+
+  // Build a lookup of FTS results by id for later
+  const noteById = new Map<string, NoteSummary>();
+  for (const r of ftsResults) {
+    noteById.set(r.id, r);
+  }
+
+  // 2. Vector search: fetch all embeddings, compute cosine similarity, rank
+  const embRows = db
+    .query(`SELECT e.note_id, e.vector FROM embeddings e`)
+    .all() as Array<{ note_id: string; vector: Buffer }>;
+
+  const vecScores: Array<{ id: string; similarity: number }> = [];
+  for (const row of embRows) {
+    const vec = blobToVector(row.vector as Buffer);
+    const sim = cosineSimilarity(queryVector, vec);
+    vecScores.push({ id: row.note_id, similarity: sim });
+  }
+
+  // Sort descending by similarity and assign ranks
+  vecScores.sort((a, b) => b.similarity - a.similarity);
+  const vecRanks = new Map<string, number>();
+  vecScores.forEach((v, i) => vecRanks.set(v.id, i + 1));
+
+  // 3. Reciprocal Rank Fusion
+  const rrfResults = reciprocalRankFusion(ftsRanks, vecRanks);
+
+  // Expand candidate pool: load note data for any ids not already in noteById
+  const candidateTopK = rrfResults.slice(0, limit * 2);
+  for (const rrf of candidateTopK) {
+    if (!noteById.has(rrf.id)) {
+      const row = db
+        .query(
+          `SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+           FROM notes WHERE id = ?`
+        )
+        .get(rrf.id) as {
+        id: string;
+        type: string;
+        content: string;
+        confidence: string;
+        created_at: string;
+        keywords: string;
+        status: string | null;
+        priority: string | null;
+        due_date: string | null;
+      } | null;
+
+      if (row) {
+        noteById.set(row.id, {
+          id: row.id,
+          type: row.type as NoteSummary["type"],
+          content: row.content,
+          confidence: row.confidence as NoteSummary["confidence"],
+          created_at: row.created_at,
+          keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
+          status: row.status as NoteSummary["status"] ?? null,
+          priority: row.priority as NoteSummary["priority"] ?? null,
+          due_date: row.due_date ?? null,
+        });
+      }
+    }
+  }
+
+  // 4. MMR: load vectors for top-K candidates that have embeddings
+  const embMap = new Map<string, Float32Array>();
+  for (const row of embRows) {
+    embMap.set(row.note_id, blobToVector(row.vector as Buffer));
+  }
+
+  const mmrItems = candidateTopK
+    .filter((rrf) => embMap.has(rrf.id) && noteById.has(rrf.id))
+    .map((rrf) => ({
+      id: rrf.id,
+      score: rrf.score,
+      vector: embMap.get(rrf.id)!,
+    }));
+
+  // Also include FTS-only candidates (no embedding) so they're not lost
+  const ftsOnlyCandidates = candidateTopK.filter(
+    (rrf) => !embMap.has(rrf.id) && noteById.has(rrf.id)
+  );
+
+  let finalIds: string[];
+
+  if (mmrItems.length > 0) {
+    const mmrResults = maximalMarginalRelevance(mmrItems, limit, mmrLambda);
+    finalIds = mmrResults.map((r) => r.id);
+    // Append FTS-only candidates after MMR results if room
+    for (const c of ftsOnlyCandidates) {
+      if (finalIds.length >= limit) break;
+      if (!finalIds.includes(c.id)) finalIds.push(c.id);
+    }
+  } else {
+    // No embeddings at all: just use RRF order
+    finalIds = candidateTopK.map((r) => r.id).slice(0, limit);
+  }
+
+  // 5. Build final NoteSummary list preserving order
+  const results: NoteSummary[] = [];
+  for (const id of finalIds) {
+    const note = noteById.get(id);
+    if (note) results.push(note);
+    if (results.length >= limit) break;
+  }
+
+  return results;
 }
 
 /**

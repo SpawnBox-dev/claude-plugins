@@ -62,11 +62,11 @@ describe("work item schema", () => {
     db.close();
   });
 
-  test("existing notes have null status and priority", () => {
+  test("existing notes have null status and priority", async () => {
     const db = makeDb("project");
     const globalDb = makeDb("global");
 
-    handleRemember(db, globalDb, {
+    await handleRemember(db, globalDb, {
       content: "Some decision",
       type: "decision",
     });
@@ -94,11 +94,11 @@ describe("work item in briefing", () => {
   let projectDb: Database;
   let globalDb: Database;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     projectDb = makeDb("project");
     globalDb = makeDb("global");
     // Add a non-work note so it's not first_run
-    handleRemember(projectDb, globalDb, {
+    await handleRemember(projectDb, globalDb, {
       content: "Project uses React 18",
       type: "architecture",
     });
@@ -152,8 +152,8 @@ describe("work item in briefing", () => {
     expect(priorities).toEqual(["critical", "medium", "low"]);
   });
 
-  test("suggested focus prefers active work over open threads", () => {
-    handleRemember(projectDb, globalDb, {
+  test("suggested focus prefers active work over open threads", async () => {
+    await handleRemember(projectDb, globalDb, {
       content: "Some open question about architecture",
       type: "open_thread",
     });
@@ -371,9 +371,9 @@ describe("work items with knowledge graph", () => {
     globalDb = makeDb("global");
   });
 
-  test("work items auto-link to related knowledge notes", () => {
+  test("work items auto-link to related knowledge notes", async () => {
     // Create an architecture note about hibernation
-    handleRemember(projectDb, globalDb, {
+    await handleRemember(projectDb, globalDb, {
       content: "Hibernation uses tar+zst bundles with server-side HKDF encryption",
       type: "architecture",
       tags: "hibernation,encryption",
@@ -396,7 +396,6 @@ describe("work items with knowledge graph", () => {
   });
 
   test("risk notes create blocks relationship with work items", () => {
-    // The linker infers blocks relationship between risk and work_item
     const { inferRelationship } = require("../../mcp/engine/linker");
     const rel = inferRelationship("risk", "work_item");
     expect(rel).toBe("blocks");

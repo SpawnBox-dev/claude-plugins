@@ -30,19 +30,19 @@ describe("orient tool", () => {
     expect(result.recovery_checkpoint).toBeNull();
   });
 
-  test("returns strategic briefing on startup with data", () => {
+  test("returns strategic briefing on startup with data", async () => {
     // Seed some notes
-    handleRemember(projectDb, globalDb, {
+    await handleRemember(projectDb, globalDb, {
       content: "Implement observer architecture for frontend/backend decoupling",
       type: "open_thread",
       tags: "architecture",
     });
-    handleRemember(projectDb, globalDb, {
+    await handleRemember(projectDb, globalDb, {
       content: "Use Zustand for state management",
       type: "decision",
       tags: "frontend",
     });
-    handleRemember(projectDb, globalDb, {
+    await handleRemember(projectDb, globalDb, {
       content: "Backup system needs retention policy",
       type: "commitment",
       tags: "backend",
