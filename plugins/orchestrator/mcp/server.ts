@@ -140,7 +140,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.12.0",
+  version: "0.12.1",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
