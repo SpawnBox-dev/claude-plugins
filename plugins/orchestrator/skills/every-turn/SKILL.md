@@ -56,6 +56,31 @@ Scan what just happened. Did any of these occur?
 
 **Multiple can apply in one turn.** If you made a decision AND learned a pattern AND the user stated a preference, invoke all three. Don't pick one.
 
+## Struggle Detection - STOP AND ASK FOR HELP
+
+<EXTREMELY_IMPORTANT>
+If you notice ANY of these patterns in your recent turns, you MUST invoke `orchestrator:consult-concierge` IMMEDIATELY with a detailed description of what you're trying to do, what keeps failing, and what approaches you've tried:
+
+**Signals you are struggling:**
+- You've tried the same approach 2+ times with different variations and it keeps failing
+- You're getting the same error/failure across multiple attempts
+- You've been working on the same issue for 3+ turns without resolution
+- You're guessing at solutions rather than working from known patterns
+- You're editing code you just edited in the previous turn
+- You keep hitting unexpected behavior that doesn't match your assumptions
+- You're tempted to "try one more thing" without understanding why the last thing failed
+
+**What to tell the concierge when struggling:**
+1. What you're trying to accomplish (the goal, not the approach)
+2. What you've tried so far and what happened
+3. What error/behavior you're seeing
+4. What assumptions you're working from
+
+The concierge can search for anti-patterns, past decisions, known gotchas, and conventions that explain WHY your approach isn't working. Previous sessions may have solved this exact problem or documented why a particular approach fails.
+
+**You are NOT "almost there." You are stuck.** Agents that keep hammering away without consulting the knowledge base waste enormous time rediscovering gotchas that are already documented. STOP. ASK. THEN proceed with the right approach.
+</EXTREMELY_IMPORTANT>
+
 ## Red Flags
 
 These thoughts mean STOP - you are rationalizing your way out of using the orchestrator:
@@ -72,6 +97,8 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "The briefing didn't mention this area" | Absence of knowledge is the strongest signal TO capture knowledge. |
 | "I don't need to look up decisions for this" | That's what every session thinks before contradicting a past decision. |
 | "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. Scan the table. |
+| "Let me try one more thing" | If you've tried 2+ things already, STOP and consult the concierge. You're stuck. |
+| "I'm almost there" | If you said this last turn too, you're not almost there. You're looping. Ask for help. |
 
 ## Turn Bridge (MANDATORY)
 
