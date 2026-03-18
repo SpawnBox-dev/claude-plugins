@@ -12,16 +12,21 @@ Use the Agent tool to spawn or resume the memory concierge:
 
 **Default model: Sonnet.** Only use Opus when the concierge itself says to escalate (genuine contradictions, complex cross-domain synthesis).
 
-**When to use this skill:**
-- Starting work on an unfamiliar area ("what should I know about combat?")
-- Suspecting you may be contradicting a past decision
+**When to use this skill (completeness matters):**
+- You need a COMPLETE picture of an area ("all work items", "everything about combat", "what's the full launch list")
+- Starting work on an unfamiliar area ("what should I know about X?")
 - After context compaction (you feel like you're missing context)
-- When raw lookup returns too many results to triage
+- You suspect you may be contradicting a past decision
+- When raw lookup returns results but you're not confident they're comprehensive
+- Building any kind of inventory, audit, or status report
+- The user says "are we missing anything?" or "give me everything"
 
-**When NOT to use this skill:**
-- Simple, specific lookups ("lookup the broker convention")
-- Just checking if a note exists
-- Quick keyword searches
+**When NOT to use this skill (precision is enough):**
+- Looking up a specific note by ID
+- Checking one known keyword or convention name ("the broker convention")
+- Quick fact-check ("was X decided?")
+
+**Key insight: if you're about to make a list or need "all of" something, use the concierge. Direct lookup returns keyword-matched results which WILL miss items that use different vocabulary. You won't know they're missing.**
 
 **Example invocation:**
 

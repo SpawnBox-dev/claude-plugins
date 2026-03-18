@@ -120,6 +120,7 @@ export interface NoteSummary {
   confidence: ConfidenceLevel;
   created_at: string;
   keywords: string[];
+  tags: string | null;
   status: WorkItemStatus | null;
   priority: WorkItemPriority | null;
   due_date: string | null;

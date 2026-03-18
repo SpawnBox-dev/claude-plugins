@@ -173,7 +173,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.12.8",
+  version: "0.13.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -406,7 +406,7 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes.",
+  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -441,16 +441,18 @@ server.tool(
     query: z.string().optional(),
     id: z.string().optional(),
     type: z.enum(NOTE_TYPES).optional(),
+    tag: z.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
     limit: z.number().optional(),
     depth: z.number().min(1).max(5).optional(),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, limit, depth, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, session_id }) => {
     const projectDb = getProjectDb();
     const result = handleRecall(projectDb, getGlobalDb(), {
       query,
       id,
       type,
+      tag,
       limit,
       depth,
     });
@@ -520,7 +522,8 @@ server.tool(
     } else if (result.results.length > 0) {
       text += "\n";
       for (const r of result.results) {
-        text += `\n- **${r.id}** [${r.type}/${r.confidence}] ${r.content}${annotationMarker(r.id)}`;
+        const tagStr = r.tags ? ` {${r.tags}}` : "";
+        text += `\n- **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
       }
     }
     return {
@@ -1121,6 +1124,116 @@ server.tool(
     return {
       content: [{ type: "text" as const, text }],
     };
+  }
+);
+
+// ── list_work_items ──────────────────────────────────────────────────────
+server.tool(
+  "list_work_items",
+  "List ALL work items, optionally filtered by status and/or priority. Unlike lookup, this does not use keyword search - it returns everything matching the filters. Use when you need a complete inventory of tracked work.",
+  {
+    status: z.enum(["proposed", "planned", "active", "blocked", "done", "all"]).optional().default("all"),
+    priority: z.enum(["critical", "high", "medium", "low", "backlog", "all"]).optional().default("all"),
+    tag: z.string().optional().describe("Filter by tag (substring match on tags field)"),
+    limit: z.number().optional().default(50),
+  },
+  async ({ status, priority, tag, limit }) => {
+    const db = getProjectDb();
+    let query = `SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date, tags
+                 FROM notes WHERE type = 'work_item'`;
+    const params: any[] = [];
+
+    if (status && status !== "all") {
+      query += ` AND status = ?`;
+      params.push(status);
+    }
+    if (priority && priority !== "all") {
+      query += ` AND priority = ?`;
+      params.push(priority);
+    }
+    if (tag) {
+      query += ` AND tags LIKE ?`;
+      params.push(`%${tag}%`);
+    }
+
+    query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, updated_at DESC`;
+    query += ` LIMIT ?`;
+    params.push(limit ?? 50);
+
+    const rows = db.query(query).all(...params) as any[];
+
+    // Get total count (without limit)
+    let countQuery = `SELECT COUNT(*) as cnt FROM notes WHERE type = 'work_item'`;
+    const countParams: any[] = [];
+    if (status && status !== "all") { countQuery += ` AND status = ?`; countParams.push(status); }
+    if (priority && priority !== "all") { countQuery += ` AND priority = ?`; countParams.push(priority); }
+    if (tag) { countQuery += ` AND tags LIKE ?`; countParams.push(`%${tag}%`); }
+    const total = (db.query(countQuery).get(...countParams) as any).cnt;
+
+    const lines: string[] = [];
+    lines.push(`## Work Items (${rows.length} of ${total} total)`);
+    lines.push("");
+
+    for (const row of rows) {
+      const pri = row.priority ? `[${row.priority.toUpperCase()}]` : "";
+      const st = row.status ? `(${row.status})` : "";
+      const due = row.due_date ? ` due:${row.due_date}` : "";
+      const tags = row.tags ? ` [${row.tags}]` : "";
+      const content = row.content.length > 120 ? row.content.slice(0, 120) + "..." : row.content;
+      lines.push(`- ${pri} **${row.id}** ${st}${due}${tags} ${content}`);
+    }
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+  }
+);
+
+// ── list_open_threads ────────────────────────────────────────────────────
+server.tool(
+  "list_open_threads",
+  "List ALL open threads (unresolved questions, investigations, tracked issues). Unlike lookup, returns everything without keyword search.",
+  {
+    resolved: z.boolean().optional().default(false).describe("Include resolved threads"),
+    tag: z.string().optional().describe("Filter by tag (substring match)"),
+    limit: z.number().optional().default(50),
+  },
+  async ({ resolved, tag, limit }) => {
+    const db = getProjectDb();
+    let query = `SELECT id, type, content, confidence, created_at, keywords, tags, resolved
+                 FROM notes WHERE type IN ('open_thread', 'commitment')`;
+    const params: any[] = [];
+
+    if (!resolved) {
+      query += ` AND resolved = 0`;
+    }
+    if (tag) {
+      query += ` AND tags LIKE ?`;
+      params.push(`%${tag}%`);
+    }
+
+    query += ` ORDER BY updated_at DESC LIMIT ?`;
+    params.push(limit ?? 50);
+
+    const rows = db.query(query).all(...params) as any[];
+
+    // Total count
+    let countQuery = `SELECT COUNT(*) as cnt FROM notes WHERE type IN ('open_thread', 'commitment')`;
+    const countParams: any[] = [];
+    if (!resolved) { countQuery += ` AND resolved = 0`; }
+    if (tag) { countQuery += ` AND tags LIKE ?`; countParams.push(`%${tag}%`); }
+    const total = (db.query(countQuery).get(...countParams) as any).cnt;
+
+    const lines: string[] = [];
+    lines.push(`## Open Threads (${rows.length} of ${total} total)`);
+    lines.push("");
+
+    for (const row of rows) {
+      const resolved_tag = row.resolved ? " [RESOLVED]" : "";
+      const tags = row.tags ? ` [${row.tags}]` : "";
+      const content = row.content.length > 120 ? row.content.slice(0, 120) + "..." : row.content;
+      lines.push(`- **${row.id}**${resolved_tag}${tags} ${content}`);
+    }
+
+    return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   }
 );
 

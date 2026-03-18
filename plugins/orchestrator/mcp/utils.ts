@@ -127,7 +127,8 @@ export function summarizeForBriefing(
   let charCount = 0;
 
   for (const note of notes) {
-    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
+    const tagStr = note.tags ? ` {${note.tags}}` : "";
+    const line = `- **${note.id}** [${note.type}]${tagStr} ${truncate(note.content, 120)}`;
     if (charCount + line.length > maxChars) break;
     lines.push(line);
     charCount += line.length + 1; // +1 for newline

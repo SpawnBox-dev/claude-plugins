@@ -23,7 +23,8 @@ You're entering a task and need context. Do this quickly and silently:
 
 1. Call `briefing` to get the session briefing (open threads, recent decisions, last checkpoint)
 2. If the task involves a specific domain or topic, invoke `orchestrator:consult-concierge` with a query like "What should I know about [topic]?" - the concierge searches conventions, decisions, anti-patterns, and architecture notes, then returns a curated summary. For simple lookups, call `lookup` directly instead.
-3. Scan the briefing for anything relevant to your current task
-4. If the briefing shows a recovery checkpoint, honor it - that's where the last session left off
+3. For a complete picture of tracked work, call `list_work_items` (all statuses) and `list_open_threads` - these return everything without keyword search, so nothing is missed.
+4. Scan the briefing for anything relevant to your current task
+5. If the briefing shows a recovery checkpoint, honor it - that's where the last session left off
 
 Do NOT dump the full briefing to the user. Internalize it and proceed with the task. Only mention relevant items (e.g., "I see there's an open thread about X that relates to this").

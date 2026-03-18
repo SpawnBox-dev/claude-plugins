@@ -6,6 +6,7 @@ export interface RecallInput {
   query?: string;
   id?: string;
   type?: NoteType;
+  tag?: string;
   limit?: number;
   depth?: number;
 }
@@ -69,7 +70,7 @@ function fetchLinkedNotes(
     const rows = db
       .query(
         `SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
+                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags
          FROM links l
          JOIN notes n ON (
            CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
@@ -97,6 +98,7 @@ function fetchLinkedNotes(
                 .map((k: string) => k.trim())
                 .filter((k: string) => k.length > 0)
             : [],
+          tags: r.tags ?? null,
           status: r.status ?? null,
           priority: r.priority ?? null,
           due_date: r.due_date ?? null,
@@ -112,6 +114,22 @@ function fetchLinkedNotes(
 
   traverse(noteId, 1);
   return results;
+}
+
+function getTotalHint(projectDb: Database, globalDb: Database, type?: NoteType): string {
+  try {
+    if (type) {
+      const total = (projectDb.query("SELECT COUNT(*) as cnt FROM notes WHERE type = ?").get(type) as any).cnt;
+      const globalTotal = (globalDb.query("SELECT COUNT(*) as cnt FROM notes WHERE type = ?").get(type) as any).cnt;
+      return ` (~${total + globalTotal} ${type} notes in knowledge base)`;
+    } else {
+      const total = (projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
+      const globalTotal = (globalDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
+      return ` (~${total + globalTotal} total notes in knowledge base)`;
+    }
+  } catch {
+    return "";
+  }
 }
 
 export function handleRecall(
@@ -188,19 +206,29 @@ export function handleRecall(
     // Filter by type if specified
     let filtered = merged;
     if (input.type) {
-      filtered = merged.filter((r) => r.type === input.type);
+      filtered = filtered.filter((r) => r.type === input.type);
+    }
+
+    // Filter by tag if specified (substring match on comma-separated tags field)
+    if (input.tag) {
+      const tagLower = input.tag.toLowerCase();
+      filtered = filtered.filter((r) =>
+        r.tags?.toLowerCase().includes(tagLower)
+      );
     }
 
     // Limit results
     const results = filtered.slice(0, limit);
+
+    const totalHint = getTotalHint(projectDb, globalDb, input.type);
 
     return {
       results,
       detail: null,
       message:
         results.length > 0
-          ? `Found ${results.length} note(s) matching "${input.query}".`
-          : `No notes found matching "${input.query}".`,
+          ? `Found ${results.length} note(s) matching "${input.query}".${totalHint}`
+          : `No notes found matching "${input.query}".${totalHint}`,
     };
   }
 

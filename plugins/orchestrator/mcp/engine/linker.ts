@@ -72,7 +72,7 @@ export function findRelatedNotes(
   try {
     const rows = db
       .query(
-        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
+        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
@@ -87,6 +87,7 @@ export function findRelatedNotes(
       confidence: string;
       created_at: string;
       keywords: string;
+      tags: string | null;
       rank: number;
     }>;
 
@@ -97,6 +98,7 @@ export function findRelatedNotes(
       confidence: r.confidence as NoteSummary["confidence"],
       created_at: r.created_at,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
+      tags: r.tags ?? null,
       status: (r as any).status ?? null,
       priority: (r as any).priority ?? null,
       due_date: (r as any).due_date ?? null,
@@ -162,7 +164,7 @@ export async function findRelatedNotesHybrid(
     if (!noteById.has(rrf.id)) {
       const row = db
         .query(
-          `SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+          `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
            FROM notes WHERE id = ?`
         )
         .get(rrf.id) as {
@@ -172,6 +174,7 @@ export async function findRelatedNotesHybrid(
         confidence: string;
         created_at: string;
         keywords: string;
+        tags: string | null;
         status: string | null;
         priority: string | null;
         due_date: string | null;
@@ -185,6 +188,7 @@ export async function findRelatedNotesHybrid(
           confidence: row.confidence as NoteSummary["confidence"],
           created_at: row.created_at,
           keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
+          tags: row.tags ?? null,
           status: row.status as NoteSummary["status"] ?? null,
           priority: row.priority as NoteSummary["priority"] ?? null,
           due_date: row.due_date ?? null,

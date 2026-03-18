@@ -118,7 +118,8 @@ function formatBriefing(
       lines.push("## OVERDUE");
       for (const item of briefing.overdue_work) {
         const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-        lines.push(`- \u26a0\ufe0f ${pri} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
+        const tagStr = item.tags ? ` {${item.tags}}` : "";
+        lines.push(`- \u26a0\ufe0f ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
       }
       lines.push("");
     }
@@ -131,7 +132,8 @@ function formatBriefing(
           const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
           const status = item.status === "active" ? "\ud83d\udd04" : "\u2b1c";
           const due = formatDueDate(item.due_date);
-          lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}${due}`);
+          const tagStr = item.tags ? ` {${item.tags}}` : "";
+          lines.push(`- ${status} ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}${due}`);
         }
         lines.push("");
       }
@@ -139,7 +141,8 @@ function formatBriefing(
         lines.push("### Blocked");
         for (const item of briefing.blocked_work) {
           const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-          lines.push(`- \ud83d\udeab ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+          const tagStr = item.tags ? ` {${item.tags}}` : "";
+          lines.push(`- \ud83d\udeab ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}`);
         }
         lines.push("");
       }
@@ -148,7 +151,8 @@ function formatBriefing(
     if (briefing.recently_completed.length > 0) {
       lines.push("## Recently Completed");
       for (const item of briefing.recently_completed) {
-        lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
+        const tagStr = item.tags ? ` {${item.tags}}` : "";
+        lines.push(`- \u2705${tagStr} **${item.id}** ${truncate(item.content, 120)}`);
       }
       lines.push("");
     }

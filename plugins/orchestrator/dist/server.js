@@ -20048,7 +20048,8 @@ function summarizeForBriefing(notes, maxTokens = 200) {
   const lines = [];
   let charCount = 0;
   for (const note of notes) {
-    const line = `- **${note.id}** [${note.type}] ${truncate(note.content, 120)}`;
+    const tagStr = note.tags ? ` {${note.tags}}` : "";
+    const line = `- **${note.id}** [${note.type}]${tagStr} ${truncate(note.content, 120)}`;
     if (charCount + line.length > maxChars)
       break;
     lines.push(line);
@@ -20281,7 +20282,7 @@ function findRelatedNotes(db, query, limit = 10) {
     return [];
   const ftsQuery = terms.join(" OR ");
   try {
-    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords,
+    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
@@ -20295,6 +20296,7 @@ function findRelatedNotes(db, query, limit = 10) {
       confidence: r.confidence,
       created_at: r.created_at,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
+      tags: r.tags ?? null,
       status: r.status ?? null,
       priority: r.priority ?? null,
       due_date: r.due_date ?? null
@@ -20604,7 +20606,7 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
     if (currentDepth > maxDepth)
       return;
     const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords
+                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags
          FROM links l
          JOIN notes n ON (
            CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
@@ -20624,6 +20626,7 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
           confidence: r.confidence,
           created_at: r.created_at,
           keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
+          tags: r.tags ?? null,
           status: r.status ?? null,
           priority: r.priority ?? null,
           due_date: r.due_date ?? null
@@ -20636,6 +20639,21 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
   }
   traverse(noteId, 1);
   return results;
+}
+function getTotalHint(projectDb2, globalDb2, type) {
+  try {
+    if (type) {
+      const total = projectDb2.query("SELECT COUNT(*) as cnt FROM notes WHERE type = ?").get(type).cnt;
+      const globalTotal = globalDb2.query("SELECT COUNT(*) as cnt FROM notes WHERE type = ?").get(type).cnt;
+      return ` (~${total + globalTotal} ${type} notes in knowledge base)`;
+    } else {
+      const total = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
+      const globalTotal = globalDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
+      return ` (~${total + globalTotal} total notes in knowledge base)`;
+    }
+  } catch {
+    return "";
+  }
 }
 function handleRecall(projectDb2, globalDb2, input) {
   const limit = input.limit ?? 10;
@@ -20688,13 +20706,18 @@ function handleRecall(projectDb2, globalDb2, input) {
     }
     let filtered = merged;
     if (input.type) {
-      filtered = merged.filter((r) => r.type === input.type);
+      filtered = filtered.filter((r) => r.type === input.type);
+    }
+    if (input.tag) {
+      const tagLower = input.tag.toLowerCase();
+      filtered = filtered.filter((r) => r.tags?.toLowerCase().includes(tagLower));
     }
     const results = filtered.slice(0, limit);
+    const totalHint = getTotalHint(projectDb2, globalDb2, input.type);
     return {
       results,
       detail: null,
-      message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}".` : `No notes found matching "${input.query}".`
+      message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}".${totalHint}` : `No notes found matching "${input.query}".${totalHint}`
     };
   }
   return {
@@ -20713,6 +20736,7 @@ function toSummary(row) {
     confidence: row.confidence,
     created_at: row.created_at,
     keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
+    tags: row.tags ?? null,
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null
@@ -20738,12 +20762,12 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       is_first_run: true
     };
   }
-  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
+  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
            ORDER BY updated_at DESC
            LIMIT 5`).all().map(toSummary) : [];
-  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
+  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
            FROM notes
            WHERE type = 'decision'
            ORDER BY created_at DESC
@@ -20818,26 +20842,26 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let recentlyCompleted = [];
   let overdueWork = [];
   if (include("work_items")) {
-    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
            updated_at DESC
          LIMIT 10`).all().map(toSummary);
-    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY updated_at DESC
          LIMIT 5`).all().map(toSummary);
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
          ORDER BY updated_at DESC
          LIMIT 5`).all(oneDayAgo).map(toSummary);
     const todayStr = new Date().toISOString().slice(0, 10);
-    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date
+    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
          AND status != 'done' AND resolved = 0
@@ -20866,7 +20890,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
 function composeContextPackage(projectDb2, globalDb2, domain) {
   const pattern = `%${domain}%`;
   function queryByType(db, type, limit = 5) {
-    return db.query(`SELECT id, type, content, confidence, created_at, keywords, due_date
+    return db.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
@@ -21018,7 +21042,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
       lines.push("## OVERDUE");
       for (const item of briefing.overdue_work) {
         const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-        lines.push(`- \u26A0\uFE0F ${pri} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
+        const tagStr = item.tags ? ` {${item.tags}}` : "";
+        lines.push(`- \u26A0\uFE0F ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
       }
       lines.push("");
     }
@@ -21030,7 +21055,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
           const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
           const status = item.status === "active" ? "\uD83D\uDD04" : "\u2B1C";
           const due = formatDueDate(item.due_date);
-          lines.push(`- ${status} ${pri} **${item.id}** ${truncate(item.content, 120)}${due}`);
+          const tagStr = item.tags ? ` {${item.tags}}` : "";
+          lines.push(`- ${status} ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}${due}`);
         }
         lines.push("");
       }
@@ -21038,7 +21064,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
         lines.push("### Blocked");
         for (const item of briefing.blocked_work) {
           const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
-          lines.push(`- \uD83D\uDEAB ${pri} **${item.id}** ${truncate(item.content, 120)}`);
+          const tagStr = item.tags ? ` {${item.tags}}` : "";
+          lines.push(`- \uD83D\uDEAB ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}`);
         }
         lines.push("");
       }
@@ -21046,7 +21073,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
     if (briefing.recently_completed.length > 0) {
       lines.push("## Recently Completed");
       for (const item of briefing.recently_completed) {
-        lines.push(`- \u2705 **${item.id}** ${truncate(item.content, 120)}`);
+        const tagStr = item.tags ? ` {${item.tags}}` : "";
+        lines.push(`- \u2705${tagStr} **${item.id}** ${truncate(item.content, 120)}`);
       }
       lines.push("");
     }
@@ -21470,7 +21498,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.12.8"
+  version: "0.13.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21647,7 +21675,7 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes.", {
+server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads.", {
   content: exports_external.string(),
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
@@ -21671,15 +21699,17 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
+  tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
   limit: exports_external.number().optional(),
   depth: exports_external.number().min(1).max(5).optional(),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, limit, depth, session_id }) => {
+}, async ({ query, id, type, tag, limit, depth, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = handleRecall(projectDb2, getGlobalDb(), {
     query,
     id,
     type,
+    tag,
     limit,
     depth
   });
@@ -21740,8 +21770,9 @@ ${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
     text += `
 `;
     for (const r of result.results) {
+      const tagStr = r.tags ? ` {${r.tags}}` : "";
       text += `
-- **${r.id}** [${r.type}/${r.confidence}] ${r.content}${annotationMarker(r.id)}`;
+- **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
     }
   }
   return {
@@ -22230,6 +22261,102 @@ User model: ${result.trajectory_updates} trajectory update(s).`;
   return {
     content: [{ type: "text", text }]
   };
+});
+server.tool("list_work_items", "List ALL work items, optionally filtered by status and/or priority. Unlike lookup, this does not use keyword search - it returns everything matching the filters. Use when you need a complete inventory of tracked work.", {
+  status: exports_external.enum(["proposed", "planned", "active", "blocked", "done", "all"]).optional().default("all"),
+  priority: exports_external.enum(["critical", "high", "medium", "low", "backlog", "all"]).optional().default("all"),
+  tag: exports_external.string().optional().describe("Filter by tag (substring match on tags field)"),
+  limit: exports_external.number().optional().default(50)
+}, async ({ status, priority, tag, limit }) => {
+  const db = getProjectDb();
+  let query = `SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date, tags
+                 FROM notes WHERE type = 'work_item'`;
+  const params = [];
+  if (status && status !== "all") {
+    query += ` AND status = ?`;
+    params.push(status);
+  }
+  if (priority && priority !== "all") {
+    query += ` AND priority = ?`;
+    params.push(priority);
+  }
+  if (tag) {
+    query += ` AND tags LIKE ?`;
+    params.push(`%${tag}%`);
+  }
+  query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, updated_at DESC`;
+  query += ` LIMIT ?`;
+  params.push(limit ?? 50);
+  const rows = db.query(query).all(...params);
+  let countQuery = `SELECT COUNT(*) as cnt FROM notes WHERE type = 'work_item'`;
+  const countParams = [];
+  if (status && status !== "all") {
+    countQuery += ` AND status = ?`;
+    countParams.push(status);
+  }
+  if (priority && priority !== "all") {
+    countQuery += ` AND priority = ?`;
+    countParams.push(priority);
+  }
+  if (tag) {
+    countQuery += ` AND tags LIKE ?`;
+    countParams.push(`%${tag}%`);
+  }
+  const total = db.query(countQuery).get(...countParams).cnt;
+  const lines = [];
+  lines.push(`## Work Items (${rows.length} of ${total} total)`);
+  lines.push("");
+  for (const row of rows) {
+    const pri = row.priority ? `[${row.priority.toUpperCase()}]` : "";
+    const st = row.status ? `(${row.status})` : "";
+    const due = row.due_date ? ` due:${row.due_date}` : "";
+    const tags = row.tags ? ` [${row.tags}]` : "";
+    const content = row.content.length > 120 ? row.content.slice(0, 120) + "..." : row.content;
+    lines.push(`- ${pri} **${row.id}** ${st}${due}${tags} ${content}`);
+  }
+  return { content: [{ type: "text", text: lines.join(`
+`) }] };
+});
+server.tool("list_open_threads", "List ALL open threads (unresolved questions, investigations, tracked issues). Unlike lookup, returns everything without keyword search.", {
+  resolved: exports_external.boolean().optional().default(false).describe("Include resolved threads"),
+  tag: exports_external.string().optional().describe("Filter by tag (substring match)"),
+  limit: exports_external.number().optional().default(50)
+}, async ({ resolved, tag, limit }) => {
+  const db = getProjectDb();
+  let query = `SELECT id, type, content, confidence, created_at, keywords, tags, resolved
+                 FROM notes WHERE type IN ('open_thread', 'commitment')`;
+  const params = [];
+  if (!resolved) {
+    query += ` AND resolved = 0`;
+  }
+  if (tag) {
+    query += ` AND tags LIKE ?`;
+    params.push(`%${tag}%`);
+  }
+  query += ` ORDER BY updated_at DESC LIMIT ?`;
+  params.push(limit ?? 50);
+  const rows = db.query(query).all(...params);
+  let countQuery = `SELECT COUNT(*) as cnt FROM notes WHERE type IN ('open_thread', 'commitment')`;
+  const countParams = [];
+  if (!resolved) {
+    countQuery += ` AND resolved = 0`;
+  }
+  if (tag) {
+    countQuery += ` AND tags LIKE ?`;
+    countParams.push(`%${tag}%`);
+  }
+  const total = db.query(countQuery).get(...countParams).cnt;
+  const lines = [];
+  lines.push(`## Open Threads (${rows.length} of ${total} total)`);
+  lines.push("");
+  for (const row of rows) {
+    const resolved_tag = row.resolved ? " [RESOLVED]" : "";
+    const tags = row.tags ? ` [${row.tags}]` : "";
+    const content = row.content.length > 120 ? row.content.slice(0, 120) + "..." : row.content;
+    lines.push(`- **${row.id}**${resolved_tag}${tags} ${content}`);
+  }
+  return { content: [{ type: "text", text: lines.join(`
+`) }] };
 });
 function cascadeResolution(db, noteId, timestamp) {
   const results = [];

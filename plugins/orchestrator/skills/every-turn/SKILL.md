@@ -29,6 +29,10 @@ Run this evaluation every turn. It takes seconds and prevents you from missing c
 - Call `plan` if the task is complex → invoke `orchestrator:planning-approach`
 - If you find prior decisions → invoke `orchestrator:what-was-decided`
 
+**Building a list, audit, or inventory?**
+- ALWAYS use `orchestrator:consult-concierge` for completeness tasks. Direct `lookup` will miss items with different vocabulary - you won't know they're missing.
+- Also consider using `list_work_items` or `list_open_threads` tools for exhaustive filtered listing (no search, no BM25, returns everything matching filters).
+
 **About to touch unfamiliar code?**
 - Invoke `orchestrator:consult-concierge` with "What conventions, anti-patterns, and architecture notes exist for [area]?" — the concierge handles the multi-query search and cross-references results.
 
@@ -94,6 +98,7 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "The user just wants speed" | Speed without context causes rework. 2 seconds of lookup saves 20 minutes. |
 | "This doesn't affect future sessions" | If you touched code, made a choice, or learned something - it does. |
 | "I'll check the knowledge base after I'm done" | Checking AFTER means you've already contradicted past decisions. Check BEFORE. |
+| "I found 5 items, that's probably all of them" | lookup returns keyword matches, not everything. Use list_work_items or concierge for complete inventories. |
 | "The briefing didn't mention this area" | Absence of knowledge is the strongest signal TO capture knowledge. |
 | "I don't need to look up decisions for this" | That's what every session thinks before contradicting a past decision. |
 | "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. Scan the table. |
