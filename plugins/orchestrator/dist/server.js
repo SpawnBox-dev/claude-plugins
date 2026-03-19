@@ -19692,6 +19692,11 @@ CREATE TABLE IF NOT EXISTS session_registry (
 ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
 UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
 `
+  },
+  {
+    version: 12,
+    name: "drop_access_count",
+    sql: `ALTER TABLE notes DROP COLUMN access_count;`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20359,7 +20364,7 @@ function promoteConfidence(db, noteId) {
   const current = row.confidence;
   const promoted = current === "low" ? "medium" : current === "medium" ? "high" : "high";
   const timestamp = now();
-  db.run(`UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`, [promoted, timestamp, timestamp, noteId]);
+  db.run(`UPDATE notes SET confidence = ?, updated_at = ? WHERE id = ?`, [promoted, timestamp, noteId]);
   return promoted;
 }
 function computeAutonomyScore(db, domain) {
@@ -20455,8 +20460,8 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
   const tagsStr = tagParts.join(",");
   const noteId = generateId();
   const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     input.type,
     input.content,
@@ -20464,7 +20469,6 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     keywords.join(","),
     tagsStr,
     "medium",
-    timestamp,
     0,
     null,
     null,
@@ -21533,7 +21537,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.0"
+  version: "0.14.1"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21961,7 +21965,6 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
         tags = ?,
         keywords = ?,
         confidence = ?,
-        last_validated = ?,
         updated_at = ?
        WHERE id = ?`, [
     newContent,
@@ -21969,7 +21972,6 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
     tags ?? row.tags,
     newKeywords ? newKeywords.join(",") : row.keywords,
     confidence ?? row.confidence ?? "medium",
-    timestamp,
     timestamp,
     id
   ]);
@@ -22080,8 +22082,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
         tagParts.push(t);
     }
   }
-  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     "work_item",
     content,
@@ -22089,7 +22091,6 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
     keywords.join(","),
     tagParts.join(","),
     "high",
-    timestamp,
     0,
     status ?? "planned",
     priority ?? "medium",
@@ -22195,15 +22196,14 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     actualParentId = generateId();
     const keywords = extractKeywords(parent_title);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       actualParentId,
       "work_item",
       parent_title,
       keywords.join(","),
       tagParts.join(","),
       "high",
-      timestamp,
       0,
       "planned",
       "high",
@@ -22218,15 +22218,14 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     const childId = generateId();
     const keywords = extractKeywords(item.content);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       childId,
       "work_item",
       item.content,
       keywords.join(","),
       tagParts.join(","),
       "high",
-      timestamp,
       0,
       "planned",
       item.priority ?? "medium",

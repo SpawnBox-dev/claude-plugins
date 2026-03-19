@@ -14,9 +14,9 @@ function insertNote(db: Database, id?: string): string {
   const noteId = id ?? generateId();
   const ts = now();
   db.run(
-    `INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at, signal)
-     VALUES (?, 'insight', 'test content', '', 'medium', ?, 0, ?, ?, 0)`,
-    [noteId, ts, ts, ts]
+    `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at, signal)
+     VALUES (?, 'insight', 'test content', '', 'medium', 0, ?, ?, 0)`,
+    [noteId, ts, ts]
   );
   return noteId;
 }

@@ -4,7 +4,7 @@ import { now } from "../utils";
 
 /**
  * Promote confidence of an existing note when a near-duplicate is found.
- * low -> medium -> high. Also refreshes last_validated.
+ * low -> medium -> high.
  * Returns the new confidence level.
  */
 export function promoteConfidence(
@@ -23,8 +23,8 @@ export function promoteConfidence(
 
   const timestamp = now();
   db.run(
-    `UPDATE notes SET confidence = ?, last_validated = ?, updated_at = ? WHERE id = ?`,
-    [promoted, timestamp, timestamp, noteId]
+    `UPDATE notes SET confidence = ?, updated_at = ? WHERE id = ?`,
+    [promoted, timestamp, noteId]
   );
 
   return promoted;

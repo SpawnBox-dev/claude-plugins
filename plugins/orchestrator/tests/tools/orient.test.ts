@@ -61,8 +61,8 @@ describe("orient tool", () => {
     // Seed a checkpoint note
     const ts = now();
     projectDb.run(
-      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         "checkpoint-1",
         "checkpoint",
@@ -71,7 +71,6 @@ describe("orient tool", () => {
         "observer,phase,checkpoint",
         "checkpoint",
         "high",
-        ts,
         0,
         ts,
         ts,

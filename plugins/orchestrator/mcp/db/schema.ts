@@ -167,6 +167,11 @@ ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
 UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
 `,
   },
+  {
+    version: 12,
+    name: "drop_access_count",
+    sql: `ALTER TABLE notes DROP COLUMN access_count;`,
+  },
 ];
 
 /**

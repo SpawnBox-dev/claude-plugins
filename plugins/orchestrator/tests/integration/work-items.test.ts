@@ -21,9 +21,9 @@ function insertWorkItem(
   const id = opts.id ?? generateId();
   const timestamp = now();
   db.run(
-    `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, created_at, updated_at)
-     VALUES (?, 'work_item', ?, '', 'work_item', 'high', ?, 0, ?, ?, ?, ?)`,
-    [id, content, timestamp, opts.status ?? "planned", opts.priority ?? "medium", timestamp, timestamp]
+    `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, created_at, updated_at)
+     VALUES (?, 'work_item', ?, '', 'work_item', 'high', 0, ?, ?, ?, ?)`,
+    [id, content, opts.status ?? "planned", opts.priority ?? "medium", timestamp, timestamp]
   );
   return id;
 }
@@ -308,16 +308,16 @@ describe("cascade resolution", () => {
   test("superseding a note auto-resolves the superseded note", () => {
     const oldDecisionId = generateId();
     db.run(
-      `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-       VALUES (?, 'decision', 'Use REST API', '', 'decision', 'medium', ?, 0, ?, ?)`,
-      [oldDecisionId, now(), now(), now()]
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES (?, 'decision', 'Use REST API', '', 'decision', 'medium', 0, ?, ?)`,
+      [oldDecisionId, now(), now()]
     );
 
     const newDecisionId = generateId();
     db.run(
-      `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-       VALUES (?, 'decision', 'Use GraphQL instead', '', 'decision', 'medium', ?, 0, ?, ?)`,
-      [newDecisionId, now(), now(), now()]
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES (?, 'decision', 'Use GraphQL instead', '', 'decision', 'medium', 0, ?, ?)`,
+      [newDecisionId, now(), now()]
     );
 
     insertLink(db, newDecisionId, oldDecisionId, "supersedes");

@@ -291,9 +291,9 @@ describe("hybrid search + session tracking integration", () => {
     const id = generateId();
     const ts = now();
     db.run(
-      `INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at)
-       VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?)`,
-      [id, type, content, ts, ts, ts]
+      `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at)
+       VALUES (?, ?, ?, '', 'medium', 0, ?, ?)`,
+      [id, type, content, ts, ts]
     );
     const blob = Buffer.from(vector.buffer);
     db.run(

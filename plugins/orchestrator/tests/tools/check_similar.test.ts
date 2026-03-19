@@ -26,9 +26,9 @@ function insertNote(
 ): void {
   const ts = now();
   db.run(
-    `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-     VALUES (?, ?, ?, '', '', 'medium', ?, ?, ?, ?)`,
-    [opts.id, opts.type, opts.content, ts, opts.resolved ?? 0, ts, ts]
+    `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+     VALUES (?, ?, ?, '', '', 'medium', ?, ?, ?)`,
+    [opts.id, opts.type, opts.content, opts.resolved ?? 0, ts, ts]
   );
 }
 

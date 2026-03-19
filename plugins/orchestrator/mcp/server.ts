@@ -174,7 +174,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.14.0",
+  version: "0.14.1",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -721,7 +721,6 @@ server.tool(
         tags = ?,
         keywords = ?,
         confidence = ?,
-        last_validated = ?,
         updated_at = ?
        WHERE id = ?`,
       [
@@ -730,7 +729,6 @@ server.tool(
         tags ?? row.tags,
         newKeywords ? newKeywords.join(",") : row.keywords,
         confidence ?? row.confidence ?? "medium",
-        timestamp,
         timestamp,
         id,
       ]
@@ -894,10 +892,10 @@ server.tool(
     }
 
     projectDb.run(
-      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [noteId, "work_item", content, context ?? null, keywords.join(","), tagParts.join(","),
-       "high", timestamp, 0, status ?? "planned", priority ?? "medium", due_date ?? null, timestamp, timestamp]
+       "high", 0, status ?? "planned", priority ?? "medium", due_date ?? null, timestamp, timestamp]
     );
 
     const links = createAutoLinks(projectDb, noteId, keywords);
@@ -1032,10 +1030,10 @@ server.tool(
       const tagParts = ["work_item", ...(tags ? tags.split(",").map(s => s.trim()) : [])];
 
       projectDb.run(
-        `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [actualParentId, "work_item", parent_title, keywords.join(","), tagParts.join(","),
-         "high", timestamp, 0, "planned", "high", due_date ?? null, timestamp, timestamp]
+         "high", 0, "planned", "high", due_date ?? null, timestamp, timestamp]
       );
       createAutoLinks(projectDb, actualParentId, keywords);
     }
@@ -1047,10 +1045,10 @@ server.tool(
       const tagParts = ["work_item", ...(tags ? tags.split(",").map(s => s.trim()) : [])];
 
       projectDb.run(
-        `INSERT INTO notes (id, type, content, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [childId, "work_item", item.content, keywords.join(","), tagParts.join(","),
-         "high", timestamp, 0, "planned", item.priority ?? "medium", item.due_date ?? due_date ?? null, timestamp, timestamp]
+         "high", 0, "planned", item.priority ?? "medium", item.due_date ?? due_date ?? null, timestamp, timestamp]
       );
 
       createAutoLinks(projectDb, childId, keywords);

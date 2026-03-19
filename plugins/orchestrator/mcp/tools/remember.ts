@@ -77,8 +77,8 @@ export async function handleRemember(
   const timestamp = now();
 
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, status, priority, due_date, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       noteId,
       input.type,
@@ -87,7 +87,6 @@ export async function handleRemember(
       keywords.join(","),
       tagsStr,
       "medium",
-      timestamp,
       0,
       null,
       null,

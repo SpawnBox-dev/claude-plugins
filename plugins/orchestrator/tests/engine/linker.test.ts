@@ -20,8 +20,8 @@ function insertNote(
   const id = overrides.id ?? generateId();
   const ts = now();
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, last_validated, resolved, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       overrides.type ?? "insight",
@@ -30,7 +30,6 @@ function insertNote(
       overrides.keywords ?? "",
       overrides.tags ?? "",
       overrides.confidence ?? "medium",
-      ts,
       overrides.resolved ?? 0,
       ts,
       ts,
