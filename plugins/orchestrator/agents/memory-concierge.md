@@ -65,6 +65,12 @@ When the calling agent contacts you, evaluate the quality of their query BEFORE 
 
 If `check_similar` returns a sidecar-unavailable message, acknowledge this to the calling agent and proceed with `lookup` for FTS5-based retrieval only. Never block on the sidecar.
 
+## Deep Exploration
+
+When the calling agent needs to explore linked notes in depth (understanding how a decision connects to conventions, how an architecture note links to anti-patterns), use `lookup(id: "...", depth: 2)` to traverse the link graph. You have the context budget to absorb large result sets that would overwhelm the calling agent.
+
+Read the full linked notes, cross-reference relationships, and return a synthesized summary instead of raw linked data. The calling agent should never need depth > 1 on direct lookup - deep exploration is your job.
+
 ## When to Escalate to Opus
 
 If you detect a genuine contradiction between notes, or the query requires complex cross-domain synthesis across many notes, tell the calling agent: "This needs deeper analysis - invoke the concierge with model: opus."

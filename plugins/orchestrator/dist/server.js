@@ -20645,7 +20645,7 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
         note: {
           id: r.id,
           type: r.type,
-          content: r.content,
+          content: r.content.length > 200 ? r.content.slice(0, 200) + `... [truncated - call lookup(id: "${r.id}") for full content]` : r.content,
           confidence: r.confidence,
           created_at: r.created_at,
           keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
@@ -21557,7 +21557,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.4"
+  version: "0.14.5"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21846,6 +21846,12 @@ ${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
 - **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
     }
   }
+  if (text.length > 15000) {
+    text += `
+
+---
+\u26A0 Large result set (` + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+  }
   return {
     content: [{ type: "text", text }]
   };
@@ -22084,18 +22090,27 @@ server.tool("user_profile", "View or update the structured user profile. Shows a
   return { content: [{ type: "text", text: "Unknown action." }] };
 });
 server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work.", {
-  content: exports_external.string().describe("What needs to be done - be specific and actionable"),
+  content: exports_external.string().optional().describe("What needs to be done - be specific and actionable. This is the primary field."),
+  title: exports_external.string().optional().describe("Alias for content (if content not provided, title is used)"),
+  description: exports_external.string().optional().describe("Additional detail (appended to content if both provided)"),
   priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional().default("medium"),
   status: exports_external.enum(WORK_ITEM_STATUSES).optional().default("planned"),
   parent_id: exports_external.string().optional().describe("ID of parent work_item this belongs to (creates part_of link)"),
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format"),
   tags: exports_external.string().optional(),
   context: exports_external.string().optional()
-}, async ({ content, priority, status, parent_id, due_date, tags, context }) => {
+}, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context }) => {
+  const content = rawContent || title || description || "";
+  if (!content) {
+    return { content: [{ type: "text", text: "Error: provide content (or title) describing what needs to be done." }] };
+  }
+  const fullContent = (rawContent || title || "") + (description && (rawContent || title) ? `
+
+` + description : description || "");
   const projectDb2 = getProjectDb();
   const noteId = generateId();
   const timestamp = now();
-  const textForKeywords = [content, context].filter(Boolean).join(" ");
+  const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
   const tagParts = ["work_item"];
   if (tags) {
@@ -22108,7 +22123,7 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     "work_item",
-    content,
+    fullContent,
     context ?? null,
     keywords.join(","),
     tagParts.join(","),

@@ -19,6 +19,7 @@ Use the Agent tool to spawn or resume the memory concierge:
 - You suspect you may be contradicting a past decision
 - When raw lookup returns results but you're not confident they're comprehensive
 - Building any kind of inventory, audit, or status report
+- Deep exploration of linked knowledge ("how does this decision connect to conventions?", "trace the history of this design choice")
 - The user says "are we missing anything?" or "give me everything"
 
 **When NOT to use this skill (precision is enough):**

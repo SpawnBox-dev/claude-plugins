@@ -174,7 +174,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.14.4",
+  version: "0.14.5",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -538,6 +538,10 @@ server.tool(
         text += `\n- **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
       }
     }
+    if (text.length > 15000) {
+      text += "\n\n---\n⚠ Large result set (" + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+    }
+
     return {
       content: [{ type: "text" as const, text }],
     };
@@ -872,7 +876,9 @@ server.tool(
   "create_work_item",
   "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work.",
   {
-    content: z.string().describe("What needs to be done - be specific and actionable"),
+    content: z.string().optional().describe("What needs to be done - be specific and actionable. This is the primary field."),
+    title: z.string().optional().describe("Alias for content (if content not provided, title is used)"),
+    description: z.string().optional().describe("Additional detail (appended to content if both provided)"),
     priority: z.enum(WORK_ITEM_PRIORITIES).optional().default("medium"),
     status: z.enum(WORK_ITEM_STATUSES).optional().default("planned"),
     parent_id: z.string().optional().describe("ID of parent work_item this belongs to (creates part_of link)"),
@@ -880,11 +886,18 @@ server.tool(
     tags: z.string().optional(),
     context: z.string().optional(),
   },
-  async ({ content, priority, status, parent_id, due_date, tags, context }) => {
+  async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context }) => {
+    // Accept content, title, or description - fold into one content string
+    const content = rawContent || title || description || "";
+    if (!content) {
+      return { content: [{ type: "text" as const, text: "Error: provide content (or title) describing what needs to be done." }] };
+    }
+    // If both content/title and description provided, combine them
+    const fullContent = (rawContent || title || "") + (description && (rawContent || title) ? "\n\n" + description : description || "");
     const projectDb = getProjectDb();
     const noteId = generateId();
     const timestamp = now();
-    const textForKeywords = [content, context].filter(Boolean).join(" ");
+    const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
     const keywords = extractKeywords(textForKeywords);
 
     const tagParts: string[] = ["work_item"];
@@ -897,7 +910,7 @@ server.tool(
     projectDb.run(
       `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [noteId, "work_item", content, context ?? null, keywords.join(","), tagParts.join(","),
+      [noteId, "work_item", fullContent, context ?? null, keywords.join(","), tagParts.join(","),
        "high", 0, status ?? "planned", priority ?? "medium", due_date ?? null, timestamp, timestamp]
     );
 

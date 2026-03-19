@@ -26,6 +26,7 @@ Run this evaluation every turn. It takes seconds and prevents you from missing c
 **About to implement something?**
 - For complex/broad queries ("what should I know about combat?", "brief me on this area"): invoke `orchestrator:consult-concierge` — the concierge searches, curates, and returns the most relevant 3-5 items with strategic framing. It tracks what it already told you and won't repeat itself.
 - For simple/specific lookups ("find the broker convention"): call `lookup` directly — faster, no subagent overhead.
+- For deep exploration (understanding how notes connect, tracing decisions to conventions): use the concierge. Direct `lookup` with `depth > 1` returns truncated linked notes - the concierge reads them in full and synthesizes.
 - Call `plan` if the task is complex → invoke `orchestrator:planning-approach`
 - If you find prior decisions → invoke `orchestrator:what-was-decided`
 

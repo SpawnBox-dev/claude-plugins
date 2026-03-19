@@ -89,7 +89,9 @@ function fetchLinkedNotes(
         note: {
           id: r.id,
           type: r.type,
-          content: r.content,
+          content: r.content.length > 200
+            ? r.content.slice(0, 200) + `... [truncated - call lookup(id: "${r.id}") for full content]`
+            : r.content,
           confidence: r.confidence,
           created_at: r.created_at,
           keywords: r.keywords
