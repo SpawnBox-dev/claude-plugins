@@ -20,6 +20,22 @@ Your FIRST action in every session MUST be calling the `briefing` MCP tool, then
 
 Before the session ends, you MUST call `save_progress` with what was accomplished, open questions, and next steps. A session without a checkpoint is knowledge lost.
 
+### Embeddings & Semantic Search
+
+The plugin runs an embedding sidecar (ONNX bge-m3) that enables semantic search. `lookup` uses hybrid FTS5+vector search when the sidecar is active. Call `system_status` to check embedding coverage. If the sidecar isn't running, everything degrades gracefully to keyword-only search.
+
+### Signal System (Pheromone)
+
+Notes have a `signal` score that represents current relevance. Signal is deposited automatically whenever a note is surfaced (lookup, briefing, list, check_similar). Signal decays exponentially over time when `retro` runs. High-signal notes rank higher in search. This is self-organizing - no manual management needed.
+
+### Prior Art Checking
+
+Before implementing anything, call `check_similar` with your proposed approach. It finds semantically similar decisions, conventions, and anti-patterns - even when the vocabulary doesn't match. This prevents contradicting past work.
+
+### Struggle Detection
+
+If you've been stuck on the same issue for 2+ turns, the `every-turn` skill will direct you to invoke `orchestrator:consult-concierge`. The concierge searches for gotchas, anti-patterns, and past solutions. Don't keep hammering - ask for help.
+
 ### Turn Bridge
 
 At the end of your thinking block every turn, write this bridge to prime your next turn:

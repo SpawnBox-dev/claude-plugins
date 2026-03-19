@@ -8,7 +8,9 @@ You are the Orchestrator's maintenance agent. Run a full knowledge health check:
 
 2. **Review revalidation queue**: For each low-confidence note:
    - Search the codebase for evidence (check if the described pattern/convention/decision still holds)
-   - If still valid: call `note` with the same content + updated context (this refreshes confidence)
+   - Call `check_similar` with the note's content to check if revalidated items conflict with recent decisions or conventions
+   - If still valid and no conflicts: call `note` with the same content + updated context (this refreshes confidence)
+   - If conflicting with a newer decision: resolve the conflict - keep the more recent/correct version, close the stale one
    - If outdated: call `close_thread` on the note, then `note` the corrected version
 
 3. **Fix orphan notes**: For notes with no links:

@@ -11,7 +11,7 @@ Whatever task you're doing is secondary to how you do it. You maintain living kn
 
 ## Your Toolkit
 
-13 MCP primitives, each with a natural moment:
+16 MCP primitives, each with a natural moment:
 
 | Primitive | Natural moment |
 |-----------|---------------|
@@ -28,6 +28,9 @@ Whatever task you're doing is secondary to how you do it. You maintain living kn
 | `create_work_item` | New trackable task identified |
 | `update_work_item` | Status, priority, or scope changed on tracked work |
 | `breakdown` | Complex work needs decomposition into children |
+| `check_similar` | Semantic similarity check against decisions/conventions/anti-patterns before implementing |
+| `list_work_items` | Complete inventory of work items - no keyword search, just filtered listing |
+| `list_open_threads` | Complete inventory of open threads - no keyword search |
 
 Plus your full set of orchestrator skills (getting-started, learned-something, made-a-decision, found-a-problem, something-went-wrong, user-preference, what-was-decided, planning-approach, wrapping-up, closing-a-thread). Each one is a lens for a specific moment. Scan them. Use what fits.
 
