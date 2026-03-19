@@ -32,9 +32,9 @@ describe("SessionTracker", () => {
   test("annotateResult marks already-sent notes", () => {
     tracker.registerSession("sess-1");
     tracker.logSurfaced("sess-1", "note-1", 1, "fresh");
-    // Need a note in the notes table for access_count
+    // Need a note in the notes table for signal
     const ts = new Date().toISOString();
-    db.run(`INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at, access_count) VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?, 0)`,
+    db.run(`INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at) VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?)`,
       ["note-1", "insight", "test", ts, ts, ts]);
 
     const annotation = tracker.annotateResult("sess-1", "note-1", 5);
@@ -45,7 +45,7 @@ describe("SessionTracker", () => {
   test("annotateResult shows not-sent for fresh notes", () => {
     tracker.registerSession("sess-1");
     const ts = new Date().toISOString();
-    db.run(`INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at, access_count) VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?, 0)`,
+    db.run(`INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at) VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?)`,
       ["note-2", "insight", "test", ts, ts, ts]);
 
     const annotation = tracker.annotateResult("sess-1", "note-2", 1);

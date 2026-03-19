@@ -291,8 +291,8 @@ describe("hybrid search + session tracking integration", () => {
     const id = generateId();
     const ts = now();
     db.run(
-      `INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at, access_count)
-       VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?, 0)`,
+      `INSERT INTO notes (id, type, content, keywords, confidence, last_validated, resolved, created_at, updated_at)
+       VALUES (?, ?, ?, '', 'medium', ?, 0, ?, ?)`,
       [id, type, content, ts, ts, ts]
     );
     const blob = Buffer.from(vector.buffer);
@@ -325,28 +325,26 @@ describe("hybrid search + session tracking integration", () => {
     expect(results[0].content).toContain("broker");
   });
 
-  test("activation tracking increments access_count", () => {
+  test("signal deposit increases pheromone signal", () => {
+    const { depositSignal } = require("../../mcp/engine/signal");
     const vec = new Float32Array(768).fill(0.5);
     const id = insertNoteWithEmbedding(
-      "test note for activation",
+      "test note for signal",
       "insight",
       vec
     );
 
     const before = db
-      .query(`SELECT access_count FROM notes WHERE id = ?`)
+      .query(`SELECT signal FROM notes WHERE id = ?`)
       .get(id) as any;
-    expect(before.access_count).toBe(0);
+    expect(before.signal).toBe(0);
 
-    db.run(
-      `UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`,
-      [new Date().toISOString(), id]
-    );
+    depositSignal(db, id);
 
     const after = db
-      .query(`SELECT access_count FROM notes WHERE id = ?`)
+      .query(`SELECT signal FROM notes WHERE id = ?`)
       .get(id) as any;
-    expect(after.access_count).toBe(1);
+    expect(after.signal).toBe(1);
   });
 
   test("session tracker annotates already-sent notes correctly", () => {

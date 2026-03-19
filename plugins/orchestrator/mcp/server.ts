@@ -23,6 +23,7 @@ import { generateId, now, extractKeywords } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 import { SessionTracker } from "./engine/session_tracker";
+import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
 
 // ── Sidecar lifecycle ────────────────────────────────────────────────────
 let embeddingClient: EmbeddingClient | null = null;
@@ -173,7 +174,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.13.0",
+  version: "0.14.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -192,6 +193,19 @@ server.tool(
       event: event ?? "startup",
       sections: sections ?? undefined,
     });
+
+    // Deposit weak signal on notes surfaced in the briefing
+    const briefingNoteIds = [
+      ...result.briefing.active_work,
+      ...result.briefing.blocked_work,
+      ...result.briefing.overdue_work,
+      ...result.briefing.recently_completed,
+      ...result.briefing.open_threads,
+      ...result.briefing.recent_decisions,
+    ].map(n => n.id);
+    if (briefingNoteIds.length > 0) {
+      depositSignalBatch(getProjectDb(), briefingNoteIds, WEAK_DEPOSIT);
+    }
 
     // Append system status when embeddings need attention
     let text = result.formatted;
@@ -485,14 +499,12 @@ server.tool(
         // Log that we surfaced this note
         const deliveryType = annotation.already_sent ? "refresh" : "fresh";
         tracker.logSurfaced(session_id, noteId, turn, deliveryType);
-
-        // Update activation tracking on the note
-        const timestamp = now();
-        projectDb.run(
-          `UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`,
-          [timestamp, noteId]
-        );
       }
+    }
+
+    // Deposit pheromone signal on all surfaced notes (regardless of session tracking)
+    if (noteIds.length > 0) {
+      depositSignalBatch(projectDb, noteIds);
     }
 
     // Format annotation marker for a note
@@ -1084,6 +1096,12 @@ server.tool(
       threshold,
     });
 
+    // Deposit weak signal on matched notes
+    const similarNoteIds = result.results.map(r => r.id);
+    if (similarNoteIds.length > 0) {
+      depositSignalBatch(getProjectDb(), similarNoteIds, WEAK_DEPOSIT);
+    }
+
     let text = result.message;
     if (result.results.length > 0) {
       text += "\n";
@@ -1170,6 +1188,12 @@ server.tool(
     if (tag) { countQuery += ` AND tags LIKE ?`; countParams.push(`%${tag}%`); }
     const total = (db.query(countQuery).get(...countParams) as any).cnt;
 
+    // Deposit weak signal on listed work items
+    const workItemIds = rows.map((r: any) => r.id);
+    if (workItemIds.length > 0) {
+      depositSignalBatch(db, workItemIds, WEAK_DEPOSIT);
+    }
+
     const lines: string[] = [];
     lines.push(`## Work Items (${rows.length} of ${total} total)`);
     lines.push("");
@@ -1221,6 +1245,12 @@ server.tool(
     if (!resolved) { countQuery += ` AND resolved = 0`; }
     if (tag) { countQuery += ` AND tags LIKE ?`; countParams.push(`%${tag}%`); }
     const total = (db.query(countQuery).get(...countParams) as any).cnt;
+
+    // Deposit weak signal on listed threads
+    const threadIds = rows.map((r: any) => r.id);
+    if (threadIds.length > 0) {
+      depositSignalBatch(db, threadIds, WEAK_DEPOSIT);
+    }
 
     const lines: string[] = [];
     lines.push(`## Open Threads (${rows.length} of ${total} total)`);

@@ -159,6 +159,14 @@ CREATE TABLE IF NOT EXISTS session_registry (
 );
 `,
   },
+  {
+    version: 11,
+    name: "add_signal_column",
+    sql: `
+ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
+UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
+`,
+  },
 ];
 
 /**

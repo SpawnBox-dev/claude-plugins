@@ -176,11 +176,9 @@ describe("recall tool", () => {
     // Log that we surfaced it
     tracker.logSurfaced(sessionId, noteId, turn1, "fresh");
 
-    // Update activation
-    projectDb.run(
-      `UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`,
-      [now(), noteId]
-    );
+    // Deposit pheromone signal (mirrors server.ts logic)
+    const { depositSignal } = await import("../../mcp/engine/signal");
+    depositSignal(projectDb, noteId);
 
     // Second lookup - same session, next turn. Note should be "already_sent"
     const turn2 = tracker.nextTurn(sessionId);
@@ -196,10 +194,10 @@ describe("recall tool", () => {
       .all(sessionId);
     expect(logs.length).toBe(1);
 
-    // Verify activation count was incremented
+    // Verify signal was deposited
     const noteRow = projectDb
-      .query(`SELECT access_count FROM notes WHERE id = ?`)
-      .get(noteId) as { access_count: number };
-    expect(noteRow.access_count).toBe(1);
+      .query(`SELECT signal FROM notes WHERE id = ?`)
+      .get(noteId) as { signal: number };
+    expect(noteRow.signal).toBe(1);
   });
 });

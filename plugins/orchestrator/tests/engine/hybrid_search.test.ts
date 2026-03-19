@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
-import { cosineSimilarity, reciprocalRankFusion, maximalMarginalRelevance, applyActivationBoost } from "../../mcp/engine/hybrid_search";
+import { cosineSimilarity, reciprocalRankFusion, maximalMarginalRelevance } from "../../mcp/engine/hybrid_search";
+import { signalBoost } from "../../mcp/engine/signal";
 
 describe("cosineSimilarity", () => {
   test("identical vectors return 1.0", () => {
@@ -56,11 +57,11 @@ describe("maximalMarginalRelevance", () => {
   });
 });
 
-describe("applyActivationBoost", () => {
-  test("zero access returns base score", () => {
-    expect(applyActivationBoost(1.0, 0)).toBeCloseTo(1.0);
+describe("signalBoost", () => {
+  test("zero signal returns 1.0", () => {
+    expect(signalBoost(0)).toBeCloseTo(1.0);
   });
-  test("higher access gives higher score", () => {
-    expect(applyActivationBoost(1.0, 10)).toBeGreaterThan(applyActivationBoost(1.0, 0));
+  test("higher signal gives higher boost", () => {
+    expect(signalBoost(10)).toBeGreaterThan(signalBoost(0));
   });
 });

@@ -19684,6 +19684,14 @@ CREATE TABLE IF NOT EXISTS session_registry (
   concierge_agent_id TEXT
 );
 `
+  },
+  {
+    version: 11,
+    name: "add_signal_column",
+    sql: `
+ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
+UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
+`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20344,15 +20352,6 @@ function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
 }
 
 // mcp/engine/scorer.ts
-function decayConfidence(db, staleDays = 30) {
-  const cutoff = new Date(Date.now() - staleDays * 24 * 60 * 60 * 1000).toISOString();
-  const result = db.run(`UPDATE notes
-     SET confidence = 'low', updated_at = ?
-     WHERE confidence != 'low'
-       AND last_validated < ?
-       AND resolved = 0`, [new Date().toISOString(), cutoff]);
-  return result.changes;
-}
 function promoteConfidence(db, noteId) {
   const row = db.query(`SELECT confidence FROM notes WHERE id = ?`).get(noteId);
   if (!row)
@@ -21214,11 +21213,47 @@ function handlePrepare(projectDb2, globalDb2, input) {
   return { package: pkg, autonomy: autonomyResult.score, formatted };
 }
 
+// mcp/engine/signal.ts
+var DECAY_RATE = 0.95;
+var DEFAULT_DEPOSIT = 1;
+var WEAK_DEPOSIT = 0.3;
+function depositSignalBatch(db, noteIds, amount = DEFAULT_DEPOSIT) {
+  if (noteIds.length === 0)
+    return;
+  const now3 = new Date().toISOString();
+  const stmt = db.prepare(`UPDATE notes SET signal = COALESCE(signal, 0) + ?, last_accessed_at = ? WHERE id = ?`);
+  for (const id of noteIds) {
+    stmt.run(amount, now3, id);
+  }
+}
+function decayAllSignals(db) {
+  const rows = db.query(`SELECT id, signal, last_accessed_at FROM notes
+       WHERE signal > 0 AND last_accessed_at IS NOT NULL`).all();
+  if (rows.length === 0)
+    return 0;
+  const now3 = Date.now();
+  const stmt = db.prepare(`UPDATE notes SET signal = ? WHERE id = ?`);
+  let decayed = 0;
+  for (const row of rows) {
+    const lastAccess = new Date(row.last_accessed_at).getTime();
+    const daysSince = (now3 - lastAccess) / (1000 * 60 * 60 * 24);
+    if (daysSince <= 0)
+      continue;
+    const newSignal = row.signal * Math.pow(DECAY_RATE, daysSince);
+    const finalSignal = newSignal < 0.01 ? 0 : newSignal;
+    if (finalSignal !== row.signal) {
+      stmt.run(finalSignal, row.id);
+      decayed++;
+    }
+  }
+  return decayed;
+}
+
 // mcp/tools/reflect.ts
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
-  const projectDecayed = decayConfidence(projectDb2);
-  const globalDecayed = decayConfidence(globalDb2);
+  const projectDecayed = decayAllSignals(projectDb2);
+  const globalDecayed = decayAllSignals(globalDb2);
   const totalDecayed = projectDecayed + globalDecayed;
   const projectMerged = mergeDuplicates(projectDb2);
   const globalMerged = mergeDuplicates(globalDb2);
@@ -21277,14 +21312,14 @@ function handleReflect(projectDb2, globalDb2, input) {
   } catch {}
   const message = [
     `Reflection complete.`,
-    totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
+    totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
     totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null,
     trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null
   ].filter(Boolean).join(" ");
   return {
-    confidence_decayed: totalDecayed,
+    signals_decayed: totalDecayed,
     duplicates_found: totalMerged,
     duplicates_merged: totalMerged,
     orphan_notes: orphanCount,
@@ -21358,8 +21393,8 @@ class SessionTracker {
       session_id: r.session_id,
       turn: r.turn_number
     }));
-    const noteRow = this.db.query(`SELECT access_count FROM notes WHERE id = ?`).get(noteId);
-    const activation_score = noteRow?.access_count ?? 0;
+    const noteRow = this.db.query(`SELECT signal FROM notes WHERE id = ?`).get(noteId);
+    const activation_score = noteRow?.signal ?? 0;
     return {
       already_sent,
       sent_turns_ago,
@@ -21498,7 +21533,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.13.0"
+  version: "0.14.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21508,6 +21543,17 @@ server.tool("briefing", "Get up to speed on the current project. Returns open th
     event: event ?? "startup",
     sections: sections ?? undefined
   });
+  const briefingNoteIds = [
+    ...result.briefing.active_work,
+    ...result.briefing.blocked_work,
+    ...result.briefing.overdue_work,
+    ...result.briefing.recently_completed,
+    ...result.briefing.open_threads,
+    ...result.briefing.recent_decisions
+  ].map((n) => n.id);
+  if (briefingNoteIds.length > 0) {
+    depositSignalBatch(getProjectDb(), briefingNoteIds, WEAK_DEPOSIT);
+  }
   let text = result.formatted;
   if (sidecarStatus !== "ready" && event === "startup") {
     text += `
@@ -21733,9 +21779,10 @@ server.tool("lookup", "Search what you already know. Use this before implementin
       annotations.set(noteId, annotation);
       const deliveryType = annotation.already_sent ? "refresh" : "fresh";
       tracker.logSurfaced(session_id, noteId, turn, deliveryType);
-      const timestamp = now();
-      projectDb2.run(`UPDATE notes SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?`, [timestamp, noteId]);
     }
+  }
+  if (noteIds.length > 0) {
+    depositSignalBatch(projectDb2, noteIds);
   }
   function annotationMarker(noteId) {
     const ann = annotations.get(noteId);
@@ -22219,6 +22266,10 @@ server.tool("check_similar", "Check if a proposed action is similar to existing 
     types: types2,
     threshold
   });
+  const similarNoteIds = result.results.map((r) => r.id);
+  if (similarNoteIds.length > 0) {
+    depositSignalBatch(getProjectDb(), similarNoteIds, WEAK_DEPOSIT);
+  }
   let text = result.message;
   if (result.results.length > 0) {
     text += `
@@ -22303,6 +22354,10 @@ server.tool("list_work_items", "List ALL work items, optionally filtered by stat
     countParams.push(`%${tag}%`);
   }
   const total = db.query(countQuery).get(...countParams).cnt;
+  const workItemIds = rows.map((r) => r.id);
+  if (workItemIds.length > 0) {
+    depositSignalBatch(db, workItemIds, WEAK_DEPOSIT);
+  }
   const lines = [];
   lines.push(`## Work Items (${rows.length} of ${total} total)`);
   lines.push("");
@@ -22346,6 +22401,10 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
     countParams.push(`%${tag}%`);
   }
   const total = db.query(countQuery).get(...countParams).cnt;
+  const threadIds = rows.map((r) => r.id);
+  if (threadIds.length > 0) {
+    depositSignalBatch(db, threadIds, WEAK_DEPOSIT);
+  }
   const lines = [];
   lines.push(`## Open Threads (${rows.length} of ${total} total)`);
   lines.push("");

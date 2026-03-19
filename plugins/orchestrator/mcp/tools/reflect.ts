@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { NoteSummary } from "../types";
-import { decayConfidence, computeAutonomyScore } from "../engine/scorer";
+import { computeAutonomyScore } from "../engine/scorer";
+import { decayAllSignals } from "../engine/signal";
 import { mergeDuplicates } from "../engine/deduplicator";
 import { now } from "../utils";
 
@@ -9,7 +10,7 @@ export interface ReflectInput {
 }
 
 export interface ReflectResult {
-  confidence_decayed: number;
+  signals_decayed: number;
   duplicates_found: number;
   duplicates_merged: number;
   orphan_notes: number;
@@ -26,9 +27,9 @@ export function handleReflect(
   globalDb: Database,
   input: ReflectInput
 ): ReflectResult {
-  // Decay confidence on stale notes in both DBs
-  const projectDecayed = decayConfidence(projectDb);
-  const globalDecayed = decayConfidence(globalDb);
+  // Decay pheromone signals on stale notes in both DBs
+  const projectDecayed = decayAllSignals(projectDb);
+  const globalDecayed = decayAllSignals(globalDb);
   const totalDecayed = projectDecayed + globalDecayed;
 
   // Merge duplicate notes in both DBs
@@ -137,7 +138,7 @@ export function handleReflect(
 
   const message = [
     `Reflection complete.`,
-    totalDecayed > 0 ? `${totalDecayed} note(s) had confidence decayed.` : null,
+    totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
     totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0
@@ -151,7 +152,7 @@ export function handleReflect(
     .join(" ");
 
   return {
-    confidence_decayed: totalDecayed,
+    signals_decayed: totalDecayed,
     duplicates_found: totalMerged,
     duplicates_merged: totalMerged,
     orphan_notes: orphanCount,

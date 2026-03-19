@@ -124,10 +124,3 @@ export function maximalMarginalRelevance(
   return selected;
 }
 
-/**
- * Activation boost: increases score based on access frequency.
- * return baseScore * (1 + 0.1 * Math.log(1 + accessCount))
- */
-export function applyActivationBoost(baseScore: number, accessCount: number): number {
-  return baseScore * (1 + 0.1 * Math.log(1 + accessCount));
-}

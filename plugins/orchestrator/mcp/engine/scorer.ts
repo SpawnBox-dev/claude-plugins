@@ -3,27 +3,6 @@ import type { AutonomyLevel, ConfidenceLevel } from "../types";
 import { now } from "../utils";
 
 /**
- * Decay confidence of stale, unresolved notes to 'low'.
- * Returns the number of rows affected.
- */
-export function decayConfidence(db: Database, staleDays = 30): number {
-  const cutoff = new Date(
-    Date.now() - staleDays * 24 * 60 * 60 * 1000
-  ).toISOString();
-
-  const result = db.run(
-    `UPDATE notes
-     SET confidence = 'low', updated_at = ?
-     WHERE confidence != 'low'
-       AND last_validated < ?
-       AND resolved = 0`,
-    [new Date().toISOString(), cutoff]
-  );
-
-  return result.changes;
-}
-
-/**
  * Promote confidence of an existing note when a near-duplicate is found.
  * low -> medium -> high. Also refreshes last_validated.
  * Returns the new confidence level.

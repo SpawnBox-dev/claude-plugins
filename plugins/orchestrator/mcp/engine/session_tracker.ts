@@ -122,7 +122,7 @@ export class SessionTracker {
    * - already_sent: whether this note was previously surfaced in this session
    * - sent_turns_ago: how many turns ago it was last sent (null if never)
    * - sent_to_other_sessions: other sessions that surfaced this note in the last 7 days
-   * - activation_score: from notes.access_count
+   * - activation_score: from notes.signal (pheromone signal strength)
    */
   annotateResult(
     sessionId: string,
@@ -162,12 +162,12 @@ export class SessionTracker {
       turn: r.turn_number,
     }));
 
-    // Get activation_score from notes.access_count
+    // Get activation_score from notes.signal (pheromone strength)
     const noteRow = this.db
-      .query(`SELECT access_count FROM notes WHERE id = ?`)
-      .get(noteId) as { access_count: number } | null;
+      .query(`SELECT signal FROM notes WHERE id = ?`)
+      .get(noteId) as { signal: number } | null;
 
-    const activation_score = noteRow?.access_count ?? 0;
+    const activation_score = noteRow?.signal ?? 0;
 
     return {
       already_sent,
