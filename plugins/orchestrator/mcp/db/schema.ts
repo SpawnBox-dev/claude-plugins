@@ -4,6 +4,7 @@ export interface Migration {
   version: number;
   name: string;
   sql: string;
+  customApply?: (db: Database) => void;
 }
 
 /**
@@ -162,15 +163,35 @@ CREATE TABLE IF NOT EXISTS session_registry (
   {
     version: 11,
     name: "add_signal_column",
+    // Wrapped in a check to handle the column already existing (e.g., manual DB manipulation)
     sql: `
-ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
-UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
+CREATE TABLE IF NOT EXISTS _signal_migration_check (x);
+DROP TABLE _signal_migration_check;
 `,
+    // Custom apply: handled in applyMigrations via special case
+    customApply: (db) => {
+      // Check if signal column already exists
+      const cols = db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "signal")) {
+        db.exec("ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0");
+      }
+      // Seed from access_count if it exists
+      const hasAccessCount = cols.some((c) => c.name === "access_count");
+      if (hasAccessCount) {
+        db.exec("UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL) WHERE signal = 0 OR signal IS NULL");
+      }
+    },
   },
   {
     version: 12,
     name: "drop_access_count",
-    sql: `ALTER TABLE notes DROP COLUMN access_count;`,
+    sql: `SELECT 1;`, // no-op SQL; actual work in customApply
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>;
+      if (cols.some((c) => c.name === "access_count")) {
+        db.exec("ALTER TABLE notes DROP COLUMN access_count");
+      }
+    },
   },
 ];
 
@@ -256,8 +277,12 @@ export function applyMigrations(
 
     db.run("BEGIN");
     try {
-      // Execute each statement in the migration SQL
-      db.exec(migration.sql);
+      // Use customApply if available (for idempotent/conditional migrations)
+      if (migration.customApply) {
+        migration.customApply(db);
+      } else {
+        db.exec(migration.sql);
+      }
 
       // Record the migration
       db.run(

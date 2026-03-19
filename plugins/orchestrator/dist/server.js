@@ -19689,14 +19689,30 @@ CREATE TABLE IF NOT EXISTS session_registry (
     version: 11,
     name: "add_signal_column",
     sql: `
-ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0;
-UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL);
-`
+CREATE TABLE IF NOT EXISTS _signal_migration_check (x);
+DROP TABLE _signal_migration_check;
+`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all();
+      if (!cols.some((c) => c.name === "signal")) {
+        db.exec("ALTER TABLE notes ADD COLUMN signal REAL DEFAULT 0");
+      }
+      const hasAccessCount = cols.some((c) => c.name === "access_count");
+      if (hasAccessCount) {
+        db.exec("UPDATE notes SET signal = CAST(COALESCE(access_count, 0) AS REAL) WHERE signal = 0 OR signal IS NULL");
+      }
+    }
   },
   {
     version: 12,
     name: "drop_access_count",
-    sql: `ALTER TABLE notes DROP COLUMN access_count;`
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all();
+      if (cols.some((c) => c.name === "access_count")) {
+        db.exec("ALTER TABLE notes DROP COLUMN access_count");
+      }
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -19757,7 +19773,11 @@ function applyMigrations(db, dbType = "project") {
       continue;
     db.run("BEGIN");
     try {
-      db.exec(migration.sql);
+      if (migration.customApply) {
+        migration.customApply(db);
+      } else {
+        db.exec(migration.sql);
+      }
       db.run("INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)", [migration.version, migration.name, new Date().toISOString()]);
       db.run("COMMIT");
     } catch (err) {
@@ -21537,7 +21557,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.2"
+  version: "0.14.3"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
