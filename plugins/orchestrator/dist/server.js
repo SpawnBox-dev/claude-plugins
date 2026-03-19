@@ -21557,7 +21557,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.3"
+  version: "0.14.4"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21864,25 +21864,27 @@ server.tool("plan", "Gather domain-specific context before starting a complex ta
 });
 server.tool("save_progress", "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends.", {
   summary: exports_external.string().describe("What was accomplished and current state"),
-  open_questions: exports_external.array(exports_external.string()).optional().describe("Unresolved questions"),
-  next_steps: exports_external.array(exports_external.string()).optional().describe("What should happen next"),
+  open_questions: exports_external.union([exports_external.array(exports_external.string()), exports_external.string()]).optional().describe("Unresolved questions (array of strings, or single string)"),
+  next_steps: exports_external.union([exports_external.array(exports_external.string()), exports_external.string()]).optional().describe("What should happen next (array of strings, or single string)"),
   in_flight: exports_external.string().optional().describe("Work currently in progress, if any")
 }, async ({ summary, open_questions, next_steps, in_flight }) => {
+  const oq = typeof open_questions === "string" ? [open_questions] : open_questions;
+  const ns = typeof next_steps === "string" ? [next_steps] : next_steps;
   const parts = [`## Work State
 ${summary}`];
   if (in_flight)
     parts.push(`
 ## In Flight
 ${in_flight}`);
-  if (open_questions?.length)
+  if (oq?.length)
     parts.push(`
 ## Open Questions
-${open_questions.map((q) => `- ${q}`).join(`
+${oq.map((q) => `- ${q}`).join(`
 `)}`);
-  if (next_steps?.length)
+  if (ns?.length)
     parts.push(`
 ## Next Steps
-${next_steps.map((s) => `- ${s}`).join(`
+${ns.map((s) => `- ${s}`).join(`
 `)}`);
   const content = parts.join(`
 `);
@@ -22034,7 +22036,7 @@ server.tool("delete_note", "Permanently delete a note from the knowledge base. U
 });
 server.tool("user_profile", "View or update the structured user profile. Shows all learned observations about the user grouped by dimension (preferences, communication style, decision patterns, strengths, blind spots, intent). Use to understand the user better or to explicitly record a user trait.", {
   action: exports_external.enum(["view", "set", "remove"]).optional().default("view"),
-  dimension: exports_external.enum(DIMENSIONS).optional().describe("Which dimension to set/remove"),
+  dimension: exports_external.enum(DIMENSIONS).optional().describe("Which dimension to set/remove. MUST be one of: communication_style, decision_pattern, strength, blind_spot, preference, intent_pattern. Do NOT invent new values."),
   observation: exports_external.string().optional().describe("The observation to record (for 'set' action)"),
   id: exports_external.string().optional().describe("ID of user_model entry to remove (for 'remove' action)")
 }, async ({ action, dimension, observation, id }) => {

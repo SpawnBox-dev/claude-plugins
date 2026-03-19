@@ -174,7 +174,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.14.3",
+  version: "0.14.4",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -569,15 +569,18 @@ server.tool(
   "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends.",
   {
     summary: z.string().describe("What was accomplished and current state"),
-    open_questions: z.array(z.string()).optional().describe("Unresolved questions"),
-    next_steps: z.array(z.string()).optional().describe("What should happen next"),
+    open_questions: z.union([z.array(z.string()), z.string()]).optional().describe("Unresolved questions (array of strings, or single string)"),
+    next_steps: z.union([z.array(z.string()), z.string()]).optional().describe("What should happen next (array of strings, or single string)"),
     in_flight: z.string().optional().describe("Work currently in progress, if any"),
   },
   async ({ summary, open_questions, next_steps, in_flight }) => {
+    // Normalize string inputs to arrays
+    const oq = typeof open_questions === "string" ? [open_questions] : open_questions;
+    const ns = typeof next_steps === "string" ? [next_steps] : next_steps;
     const parts = [`## Work State\n${summary}`];
     if (in_flight) parts.push(`\n## In Flight\n${in_flight}`);
-    if (open_questions?.length) parts.push(`\n## Open Questions\n${open_questions.map(q => `- ${q}`).join("\n")}`);
-    if (next_steps?.length) parts.push(`\n## Next Steps\n${next_steps.map(s => `- ${s}`).join("\n")}`);
+    if (oq?.length) parts.push(`\n## Open Questions\n${oq.map(q => `- ${q}`).join("\n")}`);
+    if (ns?.length) parts.push(`\n## Next Steps\n${ns.map(s => `- ${s}`).join("\n")}`);
 
     const content = parts.join("\n");
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
@@ -796,7 +799,7 @@ server.tool(
   "View or update the structured user profile. Shows all learned observations about the user grouped by dimension (preferences, communication style, decision patterns, strengths, blind spots, intent). Use to understand the user better or to explicitly record a user trait.",
   {
     action: z.enum(["view", "set", "remove"]).optional().default("view"),
-    dimension: z.enum(DIMENSIONS).optional().describe("Which dimension to set/remove"),
+    dimension: z.enum(DIMENSIONS).optional().describe("Which dimension to set/remove. MUST be one of: communication_style, decision_pattern, strength, blind_spot, preference, intent_pattern. Do NOT invent new values."),
     observation: z.string().optional().describe("The observation to record (for 'set' action)"),
     id: z.string().optional().describe("ID of user_model entry to remove (for 'remove' action)"),
   },
