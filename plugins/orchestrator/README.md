@@ -19,7 +19,7 @@ Hybrid search combines two paths:
 - **FTS5 BM25** - keyword matching with weighted fields (keywords 2x, content 1x, context 0.5x)
 - **Vector cosine similarity** - 1024-dimensional embeddings via ONNX bge-m3 sidecar
 
-Results are merged via **Reciprocal Rank Fusion** (RRF), then diversified with **Maximal Marginal Relevance** (MMR) to prevent similar notes from clustering. **Activation tracking** gives a gentle boost to frequently-accessed notes.
+Results are merged via **Reciprocal Rank Fusion** (RRF), then diversified with **Maximal Marginal Relevance** (MMR) to prevent similar notes from clustering. **ANTS** (Adaptive Note Temperature System) gives a signal boost to frequently-accessed notes.
 
 When the embedding sidecar is unavailable, search degrades gracefully to FTS5-only.
 
@@ -61,13 +61,16 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 | `create_work_item` | Track a concrete task with priority and optional due date |
 | `update_work_item` | Change status/priority/content/due date |
 | `breakdown` | Split complex work into parent + children work items |
-| `retro` | Knowledge maintenance - consolidation, confidence decay, gap analysis, dedup |
+| `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup |
+| `list_open_threads` | List all open threads with status and signal |
+| `list_work_items` | List work items filtered by status/priority |
 
 ### Engine
 
 The engine layer handles the intelligence behind the tools:
 
-- **Hybrid Search** (`hybrid_search.ts`) - Cosine similarity, RRF fusion, MMR diversity, activation boost
+- **Hybrid Search** (`hybrid_search.ts`) - Cosine similarity, RRF fusion, MMR diversity, ANTS signal boost
+- **ANTS Signal** (`signal.ts`) - Adaptive Note Temperature System: pheromone-inspired signal deposit/decay, vacation-safe (14-day cap)
 - **Embeddings** (`embeddings.ts`) - Sidecar client, embed on insert/update, batch backfill, graceful fallback
 - **Session Tracker** (`session_tracker.ts`) - Session registration, surfacing log, cross-session annotations, cleanup
 - **Scorer** - Ranks notes by relevance (recency, access frequency, keyword overlap, confidence)
@@ -141,7 +144,7 @@ Requirements: Python 3.10+ and uv (auto-installed via `pip install uv` if Python
 # Type check
 bun run typecheck
 
-# Run tests (104 tests)
+# Run tests (114 tests)
 bun test
 
 # Build (bundles to dist/server.js)
@@ -171,6 +174,7 @@ orchestrator-plugin/
       composer.ts               # Briefing assembly
       deduplicator.ts           # Jaccard similarity, merge duplicates
       linker.ts                 # FTS5 search, hybrid search, auto-linking
+      signal.ts                 # ANTS: Adaptive Note Temperature System - deposit, decay, vacation protection
       scorer.ts                 # Confidence decay, promotion
     tools/
       orient.ts                 # Briefing handler
@@ -188,7 +192,7 @@ orchestrator-plugin/
   skills/                       # 13 skills for orchestrated workflow
   hooks/                        # Session lifecycle hooks (start, stop, compact, submit)
   commands/                     # Slash commands
-  tests/                        # 104 tests across 13 files
+  tests/                        # 114 tests across 14 files
   dist/
     server.js                   # Bundled MCP server (~0.76 MB)
 ```

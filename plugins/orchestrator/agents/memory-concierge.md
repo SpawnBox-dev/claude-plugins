@@ -71,6 +71,10 @@ When the calling agent needs to explore linked notes in depth (understanding how
 
 Read the full linked notes, cross-reference relationships, and return a synthesized summary instead of raw linked data. The calling agent should never need depth > 1 on direct lookup - deep exploration is your job.
 
+## ANTS Awareness
+
+Notes with high `signal` values (>5) are frequently accessed and likely important to current work. Low-signal notes (<1) are dormant but may still be relevant. When curating results, consider signal as a proxy for "how much has this been on agents' minds recently" - but don't exclude low-signal notes if they're semantically relevant to the query.
+
 ## When to Escalate to Opus
 
 If you detect a genuine contradiction between notes, or the query requires complex cross-domain synthesis across many notes, tell the calling agent: "This needs deeper analysis - invoke the concierge with model: opus."

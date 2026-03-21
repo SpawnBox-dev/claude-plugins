@@ -24,9 +24,9 @@ Before the session ends, you MUST call `save_progress` with what was accomplishe
 
 The plugin runs an embedding sidecar (ONNX bge-m3) that enables semantic search. `lookup` uses hybrid FTS5+vector search when the sidecar is active. Call `system_status` to check embedding coverage. If the sidecar isn't running, everything degrades gracefully to keyword-only search.
 
-### Signal System (Pheromone)
+### ANTS: Adaptive Note Temperature System
 
-Notes have a `signal` score that represents current relevance. Signal is deposited automatically whenever a note is surfaced (lookup, briefing, list, check_similar). Signal decays exponentially over time when `retro` runs. High-signal notes rank higher in search. This is self-organizing - no manual management needed.
+Notes have a `signal` score (temperature) that represents current relevance. Signal is deposited automatically whenever a note is surfaced (lookup, briefing, list, check_similar). Signal decays exponentially over time when `retro` runs, capped at 14 days per pass (vacation protection - trails dim but never disappear). High-signal notes rank higher in search. This is self-organizing - no manual management needed.
 
 ### Prior Art Checking
 
