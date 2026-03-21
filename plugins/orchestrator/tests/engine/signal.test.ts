@@ -73,14 +73,28 @@ describe("signal", () => {
     expect(row.signal).toBeLessThan(6.0);
   });
 
-  test("decayAllSignals zeroes out dust", () => {
+  test("decayAllSignals zeroes out dust (tiny signal, capped decay)", () => {
     const id = insertNote(db);
     const longAgo = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString();
-    db.run("UPDATE notes SET signal = 0.5, last_accessed_at = ? WHERE id = ?", [longAgo, id]);
+    db.run("UPDATE notes SET signal = 0.005, last_accessed_at = ? WHERE id = ?", [longAgo, id]);
 
     decayAllSignals(db);
     const row = db.query("SELECT signal FROM notes WHERE id = ?").get(id) as any;
-    expect(row.signal).toBe(0); // 0.5 * 0.95^200 ~ 0.00001 -> zeroed
+    // 0.005 * 0.95^14 (capped) ≈ 0.0024 → below 0.01 → zeroed
+    expect(row.signal).toBe(0);
+  });
+
+  test("decayAllSignals caps at 14 days (vacation protection)", () => {
+    const id = insertNote(db);
+    // 90 days away - without cap would be 0.95^90 ≈ 0.01, with cap it's 0.95^14 ≈ 0.49
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    db.run("UPDATE notes SET signal = 10.0, last_accessed_at = ? WHERE id = ?", [ninetyDaysAgo, id]);
+
+    decayAllSignals(db);
+    const row = db.query("SELECT signal FROM notes WHERE id = ?").get(id) as any;
+    // 10 * 0.95^14 ≈ 4.88 (not 10 * 0.95^90 ≈ 0.1)
+    expect(row.signal).toBeGreaterThan(4.0);
+    expect(row.signal).toBeLessThan(6.0);
   });
 
   test("decayAllSignals skips notes with no signal", () => {

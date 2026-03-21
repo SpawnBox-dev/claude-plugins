@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 
 const DECAY_RATE = 0.95; // ~5% per day, halves every ~14 days
+const MAX_DECAY_DAYS = 14; // Cap decay exponent - prevents vacation wipeout
 const DEFAULT_DEPOSIT = 1.0;
 const WEAK_DEPOSIT = 0.3; // for listing (weaker signal than search)
 
@@ -39,14 +40,20 @@ export function depositSignalBatch(
 }
 
 /**
+ * ANTS: Adaptive Note Temperature System
+ *
  * Decay all signals based on time elapsed since last access.
- * signal = signal * (DECAY_RATE ^ days_since_last_access)
+ * signal = signal * (DECAY_RATE ^ min(days_since_last_access, MAX_DECAY_DAYS))
+ *
+ * The MAX_DECAY_DAYS cap prevents vacation wipeout: no matter how long
+ * the user has been away, a single retro pass can only halve signals at most.
+ * This preserves relative ordering - hot trails stay hotter than cold ones
+ * even after extended absence.
  *
  * Called during retro/reflect. Notes with no signal or no last_accessed_at are skipped.
  * After decay, notes with signal < 0.01 are zeroed out to avoid floating point dust.
  */
 export function decayAllSignals(db: Database): number {
-  // SQLite doesn't have POWER() in all builds, so we compute in JS
   const rows = db
     .query(
       `SELECT id, signal, last_accessed_at FROM notes
@@ -65,7 +72,9 @@ export function decayAllSignals(db: Database): number {
     const daysSince = (now - lastAccess) / (1000 * 60 * 60 * 24);
     if (daysSince <= 0) continue;
 
-    const newSignal = row.signal * Math.pow(DECAY_RATE, daysSince);
+    // Cap decay exponent to prevent vacation wipeout
+    const effectiveDays = Math.min(daysSince, MAX_DECAY_DAYS);
+    const newSignal = row.signal * Math.pow(DECAY_RATE, effectiveDays);
     const finalSignal = newSignal < 0.01 ? 0 : newSignal;
 
     if (finalSignal !== row.signal) {

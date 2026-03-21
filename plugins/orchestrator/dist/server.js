@@ -21239,6 +21239,7 @@ function handlePrepare(projectDb2, globalDb2, input) {
 
 // mcp/engine/signal.ts
 var DECAY_RATE = 0.95;
+var MAX_DECAY_DAYS = 14;
 var DEFAULT_DEPOSIT = 1;
 var WEAK_DEPOSIT = 0.3;
 function depositSignalBatch(db, noteIds, amount = DEFAULT_DEPOSIT) {
@@ -21263,7 +21264,8 @@ function decayAllSignals(db) {
     const daysSince = (now3 - lastAccess) / (1000 * 60 * 60 * 24);
     if (daysSince <= 0)
       continue;
-    const newSignal = row.signal * Math.pow(DECAY_RATE, daysSince);
+    const effectiveDays = Math.min(daysSince, MAX_DECAY_DAYS);
+    const newSignal = row.signal * Math.pow(DECAY_RATE, effectiveDays);
     const finalSignal = newSignal < 0.01 ? 0 : newSignal;
     if (finalSignal !== row.signal) {
       stmt.run(finalSignal, row.id);
@@ -21557,7 +21559,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.5"
+  version: "0.14.6"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
