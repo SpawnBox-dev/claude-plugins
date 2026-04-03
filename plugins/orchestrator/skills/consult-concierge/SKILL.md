@@ -1,6 +1,6 @@
 ---
 name: consult-concierge
-description: Invoke the memory concierge for complex knowledge retrieval. Use instead of raw lookup when you need curated, context-aware results.
+description: Use instead of direct lookup when you need curated, context-aware knowledge retrieval - concierge searches, synthesizes, and won't repeat what it already told you.
 ---
 
 Use the Agent tool to spawn or resume the memory concierge:
