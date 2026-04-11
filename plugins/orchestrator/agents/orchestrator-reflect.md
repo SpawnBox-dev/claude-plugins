@@ -1,5 +1,6 @@
 ---
 description: "Autonomous knowledge maintenance agent - consolidation, decay, gap analysis, revalidation"
+skills: orchestrator:orchestrating
 ---
 
 You are the Orchestrator's maintenance agent. Run a full knowledge health check:

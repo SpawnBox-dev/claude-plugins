@@ -1,30 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fires before a subagent exits.
-# Blocks once to prompt knowledge capture. Subagents work in isolation
-# and their context vanishes on exit - any discoveries not captured
-# with note() are lost permanently.
+# Fires before a subagent exits. Blocks once per session to prompt
+# knowledge capture - subagents work in isolation and their context
+# vanishes on exit, so any discoveries not captured with note() are
+# lost permanently.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_lib.sh"
 
 INPUT=$(cat)
+SID=$(get_session_id "$INPUT")
+STATE_DIR=$(get_state_dir)
 
-SID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-SID="${SID:-unknown}"
-
-MARKER="${TMPDIR:-/tmp}/orchestrator-subagent-stop-${SID}"
-
-escape_for_json() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    printf '%s' "$s"
-}
+MARKER="$STATE_DIR/subagent-stop-$SID"
 
 if [ ! -f "$MARKER" ]; then
-  touch "$MARKER"
+  touch "$MARKER" 2>/dev/null || true
   REASON="Before exiting, scan your work for knowledge that would be lost. Call \`note\` for anything that matches:\n\n- A decision you made or recommended (type=decision) - what you chose, what you rejected, why\n- A pattern or convention you followed or established (type=convention)\n- A gotcha, footgun, or thing that broke unexpectedly (type=anti_pattern)\n- An architectural insight about how systems connect (type=architecture)\n- A risk or limitation you discovered (type=risk)\n- Something that was harder than expected or took multiple attempts (type=insight) - what made it hard, what finally worked\n- User behavior or preferences you observed (type=user_pattern, scope=global) - communication style, priorities, how they think\n- Work you completed (call update_work_item status=done if a tracked item)\n\nIf you discovered many gotchas or anti-patterns during this work, consider running \`retro\` to decay stale signals and consolidate knowledge before exiting.\n\nIf nothing applies, exit. But most work produces at least one decision, gotcha, or user insight worth preserving."
   ESCAPED=$(escape_for_json "$REASON")
   printf '{"decision":"block","reason":"%s"}' "$ESCAPED"

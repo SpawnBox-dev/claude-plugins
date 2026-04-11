@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Fires before a write-class tool (Write/Edit/MultiEdit/NotebookEdit).
+#
+# This is a SOFT gate. It injects additionalContext telling the model to
+# consider checking the knowledge base before editing, and only fires:
+#   - after turn 1 (fresh sessions get a free pass)
+#   - if no orchestrator MCP tool has been called this turn
+#   - at most once per turn (preuse-warned marker)
+#
+# The injection lands at the exact moment the model is about to write
+# code, which has much higher attention weight than a UserPromptSubmit
+# banner the model has already seen many times. Zero model calls, zero
+# token cost, ~10ms of bash.
+#
+# We deliberately do NOT return permissionDecision: deny or ask. A hard
+# block is too aggressive for v1 - the user-facing effect would be
+# interactive permission prompts on every write in sessions where the
+# model never uses orchestrator tools. The additionalContext route is
+# non-blocking, free, and still materially raises salience.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_lib.sh"
+
+INPUT=$(cat 2>/dev/null || printf '')
+SID=$(get_session_id "$INPUT")
+STATE_DIR=$(get_state_dir)
+
+TURN_FILE="$STATE_DIR/turn-$SID"
+TURN=$(cat "$TURN_FILE" 2>/dev/null || printf '0')
+
+# Free pass on turn 1 - fresh sessions shouldn't be nagged before they
+# have had a chance to run briefing or lookup.
+if [ "$TURN" -lt 2 ]; then
+    exit 0
+fi
+
+ORCH_ACTIVITY_FILE="$STATE_DIR/orch-active-$SID"
+if [ -f "$ORCH_ACTIVITY_FILE" ]; then
+    # Model already used an orchestrator tool this turn - no nag needed.
+    exit 0
+fi
+
+WARNED_FILE="$STATE_DIR/preuse-warned-$SID"
+if [ -f "$WARNED_FILE" ]; then
+    # Already warned once this turn - don't spam every write tool call.
+    exit 0
+fi
+touch "$WARNED_FILE" 2>/dev/null || true
+
+MSG="[orch] You are about to modify code but have not called any orchestrator tool this turn. Consider whether a prior decision, convention, or anti-pattern applies here. A 2-second lookup can save 20 minutes of rework. This reminder fires once per turn, only when you have skipped orchestrator tools entirely."
+ESCAPED=$(escape_for_json "$MSG")
+
+cat <<EOF
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow",
+    "additionalContext": "${ESCAPED}"
+  }
+}
+EOF
+
+exit 0

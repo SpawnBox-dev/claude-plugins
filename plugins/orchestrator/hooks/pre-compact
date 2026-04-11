@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-printf '{"systemMessage":"Context compaction in progress. Orchestrator will recover via orient on restart."}'
+# Fires immediately before context compaction. Cannot block compaction,
+# but can emit a systemMessage that survives into the compacted summary.
+# Use this to remind the model to flush uncaptured knowledge while it
+# still has the full window.
+
+printf '{"systemMessage":"Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost."}'
 exit 0

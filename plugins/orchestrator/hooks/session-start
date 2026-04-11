@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Fires when a session starts, resumes, clears, or recovers from compaction.
+# Injects the mandatory startup directive and cleans up stale state files
+# from old sessions so the state dir does not grow forever.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_lib.sh"
+
 EVENT_TYPE="${CLAUDE_HOOK_EVENT_NAME:-startup}"
 
 case "$EVENT_TYPE" in
@@ -10,15 +17,10 @@ case "$EVENT_TYPE" in
   *)       ORIENT_EVENT="startup" ;;
 esac
 
-escape_for_json() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    printf '%s' "$s"
-}
+STATE_DIR=$(get_state_dir)
+# Clean up state files from sessions older than 7 days. Use find where
+# available; failures are non-fatal because state files are advisory.
+find "$STATE_DIR" -type f -mtime +7 ! -name '.gitignore' -delete 2>/dev/null || true
 
 CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\". (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional.\n\nRED FLAGS - if you think any of these, you are rationalizing and MUST stop:\n- \"This is just a quick fix\" -> Quick fixes create decisions. Lookup first.\n- \"I already know this codebase\" -> You know THIS context window. Previous sessions knew more.\n- \"I'll note it later\" -> Later never comes. Context compaction erases your memory. Note NOW.\n- \"Nothing noteworthy happened\" -> Re-evaluate. Zero-signal turns are rare.\n- \"The user just wants speed\" -> Speed without context causes rework.\n- \"I'll check the knowledge base after\" -> Checking AFTER means you already contradicted past decisions."
 ESCAPED=$(escape_for_json "$CONTEXT")

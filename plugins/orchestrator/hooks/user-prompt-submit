@@ -2,21 +2,69 @@
 set -euo pipefail
 
 # Fires before Claude processes every user message.
-# Injects a lightweight every-turn prompt into context.
-# This is the "pre-turn" enforcement hook - the model sees this
-# reminder right before it thinks, every single turn.
+#
+# Two jobs:
+#   1. Inject a rotating every-turn reminder. A 10-variant pool defeats
+#      "system-reminder habituation" where the model learns to ignore a
+#      string it has seen 20 turns in a row. Cost: zero extra tokens,
+#      zero extra latency (just variant selection by turn counter).
+#   2. Read and inject last turn's bridge - which orchestrator tools
+#      fired in the previous turn. This is the continuity mechanism that
+#      replaces the unreliable thinking-block "[orch] next:" pattern,
+#      which often gets stripped by thinking compression in 4.5/4.6.
 
-escape_for_json() {
-    local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\n'/\\n}"
-    s="${s//$'\r'/\\r}"
-    s="${s//$'\t'/\\t}"
-    printf '%s' "$s"
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/_lib.sh"
 
-CONTEXT="[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? If you used 0 orchestrator tools, ask yourself why - most turns have signal. THEN for this turn: lookup needed? Decisions to check? Scan the every-turn action table."
+INPUT=$(cat 2>/dev/null || printf '')
+SID=$(get_session_id "$INPUT")
+STATE_DIR=$(get_state_dir)
+
+TURN_FILE="$STATE_DIR/turn-$SID"
+TURN=$(cat "$TURN_FILE" 2>/dev/null || printf '0')
+TURN=$((TURN + 1))
+printf '%s' "$TURN" > "$TURN_FILE"
+
+# Reset per-turn markers so PreToolUse gate fires fresh each turn and
+# PostToolUseFailure struggle counter gets a clean window.
+rm -f "$STATE_DIR/orch-active-$SID" "$STATE_DIR/preuse-warned-$SID" 2>/dev/null || true
+
+# Read the bridge written by post-tool-use during the previous turn,
+# then clear it so this turn's orchestrator tool calls rebuild it cleanly.
+BRIDGE_FILE="$STATE_DIR/bridge-$SID"
+BRIDGE=""
+if [ -f "$BRIDGE_FILE" ]; then
+    BRIDGE=$(cat "$BRIDGE_FILE" 2>/dev/null || printf '')
+    rm -f "$BRIDGE_FILE" 2>/dev/null || true
+fi
+
+# Rotating reminder variants. Keep wording punchy and varied so the
+# model attends to them as new information instead of filtering them
+# as chrome. Add or reorder freely.
+VARIANTS=(
+    "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table."
+    "[orch] Turn ${TURN}: what prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears."
+    "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table."
+    "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts."
+    "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now."
+    "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread. Which one fits this turn before acting?"
+    "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and invoke orchestrator:consult-concierge. Do not hammer."
+    "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent."
+    "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns."
+    "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items or orchestrator:consult-concierge. Direct lookup misses items with different vocabulary."
+)
+VARIANT_COUNT=${#VARIANTS[@]}
+IDX=$(( (TURN - 1) % VARIANT_COUNT ))
+REMINDER="${VARIANTS[$IDX]}"
+
+if [ -n "$BRIDGE" ]; then
+    CONTEXT="${REMINDER}
+
+Last turn bridge: ${BRIDGE}"
+else
+    CONTEXT="$REMINDER"
+fi
+
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF
