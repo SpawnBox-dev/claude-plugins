@@ -52,16 +52,27 @@ export function inferRelationship(
 /**
  * Find notes related to the given query using FTS5 full-text search.
  * Uses BM25 ranking with weights: content=1.0, context=0.5, keywords=2.0.
+ *
+ * Tokenization matches FTS5's internal unicode61 tokenizer: any non-alphanumeric
+ * character is a word separator. This is critical - the old implementation
+ * preserved hyphens and underscores, which caused FTS5 to interpret `-` as its
+ * NOT operator and throw a syntax error on queries like "x-ray" or
+ * "mining-anomaly". The try/catch below would swallow the error and return 0
+ * results, which looked like "no matches" but was actually a query-construction
+ * bug. We now strip non-alphanumerics here so the query tokens exactly match
+ * what's in the FTS5 index, e.g. "x-ray detection" -> ["ray", "detection"]
+ * (the single-char "x" is filtered by the length>2 check).
  */
 export function findRelatedNotes(
   db: Database,
   query: string,
   limit = 10
 ): NoteSummary[] {
-  // Convert natural language to FTS5 syntax: filter short words, join with OR
+  // Convert natural language to FTS5 syntax: split on any non-alphanumeric
+  // run (same as FTS5 unicode61 tokenizer), filter short words, join with OR.
   const terms = query
     .toLowerCase()
-    .replace(/[^a-z0-9\s_-]/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
     .split(/\s+/)
     .filter((w) => w.length > 2);
 
@@ -103,8 +114,14 @@ export function findRelatedNotes(
       priority: (r as any).priority ?? null,
       due_date: (r as any).due_date ?? null,
     }));
-  } catch {
-    // FTS query can fail with unusual input - return empty
+  } catch (err) {
+    // FTS query can still fail on truly pathological input. Log the actual
+    // query and error so regressions in query construction are debuggable
+    // instead of silently returning zero results.
+    console.error(
+      `[linker] findRelatedNotes FTS5 error - query="${ftsQuery}" original="${query}":`,
+      err
+    );
     return [];
   }
 }

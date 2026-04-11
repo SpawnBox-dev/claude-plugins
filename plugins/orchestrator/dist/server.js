@@ -20329,7 +20329,7 @@ function inferRelationship(fromType, toType) {
   return "related_to";
 }
 function findRelatedNotes(db, query, limit = 10) {
-  const terms = query.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
+  const terms = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter((w) => w.length > 2);
   if (terms.length === 0)
     return [];
   const ftsQuery = terms.join(" OR ");
@@ -20353,7 +20353,8 @@ function findRelatedNotes(db, query, limit = 10) {
       priority: r.priority ?? null,
       due_date: r.due_date ?? null
     }));
-  } catch {
+  } catch (err) {
+    console.error(`[linker] findRelatedNotes FTS5 error - query="${ftsQuery}" original="${query}":`, err);
     return [];
   }
 }
@@ -21759,7 +21760,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.20.0"
+  version: "0.20.1"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),

@@ -230,4 +230,53 @@ describe("linker", () => {
     const results = await findRelatedNotesHybrid(db, "broker telemetry", 2);
     expect(results.length).toBeLessThanOrEqual(2);
   });
+
+  test("findRelatedNotes handles hyphenated query terms (regression for x-ray bug)", () => {
+    insertNote(db, {
+      content: "X-ray detection and mining anomaly analysis",
+      keywords: "xray,detection,mining,anomaly",
+      tags: "x-ray-detection,mining,investigation",
+    });
+    insertNote(db, {
+      content: "Burst detection rate calculation",
+      keywords: "burst,detection,rate",
+    });
+
+    // Bug: pre-v0.20.1 this returned zero results because FTS5 parsed the
+    // hyphen in "x-ray" as a NOT operator, the catch block swallowed the
+    // syntax error, and the caller saw no matches.
+    const results = findRelatedNotes(db, "x-ray detection", 10);
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    // The hyphenated note should be findable
+    expect(results.some((r) => r.content.includes("X-ray"))).toBe(true);
+  });
+
+  test("findRelatedNotes handles underscore query terms", () => {
+    insertNote(db, {
+      content: "rcon guard token extraction",
+      keywords: "rcon,guard,token",
+    });
+
+    // Same bug pattern - underscore is an FTS5 token separator in the
+    // unicode61 tokenizer, so "rcon_guard" needs to split into ["rcon", "guard"]
+    // to match what's stored in the index.
+    const results = findRelatedNotes(db, "rcon_guard token", 10);
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("findRelatedNotes handles multi-term query with hyphens mixed in", () => {
+    insertNote(db, {
+      content: "Mining investigation finds x-ray false positive and burst detection",
+      keywords: "mining,investigation,xray,false,positive",
+    });
+
+    // This was the original failing query from the v0.20 live test -
+    // 8 keywords including hyphenated "x-ray".
+    const results = findRelatedNotes(
+      db,
+      "player investigation mining anomaly detection false positive x-ray",
+      10
+    );
+    expect(results.length).toBeGreaterThanOrEqual(1);
+  });
 });
