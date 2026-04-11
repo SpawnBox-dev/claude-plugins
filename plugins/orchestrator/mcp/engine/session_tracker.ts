@@ -10,6 +10,7 @@ export interface SessionRegistryRow {
   notes_surfaced: number;
   compaction_count: number;
   concierge_agent_id: string | null;
+  last_briefing_at: string | null;
 }
 
 export interface SessionAnnotation {
@@ -17,6 +18,33 @@ export interface SessionAnnotation {
   sent_turns_ago: number | null;
   sent_to_other_sessions: Array<{ session_id: string; turn: number }>;
   activation_score: number;
+}
+
+/** Summary of a note created by another session since the caller's last briefing. */
+export interface CrossSessionNewNote {
+  id: string;
+  type: string;
+  content: string;
+  tags: string | null;
+  created_at: string;
+  source_session: string;
+}
+
+/** A note that other active sessions have been surfacing heavily recently. */
+export interface CrossSessionHotNote {
+  id: string;
+  type: string;
+  content: string;
+  tags: string | null;
+  distinct_sessions: number;
+  surfacings: number;
+}
+
+export interface CrossSessionUpdates {
+  new_notes: CrossSessionNewNote[];
+  hot_notes: CrossSessionHotNote[];
+  active_session_count: number;
+  since: string | null;
 }
 
 export class SessionTracker {
@@ -42,8 +70,8 @@ export class SessionTracker {
     const timestamp = now();
     this.db.run(
       `INSERT OR IGNORE INTO session_registry
-       (session_id, started_at, last_active_at, agent_model, notes_surfaced, compaction_count)
-       VALUES (?, ?, ?, ?, 0, 0)`,
+       (session_id, started_at, last_active_at, agent_model, notes_surfaced, compaction_count, last_briefing_at)
+       VALUES (?, ?, ?, ?, 0, 0, NULL)`,
       [sessionId, timestamp, timestamp, model ?? null]
     );
     this.db.run(
@@ -183,6 +211,120 @@ export class SessionTracker {
       `UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`,
       [task, now(), sessionId]
     );
+  }
+
+  /**
+   * Update a session's last_briefing_at cursor. Called at the end of
+   * handleOrient so the NEXT briefing can compute "new since last briefing"
+   * against a stable cursor.
+   */
+  updateLastBriefing(sessionId: string): void {
+    this.db.run(
+      `UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`,
+      [now(), now(), sessionId]
+    );
+  }
+
+  /**
+   * Fetch cross-session updates for a session: notes other active sessions
+   * have created since this session's last briefing, plus notes that other
+   * active sessions have been surfacing heavily in the last 2 hours.
+   *
+   * "Active session" = last_active_at within the past 24 hours and not the
+   * caller's own session. If no last_briefing_at cursor exists, we fall
+   * back to started_at so the first briefing still shows recent activity.
+   */
+  getCrossSessionUpdates(sessionId: string): CrossSessionUpdates {
+    const me = this.getSession(sessionId);
+    const twentyFourHoursAgo = new Date(
+      Date.now() - 24 * 60 * 60 * 1000
+    ).toISOString();
+    // On first briefing (no cursor yet), look back 24h so a freshly started
+    // session catches up on what sibling sessions have been doing. Subsequent
+    // briefings use the persisted cursor from the previous call.
+    const since = me?.last_briefing_at ?? twentyFourHoursAgo;
+
+    // Count other active sessions (excluding self) for context
+    const activeCount = (
+      this.db
+        .query(
+          `SELECT COUNT(*) as cnt FROM session_registry
+           WHERE session_id != ? AND last_active_at > ?`
+        )
+        .get(sessionId, twentyFourHoursAgo) as { cnt: number }
+    ).cnt;
+
+    // Notes created by other active sessions since the caller's last briefing.
+    // Exclude notes the caller has already surfaced this session (via
+    // session_log) to avoid repeating things they've already seen.
+    const newNotesRows = this.db
+      .query(
+        `SELECT n.id, n.type, n.content, n.tags, n.created_at, n.source_session
+         FROM notes n
+         WHERE n.source_session IS NOT NULL
+           AND n.source_session != ?
+           AND n.created_at > ?
+           AND EXISTS (
+             SELECT 1 FROM session_registry sr
+             WHERE sr.session_id = n.source_session
+               AND sr.last_active_at > ?
+           )
+           AND n.id NOT IN (
+             SELECT note_id FROM session_log WHERE session_id = ?
+           )
+         ORDER BY n.created_at DESC
+         LIMIT 8`
+      )
+      .all(
+        sessionId,
+        since,
+        twentyFourHoursAgo,
+        sessionId
+      ) as Array<{
+      id: string;
+      type: string;
+      content: string;
+      tags: string | null;
+      created_at: string;
+      source_session: string;
+    }>;
+
+    // Hot notes: notes that 2+ OTHER active sessions have surfaced within the
+    // last 2 hours. These are "the things sibling sessions are actively
+    // thinking about right now" even if they existed before.
+    const twoHoursAgo = new Date(
+      Date.now() - 2 * 60 * 60 * 1000
+    ).toISOString();
+
+    const hotNotesRows = this.db
+      .query(
+        `SELECT n.id, n.type, n.content, n.tags,
+                COUNT(DISTINCT sl.session_id) as distinct_sessions,
+                COUNT(*) as surfacings
+         FROM session_log sl
+         JOIN notes n ON n.id = sl.note_id
+         WHERE sl.surfaced_at > ?
+           AND sl.session_id != ?
+         GROUP BY n.id
+         HAVING distinct_sessions >= 2
+         ORDER BY distinct_sessions DESC, surfacings DESC
+         LIMIT 5`
+      )
+      .all(twoHoursAgo, sessionId) as Array<{
+      id: string;
+      type: string;
+      content: string;
+      tags: string | null;
+      distinct_sessions: number;
+      surfacings: number;
+    }>;
+
+    return {
+      new_notes: newNotesRows,
+      hot_notes: hotNotesRows,
+      active_session_count: activeCount,
+      since,
+    };
   }
 
   /** Set the concierge agent ID for a session. */

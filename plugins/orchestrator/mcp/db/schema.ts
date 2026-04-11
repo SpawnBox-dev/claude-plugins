@@ -193,6 +193,27 @@ DROP TABLE _signal_migration_check;
       }
     },
   },
+  {
+    version: 13,
+    name: "add_cross_session_tracking",
+    // Add per-note source session attribution and per-session last-briefing
+    // cursor. Enables cross-session discovery injection in briefings: session
+    // A can see what session B has been creating/discovering since the last
+    // time A called briefing. Both columns nullable - existing notes and
+    // sessions are unaffected.
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const noteCols = db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>;
+      if (!noteCols.some((c) => c.name === "source_session")) {
+        db.exec("ALTER TABLE notes ADD COLUMN source_session TEXT");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_notes_source_session ON notes(source_session)");
+      }
+      const sessCols = db.query("PRAGMA table_info(session_registry)").all() as Array<{ name: string }>;
+      if (!sessCols.some((c) => c.name === "last_briefing_at")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN last_briefing_at TEXT");
+      }
+    },
+  },
 ];
 
 /**

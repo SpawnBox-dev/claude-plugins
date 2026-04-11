@@ -195,25 +195,40 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.16.0",
+  version: "0.17.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
 server.tool(
   "briefing",
-  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.",
+  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.",
   {
     event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
     sections: z
       .array(z.enum(BRIEFING_SECTIONS))
       .optional()
-      .describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, checkpoint"),
+      .describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Session ID. Required for cross_session updates (what other active sessions have discovered since your last briefing). Strongly recommended - pass your session identifier."),
   },
-  async ({ event, sections }) => {
-    const result = handleOrient(getProjectDb(), getGlobalDb(), {
-      event: event ?? "startup",
-      sections: sections ?? undefined,
-    });
+  async ({ event, sections, session_id }) => {
+    // Register the session before running the briefing so cross-session
+    // tracking has a row to compare against next time.
+    if (session_id && sessionTracker) {
+      sessionTracker.registerSession(session_id);
+    }
+    const result = handleOrient(
+      getProjectDb(),
+      getGlobalDb(),
+      {
+        event: event ?? "startup",
+        sections: sections ?? undefined,
+        session_id,
+      },
+      sessionTracker
+    );
 
     // Deposit weak signal on notes surfaced in the briefing
     const briefingNoteIds = [
@@ -441,7 +456,7 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads.",
+  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads. Pass `session_id` so sibling sessions can see what you've just created on their next briefing.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -452,8 +467,15 @@ server.tool(
       .enum(DIMENSIONS)
       .optional()
       .describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference"),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended."),
   },
-  async ({ content, type, context, tags, scope, dimension }) => {
+  async ({ content, type, context, tags, scope, dimension, session_id }) => {
+    if (session_id && sessionTracker) {
+      sessionTracker.registerSession(session_id);
+    }
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
       content,
       type,
@@ -461,6 +483,7 @@ server.tool(
       tags,
       scope,
       dimension: dimension as Dimension | undefined,
+      session_id,
     }, embeddingClient);
     return {
       content: [{ type: "text" as const, text: result.message }],

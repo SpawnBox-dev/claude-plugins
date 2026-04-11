@@ -2,10 +2,15 @@ import type { Database } from "bun:sqlite";
 import type { Briefing, BriefingSection, Note, NoteSummary } from "../types";
 import { composeBriefing } from "../engine/composer";
 import { summarizeForBriefing, relativeTime, truncate } from "../utils";
+import type { SessionTracker } from "../engine/session_tracker";
 
 export interface OrientInput {
   event: "startup" | "resume" | "clear" | "compact";
   sections?: BriefingSection[];
+  /** Session ID for cross-session discovery injection. When provided, the
+   *  briefing includes notes that other active sessions have created or
+   *  been heavily surfacing since the caller's last briefing. */
+  session_id?: string;
 }
 
 export interface OrientResult {
@@ -214,6 +219,31 @@ function formatBriefing(
     lines.push("");
   }
 
+  if (include("cross_session") && briefing.cross_session) {
+    const xs = briefing.cross_session;
+    const hasAnything = xs.new_notes.length > 0 || xs.hot_notes.length > 0;
+    if (hasAnything) {
+      lines.push(`## Cross-Session Activity (${xs.active_session_count} other active session${xs.active_session_count === 1 ? "" : "s"})`);
+      if (xs.new_notes.length > 0) {
+        lines.push("### New since your last briefing");
+        for (const n of xs.new_notes) {
+          const tagStr = n.tags ? ` {${n.tags}}` : "";
+          const age = relativeTime(n.created_at);
+          lines.push(`- [${n.type}]${tagStr} **${n.id}** (${age}) ${truncate(n.content, 140)}`);
+        }
+        lines.push("");
+      }
+      if (xs.hot_notes.length > 0) {
+        lines.push("### Hot across sessions (surfaced by 2+ others in last 2h)");
+        for (const n of xs.hot_notes) {
+          const tagStr = n.tags ? ` {${n.tags}}` : "";
+          lines.push(`- [${n.type}]${tagStr} **${n.id}** (${n.distinct_sessions} sessions, ${n.surfacings}x) ${truncate(n.content, 140)}`);
+        }
+        lines.push("");
+      }
+    }
+  }
+
   if (briefing.suggested_focus) {
     lines.push(`**Suggested focus:** ${briefing.suggested_focus}`);
     lines.push(`**Intensity:** ${briefing.suggested_intensity}`);
@@ -233,7 +263,8 @@ function formatBriefing(
 export function handleOrient(
   projectDb: Database,
   globalDb: Database,
-  input: OrientInput
+  input: OrientInput,
+  sessionTracker?: SessionTracker | null
 ): OrientResult {
   const briefing = composeBriefing(projectDb, globalDb, input.sections);
 
@@ -243,7 +274,27 @@ export function handleOrient(
   // Always fetch checkpoint - it provides continuity across sessions
   const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb) : null;
   const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb) : [];
+
+  // Cross-session updates: read BEFORE we update the last_briefing_at cursor
+  // so "since your last briefing" is computed against the stable old value.
+  if (include("cross_session") && sessionTracker && input.session_id) {
+    try {
+      briefing.cross_session = sessionTracker.getCrossSessionUpdates(input.session_id);
+    } catch (err) {
+      console.error(`[orient] cross-session update fetch failed:`, err);
+    }
+  }
+
   const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+
+  // Now advance the cursor so the NEXT briefing sees "new since this moment".
+  if (sessionTracker && input.session_id) {
+    try {
+      sessionTracker.updateLastBriefing(input.session_id);
+    } catch {
+      // non-fatal
+    }
+  }
 
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }

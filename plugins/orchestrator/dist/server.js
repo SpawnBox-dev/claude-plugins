@@ -19516,6 +19516,7 @@ var BRIEFING_SECTIONS = [
   "drift",
   "user_model",
   "cross_project",
+  "cross_session",
   "checkpoint"
 ];
 var DIMENSIONS = [
@@ -19711,6 +19712,22 @@ DROP TABLE _signal_migration_check;
       const cols = db.query("PRAGMA table_info(notes)").all();
       if (cols.some((c) => c.name === "access_count")) {
         db.exec("ALTER TABLE notes DROP COLUMN access_count");
+      }
+    }
+  },
+  {
+    version: 13,
+    name: "add_cross_session_tracking",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const noteCols = db.query("PRAGMA table_info(notes)").all();
+      if (!noteCols.some((c) => c.name === "source_session")) {
+        db.exec("ALTER TABLE notes ADD COLUMN source_session TEXT");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_notes_source_session ON notes(source_session)");
+      }
+      const sessCols = db.query("PRAGMA table_info(session_registry)").all();
+      if (!sessCols.some((c) => c.name === "last_briefing_at")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN last_briefing_at TEXT");
       }
     }
   }
@@ -20480,8 +20497,8 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
   const tagsStr = tagParts.join(",");
   const noteId = generateId();
   const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     input.type,
     input.content,
@@ -20494,7 +20511,8 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     null,
     null,
     timestamp,
-    timestamp
+    timestamp,
+    input.session_id ?? null
   ]);
   const links = createAutoLinks(db, noteId, keywords);
   let similarityAlert = "";
@@ -20782,7 +20800,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       user_profile: [],
       suggested_focus: null,
       suggested_intensity: "tactical",
-      is_first_run: true
+      is_first_run: true,
+      cross_session: null
     };
   }
   const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
@@ -20907,7 +20926,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     user_profile: userProfile,
     suggested_focus: suggestedFocus,
     suggested_intensity: suggestedIntensity,
-    is_first_run: false
+    is_first_run: false,
+    cross_session: null
   };
 }
 function composeContextPackage(projectDb2, globalDb2, domain) {
@@ -21154,6 +21174,30 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
 `));
     lines.push("");
   }
+  if (include("cross_session") && briefing.cross_session) {
+    const xs = briefing.cross_session;
+    const hasAnything = xs.new_notes.length > 0 || xs.hot_notes.length > 0;
+    if (hasAnything) {
+      lines.push(`## Cross-Session Activity (${xs.active_session_count} other active session${xs.active_session_count === 1 ? "" : "s"})`);
+      if (xs.new_notes.length > 0) {
+        lines.push("### New since your last briefing");
+        for (const n of xs.new_notes) {
+          const tagStr = n.tags ? ` {${n.tags}}` : "";
+          const age = relativeTime(n.created_at);
+          lines.push(`- [${n.type}]${tagStr} **${n.id}** (${age}) ${truncate(n.content, 140)}`);
+        }
+        lines.push("");
+      }
+      if (xs.hot_notes.length > 0) {
+        lines.push("### Hot across sessions (surfaced by 2+ others in last 2h)");
+        for (const n of xs.hot_notes) {
+          const tagStr = n.tags ? ` {${n.tags}}` : "";
+          lines.push(`- [${n.type}]${tagStr} **${n.id}** (${n.distinct_sessions} sessions, ${n.surfacings}x) ${truncate(n.content, 140)}`);
+        }
+        lines.push("");
+      }
+    }
+  }
   if (briefing.suggested_focus) {
     lines.push(`**Suggested focus:** ${briefing.suggested_focus}`);
     lines.push(`**Intensity:** ${briefing.suggested_intensity}`);
@@ -21167,12 +21211,24 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
   return lines.join(`
 `);
 }
-function handleOrient(projectDb2, globalDb2, input) {
+function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
   const briefing = composeBriefing(projectDb2, globalDb2, input.sections);
   const include = (section) => !input.sections || input.sections.length === 0 || input.sections.includes(section);
   const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb2) : null;
   const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb2) : [];
+  if (include("cross_session") && sessionTracker && input.session_id) {
+    try {
+      briefing.cross_session = sessionTracker.getCrossSessionUpdates(input.session_id);
+    } catch (err) {
+      console.error(`[orient] cross-session update fetch failed:`, err);
+    }
+  }
   const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+  if (sessionTracker && input.session_id) {
+    try {
+      sessionTracker.updateLastBriefing(input.session_id);
+    } catch {}
+  }
   return { briefing, recovery_checkpoint: checkpoint, formatted };
 }
 
@@ -21375,8 +21431,8 @@ class SessionTracker {
   registerSession(sessionId, model) {
     const timestamp = now();
     this.db.run(`INSERT OR IGNORE INTO session_registry
-       (session_id, started_at, last_active_at, agent_model, notes_surfaced, compaction_count)
-       VALUES (?, ?, ?, ?, 0, 0)`, [sessionId, timestamp, timestamp, model ?? null]);
+       (session_id, started_at, last_active_at, agent_model, notes_surfaced, compaction_count, last_briefing_at)
+       VALUES (?, ?, ?, ?, 0, 0, NULL)`, [sessionId, timestamp, timestamp, model ?? null]);
     this.db.run(`UPDATE session_registry SET last_active_at = ? WHERE session_id = ?`, [timestamp, sessionId]);
   }
   getSession(sessionId) {
@@ -21430,6 +21486,49 @@ class SessionTracker {
   }
   updateCurrentTask(sessionId, task) {
     this.db.run(`UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`, [task, now(), sessionId]);
+  }
+  updateLastBriefing(sessionId) {
+    this.db.run(`UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`, [now(), now(), sessionId]);
+  }
+  getCrossSessionUpdates(sessionId) {
+    const me = this.getSession(sessionId);
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const since = me?.last_briefing_at ?? twentyFourHoursAgo;
+    const activeCount = this.db.query(`SELECT COUNT(*) as cnt FROM session_registry
+           WHERE session_id != ? AND last_active_at > ?`).get(sessionId, twentyFourHoursAgo).cnt;
+    const newNotesRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.created_at, n.source_session
+         FROM notes n
+         WHERE n.source_session IS NOT NULL
+           AND n.source_session != ?
+           AND n.created_at > ?
+           AND EXISTS (
+             SELECT 1 FROM session_registry sr
+             WHERE sr.session_id = n.source_session
+               AND sr.last_active_at > ?
+           )
+           AND n.id NOT IN (
+             SELECT note_id FROM session_log WHERE session_id = ?
+           )
+         ORDER BY n.created_at DESC
+         LIMIT 8`).all(sessionId, since, twentyFourHoursAgo, sessionId);
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const hotNotesRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags,
+                COUNT(DISTINCT sl.session_id) as distinct_sessions,
+                COUNT(*) as surfacings
+         FROM session_log sl
+         JOIN notes n ON n.id = sl.note_id
+         WHERE sl.surfaced_at > ?
+           AND sl.session_id != ?
+         GROUP BY n.id
+         HAVING distinct_sessions >= 2
+         ORDER BY distinct_sessions DESC, surfacings DESC
+         LIMIT 5`).all(twoHoursAgo, sessionId);
+    return {
+      new_notes: newNotesRows,
+      hot_notes: hotNotesRows,
+      active_session_count: activeCount,
+      since
+    };
   }
   setConciergeAgentId(sessionId, agentId) {
     this.db.run(`UPDATE session_registry SET concierge_agent_id = ? WHERE session_id = ?`, [agentId, sessionId]);
@@ -21570,16 +21669,21 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.16.0"
+  version: "0.17.0"
 });
-server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
+server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
-  sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, checkpoint")
-}, async ({ event, sections }) => {
+  sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint"),
+  session_id: exports_external.string().optional().describe("Session ID. Required for cross_session updates (what other active sessions have discovered since your last briefing). Strongly recommended - pass your session identifier.")
+}, async ({ event, sections, session_id }) => {
+  if (session_id && sessionTracker) {
+    sessionTracker.registerSession(session_id);
+  }
   const result = handleOrient(getProjectDb(), getGlobalDb(), {
     event: event ?? "startup",
-    sections: sections ?? undefined
-  });
+    sections: sections ?? undefined,
+    session_id
+  }, sessionTracker);
   const briefingNoteIds = [
     ...result.briefing.active_work,
     ...result.briefing.blocked_work,
@@ -21758,21 +21862,26 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads.", {
+server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads. Pass `session_id` so sibling sessions can see what you've just created on their next briefing.", {
   content: exports_external.string(),
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
   tags: exports_external.string().optional(),
   scope: exports_external.enum(["global", "project"]).optional(),
-  dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference")
-}, async ({ content, type, context, tags, scope, dimension }) => {
+  dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference"),
+  session_id: exports_external.string().optional().describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended.")
+}, async ({ content, type, context, tags, scope, dimension, session_id }) => {
+  if (session_id && sessionTracker) {
+    sessionTracker.registerSession(session_id);
+  }
   const result = await handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type,
     context,
     tags,
     scope,
-    dimension
+    dimension,
+    session_id
   }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]

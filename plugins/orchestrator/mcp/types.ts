@@ -62,6 +62,7 @@ export const BRIEFING_SECTIONS = [
   "drift",
   "user_model",
   "cross_project",
+  "cross_session",
   "checkpoint",
 ] as const;
 export type BriefingSection = (typeof BRIEFING_SECTIONS)[number];
@@ -153,6 +154,27 @@ export interface AutonomyScore {
   last_calibrated: string;
 }
 
+export interface CrossSessionUpdate {
+  new_notes: Array<{
+    id: string;
+    type: string;
+    content: string;
+    tags: string | null;
+    created_at: string;
+    source_session: string;
+  }>;
+  hot_notes: Array<{
+    id: string;
+    type: string;
+    content: string;
+    tags: string | null;
+    distinct_sessions: number;
+    surfacings: number;
+  }>;
+  active_session_count: number;
+  since: string | null;
+}
+
 export interface Briefing {
   open_threads: NoteSummary[];
   recent_decisions: NoteSummary[];
@@ -167,6 +189,7 @@ export interface Briefing {
   suggested_focus: string | null;
   suggested_intensity: "strategic" | "tactical" | "trivial";
   is_first_run: boolean;
+  cross_session: CrossSessionUpdate | null;
 }
 
 export interface UserProfileEntry {

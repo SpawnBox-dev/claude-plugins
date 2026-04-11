@@ -17,6 +17,9 @@ export interface RememberInput {
   tags?: string;
   scope?: "global" | "project";
   dimension?: Dimension;
+  /** Session ID that authored this note. Enables cross-session discovery
+   *  injection so sibling sessions can see what this session has created. */
+  session_id?: string;
 }
 
 export interface RememberResult {
@@ -77,8 +80,8 @@ export async function handleRemember(
   const timestamp = now();
 
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       noteId,
       input.type,
@@ -93,6 +96,7 @@ export async function handleRemember(
       null,
       timestamp,
       timestamp,
+      input.session_id ?? null,
     ]
   );
 

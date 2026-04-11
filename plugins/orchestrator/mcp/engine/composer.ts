@@ -55,6 +55,7 @@ export function composeBriefing(
       suggested_focus: null,
       suggested_intensity: "tactical",
       is_first_run: true,
+      cross_session: null,
     };
   }
 
@@ -281,6 +282,7 @@ export function composeBriefing(
     suggested_focus: suggestedFocus,
     suggested_intensity: suggestedIntensity,
     is_first_run: false,
+    cross_session: null,
   };
 }
 
