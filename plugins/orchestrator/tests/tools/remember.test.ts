@@ -129,4 +129,91 @@ describe("remember tool", () => {
     // Should contain meaningful words from content
     expect(note.keywords.toLowerCase()).toContain("backup");
   });
+
+  // === v0.18 source_session plumbing regression guards ===
+  //
+  // These tests verify that the session_id passed into handleRemember actually
+  // lands in the notes.source_session column. The cross-session discovery
+  // pipeline depends on this: without source_session set, sibling sessions'
+  // briefings will never surface this note under "new since your last briefing".
+  //
+  // Before v0.18, handleRemember did not accept session_id at all. Between
+  // v0.18 and v0.19.1 we only had integration-level evidence that it worked.
+  // These are the unit-level regression guards that were previously missing.
+
+  test("writes source_session column when session_id provided", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
+      content: "Session-attributed decision note",
+      type: "decision",
+      session_id: "source-session-test-1",
+    });
+
+    expect(result.stored).toBe(true);
+    const note = projectDb
+      .query("SELECT source_session FROM notes WHERE id = ?")
+      .get(result.note_id!) as { source_session: string | null };
+    expect(note.source_session).toBe("source-session-test-1");
+  });
+
+  test("writes NULL source_session when session_id omitted", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
+      content: "Unattributed insight note",
+      type: "insight",
+    });
+
+    expect(result.stored).toBe(true);
+    const note = projectDb
+      .query("SELECT source_session FROM notes WHERE id = ?")
+      .get(result.note_id!) as { source_session: string | null };
+    expect(note.source_session).toBeNull();
+  });
+
+  test("source_session persists through the full note insert flow", async () => {
+    // Multi-note sequence from the same session. All should share source_session.
+    const ids: string[] = [];
+    for (const content of [
+      "First thought about backup design",
+      "Second thought about restore flow",
+      "Third thought about hibernation encryption",
+    ]) {
+      const result = await handleRemember(projectDb, globalDb, {
+        content,
+        type: "insight",
+        session_id: "multi-note-session",
+      });
+      expect(result.stored).toBe(true);
+      ids.push(result.note_id!);
+    }
+
+    const rows = projectDb
+      .query(
+        `SELECT id, source_session FROM notes WHERE id IN (?, ?, ?) ORDER BY created_at ASC`
+      )
+      .all(ids[0], ids[1], ids[2]) as Array<{
+      id: string;
+      source_session: string | null;
+    }>;
+
+    expect(rows.length).toBe(3);
+    for (const row of rows) {
+      expect(row.source_session).toBe("multi-note-session");
+    }
+  });
+
+  test("source_session writes to global DB for user_pattern notes", async () => {
+    // user_pattern routes to global DB via GLOBAL_TYPES routing
+    const result = await handleRemember(projectDb, globalDb, {
+      content: "User prefers structured answers",
+      type: "user_pattern",
+      session_id: "global-routing-session",
+    });
+
+    expect(result.stored).toBe(true);
+    // Note should be in global DB, not project DB
+    const globalNote = globalDb
+      .query("SELECT source_session FROM notes WHERE id = ?")
+      .get(result.note_id!) as { source_session: string | null } | null;
+    expect(globalNote).toBeTruthy();
+    expect(globalNote!.source_session).toBe("global-routing-session");
+  });
 });
