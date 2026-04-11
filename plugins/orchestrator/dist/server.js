@@ -21759,7 +21759,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.19.0"
+  version: "0.20.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21990,8 +21990,8 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
   tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
-  limit: exports_external.number().optional(),
-  depth: exports_external.number().min(1).max(5).optional(),
+  limit: exports_external.coerce.number().optional(),
+  depth: exports_external.coerce.number().min(1).max(5).optional(),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
 }, async ({ query, id, type, tag, limit, depth, session_id }) => {
   const projectDb2 = getProjectDb();
@@ -22533,7 +22533,7 @@ ${created.map((c) => `- ${c}`).join(`
 server.tool("check_similar", "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use before implementing to catch prior art.", {
   proposed_action: exports_external.string(),
   types: exports_external.array(exports_external.enum(NOTE_TYPES)).optional(),
-  threshold: exports_external.number().min(0).max(1).optional()
+  threshold: exports_external.coerce.number().min(0).max(1).optional()
 }, async ({ proposed_action, types: types2, threshold }) => {
   let queryVector = null;
   if (embeddingClient) {
@@ -22597,7 +22597,7 @@ server.tool("list_work_items", "List ALL work items, optionally filtered by stat
   status: exports_external.enum(["proposed", "planned", "active", "blocked", "done", "all"]).optional().default("all"),
   priority: exports_external.enum(["critical", "high", "medium", "low", "backlog", "all"]).optional().default("all"),
   tag: exports_external.string().optional().describe("Filter by tag (substring match on tags field)"),
-  limit: exports_external.number().optional().default(50)
+  limit: exports_external.coerce.number().optional().default(50)
 }, async ({ status, priority, tag, limit }) => {
   const db = getProjectDb();
   let query = `SELECT id, type, content, confidence, created_at, keywords, status, priority, due_date, tags
@@ -22653,9 +22653,9 @@ server.tool("list_work_items", "List ALL work items, optionally filtered by stat
 `) }] };
 });
 server.tool("list_open_threads", "List ALL open threads (unresolved questions, investigations, tracked issues). Unlike lookup, returns everything without keyword search.", {
-  resolved: exports_external.boolean().optional().default(false).describe("Include resolved threads"),
+  resolved: exports_external.coerce.boolean().optional().default(false).describe("Include resolved threads"),
   tag: exports_external.string().optional().describe("Filter by tag (substring match)"),
-  limit: exports_external.number().optional().default(50)
+  limit: exports_external.coerce.number().optional().default(50)
 }, async ({ resolved, tag, limit }) => {
   const db = getProjectDb();
   let query = `SELECT id, type, content, confidence, created_at, keywords, tags, resolved

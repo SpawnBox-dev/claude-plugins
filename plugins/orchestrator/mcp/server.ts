@@ -259,7 +259,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.19.0",
+  version: "0.20.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -572,8 +572,8 @@ server.tool(
     id: z.string().optional(),
     type: z.enum(NOTE_TYPES).optional(),
     tag: z.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
-    limit: z.number().optional(),
-    depth: z.number().min(1).max(5).optional(),
+    limit: z.coerce.number().optional(),
+    depth: z.coerce.number().min(1).max(5).optional(),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
   async ({ query, id, type, tag, limit, depth, session_id }) => {
@@ -1229,7 +1229,7 @@ server.tool(
   {
     proposed_action: z.string(),
     types: z.array(z.enum(NOTE_TYPES)).optional(),
-    threshold: z.number().min(0).max(1).optional(),
+    threshold: z.coerce.number().min(0).max(1).optional(),
   },
   async ({ proposed_action, types, threshold }) => {
     let queryVector: Float32Array | null = null;
@@ -1300,7 +1300,7 @@ server.tool(
     status: z.enum(["proposed", "planned", "active", "blocked", "done", "all"]).optional().default("all"),
     priority: z.enum(["critical", "high", "medium", "low", "backlog", "all"]).optional().default("all"),
     tag: z.string().optional().describe("Filter by tag (substring match on tags field)"),
-    limit: z.number().optional().default(50),
+    limit: z.coerce.number().optional().default(50),
   },
   async ({ status, priority, tag, limit }) => {
     const db = getProjectDb();
@@ -1363,9 +1363,9 @@ server.tool(
   "list_open_threads",
   "List ALL open threads (unresolved questions, investigations, tracked issues). Unlike lookup, returns everything without keyword search.",
   {
-    resolved: z.boolean().optional().default(false).describe("Include resolved threads"),
+    resolved: z.coerce.boolean().optional().default(false).describe("Include resolved threads"),
     tag: z.string().optional().describe("Filter by tag (substring match)"),
-    limit: z.number().optional().default(50),
+    limit: z.coerce.number().optional().default(50),
   },
   async ({ resolved, tag, limit }) => {
     const db = getProjectDb();

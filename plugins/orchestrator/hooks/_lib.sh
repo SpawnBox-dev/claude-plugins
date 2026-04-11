@@ -66,3 +66,19 @@ get_field() {
     local field="$2"
     printf '%s' "$input" | grep -o "\"${field}\":\"[^\"]*\"" | head -1 | cut -d'"' -f4
 }
+
+# Extract agent_id from the hook's stdin JSON. Populated when the hook fires
+# inside a subagent (Claude Code 2026 PreToolUse/PostToolUse/PostToolUseFailure
+# in subagent context). Returns "unknown" when absent so callers can
+# distinguish missing from malformed. Sanitized for filesystem safety to match
+# get_session_id - only [a-zA-Z0-9_-] allowed.
+get_agent_id() {
+    local input="$1"
+    local aid
+    aid=$(printf '%s' "$input" | grep -o '"agent_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    aid="${aid:-unknown}"
+    case "$aid" in
+        *[!a-zA-Z0-9_-]*|"") aid="unknown" ;;
+    esac
+    printf '%s' "$aid"
+}
