@@ -21,9 +21,21 @@ past decisions or wasting cold-start budget on the concierge later.
 
 You're entering a task and need context. Do this quickly and silently:
 
+## Step 0 — Capture your session_id
+
+The SessionStart hook injects your current `session_id` into context as part of the startup directive. **Find it and remember it.** Every subsequent orchestrator tool call should pass this same `session_id` so sibling sessions can see what you create and you can see what they're working on.
+
+- Briefings without `session_id` miss the Cross-Session Activity section.
+- Notes without `session_id` are invisible to other sessions' cross-session discovery.
+- Work items without `session_id` cannot be attributed in the discovery feed.
+
+If for any reason you cannot find your session_id in the startup context, ask the user to share it or proceed without it - but the cross-session features will be degraded.
+
 ## Step 1 — Briefing
 
-Call `briefing` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint). Scan it internally. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
+Call `briefing({ event: "startup", session_id: "<your_session_id>" })` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, AND cross-session activity from sibling sessions). Scan it internally. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
+
+If the Cross-Session Activity section is non-empty, note anything that affects your task. Sibling sessions may have just decided something you're about to revisit, or flagged an anti-pattern in the area you're about to touch.
 
 ## Step 2 — Spawn the Concierge (do this NOW, not later)
 

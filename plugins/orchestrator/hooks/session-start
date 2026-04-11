@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Fires when a session starts, resumes, clears, or recovers from compaction.
-# Injects the mandatory startup directive and cleans up stale state files
-# from old sessions so the state dir does not grow forever.
+# Injects the mandatory startup directive, surfaces the runtime session_id
+# so the agent can pass it to every orchestrator tool call (enables
+# cross-session discovery), and cleans up stale state files from old sessions.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/_lib.sh"
@@ -22,7 +23,28 @@ STATE_DIR=$(get_state_dir)
 # available; failures are non-fatal because state files are advisory.
 find "$STATE_DIR" -type f -mtime +7 ! -name '.gitignore' -delete 2>/dev/null || true
 
-CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\". (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional.\n\nRED FLAGS - if you think any of these, you are rationalizing and MUST stop:\n- \"This is just a quick fix\" -> Quick fixes create decisions. Lookup first.\n- \"I already know this codebase\" -> You know THIS context window. Previous sessions knew more.\n- \"I'll note it later\" -> Later never comes. Context compaction erases your memory. Note NOW.\n- \"Nothing noteworthy happened\" -> Re-evaluate. Zero-signal turns are rare.\n- \"The user just wants speed\" -> Speed without context causes rework.\n- \"I'll check the knowledge base after\" -> Checking AFTER means you already contradicted past decisions."
+# Try to read session_id from stdin (SessionStart hook input may or may not
+# include it depending on Claude Code version). Never block on this - if
+# stdin is empty or non-JSON, fall back gracefully.
+INPUT=""
+if [ -t 0 ]; then
+    INPUT=""
+else
+    INPUT=$(cat 2>/dev/null || printf '')
+fi
+
+SID=""
+if [ -n "$INPUT" ]; then
+    SID=$(get_session_id "$INPUT")
+    if [ "$SID" = "unknown" ]; then SID=""; fi
+fi
+
+SID_LINE=""
+if [ -n "$SID" ]; then
+    SID_LINE="\n\nYour session ID for this conversation is: ${SID}\nPass this as \`session_id\` on EVERY orchestrator tool call (briefing, note, lookup, create_work_item, update_work_item, save_progress, breakdown, close_thread). It enables cross-session discovery so sibling sessions see what you create and you see what they're working on. Save the session ID in your working memory and reuse it throughout the session - never invent a new one."
+fi
+
+CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\" AND session_id set. (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional.\n\nRED FLAGS - if you think any of these, you are rationalizing and MUST stop:\n- \"This is just a quick fix\" -> Quick fixes create decisions. Lookup first.\n- \"I already know this codebase\" -> You know THIS context window. Previous sessions knew more.\n- \"I'll note it later\" -> Later never comes. Context compaction erases your memory. Note NOW.\n- \"Nothing noteworthy happened\" -> Re-evaluate. Zero-signal turns are rare.\n- \"The user just wants speed\" -> Speed without context causes rework.\n- \"I'll check the knowledge base after\" -> Checking AFTER means you already contradicted past decisions.${SID_LINE}"
 ESCAPED=$(escape_for_json "$CONTEXT")
 
 cat <<EOF

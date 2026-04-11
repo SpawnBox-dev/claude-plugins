@@ -17,6 +17,10 @@ export interface SessionAnnotation {
   already_sent: boolean;
   sent_turns_ago: number | null;
   sent_to_other_sessions: Array<{ session_id: string; turn: number }>;
+  /** Count of distinct OTHER sessions that surfaced this note in the last
+   *  2 hours. Use to render a "🔥 hot" badge. Subset of sent_to_other_sessions
+   *  which has a 7-day window. */
+  hot_across_sessions: number;
   activation_score: number;
 }
 
@@ -190,6 +194,18 @@ export class SessionTracker {
       turn: r.turn_number,
     }));
 
+    // Hot count: distinct OTHER sessions that surfaced this note in last 2h
+    const twoHoursAgo = new Date(
+      Date.now() - 2 * 60 * 60 * 1000
+    ).toISOString();
+    const hotRow = this.db
+      .query(
+        `SELECT COUNT(DISTINCT session_id) as cnt FROM session_log
+         WHERE note_id = ? AND session_id != ? AND surfaced_at > ?`
+      )
+      .get(noteId, sessionId, twoHoursAgo) as { cnt: number } | null;
+    const hot_across_sessions = hotRow?.cnt ?? 0;
+
     // Get activation_score from notes.signal (pheromone strength)
     const noteRow = this.db
       .query(`SELECT signal FROM notes WHERE id = ?`)
@@ -201,6 +217,7 @@ export class SessionTracker {
       already_sent,
       sent_turns_ago,
       sent_to_other_sessions,
+      hot_across_sessions,
       activation_score,
     };
   }
@@ -289,14 +306,16 @@ export class SessionTracker {
       source_session: string;
     }>;
 
-    // Hot notes: notes that 2+ OTHER active sessions have surfaced within the
-    // last 2 hours. These are "the things sibling sessions are actively
-    // thinking about right now" even if they existed before.
+    // Hot notes: union of two signals over the last 2 hours:
+    //   (read-side) 2+ OTHER active sessions surfaced the note via session_log
+    //   (creation-side) another active session CREATED the note
+    // Creation-side matters because a fresh decision/insight that hasn't yet
+    // been re-surfaced should still be "hot" on sibling sessions' screens.
     const twoHoursAgo = new Date(
       Date.now() - 2 * 60 * 60 * 1000
     ).toISOString();
 
-    const hotNotesRows = this.db
+    const readHotRows = this.db
       .query(
         `SELECT n.id, n.type, n.content, n.tags,
                 COUNT(DISTINCT sl.session_id) as distinct_sessions,
@@ -319,9 +338,58 @@ export class SessionTracker {
       surfacings: number;
     }>;
 
+    const createHotRows = this.db
+      .query(
+        `SELECT n.id, n.type, n.content, n.tags, n.source_session
+         FROM notes n
+         WHERE n.source_session IS NOT NULL
+           AND n.source_session != ?
+           AND n.created_at > ?
+           AND EXISTS (
+             SELECT 1 FROM session_registry sr
+             WHERE sr.session_id = n.source_session
+               AND sr.last_active_at > ?
+           )
+         ORDER BY n.created_at DESC
+         LIMIT 5`
+      )
+      .all(sessionId, twoHoursAgo, twentyFourHoursAgo) as Array<{
+      id: string;
+      type: string;
+      content: string;
+      tags: string | null;
+      source_session: string;
+    }>;
+
+    // Union and dedupe by id. Read-side wins on collision because it carries
+    // the distinct_sessions/surfacings metadata that creation-side lacks.
+    const seen = new Set<string>();
+    const hotNotesRows: CrossSessionHotNote[] = [];
+    for (const r of readHotRows) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      hotNotesRows.push(r);
+    }
+    for (const r of createHotRows) {
+      if (seen.has(r.id)) continue;
+      seen.add(r.id);
+      // Creation-side placeholder metadata: 1 distinct session (the author),
+      // 1 "surfacing" (the creation event itself).
+      hotNotesRows.push({
+        id: r.id,
+        type: r.type,
+        content: r.content,
+        tags: r.tags,
+        distinct_sessions: 1,
+        surfacings: 1,
+      });
+    }
+    // Cap at 8 total across both signals.
+    const cappedHot = hotNotesRows.slice(0, 8);
+
     return {
       new_notes: newNotesRows,
-      hot_notes: hotNotesRows,
+      hot_notes: cappedHot,
       active_session_count: activeCount,
       since,
     };

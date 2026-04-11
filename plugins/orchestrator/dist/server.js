@@ -21475,12 +21475,17 @@ class SessionTracker {
       session_id: r.session_id,
       turn: r.turn_number
     }));
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const hotRow = this.db.query(`SELECT COUNT(DISTINCT session_id) as cnt FROM session_log
+         WHERE note_id = ? AND session_id != ? AND surfaced_at > ?`).get(noteId, sessionId, twoHoursAgo);
+    const hot_across_sessions = hotRow?.cnt ?? 0;
     const noteRow = this.db.query(`SELECT signal FROM notes WHERE id = ?`).get(noteId);
     const activation_score = noteRow?.signal ?? 0;
     return {
       already_sent,
       sent_turns_ago,
       sent_to_other_sessions,
+      hot_across_sessions,
       activation_score
     };
   }
@@ -21512,7 +21517,7 @@ class SessionTracker {
          ORDER BY n.created_at DESC
          LIMIT 8`).all(sessionId, since, twentyFourHoursAgo, sessionId);
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const hotNotesRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags,
+    const readHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags,
                 COUNT(DISTINCT sl.session_id) as distinct_sessions,
                 COUNT(*) as surfacings
          FROM session_log sl
@@ -21523,9 +21528,43 @@ class SessionTracker {
          HAVING distinct_sessions >= 2
          ORDER BY distinct_sessions DESC, surfacings DESC
          LIMIT 5`).all(twoHoursAgo, sessionId);
+    const createHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.source_session
+         FROM notes n
+         WHERE n.source_session IS NOT NULL
+           AND n.source_session != ?
+           AND n.created_at > ?
+           AND EXISTS (
+             SELECT 1 FROM session_registry sr
+             WHERE sr.session_id = n.source_session
+               AND sr.last_active_at > ?
+           )
+         ORDER BY n.created_at DESC
+         LIMIT 5`).all(sessionId, twoHoursAgo, twentyFourHoursAgo);
+    const seen = new Set;
+    const hotNotesRows = [];
+    for (const r of readHotRows) {
+      if (seen.has(r.id))
+        continue;
+      seen.add(r.id);
+      hotNotesRows.push(r);
+    }
+    for (const r of createHotRows) {
+      if (seen.has(r.id))
+        continue;
+      seen.add(r.id);
+      hotNotesRows.push({
+        id: r.id,
+        type: r.type,
+        content: r.content,
+        tags: r.tags,
+        distinct_sessions: 1,
+        surfacings: 1
+      });
+    }
+    const cappedHot = hotNotesRows.slice(0, 8);
     return {
       new_notes: newNotesRows,
-      hot_notes: hotNotesRows,
+      hot_notes: cappedHot,
       active_session_count: activeCount,
       since
     };
@@ -21669,7 +21708,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.17.0"
+  version: "0.18.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21938,7 +21977,9 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     if (ann.already_sent && ann.sent_turns_ago !== null) {
       parts.push(`already sent ${ann.sent_turns_ago} turn(s) ago`);
     }
-    if (ann.sent_to_other_sessions.length > 0) {
+    if (ann.hot_across_sessions > 0) {
+      parts.push(`HOT: ${ann.hot_across_sessions} other session${ann.hot_across_sessions === 1 ? "" : "s"} touched this in last 2h`);
+    } else if (ann.sent_to_other_sessions.length > 0) {
       parts.push(`sent to ${ann.sent_to_other_sessions.length} other session(s)`);
     }
     return parts.length > 0 ? ` [${parts.join("; ")}]` : "";
@@ -21990,12 +22031,15 @@ server.tool("plan", "Gather domain-specific context before starting a complex ta
     content: [{ type: "text", text: result.formatted }]
   };
 });
-server.tool("save_progress", "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends.", {
+server.tool("save_progress", "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends. Pass session_id so the checkpoint is attributed to you for cross-session awareness.", {
   summary: exports_external.string().describe("What was accomplished and current state"),
   open_questions: exports_external.union([exports_external.array(exports_external.string()), exports_external.string()]).optional().describe("Unresolved questions (array of strings, or single string)"),
   next_steps: exports_external.union([exports_external.array(exports_external.string()), exports_external.string()]).optional().describe("What should happen next (array of strings, or single string)"),
-  in_flight: exports_external.string().optional().describe("Work currently in progress, if any")
-}, async ({ summary, open_questions, next_steps, in_flight }) => {
+  in_flight: exports_external.string().optional().describe("Work currently in progress, if any"),
+  session_id: exports_external.string().optional().describe("Session ID for cross-session attribution on the checkpoint.")
+}, async ({ summary, open_questions, next_steps, in_flight, session_id }) => {
+  if (session_id && sessionTracker)
+    sessionTracker.registerSession(session_id);
   const oq = typeof open_questions === "string" ? [open_questions] : open_questions;
   const ns = typeof next_steps === "string" ? [next_steps] : next_steps;
   const parts = [`## Work State
@@ -22020,7 +22064,8 @@ ${ns.map((s) => `- ${s}`).join(`
     content,
     type: "checkpoint",
     context: `Checkpoint created at ${new Date().toISOString()}`,
-    tags: "checkpoint"
+    tags: "checkpoint",
+    session_id
   }, embeddingClient);
   return {
     content: [{
@@ -22029,11 +22074,14 @@ ${ns.map((s) => `- ${s}`).join(`
     }]
   };
 });
-server.tool("close_thread", "Mark an open thread, commitment, or work item as resolved/done. Cascades through the knowledge graph: unblocks blocked items, auto-completes parents when all children are done, auto-resolves superseded notes. Use when a tracked issue has been addressed, a question answered, a commitment fulfilled, or a task completed.", {
+server.tool("close_thread", "Mark an open thread, commitment, or work item as resolved/done. Cascades through the knowledge graph: unblocks blocked items, auto-completes parents when all children are done, auto-resolves superseded notes. Use when a tracked issue has been addressed, a question answered, a commitment fulfilled, or a task completed. Pass session_id so any recorded resolution decision carries your attribution.", {
   id: exports_external.string(),
-  resolution: exports_external.string().optional()
-}, async ({ id, resolution }) => {
+  resolution: exports_external.string().optional(),
+  session_id: exports_external.string().optional().describe("Session ID - attributed to the resolution decision note if one is created.")
+}, async ({ id, resolution, session_id }) => {
   const projectDb2 = getProjectDb();
+  if (session_id && sessionTracker)
+    sessionTracker.registerSession(session_id);
   const globalDb2 = getGlobalDb();
   let db = projectDb2;
   let row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
@@ -22058,7 +22106,8 @@ server.tool("close_thread", "Mark an open thread, commitment, or work item as re
       content: resolution,
       type: "decision",
       context: `Resolved ${row.type}: ${row.content}`,
-      tags: row.type
+      tags: row.type,
+      session_id
     }, embeddingClient);
   }
   let message = `Resolved ${row.type} note "${id}".`;
@@ -22211,7 +22260,7 @@ server.tool("user_profile", "View or update the structured user profile. Shows a
   }
   return { content: [{ type: "text", text: "Unknown action." }] };
 });
-server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work.", {
+server.tool("create_work_item", "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work. Pass session_id so sibling sessions can see this item on their next briefing.", {
   content: exports_external.string().optional().describe("What needs to be done - be specific and actionable. This is the primary field."),
   title: exports_external.string().optional().describe("Alias for content (if content not provided, title is used)"),
   description: exports_external.string().optional().describe("Additional detail (appended to content if both provided)"),
@@ -22220,8 +22269,9 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   parent_id: exports_external.string().optional().describe("ID of parent work_item this belongs to (creates part_of link)"),
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format"),
   tags: exports_external.string().optional(),
-  context: exports_external.string().optional()
-}, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context }) => {
+  context: exports_external.string().optional(),
+  session_id: exports_external.string().optional().describe("Session ID that created this work item. Enables cross-session discovery.")
+}, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, session_id }) => {
   const content = rawContent || title || description || "";
   if (!content) {
     return { content: [{ type: "text", text: "Error: provide content (or title) describing what needs to be done." }] };
@@ -22230,6 +22280,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
 
 ` + description : description || "");
   const projectDb2 = getProjectDb();
+  if (session_id && sessionTracker)
+    sessionTracker.registerSession(session_id);
   const noteId = generateId();
   const timestamp = now();
   const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
@@ -22241,8 +22293,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
         tagParts.push(t);
     }
   }
-  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     "work_item",
     fullContent,
@@ -22255,7 +22307,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
     priority ?? "medium",
     due_date ?? null,
     timestamp,
-    timestamp
+    timestamp,
+    session_id ?? null
   ]);
   const links = createAutoLinks(projectDb2, noteId, keywords);
   if (parent_id) {
@@ -22337,7 +22390,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     }]
   };
 });
-server.tool("breakdown", "Break down a work item or plan into child work items. Creates multiple work_items linked to a parent via part_of relationships. Use when you have a complex task that needs to be split into concrete steps.", {
+server.tool("breakdown", "Break down a work item or plan into child work items. Creates multiple work_items linked to a parent via part_of relationships. Use when you have a complex task that needs to be split into concrete steps. Pass session_id so parent and children carry cross-session attribution.", {
   parent_id: exports_external.string().optional().describe("ID of parent work_item. If omitted, creates a new parent from the title."),
   parent_title: exports_external.string().optional().describe("Title for a new parent work_item (used when parent_id is omitted)"),
   items: exports_external.array(exports_external.object({
@@ -22346,17 +22399,20 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     due_date: exports_external.string().optional()
   })),
   tags: exports_external.string().optional(),
-  due_date: exports_external.string().optional().describe("Default due date for all items (individual items can override)")
-}, async ({ parent_id, parent_title, items, tags, due_date }) => {
+  due_date: exports_external.string().optional().describe("Default due date for all items (individual items can override)"),
+  session_id: exports_external.string().optional().describe("Session ID for cross-session attribution on parent and children.")
+}, async ({ parent_id, parent_title, items, tags, due_date, session_id }) => {
   const projectDb2 = getProjectDb();
+  if (session_id && sessionTracker)
+    sessionTracker.registerSession(session_id);
   const timestamp = now();
   let actualParentId = parent_id;
   if (!actualParentId && parent_title) {
     actualParentId = generateId();
     const keywords = extractKeywords(parent_title);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       actualParentId,
       "work_item",
       parent_title,
@@ -22368,7 +22424,8 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
       "high",
       due_date ?? null,
       timestamp,
-      timestamp
+      timestamp,
+      session_id ?? null
     ]);
     createAutoLinks(projectDb2, actualParentId, keywords);
   }
@@ -22377,8 +22434,8 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
     const childId = generateId();
     const keywords = extractKeywords(item.content);
     const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
-    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       childId,
       "work_item",
       item.content,
@@ -22390,7 +22447,8 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
       item.priority ?? "medium",
       item.due_date ?? due_date ?? null,
       timestamp,
-      timestamp
+      timestamp,
+      session_id ?? null
     ]);
     createAutoLinks(projectDb2, childId, keywords);
     if (actualParentId) {
