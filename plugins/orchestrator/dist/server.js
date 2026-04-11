@@ -6518,7 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve } from "path";
+import { resolve, join as join2 } from "path";
+import { existsSync as existsSync2, readFileSync } from "fs";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -19841,6 +19842,7 @@ function initDb(path, dbType) {
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
+  db.run("PRAGMA busy_timeout = 5000");
   applyMigrations(db, dbType);
   return db;
 }
@@ -21216,20 +21218,28 @@ function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
   const include = (section) => !input.sections || input.sections.length === 0 || input.sections.includes(section);
   const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb2) : null;
   const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb2) : [];
+  const readAt = new Date().toISOString();
   if (include("cross_session") && sessionTracker && input.session_id) {
     try {
-      briefing.cross_session = sessionTracker.getCrossSessionUpdates(input.session_id);
+      briefing.cross_session = sessionTracker.getCrossSessionUpdates(input.session_id, readAt);
     } catch (err) {
       console.error(`[orient] cross-session update fetch failed:`, err);
+      crossSessionHealthy = false;
+      crossSessionLastError = String(err);
     }
   }
   const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
   if (sessionTracker && input.session_id) {
     try {
-      sessionTracker.updateLastBriefing(input.session_id);
+      sessionTracker.updateLastBriefing(input.session_id, readAt);
     } catch {}
   }
   return { briefing, recovery_checkpoint: checkpoint, formatted };
+}
+var crossSessionHealthy = true;
+var crossSessionLastError = null;
+function getCrossSessionHealth() {
+  return { healthy: crossSessionHealthy, last_error: crossSessionLastError };
 }
 
 // mcp/tools/prepare.ts
@@ -21492,16 +21502,47 @@ class SessionTracker {
   updateCurrentTask(sessionId, task) {
     this.db.run(`UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`, [task, now(), sessionId]);
   }
-  updateLastBriefing(sessionId) {
-    this.db.run(`UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`, [now(), now(), sessionId]);
+  updateLastBriefing(sessionId, at) {
+    const ts = at ?? now();
+    this.db.run(`UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`, [ts, ts, sessionId]);
   }
-  getCrossSessionUpdates(sessionId) {
+  getCrossSessionUpdates(sessionId, upperBound) {
     const me = this.getSession(sessionId);
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const since = me?.last_briefing_at ?? twentyFourHoursAgo;
     const activeCount = this.db.query(`SELECT COUNT(*) as cnt FROM session_registry
            WHERE session_id != ? AND last_active_at > ?`).get(sessionId, twentyFourHoursAgo).cnt;
+    const upperClause = upperBound ? "AND n.created_at <= ?" : "";
+    const newNotesParams = upperBound ? [sessionId, since, upperBound, twentyFourHoursAgo, sessionId] : [sessionId, since, twentyFourHoursAgo, sessionId];
     const newNotesRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.created_at, n.source_session
+         FROM notes n
+         WHERE n.source_session IS NOT NULL
+           AND n.source_session != ?
+           AND n.created_at > ?
+           ${upperClause}
+           AND EXISTS (
+             SELECT 1 FROM session_registry sr
+             WHERE sr.session_id = n.source_session
+               AND sr.last_active_at > ?
+           )
+           AND n.id NOT IN (
+             SELECT note_id FROM session_log WHERE session_id = ?
+           )
+         ORDER BY n.created_at DESC
+         LIMIT 8`).all(...newNotesParams);
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const readHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags,
+                COUNT(DISTINCT sl.session_id) as distinct_sessions,
+                COUNT(*) as surfacings
+         FROM session_log sl
+         JOIN notes n ON n.id = sl.note_id
+         WHERE sl.surfaced_at > ?
+           AND sl.session_id != ?
+         GROUP BY n.id
+         HAVING distinct_sessions >= 2
+         ORDER BY distinct_sessions DESC, surfacings DESC
+         LIMIT 8`).all(twoHoursAgo, sessionId);
+    const createHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.source_session
          FROM notes n
          WHERE n.source_session IS NOT NULL
            AND n.source_session != ?
@@ -21515,31 +21556,7 @@ class SessionTracker {
              SELECT note_id FROM session_log WHERE session_id = ?
            )
          ORDER BY n.created_at DESC
-         LIMIT 8`).all(sessionId, since, twentyFourHoursAgo, sessionId);
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const readHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags,
-                COUNT(DISTINCT sl.session_id) as distinct_sessions,
-                COUNT(*) as surfacings
-         FROM session_log sl
-         JOIN notes n ON n.id = sl.note_id
-         WHERE sl.surfaced_at > ?
-           AND sl.session_id != ?
-         GROUP BY n.id
-         HAVING distinct_sessions >= 2
-         ORDER BY distinct_sessions DESC, surfacings DESC
-         LIMIT 5`).all(twoHoursAgo, sessionId);
-    const createHotRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.source_session
-         FROM notes n
-         WHERE n.source_session IS NOT NULL
-           AND n.source_session != ?
-           AND n.created_at > ?
-           AND EXISTS (
-             SELECT 1 FROM session_registry sr
-             WHERE sr.session_id = n.source_session
-               AND sr.last_active_at > ?
-           )
-         ORDER BY n.created_at DESC
-         LIMIT 5`).all(sessionId, twoHoursAgo, twentyFourHoursAgo);
+         LIMIT 8`).all(sessionId, twoHoursAgo, twentyFourHoursAgo, sessionId);
     const seen = new Set;
     const hotNotesRows = [];
     for (const r of readHotRows) {
@@ -21588,9 +21605,43 @@ class SessionTracker {
 }
 
 // mcp/server.ts
+var cachedFallbackSessionId = null;
+function getFallbackSessionId() {
+  if (cachedFallbackSessionId)
+    return cachedFallbackSessionId;
+  const envId = process.env.CLAUDE_SESSION_ID;
+  if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) {
+    cachedFallbackSessionId = envId;
+    return envId;
+  }
+  const projectDir = process.env.CLAUDE_PROJECT_DIR;
+  if (projectDir) {
+    const file = join2(projectDir, ".orchestrator-state", "active-session");
+    try {
+      if (existsSync2(file)) {
+        const raw = readFileSync(file, "utf8").trim();
+        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+          cachedFallbackSessionId = raw;
+          return raw;
+        }
+      }
+    } catch {}
+  }
+  return;
+}
+function resolveSessionId(explicit) {
+  return explicit ?? getFallbackSessionId();
+}
 var embeddingClient = null;
 var sidecarProcess = null;
 var sessionTracker = null;
+var registeredSessions = new Set;
+function registerSessionOnce(sessionId) {
+  if (!sessionTracker || registeredSessions.has(sessionId))
+    return;
+  sessionTracker.registerSession(sessionId);
+  registeredSessions.add(sessionId);
+}
 var sidecarStatus = "starting";
 var sidecarError = null;
 async function trySpawn(cmd, portFile, label, timeoutMs) {
@@ -21708,16 +21759,16 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.18.0"
+  version: "0.19.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
   sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint"),
   session_id: exports_external.string().optional().describe("Session ID. Required for cross_session updates (what other active sessions have discovered since your last briefing). Strongly recommended - pass your session identifier.")
 }, async ({ event, sections, session_id }) => {
-  if (session_id && sessionTracker) {
-    sessionTracker.registerSession(session_id);
-  }
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const result = handleOrient(getProjectDb(), getGlobalDb(), {
     event: event ?? "startup",
     sections: sections ?? undefined,
@@ -21776,6 +21827,14 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push("  - To enable: call `install_embeddings` tool, or manually install uv (https://docs.astral.sh/uv/)");
   }
   lines.push(`- **Active sessions** (24h): ${activeSessions}`);
+  const xsHealth = getCrossSessionHealth();
+  if (!xsHealth.healthy) {
+    lines.push(`- **Cross-session discovery**: DEGRADED`);
+    if (xsHealth.last_error) {
+      lines.push(`  - Last error: ${xsHealth.last_error}`);
+    }
+    lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
+  }
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
@@ -21910,9 +21969,9 @@ server.tool("note", "Save a piece of knowledge you've just learned, decided, or 
   dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference"),
   session_id: exports_external.string().optional().describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended.")
 }, async ({ content, type, context, tags, scope, dimension, session_id }) => {
-  if (session_id && sessionTracker) {
-    sessionTracker.registerSession(session_id);
-  }
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const result = await handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type,
@@ -21944,10 +22003,11 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     limit,
     depth
   });
+  session_id = resolveSessionId(session_id);
   let turn = null;
   const tracker = sessionTracker;
   if (session_id && tracker) {
-    tracker.registerSession(session_id);
+    registerSessionOnce(session_id);
     turn = tracker.nextTurn(session_id);
   }
   const noteIds = [];
@@ -22038,8 +22098,9 @@ server.tool("save_progress", "Save your current progress so the next session can
   in_flight: exports_external.string().optional().describe("Work currently in progress, if any"),
   session_id: exports_external.string().optional().describe("Session ID for cross-session attribution on the checkpoint.")
 }, async ({ summary, open_questions, next_steps, in_flight, session_id }) => {
-  if (session_id && sessionTracker)
-    sessionTracker.registerSession(session_id);
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const oq = typeof open_questions === "string" ? [open_questions] : open_questions;
   const ns = typeof next_steps === "string" ? [next_steps] : next_steps;
   const parts = [`## Work State
@@ -22080,8 +22141,9 @@ server.tool("close_thread", "Mark an open thread, commitment, or work item as re
   session_id: exports_external.string().optional().describe("Session ID - attributed to the resolution decision note if one is created.")
 }, async ({ id, resolution, session_id }) => {
   const projectDb2 = getProjectDb();
-  if (session_id && sessionTracker)
-    sessionTracker.registerSession(session_id);
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const globalDb2 = getGlobalDb();
   let db = projectDb2;
   let row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
@@ -22280,8 +22342,9 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
 
 ` + description : description || "");
   const projectDb2 = getProjectDb();
-  if (session_id && sessionTracker)
-    sessionTracker.registerSession(session_id);
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const noteId = generateId();
   const timestamp = now();
   const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
@@ -22403,8 +22466,9 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   session_id: exports_external.string().optional().describe("Session ID for cross-session attribution on parent and children.")
 }, async ({ parent_id, parent_title, items, tags, due_date, session_id }) => {
   const projectDb2 = getProjectDb();
-  if (session_id && sessionTracker)
-    sessionTracker.registerSession(session_id);
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const timestamp = now();
   let actualParentId = parent_id;
   if (!actualParentId && parent_title) {

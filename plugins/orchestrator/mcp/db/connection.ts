@@ -70,6 +70,13 @@ function initDb(path: string, dbType: "project" | "global"): Database {
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
+  // WAL allows concurrent readers but writers still serialize. Without a
+  // busy timeout, a concurrent writer throws SQLITE_BUSY immediately instead
+  // of waiting. v0.16+ explicitly runs N concurrent MCP server processes
+  // against one DB, so this is required - any overlapping registerSession,
+  // logSurfaced, updateLastBriefing, or note insert from sibling sessions
+  // would flake intermittently without it.
+  db.run("PRAGMA busy_timeout = 5000");
 
   applyMigrations(db, dbType);
 

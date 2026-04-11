@@ -45,6 +45,7 @@
     ],
     "PostToolUseFailure": [
       {
+        "matcher": "Write|Edit|MultiEdit|Bash|mcp__.*",
         "hooks": [
           {
             "type": "command",

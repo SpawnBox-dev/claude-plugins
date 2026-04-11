@@ -277,24 +277,44 @@ export function handleOrient(
 
   // Cross-session updates: read BEFORE we update the last_briefing_at cursor
   // so "since your last briefing" is computed against the stable old value.
+  // Capture readAt BEFORE the query and pass the SAME timestamp to both the
+  // query's upper bound and to updateLastBriefing, closing the read/write
+  // cursor race: any note with created_at in (old_cursor, readAt] is
+  // visible, and any note with created_at > readAt is NOT missed because
+  // the cursor hasn't moved past it.
+  const readAt = new Date().toISOString();
   if (include("cross_session") && sessionTracker && input.session_id) {
     try {
-      briefing.cross_session = sessionTracker.getCrossSessionUpdates(input.session_id);
+      briefing.cross_session = sessionTracker.getCrossSessionUpdates(
+        input.session_id,
+        readAt
+      );
     } catch (err) {
       console.error(`[orient] cross-session update fetch failed:`, err);
+      crossSessionHealthy = false;
+      crossSessionLastError = String(err);
     }
   }
 
   const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
 
-  // Now advance the cursor so the NEXT briefing sees "new since this moment".
+  // Advance the cursor to EXACTLY the same readAt we just queried against.
   if (sessionTracker && input.session_id) {
     try {
-      sessionTracker.updateLastBriefing(input.session_id);
+      sessionTracker.updateLastBriefing(input.session_id, readAt);
     } catch {
       // non-fatal
     }
   }
 
   return { briefing, recovery_checkpoint: checkpoint, formatted };
+}
+
+// Module-level cross-session health flags (H3). Exposed via system_status
+// so a silent migration or query failure is actually visible.
+let crossSessionHealthy = true;
+let crossSessionLastError: string | null = null;
+
+export function getCrossSessionHealth(): { healthy: boolean; last_error: string | null } {
+  return { healthy: crossSessionHealthy, last_error: crossSessionLastError };
 }

@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -14,7 +15,7 @@ import type { WorkItemStatus, Dimension } from "./types";
 import { getProjectDb, getGlobalDb } from "./db/connection";
 import { handleRemember } from "./tools/remember";
 import { handleRecall } from "./tools/recall";
-import { handleOrient } from "./tools/orient";
+import { handleOrient, getCrossSessionHealth } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
@@ -25,10 +26,73 @@ import { EmbeddingClient } from "./engine/embeddings";
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
 
+// ── Session ID fallback ─────────────────────────────────────────────────
+//
+// Tool handlers accept `session_id` as an optional param, but the model
+// frequently forgets to pass it. The session-start hook writes the current
+// session_id to a fallback file; we read it here as a last resort so
+// cross-session discovery keeps working even without explicit handoff.
+//
+// Resolution order:
+//   1. Explicit param (best)
+//   2. CLAUDE_SESSION_ID env var (if Claude Code ever sets it on MCP spawn)
+//   3. $CLAUDE_PROJECT_DIR/.orchestrator-state/active-session (hook-written)
+//
+// Cache the first successful read for this MCP server's lifetime because the
+// server is per-session by stdio design - its session_id cannot change.
+// Multi-session users should still pass session_id explicitly because the
+// fallback file is last-writer-wins across sibling sessions.
+let cachedFallbackSessionId: string | null = null;
+
+function getFallbackSessionId(): string | undefined {
+  if (cachedFallbackSessionId) return cachedFallbackSessionId;
+
+  const envId = process.env.CLAUDE_SESSION_ID;
+  if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) {
+    cachedFallbackSessionId = envId;
+    return envId;
+  }
+
+  const projectDir = process.env.CLAUDE_PROJECT_DIR;
+  if (projectDir) {
+    const file = join(projectDir, ".orchestrator-state", "active-session");
+    try {
+      if (existsSync(file)) {
+        const raw = readFileSync(file, "utf8").trim();
+        // Sanitize: same rule as the bash helper. Defence in depth.
+        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+          cachedFallbackSessionId = raw;
+          return raw;
+        }
+      }
+    } catch {
+      // Non-fatal - fallback is best-effort
+    }
+  }
+
+  return undefined;
+}
+
+function resolveSessionId(explicit?: string): string | undefined {
+  return explicit ?? getFallbackSessionId();
+}
+
 // ── Sidecar lifecycle ────────────────────────────────────────────────────
 let embeddingClient: EmbeddingClient | null = null;
 let sidecarProcess: ReturnType<typeof Bun.spawn> | null = null;
 let sessionTracker: SessionTracker | null = null;
+
+// Cache of sessions that have already been registered in this process.
+// Skips redundant INSERT OR IGNORE + UPDATE round-trips on every tool call,
+// which compounds C1 (SQLITE_BUSY) risk under concurrent siblings. Cleared
+// only on process exit.
+const registeredSessions = new Set<string>();
+
+function registerSessionOnce(sessionId: string): void {
+  if (!sessionTracker || registeredSessions.has(sessionId)) return;
+  sessionTracker.registerSession(sessionId);
+  registeredSessions.add(sessionId);
+}
 let sidecarStatus: "ready" | "starting" | "unavailable" | "error" = "starting";
 let sidecarError: string | null = null;
 
@@ -195,7 +259,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.18.0",
+  version: "0.19.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -216,9 +280,8 @@ server.tool(
   async ({ event, sections, session_id }) => {
     // Register the session before running the briefing so cross-session
     // tracking has a row to compare against next time.
-    if (session_id && sessionTracker) {
-      sessionTracker.registerSession(session_id);
-    }
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const result = handleOrient(
       getProjectDb(),
       getGlobalDb(),
@@ -302,6 +365,16 @@ server.tool(
     }
 
     lines.push(`- **Active sessions** (24h): ${activeSessions}`);
+
+    // Cross-session health - surfaces silent migration/query failures
+    const xsHealth = getCrossSessionHealth();
+    if (!xsHealth.healthy) {
+      lines.push(`- **Cross-session discovery**: DEGRADED`);
+      if (xsHealth.last_error) {
+        lines.push(`  - Last error: ${xsHealth.last_error}`);
+      }
+      lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
+    }
 
     return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   }
@@ -473,9 +546,8 @@ server.tool(
       .describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended."),
   },
   async ({ content, type, context, tags, scope, dimension, session_id }) => {
-    if (session_id && sessionTracker) {
-      sessionTracker.registerSession(session_id);
-    }
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
       content,
       type,
@@ -516,10 +588,11 @@ server.tool(
     });
 
     // Session tracking: register session, advance turn, annotate results
+    session_id = resolveSessionId(session_id);
     let turn: number | null = null;
     const tracker = sessionTracker;
     if (session_id && tracker) {
-      tracker.registerSession(session_id);
+      registerSessionOnce(session_id);
       turn = tracker.nextTurn(session_id);
     }
 
@@ -625,7 +698,8 @@ server.tool(
     session_id: z.string().optional().describe("Session ID for cross-session attribution on the checkpoint."),
   },
   async ({ summary, open_questions, next_steps, in_flight, session_id }) => {
-    if (session_id && sessionTracker) sessionTracker.registerSession(session_id);
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     // Normalize string inputs to arrays
     const oq = typeof open_questions === "string" ? [open_questions] : open_questions;
     const ns = typeof next_steps === "string" ? [next_steps] : next_steps;
@@ -665,7 +739,8 @@ server.tool(
   },
   async ({ id, resolution, session_id }) => {
     const projectDb = getProjectDb();
-    if (session_id && sessionTracker) sessionTracker.registerSession(session_id);
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const globalDb = getGlobalDb();
 
     let db = projectDb;
@@ -948,7 +1023,8 @@ server.tool(
     // If both content/title and description provided, combine them
     const fullContent = (rawContent || title || "") + (description && (rawContent || title) ? "\n\n" + description : description || "");
     const projectDb = getProjectDb();
-    if (session_id && sessionTracker) sessionTracker.registerSession(session_id);
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const noteId = generateId();
     const timestamp = now();
     const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
@@ -1092,7 +1168,8 @@ server.tool(
   },
   async ({ parent_id, parent_title, items, tags, due_date, session_id }) => {
     const projectDb = getProjectDb();
-    if (session_id && sessionTracker) sessionTracker.registerSession(session_id);
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const timestamp = now();
 
     let actualParentId = parent_id;

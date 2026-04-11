@@ -10,6 +10,10 @@ escape_for_json() {
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
+    # Strip remaining ASCII control chars (0x00-0x1f minus the ones we just
+    # handled) via tr. A stray \x0b or \x1b would otherwise produce invalid
+    # JSON and break the hook's output.
+    s=$(printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037' 2>/dev/null || printf '%s' "$s")
     printf '%s' "$s"
 }
 
@@ -38,11 +42,21 @@ get_state_dir() {
 }
 
 # Extract session_id from the hook's stdin JSON. Usage: SID=$(get_session_id "$INPUT")
+#
+# Sanitizes the result: only allows [a-zA-Z0-9_-]. Anything else collapses to
+# "unknown". Every hook uses the returned SID as a filename suffix
+# (turn-$SID, bridge-$SID, etc.), so an unvalidated value like
+# "../../../etc/passwd" would let a crafted payload write outside the state
+# directory. This defense is cheap and sound.
 get_session_id() {
     local input="$1"
     local sid
     sid=$(printf '%s' "$input" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
-    printf '%s' "${sid:-unknown}"
+    sid="${sid:-unknown}"
+    case "$sid" in
+        *[!a-zA-Z0-9_-]*|"") sid="unknown" ;;
+    esac
+    printf '%s' "$sid"
 }
 
 # Extract a top-level string field from the hook's stdin JSON (simple cases only).

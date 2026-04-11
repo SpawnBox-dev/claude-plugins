@@ -234,11 +234,20 @@ export class SessionTracker {
    * Update a session's last_briefing_at cursor. Called at the end of
    * handleOrient so the NEXT briefing can compute "new since last briefing"
    * against a stable cursor.
+   *
+   * IMPORTANT: accepts an explicit `at` timestamp so the caller can pass
+   * the SAME value it used as the upper bound in getCrossSessionUpdates.
+   * Without this, there is a read/write race: between read and write, a
+   * sibling session could insert notes whose created_at falls in
+   * (read_cursor, write_cursor]. The cursor jumps past them and they are
+   * silently skipped on the next briefing. Passing the same timestamp for
+   * both operations closes the window.
    */
-  updateLastBriefing(sessionId: string): void {
+  updateLastBriefing(sessionId: string, at?: string): void {
+    const ts = at ?? now();
     this.db.run(
       `UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`,
-      [now(), now(), sessionId]
+      [ts, ts, sessionId]
     );
   }
 
@@ -251,7 +260,18 @@ export class SessionTracker {
    * caller's own session. If no last_briefing_at cursor exists, we fall
    * back to started_at so the first briefing still shows recent activity.
    */
-  getCrossSessionUpdates(sessionId: string): CrossSessionUpdates {
+  /**
+   * Fetch cross-session updates for `sessionId`.
+   *
+   * `upperBound` (optional) caps the "since this moment" lookup so the
+   * caller can also pass the SAME value to updateLastBriefing() and avoid
+   * the read/write cursor race. If omitted, the query has no upper bound
+   * and behaves as "everything since last briefing, through right now".
+   */
+  getCrossSessionUpdates(
+    sessionId: string,
+    upperBound?: string
+  ): CrossSessionUpdates {
     const me = this.getSession(sessionId);
     const twentyFourHoursAgo = new Date(
       Date.now() - 24 * 60 * 60 * 1000
@@ -273,7 +293,15 @@ export class SessionTracker {
 
     // Notes created by other active sessions since the caller's last briefing.
     // Exclude notes the caller has already surfaced this session (via
-    // session_log) to avoid repeating things they've already seen.
+    // session_log) to avoid repeating things they've already seen. If the
+    // caller passed an upperBound, cap the query so updateLastBriefing can
+    // advance the cursor to that exact moment without losing notes created
+    // in the gap between read and write.
+    const upperClause = upperBound ? "AND n.created_at <= ?" : "";
+    const newNotesParams = upperBound
+      ? [sessionId, since, upperBound, twentyFourHoursAgo, sessionId]
+      : [sessionId, since, twentyFourHoursAgo, sessionId];
+
     const newNotesRows = this.db
       .query(
         `SELECT n.id, n.type, n.content, n.tags, n.created_at, n.source_session
@@ -281,6 +309,7 @@ export class SessionTracker {
          WHERE n.source_session IS NOT NULL
            AND n.source_session != ?
            AND n.created_at > ?
+           ${upperClause}
            AND EXISTS (
              SELECT 1 FROM session_registry sr
              WHERE sr.session_id = n.source_session
@@ -292,12 +321,7 @@ export class SessionTracker {
          ORDER BY n.created_at DESC
          LIMIT 8`
       )
-      .all(
-        sessionId,
-        since,
-        twentyFourHoursAgo,
-        sessionId
-      ) as Array<{
+      .all(...newNotesParams) as Array<{
       id: string;
       type: string;
       content: string;
@@ -327,7 +351,7 @@ export class SessionTracker {
          GROUP BY n.id
          HAVING distinct_sessions >= 2
          ORDER BY distinct_sessions DESC, surfacings DESC
-         LIMIT 5`
+         LIMIT 8`
       )
       .all(twoHoursAgo, sessionId) as Array<{
       id: string;
@@ -350,10 +374,13 @@ export class SessionTracker {
              WHERE sr.session_id = n.source_session
                AND sr.last_active_at > ?
            )
+           AND n.id NOT IN (
+             SELECT note_id FROM session_log WHERE session_id = ?
+           )
          ORDER BY n.created_at DESC
-         LIMIT 5`
+         LIMIT 8`
       )
-      .all(sessionId, twoHoursAgo, twentyFourHoursAgo) as Array<{
+      .all(sessionId, twoHoursAgo, twentyFourHoursAgo, sessionId) as Array<{
       id: string;
       type: string;
       content: string;
