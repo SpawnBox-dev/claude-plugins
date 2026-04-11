@@ -86,11 +86,11 @@ describe("full session lifecycle", () => {
     expect(secondOrient.briefing.open_threads.length).toBeGreaterThanOrEqual(1);
 
     // 4. Recall "observer architecture" - should find results
-    const recallResult = handleRecall(projectDb, globalDb, {
+    const recallResult = await handleRecall(projectDb, globalDb, {
       query: "observer architecture",
     });
     expect(recallResult.results.length).toBeGreaterThan(0);
-    const observerNote = recallResult.results.find((r) =>
+    const observerNote = recallResult.results.find((r: any) =>
       r.content.includes("Observer architecture")
     );
     expect(observerNote).toBeTruthy();
@@ -249,24 +249,24 @@ describe("full session lifecycle", () => {
     expect(recipe.note_id).toBeTruthy();
 
     // 3. Recall anti-patterns about editing files - should find the anti_pattern
-    const recallAnti = handleRecall(projectDb, globalDb, {
+    const recallAnti = await handleRecall(projectDb, globalDb, {
       query: "editing files formatting",
       type: "anti_pattern",
     });
     expect(recallAnti.results.length).toBeGreaterThan(0);
-    const foundAnti = recallAnti.results.find((r) =>
+    const foundAnti = recallAnti.results.find((r: any) =>
       r.content.includes("sed")
     );
     expect(foundAnti).toBeTruthy();
     expect(foundAnti!.type).toBe("anti_pattern");
 
     // 4. Recall autonomy recipes about dev app status - should find the recipe
-    const recallRecipe = handleRecall(projectDb, globalDb, {
+    const recallRecipe = await handleRecall(projectDb, globalDb, {
       query: "dev app status spawnbox",
       type: "autonomy_recipe",
     });
     expect(recallRecipe.results.length).toBeGreaterThan(0);
-    const foundRecipe = recallRecipe.results.find((r) =>
+    const foundRecipe = recallRecipe.results.find((r: any) =>
       r.content.includes("tasklist")
     );
     expect(foundRecipe).toBeTruthy();

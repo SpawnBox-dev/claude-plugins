@@ -20208,6 +20208,60 @@ function cosineSimilarity(a, b) {
     return 0;
   return dot / denom;
 }
+function reciprocalRankFusion(ftsRanks, vecRanks, k = 60) {
+  const scores = new Map;
+  for (const [id, rank] of ftsRanks) {
+    scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank));
+  }
+  for (const [id, rank] of vecRanks) {
+    scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank));
+  }
+  const results = [];
+  for (const [id, score] of scores) {
+    results.push({ id, score });
+  }
+  results.sort((a, b) => b.score - a.score);
+  return results;
+}
+function maximalMarginalRelevance(items, topK, lambda = 0.7) {
+  if (items.length === 0)
+    return [];
+  const selected = [];
+  const remaining = new Set(items.map((_, i) => i));
+  let bestIdx = 0;
+  let bestScore = -Infinity;
+  for (const i of remaining) {
+    if (items[i].score > bestScore) {
+      bestScore = items[i].score;
+      bestIdx = i;
+    }
+  }
+  selected.push(items[bestIdx]);
+  remaining.delete(bestIdx);
+  while (selected.length < topK && remaining.size > 0) {
+    let bestMMR = -Infinity;
+    let bestCandidate = -1;
+    for (const i of remaining) {
+      const relevance = items[i].score;
+      let maxSim = -Infinity;
+      for (const s of selected) {
+        const sim = cosineSimilarity(items[i].vector, s.vector);
+        if (sim > maxSim)
+          maxSim = sim;
+      }
+      const mmr = lambda * relevance - (1 - lambda) * maxSim;
+      if (mmr > bestMMR) {
+        bestMMR = mmr;
+        bestCandidate = i;
+      }
+    }
+    if (bestCandidate === -1)
+      break;
+    selected.push(items[bestCandidate]);
+    remaining.delete(bestCandidate);
+  }
+  return selected;
+}
 
 // mcp/engine/embeddings.ts
 class EmbeddingClient {
@@ -20357,6 +20411,82 @@ function findRelatedNotes(db, query, limit = 10) {
     console.error(`[linker] findRelatedNotes FTS5 error - query="${ftsQuery}" original="${query}":`, err);
     return [];
   }
+}
+async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLambda = 0.7) {
+  if (!queryVector) {
+    return findRelatedNotes(db, query, limit);
+  }
+  const ftsResults = findRelatedNotes(db, query, limit * 3);
+  const ftsRanks = new Map;
+  ftsResults.forEach((r, i) => ftsRanks.set(r.id, i + 1));
+  const noteById = new Map;
+  for (const r of ftsResults) {
+    noteById.set(r.id, r);
+  }
+  const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e`).all();
+  const vecScores = [];
+  for (const row of embRows) {
+    const vec = blobToVector(row.vector);
+    const sim = cosineSimilarity(queryVector, vec);
+    vecScores.push({ id: row.note_id, similarity: sim });
+  }
+  vecScores.sort((a, b) => b.similarity - a.similarity);
+  const vecRanks = new Map;
+  vecScores.forEach((v, i) => vecRanks.set(v.id, i + 1));
+  const rrfResults = reciprocalRankFusion(ftsRanks, vecRanks);
+  const candidateTopK = rrfResults.slice(0, limit * 2);
+  for (const rrf of candidateTopK) {
+    if (!noteById.has(rrf.id)) {
+      const row = db.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+           FROM notes WHERE id = ?`).get(rrf.id);
+      if (row) {
+        noteById.set(row.id, {
+          id: row.id,
+          type: row.type,
+          content: row.content,
+          confidence: row.confidence,
+          created_at: row.created_at,
+          keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
+          tags: row.tags ?? null,
+          status: row.status ?? null,
+          priority: row.priority ?? null,
+          due_date: row.due_date ?? null
+        });
+      }
+    }
+  }
+  const embMap = new Map;
+  for (const row of embRows) {
+    embMap.set(row.note_id, blobToVector(row.vector));
+  }
+  const mmrItems = candidateTopK.filter((rrf) => embMap.has(rrf.id) && noteById.has(rrf.id)).map((rrf) => ({
+    id: rrf.id,
+    score: rrf.score,
+    vector: embMap.get(rrf.id)
+  }));
+  const ftsOnlyCandidates = candidateTopK.filter((rrf) => !embMap.has(rrf.id) && noteById.has(rrf.id));
+  let finalIds;
+  if (mmrItems.length > 0) {
+    const mmrResults = maximalMarginalRelevance(mmrItems, limit, mmrLambda);
+    finalIds = mmrResults.map((r) => r.id);
+    for (const c of ftsOnlyCandidates) {
+      if (finalIds.length >= limit)
+        break;
+      if (!finalIds.includes(c.id))
+        finalIds.push(c.id);
+    }
+  } else {
+    finalIds = candidateTopK.map((r) => r.id).slice(0, limit);
+  }
+  const results = [];
+  for (const id of finalIds) {
+    const note = noteById.get(id);
+    if (note)
+      results.push(note);
+    if (results.length >= limit)
+      break;
+  }
+  return results;
 }
 function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
   if (keywords.length === 0)
@@ -20699,7 +20829,7 @@ function getTotalHint(projectDb2, globalDb2, type) {
     return "";
   }
 }
-function handleRecall(projectDb2, globalDb2, input) {
+async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
   const limit = input.limit ?? 10;
   if (input.id) {
     let note = tryFetchNote(projectDb2, input.id);
@@ -20727,8 +20857,19 @@ function handleRecall(projectDb2, globalDb2, input) {
     };
   }
   if (input.query) {
-    const projectResults = findRelatedNotes(projectDb2, input.query, limit);
-    const globalResults = findRelatedNotes(globalDb2, input.query, limit);
+    let queryVector;
+    if (embeddingClient) {
+      try {
+        const vecs = await embeddingClient.embed([input.query]);
+        if (vecs && vecs.length > 0) {
+          queryVector = vecs[0];
+        }
+      } catch (err) {
+        console.error(`[recall] Query embed failed, falling back to FTS5-only:`, err);
+      }
+    }
+    const projectResults = await findRelatedNotesHybrid(projectDb2, input.query, limit, queryVector);
+    const globalResults = await findRelatedNotesHybrid(globalDb2, input.query, limit, queryVector);
     const GLOBAL_RESERVED = Math.min(3, globalResults.length);
     const seen = new Set;
     const merged = [];
@@ -21760,7 +21901,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.20.1"
+  version: "0.21.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -21996,14 +22137,14 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
 }, async ({ query, id, type, tag, limit, depth, session_id }) => {
   const projectDb2 = getProjectDb();
-  const result = handleRecall(projectDb2, getGlobalDb(), {
+  const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
     id,
     type,
     tag,
     limit,
     depth
-  });
+  }, embeddingClient);
   session_id = resolveSessionId(session_id);
   let turn = null;
   const tracker = sessionTracker;

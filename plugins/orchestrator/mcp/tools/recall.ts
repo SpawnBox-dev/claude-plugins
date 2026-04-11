@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Note, NoteSummary, NoteType } from "../types";
-import { findRelatedNotes } from "../engine/linker";
+import { findRelatedNotes, findRelatedNotesHybrid } from "../engine/linker";
+import type { EmbeddingClient } from "../engine/embeddings";
 
 export interface RecallInput {
   query?: string;
@@ -134,11 +135,12 @@ function getTotalHint(projectDb: Database, globalDb: Database, type?: NoteType):
   }
 }
 
-export function handleRecall(
+export async function handleRecall(
   projectDb: Database,
   globalDb: Database,
-  input: RecallInput
-): RecallResult {
+  input: RecallInput,
+  embeddingClient?: EmbeddingClient | null
+): Promise<RecallResult> {
   const limit = input.limit ?? 10;
 
   // Detail mode: fetch a specific note by ID
@@ -172,10 +174,46 @@ export function handleRecall(
     };
   }
 
-  // Search mode: query both DBs
+  // Search mode: query both DBs via hybrid search (FTS5 + vector when
+  // embeddings are available). If the sidecar is up, we generate ONE query
+  // vector and pass it to both DB searches so they merge FTS5 BM25 with
+  // cosine similarity via RRF+MMR. If the sidecar is down or embedding fails,
+  // findRelatedNotesHybrid falls through to FTS5-only automatically.
+  //
+  // This is the v0.21 fix for the "lookup has zero resilience when FTS5
+  // returns empty" problem. Before this change, a query like "storage
+  // deduplication" would miss a note titled "compressed backup hashing"
+  // because there's no keyword overlap - even though they're semantically
+  // about the same thing. Vector search catches that.
   if (input.query) {
-    const projectResults = findRelatedNotes(projectDb, input.query, limit);
-    const globalResults = findRelatedNotes(globalDb, input.query, limit);
+    let queryVector: Float32Array | undefined;
+    if (embeddingClient) {
+      try {
+        const vecs = await embeddingClient.embed([input.query]);
+        if (vecs && vecs.length > 0) {
+          queryVector = vecs[0];
+        }
+      } catch (err) {
+        // Sidecar failure is non-fatal - fall through to FTS5-only
+        console.error(
+          `[recall] Query embed failed, falling back to FTS5-only:`,
+          err
+        );
+      }
+    }
+
+    const projectResults = await findRelatedNotesHybrid(
+      projectDb,
+      input.query,
+      limit,
+      queryVector
+    );
+    const globalResults = await findRelatedNotesHybrid(
+      globalDb,
+      input.query,
+      limit,
+      queryVector
+    );
 
     // Interleave with reserved slots for global results.
     // Global DB has user_patterns, cross-project conventions, tool_capabilities -

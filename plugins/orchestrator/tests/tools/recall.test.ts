@@ -34,12 +34,12 @@ describe("recall tool", () => {
       tags: "discord",
     });
 
-    const result = handleRecall(projectDb, globalDb, {
+    const result = await handleRecall(projectDb, globalDb, {
       query: "backup snapshot",
     });
 
     expect(result.results.length).toBeGreaterThanOrEqual(1);
-    expect(result.results.some((r) => r.content.includes("backup"))).toBe(
+    expect(result.results.some((r: any) => r.content.includes("backup"))).toBe(
       true
     );
     expect(result.detail).toBeNull();
@@ -51,7 +51,7 @@ describe("recall tool", () => {
       type: "architecture",
     });
 
-    const result = handleRecall(projectDb, globalDb, {
+    const result = await handleRecall(projectDb, globalDb, {
       query: "kubernetes deployment helm chart",
     });
 
@@ -69,7 +69,7 @@ describe("recall tool", () => {
       type: "decision",
     });
 
-    const result = handleRecall(projectDb, globalDb, {
+    const result = await handleRecall(projectDb, globalDb, {
       query: "backup snapshot",
       type: "decision",
     });
@@ -86,7 +86,7 @@ describe("recall tool", () => {
       type: "decision",
     });
 
-    const result = handleRecall(projectDb, globalDb, {
+    const result = await handleRecall(projectDb, globalDb, {
       id: stored.note_id!,
     });
 
@@ -123,13 +123,13 @@ describe("recall tool", () => {
       .get() as { id: string };
 
     // Depth 1: only direct links
-    const shallow = handleRecall(projectDb, globalDb, {
+    const shallow = await handleRecall(projectDb, globalDb, {
       id: firstNote.id,
       depth: 1,
     });
 
     // Depth 3: multi-hop traversal
-    const deep = handleRecall(projectDb, globalDb, {
+    const deep = await handleRecall(projectDb, globalDb, {
       id: firstNote.id,
       depth: 3,
     });
@@ -138,6 +138,30 @@ describe("recall tool", () => {
     expect(deep.detail!.links.length).toBeGreaterThanOrEqual(
       shallow.detail!.links.length
     );
+  });
+
+  test("handleRecall falls back to FTS5 cleanly when embeddingClient is null", async () => {
+    // v0.21 introduced an optional embeddingClient param. Verify that passing
+    // null doesn't break anything and produces the same results as the
+    // 3-argument call signature used before the refactor.
+    await handleRemember(projectDb, globalDb, {
+      content: "Backup engine uses content-addressable storage",
+      type: "architecture",
+      tags: "backup",
+    });
+
+    const withoutClient = await handleRecall(projectDb, globalDb, {
+      query: "backup content-addressable",
+    });
+    const withNullClient = await handleRecall(
+      projectDb,
+      globalDb,
+      { query: "backup content-addressable" },
+      null
+    );
+
+    expect(withoutClient.results.length).toBe(withNullClient.results.length);
+    expect(withoutClient.results.length).toBeGreaterThanOrEqual(1);
   });
 
   test("lookup with session_id tracks surfaced notes", async () => {
@@ -160,12 +184,12 @@ describe("recall tool", () => {
     expect(turn1).toBe(1);
 
     // First lookup - note should not be "already_sent"
-    const result1 = handleRecall(projectDb, globalDb, {
+    const result1 = await handleRecall(projectDb, globalDb, {
       query: "backup engine",
     });
     expect(result1.results.length).toBeGreaterThanOrEqual(1);
 
-    const matchedNote = result1.results.find((r) => r.id === noteId);
+    const matchedNote = result1.results.find((r: any) => r.id === noteId);
     expect(matchedNote).toBeTruthy();
 
     // Annotate before logging (mirrors server.ts logic)

@@ -259,7 +259,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.20.1",
+  version: "0.21.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -578,14 +578,19 @@ server.tool(
   },
   async ({ query, id, type, tag, limit, depth, session_id }) => {
     const projectDb = getProjectDb();
-    const result = handleRecall(projectDb, getGlobalDb(), {
-      query,
-      id,
-      type,
-      tag,
-      limit,
-      depth,
-    });
+    const result = await handleRecall(
+      projectDb,
+      getGlobalDb(),
+      {
+        query,
+        id,
+        type,
+        tag,
+        limit,
+        depth,
+      },
+      embeddingClient
+    );
 
     // Session tracking: register session, advance turn, annotate results
     session_id = resolveSessionId(session_id);
