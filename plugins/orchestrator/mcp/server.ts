@@ -90,7 +90,28 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
   const portFile = resolve(pluginRoot, ".sidecar-port");
 
-  // Clean up stale port file
+  // Reuse an existing healthy sidecar if one is already running. Each Claude
+  // session spawns its own MCP server process, so without reuse we end up with
+  // N Python sidecars each loading ~1.5GB of ONNX model weights. The port file
+  // is written by whichever sidecar booted first; if we can reach it over HTTP,
+  // adopt it instead of spawning a duplicate.
+  try {
+    const content = await Bun.file(portFile).text();
+    const existingPort = parseInt(content.trim(), 10);
+    if (!isNaN(existingPort) && existingPort > 0) {
+      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
+      if (await client.isAvailable()) {
+        console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
+        // Do NOT set sidecarProcess - we didn't start it, so we must not kill
+        // it on our exit. Let it outlive us so sibling sessions keep working.
+        return client;
+      }
+    }
+  } catch {
+    // No port file or unreadable - proceed with spawn
+  }
+
+  // No reusable sidecar found - clean the stale port file (if any) and spawn fresh.
   try {
     const { unlinkSync } = await import("node:fs");
     unlinkSync(portFile);
@@ -174,7 +195,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 
 const server = new McpServer({
   name: "orchestrator",
-  version: "0.14.6",
+  version: "0.16.0",
 });
 
 // ── briefing ────────────────────────────────────────────────────────────
@@ -1393,12 +1414,13 @@ async function main() {
   });
 }
 
-// Cleanup sidecar on exit
-process.on("exit", () => {
-  if (sidecarProcess) {
-    try { sidecarProcess.kill(); } catch { /* already dead */ }
-  }
-});
+// Do NOT kill the sidecar on exit. Multiple Claude sessions share one
+// sidecar via the .sidecar-port file, so killing it here would yank the
+// rug out from under sibling sessions. The sidecar will linger as an
+// orphan Python process using ~500MB until the user reboots or manually
+// kills it - which is a deliberate tradeoff versus respawning a fresh
+// 1.5GB ONNX model every session. If the sidecar dies, the next session
+// to start will spawn a new one via the reuse-or-spawn logic above.
 
 main().catch((err) => {
   console.error("Server failed to start:", err);

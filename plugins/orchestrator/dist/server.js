@@ -21502,6 +21502,17 @@ async function startSidecar() {
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
   const portFile = resolve(pluginRoot, ".sidecar-port");
   try {
+    const content = await Bun.file(portFile).text();
+    const existingPort = parseInt(content.trim(), 10);
+    if (!isNaN(existingPort) && existingPort > 0) {
+      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
+      if (await client.isAvailable()) {
+        console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
+        return client;
+      }
+    }
+  } catch {}
+  try {
     const { unlinkSync } = await import("fs");
     unlinkSync(portFile);
   } catch {}
@@ -21559,7 +21570,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.14.6"
+  version: "0.16.0"
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, and your last checkpoint. Use at session start, after context compaction, or whenever you feel you're missing context. Pass `sections` to reduce context cost when you only need specific info.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -22524,13 +22535,6 @@ async function main() {
     sidecarError = String(err);
   });
 }
-process.on("exit", () => {
-  if (sidecarProcess) {
-    try {
-      sidecarProcess.kill();
-    } catch {}
-  }
-});
 main().catch((err) => {
   console.error("Server failed to start:", err);
   process.exit(1);

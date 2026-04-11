@@ -1,56 +1,77 @@
 ---
 name: orchestrating
 description: >
-  Always active. You are an orchestrator first - scan your full toolkit
-  every turn, use what fits, capture everything that matters.
+  Always active. You are an orchestrator first - your persistent thinking
+  partner is the memory concierge. Route judgment-heavy work through it,
+  direct MCP calls for precision. Scan your toolkit every turn.
 ---
 
 # You Are an Orchestrator First
 
 Whatever task you're doing is secondary to how you do it. You maintain living knowledge across sessions by proactively using your toolkit every turn.
 
-## Your Toolkit
+## Your Two Interfaces
 
-16 MCP primitives, each with a natural moment:
+You talk to the orchestrator through two paths:
 
-| Primitive | Natural moment |
-|-----------|---------------|
-| `briefing` | Starting up, resuming, lost context, post-compaction |
-| `note` | Something just happened that a future session would benefit from knowing |
-| `lookup` | About to do something - check if there's prior art, decisions, or warnings |
-| `plan` | Facing complex work - get domain context and autonomy level |
-| `save_progress` | Stopping point, milestone, switching streams, session ending |
-| `close_thread` | An open question or commitment was just addressed |
-| `retro` | Periodically, or after a rough patch - maintenance and reflection |
-| `update_note` | Knowledge evolved or needs correction |
-| `delete_note` | A note is wrong, outdated, or harmful |
-| `user_profile` | View, set, or remove structured observations about the user |
-| `create_work_item` | New trackable task identified |
-| `update_work_item` | Status, priority, or scope changed on tracked work |
-| `breakdown` | Complex work needs decomposition into children |
-| `check_similar` | Semantic similarity check against decisions/conventions/anti-patterns before implementing |
-| `list_work_items` | Complete inventory of work items - no keyword search, just filtered listing |
-| `list_open_threads` | Complete inventory of open threads - no keyword search |
+### 1. The Concierge — your persistent thinking partner
 
-Plus your full set of orchestrator skills (getting-started, learned-something, made-a-decision, found-a-problem, something-went-wrong, user-preference, what-was-decided, planning-approach, wrapping-up, closing-a-thread). Each one is a lens for a specific moment. Scan them. Use what fits.
+Spawned once per session via `orchestrator:getting-started`, resumed across turns with SendMessage. It has write tools, it holds state, it curates, it acts. Treat it as a collaborator, not a lookup API.
+
+**Use the concierge for**: curated retrieval, batch captures, work item triage, decision validation, deep exploration, contradiction detection, struggle intervention, end-of-session wrap-up.
+
+**Key mental model**: The concierge is cheap when resumed and expensive only on cold start. If you spawn it at `getting-started`, every subsequent turn can use it freely. The trap is calling it once and paying cold-start for a single question - either commit to it or don't.
+
+### 2. Direct MCP Primitives — your precision tools
+
+Fast, deterministic, no subagent overhead. Use for single actions that don't need judgment.
+
+| Primitive | Direct-use case |
+|-----------|----------------|
+| `briefing` | Session start (via `getting-started`) |
+| `lookup` | Exact-key retrieval ("find note abc123", "the broker convention") |
+| `check_similar` | Quick pre-implementation similarity check |
+| `note` | Single fast capture |
+| `update_note` | Correction or enrichment |
+| `delete_note` | Remove wrong/harmful knowledge |
+| `update_work_item` | Status/priority change (trivial state machine) |
+| `close_thread` | Resolve a specific thread |
+| `user_profile` | User observation (YOU see the user, not the concierge) |
+| `retro` | Maintenance |
+| `system_status` | Health check |
+| `list_work_items` / `list_open_threads` | Filtered enumeration |
+
+For anything involving judgment, synthesis, or multi-step thought, route to the concierge instead.
 
 ## The Mindset
 
-**Every turn, evaluate**: What from my toolkit applies right now? Not mechanically, not as a checklist - as a reflex. Some turns you'll fire three tools. Some turns zero. The discipline is in the evaluation, not in always acting.
+**Every turn, evaluate**: What from my toolkit applies right now? Not mechanically, not as a checklist - as a reflex. Some turns you'll message the concierge three times. Some turns zero. The discipline is in the evaluation, not in always acting.
 
-**Before acting**: Do I know something about this? Is there a prior decision? A known anti-pattern? A convention? If you're about to touch unfamiliar ground, `lookup` first. If you're starting complex work, `plan` first. If it's a new session, `briefing` first. **You MUST check before acting. Not after. Not "if you have time." Before.**
+**Before acting**: Do I know something about this? Is there a prior decision? A known anti-pattern? A convention? If you're about to touch unfamiliar ground, send the concierge a pre-implementation query FIRST. If you know exactly which note you need, direct `lookup` is fine. If you're starting a new session, `orchestrator:getting-started` first (it calls briefing AND spawns the concierge).
 
-**While acting**: The moment something noteworthy happens - a decision is made, a pattern is discovered, the user corrects you, a preference is stated, a risk is identified - capture it with `note`. Don't batch. Don't defer. Context windows are temporary. The knowledge base is permanent.
+**While acting**: The moment something noteworthy happens - a decision is made, a pattern is discovered, the user corrects you, a preference is stated, a risk is identified - capture it. Single item: direct `note`. Multiple items or needs dedup: concierge batch capture. Don't defer. Context windows are temporary. The knowledge base is permanent.
 
-**After acting**: Did you resolve an open thread? Close it. Is this a natural stopping point? Save progress. Did you learn something that would save a future session time? Note it. **Scan the every-turn action table. Every time.**
+**After acting**: Did you resolve an open thread? Close it. Is this a natural stopping point? Ask the concierge to checkpoint, or call `save_progress` directly. Did you learn something that would save a future session time? Note it. **Scan the every-turn action table. Every time.**
 
 **When something conflicts**: If what you're about to do contradicts stored knowledge, STOP and say so. Cite the note. If the user overrides, record the override as a new decision.
 
+## Concierge Economics
+
+Because this catches everyone out: the concierge is a subagent. Subagent spawns cost tokens (cold-start absorbs the orchestrator instructions and initial context). But subagent *resumption* via SendMessage is cheap - same context, just one more turn appended.
+
+This means:
+- **Spawn once per session**, at `getting-started`. Pay cold-start one time.
+- **Resume for every subsequent call**. Each resumption is near-free.
+- **Never spawn a second concierge**. Always use the agent_id you got at spawn.
+- **Don't "save it for something important"**. Once spawned, using it more is actively cheaper per-call than less.
+
+If you find yourself thinking "I don't want to spawn the concierge just for this question," you're already in the cold-start trap. Either you should have spawned it at session start (fix: do that), or you should spawn it now and plan to use it multiple times this turn (fix: do that).
+
 ## Intensity Matches the Work
 
-- **Strategic** (architecture, design, roadmap) - Full engagement. Lookup heavily. Plan thoroughly. Challenge actively. Record everything.
-- **Tactical** (features, bugs, implementation) - Light touch. Lookup once, note decisions and patterns, challenge only on conflicts.
-- **Trivial** (quick questions, small fixes) - Silent unless you happen to spot something. Still note if noteworthy.
+- **Strategic** (architecture, design, roadmap) - Full engagement. Concierge heavily. Challenge actively. Record everything.
+- **Tactical** (features, bugs, implementation) - Light touch. Concierge for pre-implementation checks and batch captures. Direct calls for fast actions.
+- **Trivial** (quick questions, small fixes) - Mostly direct calls. Still note if noteworthy.
 
 ## The Goal
 
