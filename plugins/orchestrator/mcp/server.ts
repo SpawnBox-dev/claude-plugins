@@ -1075,21 +1075,24 @@ server.tool(
 // ── update_work_item ────────────────────────────────────────────────────
 server.tool(
   "update_work_item",
-  "Update a work item's status, priority, due date, or content. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.",
+  "Update a work item's status, priority, due date, content, tags, context, or confidence. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.",
   {
     id: z.string(),
     status: z.enum(WORK_ITEM_STATUSES).optional(),
     priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
     due_date: z.string().optional().describe("Due date in YYYY-MM-DD format, or empty string to clear"),
     content: z.string().optional().describe("Updated description"),
+    tags: z.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
+    context: z.string().optional().describe("Updated context (replaces existing; empty string clears)"),
+    confidence: z.enum(["low", "medium", "high"]).optional(),
     blocked_by: z.string().optional().describe("ID of the note blocking this work item (creates blocks link)"),
   },
-  async ({ id, status, priority, due_date, content, blocked_by }) => {
+  async ({ id, status, priority, due_date, content, tags, context, confidence, blocked_by }) => {
     const projectDb = getProjectDb();
 
     const row = projectDb
-      .query(`SELECT id, type, content, status, priority, due_date FROM notes WHERE id = ?`)
-      .get(id) as { id: string; type: string; content: string; status: string | null; priority: string | null; due_date: string | null } | null;
+      .query(`SELECT id, type, content, context, tags, status, priority, due_date FROM notes WHERE id = ?`)
+      .get(id) as { id: string; type: string; content: string; context: string | null; tags: string | null; status: string | null; priority: string | null; due_date: string | null } | null;
 
     if (!row) {
       return {
@@ -1119,6 +1122,19 @@ server.tool(
       const newKeywords = extractKeywords(content);
       updates.push(`keywords = '${newKeywords.join(",")}'`);
       changes.push("content updated");
+    }
+    if (tags !== undefined) {
+      updates.push(`tags = '${tags.replace(/'/g, "''")}'`);
+      changes.push(`tags: ${row.tags ?? "none"} -> ${tags || "cleared"}`);
+    }
+    if (context !== undefined) {
+      const newCtx = context === "" ? null : context;
+      updates.push(`context = ${newCtx ? `'${newCtx.replace(/'/g, "''")}'` : "NULL"}`);
+      changes.push("context updated");
+    }
+    if (confidence) {
+      updates.push(`confidence = '${confidence}'`);
+      changes.push(`confidence: ${confidence}`);
     }
 
     if (updates.length > 0) {

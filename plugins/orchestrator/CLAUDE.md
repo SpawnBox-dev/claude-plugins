@@ -48,6 +48,18 @@ At the end of your thinking block every turn, write this bridge to prime your ne
 
 When you see a previous `[orch] next:` in your thinking history, HONOR it. Your past self is telling you what to do. If `[orch] next:` says to invoke every-turn, you invoke every-turn.
 
+### Storage Model: Notes and Work Items Share One Table
+
+There is no separate "work items" table. Work items are rows in the `notes` table with `type = "work_item"` and populated `status`/`priority`/`due_date`/`blocked_by` columns. Everything else (`content`, `context`, `tags`, `keywords`, `confidence`) is shared between all note types.
+
+This means:
+- `update_note` operates on work items too - its UPDATE query doesn't filter by type. Works fine, use it interchangeably with `update_work_item` as of v0.21.2.
+- `delete_note` works on work items.
+- `update_work_item` is a convenience wrapper for task-semantic fields (status cascade, due dates, blocked_by links). Since v0.21.2 it also covers `tags`, `context`, `confidence` for parity with `update_note`.
+- Tags are a comma-separated text column. To add or remove one, read-modify-write.
+
+If you find yourself building workarounds because a tool "doesn't support" something, check whether the sibling tool on the same row does.
+
 ### The Goal
 
 Context windows are temporary. The orchestrator is permanent. Every session should leave the knowledge base richer than it found it.

@@ -22531,16 +22531,19 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
     }]
   };
 });
-server.tool("update_work_item", "Update a work item's status, priority, due date, or content. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.", {
+server.tool("update_work_item", "Update a work item's status, priority, due date, content, tags, context, or confidence. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.", {
   id: exports_external.string(),
   status: exports_external.enum(WORK_ITEM_STATUSES).optional(),
   priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional(),
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format, or empty string to clear"),
   content: exports_external.string().optional().describe("Updated description"),
+  tags: exports_external.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
+  context: exports_external.string().optional().describe("Updated context (replaces existing; empty string clears)"),
+  confidence: exports_external.enum(["low", "medium", "high"]).optional(),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
-}, async ({ id, status, priority, due_date, content, blocked_by }) => {
+}, async ({ id, status, priority, due_date, content, tags, context, confidence, blocked_by }) => {
   const projectDb2 = getProjectDb();
-  const row = projectDb2.query(`SELECT id, type, content, status, priority, due_date FROM notes WHERE id = ?`).get(id);
+  const row = projectDb2.query(`SELECT id, type, content, context, tags, status, priority, due_date FROM notes WHERE id = ?`).get(id);
   if (!row) {
     return {
       content: [{ type: "text", text: `No note found with id "${id}".` }]
@@ -22567,6 +22570,19 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     const newKeywords = extractKeywords(content);
     updates.push(`keywords = '${newKeywords.join(",")}'`);
     changes.push("content updated");
+  }
+  if (tags !== undefined) {
+    updates.push(`tags = '${tags.replace(/'/g, "''")}'`);
+    changes.push(`tags: ${row.tags ?? "none"} -> ${tags || "cleared"}`);
+  }
+  if (context !== undefined) {
+    const newCtx = context === "" ? null : context;
+    updates.push(`context = ${newCtx ? `'${newCtx.replace(/'/g, "''")}'` : "NULL"}`);
+    changes.push("context updated");
+  }
+  if (confidence) {
+    updates.push(`confidence = '${confidence}'`);
+    changes.push(`confidence: ${confidence}`);
   }
   if (updates.length > 0) {
     updates.push(`updated_at = '${timestamp}'`);
