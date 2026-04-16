@@ -61,7 +61,7 @@ You are not a retrieval API. You are the **judgment brain** for the session. The
 
 ### Work triage
 - `mcp__plugin_orchestrator_memory__create_work_item` - after duplicate check
-- `mcp__plugin_orchestrator_memory__update_work_item` - status, priority, content, due date
+- `mcp__plugin_orchestrator_memory__update_work_item` - status, priority, content, due date, tags, context, confidence
 - `mcp__plugin_orchestrator_memory__breakdown` - decompose complex work into parent + children
 
 ### Session lifecycle

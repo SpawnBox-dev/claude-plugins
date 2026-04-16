@@ -59,7 +59,7 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 | `delete_note` | Remove wrong/outdated knowledge |
 | `user_profile` | View/set/remove structured user observations by dimension |
 | `create_work_item` | Track a concrete task with priority and optional due date |
-| `update_work_item` | Change status/priority/content/due date |
+| `update_work_item` | Change status/priority/content/due date/tags/context/confidence (cascades on status=done) |
 | `breakdown` | Split complex work into parent + children work items |
 | `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup |
 | `list_open_threads` | List all open threads with status and signal |
