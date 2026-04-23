@@ -31,6 +31,7 @@ describe("migration 14: superseded_by", () => {
     const db = new Database(":memory:");
     db.exec(`CREATE TABLE migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
     db.exec(`CREATE TABLE notes (id TEXT PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL, context TEXT, keywords TEXT, tags TEXT, source TEXT, confidence TEXT DEFAULT 'medium', last_validated TEXT, resolved INTEGER DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    db.exec(`CREATE TABLE links (id TEXT PRIMARY KEY, from_note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE, to_note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE, relationship TEXT NOT NULL, strength TEXT, created_at TEXT NOT NULL)`);
     for (let v = 1; v <= 13; v++) {
       db.run("INSERT INTO migrations (version, name, applied_at) VALUES (?, ?, ?)", [v, `v${v}`, "2026-01-01"]);
     }

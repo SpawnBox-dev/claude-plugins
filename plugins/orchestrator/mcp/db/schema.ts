@@ -229,6 +229,42 @@ DROP TABLE _signal_migration_check;
       db.exec("CREATE INDEX IF NOT EXISTS idx_notes_superseded_by ON notes(superseded_by)");
     },
   },
+  {
+    version: 15,
+    name: "add_note_revisions_and_link_unique",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      // Step A: deduplicate existing links on (from_note_id, to_note_id, relationship).
+      // Keep the lowest rowid (earliest-inserted, matching sqlite auto-increment semantics).
+      db.exec(`
+        DELETE FROM links
+        WHERE rowid NOT IN (
+          SELECT MIN(rowid) FROM links
+          GROUP BY from_note_id, to_note_id, relationship
+        )
+      `);
+
+      // Step B: UNIQUE index on links prevents future duplicate edges.
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique_edge ON links(from_note_id, to_note_id, relationship)`);
+
+      // Step C: note_revisions table for R2 revision history.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS note_revisions (
+          id TEXT PRIMARY KEY,
+          note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+          content TEXT NOT NULL,
+          context TEXT,
+          tags TEXT,
+          keywords TEXT,
+          confidence TEXT,
+          revised_at TEXT NOT NULL,
+          revised_by_session TEXT
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_note_id ON note_revisions(note_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_revised_at ON note_revisions(revised_at)`);
+    },
+  },
 ];
 
 /**
