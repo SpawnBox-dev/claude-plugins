@@ -124,6 +124,7 @@ export interface NoteSummary {
   created_at: string;
   updated_at: string;
   source_session: string | null;
+  superseded_by: string | null;
   keywords: string[];
   tags: string | null;
   status: WorkItemStatus | null;

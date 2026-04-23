@@ -154,3 +154,25 @@ export function relativeTime(isoTimestamp: string): string {
   if (diffDay < 7) return `${diffDay}d ago`;
   return `${Math.floor(diffDay / 7)}w ago`;
 }
+
+/**
+ * Compact age formatter for inline rendering in lookup envelopes.
+ * Examples: "just now", "3m", "3h", "5d", "2w", "62d"
+ *
+ * Differs from relativeTime: omits "ago" suffix for terseness and collapses
+ * week output back to days once we cross ~2 months (for trend-visibility
+ * instead of inflating noisy weeks).
+ */
+export function formatAge(iso: string, now: Date = new Date()): string {
+  const then = new Date(iso);
+  const diffMs = now.getTime() - then.getTime();
+  if (diffMs < 60_000) return "just now";
+  const diffMin = Math.floor(diffMs / 60_000);
+  if (diffMin < 60) return `${diffMin}m`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `${diffH}h`;
+  const diffD = Math.floor(diffH / 24);
+  if (diffD < 14) return `${diffD}d`;
+  if (diffD < 60) return `${Math.floor(diffD / 7)}w`;
+  return `${diffD}d`;
+}

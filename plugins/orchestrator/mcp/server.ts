@@ -21,7 +21,7 @@ import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { composeUserProfile } from "./engine/composer";
-import { generateId, now, extractKeywords } from "./utils";
+import { generateId, now, extractKeywords, formatAge } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 import { SessionTracker } from "./engine/session_tracker";
@@ -650,23 +650,35 @@ server.tool(
 
     let text = result.message;
     if (result.detail) {
-      text += `\n\n**${result.detail.type}** (${result.detail.confidence})\n${result.detail.content}${annotationMarker(result.detail.id)}`;
+      const age = formatAge(result.detail.updated_at);
+      const src = result.detail.source_session ? ` by:${result.detail.source_session.slice(0, 8)}` : "";
+      const supSuffix = result.detail.superseded_by
+        ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
+        : "";
+      text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}\n${result.detail.content}${annotationMarker(result.detail.id)}`;
+      text += `\n\n[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
       if (result.detail.links.length > 0) {
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
           const indent = "  ".repeat(link.depth - 1);
-          text += `\n${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
+          const linkedSup = link.note.superseded_by
+            ? ` [SUPERSEDED by ${link.note.superseded_by}]`
+            : "";
+          text += `\n${indent}- **${link.note.id}** [${link.relationship}]${linkedSup} ${link.note.content}`;
         }
       }
     } else if (result.results.length > 0) {
       text += "\n";
       for (const r of result.results) {
         const tagStr = r.tags ? ` {${r.tags}}` : "";
-        text += `\n- **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
+        const age = formatAge(r.updated_at);
+        const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
+        text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr} ${r.content}${annotationMarker(r.id)}`;
+        text += `\n  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
       }
     }
     if (text.length > 15000) {
-      text += "\n\n---\n⚠ Large result set (" + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+      text += "\n\n---\nLarge result set (" + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
     }
 
     return {

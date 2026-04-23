@@ -1,5 +1,5 @@
-import { describe, expect, it } from "bun:test";
-import { extractKeywords, truncate, generateId } from "../mcp/utils";
+import { describe, expect, it, test } from "bun:test";
+import { extractKeywords, truncate, generateId, formatAge } from "../mcp/utils";
 
 describe("extractKeywords", () => {
   it("extracts meaningful keywords from text", () => {
@@ -58,5 +58,43 @@ describe("generateId", () => {
     expect(id2).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     );
+  });
+});
+
+describe("formatAge", () => {
+  test("recent minutes", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-23T11:57:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("3m");
+  });
+
+  test("hours", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-23T09:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("3h");
+  });
+
+  test("days", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-18T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("5d");
+  });
+
+  test("weeks", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-05T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("2w");
+  });
+
+  test("months", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-02-20T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("62d");
+  });
+
+  test("just now for under a minute", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-23T11:59:30Z").toISOString();
+    expect(formatAge(then, now)).toBe("just now");
   });
 });

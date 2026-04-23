@@ -84,7 +84,7 @@ export function findRelatedNotes(
   try {
     const rows = db
       .query(
-        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.keywords, n.tags,
+        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
@@ -101,6 +101,7 @@ export function findRelatedNotes(
       created_at: string;
       updated_at: string;
       source_session: string | null;
+      superseded_by: string | null;
       keywords: string;
       tags: string | null;
       rank: number;
@@ -114,6 +115,7 @@ export function findRelatedNotes(
       created_at: r.created_at,
       updated_at: r.updated_at,
       source_session: r.source_session,
+      superseded_by: r.superseded_by ?? null,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
       tags: r.tags ?? null,
       status: (r as any).status ?? null,
@@ -216,6 +218,7 @@ export async function findRelatedNotesHybrid(
           created_at: row.created_at,
           updated_at: row.updated_at,
           source_session: row.source_session,
+          superseded_by: row.superseded_by ?? null,
           keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
           tags: row.tags ?? null,
           status: row.status as NoteSummary["status"] ?? null,

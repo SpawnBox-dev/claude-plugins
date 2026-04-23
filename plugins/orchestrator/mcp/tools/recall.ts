@@ -76,7 +76,7 @@ function fetchLinkedNotes(
       .query(
         `SELECT l.relationship, l.from_note_id, l.to_note_id,
                 n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-                n.source_session, n.keywords, n.tags, n.status, n.priority, n.due_date
+                n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
          FROM links l
          JOIN notes n ON (
            CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
@@ -102,6 +102,7 @@ function fetchLinkedNotes(
           created_at: r.created_at,
           updated_at: r.updated_at,
           source_session: r.source_session ?? null,
+          superseded_by: r.superseded_by ?? null,
           keywords: r.keywords
             ? r.keywords
                 .split(",")
