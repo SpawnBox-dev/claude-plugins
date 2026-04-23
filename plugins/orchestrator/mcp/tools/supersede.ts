@@ -54,6 +54,31 @@ export async function handleSupersede(
     };
   }
 
+  // Check current state of old note - reject chain-fork, allow true idempotent no-op.
+  // This runs BEFORE any new_id validation or inline creation to prevent orphan notes.
+  const currentSupersededBy = (db.query(`SELECT superseded_by FROM notes WHERE id = ?`).get(input.old_id) as { superseded_by: string | null }).superseded_by;
+
+  if (currentSupersededBy !== null) {
+    // Old note is already superseded. Two sub-cases:
+    if (input.new_id && input.new_id === currentSupersededBy) {
+      // True idempotent no-op for same (old_id, new_id) pair. Preserve original superseded_at.
+      return {
+        superseded: true,
+        old_id: input.old_id,
+        new_id: currentSupersededBy,
+        message: `Note "${input.old_id}" was already superseded by "${currentSupersededBy}" - no change.`,
+      };
+    }
+    // Any other case (different new_id, or inline new_content path): reject, don't fork the chain.
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: `"${input.old_id}" is already superseded by "${currentSupersededBy}". To change the successor, supersede "${currentSupersededBy}" with the new replacement, or use a different old_id.`,
+      message: `Cannot re-supersede: already points at "${currentSupersededBy}".`,
+    };
+  }
+
   let newId = input.new_id ?? null;
 
   // If new_id was provided directly, validate it lives in the same db

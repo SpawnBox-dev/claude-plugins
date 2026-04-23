@@ -155,17 +155,62 @@ describe("R2.4: supersede_note hardening", () => {
     expect(oldRow.superseded_by).toBeNull();
   });
 
-  test("double-supersede is idempotent (INSERT OR IGNORE + UNIQUE index)", async () => {
+  test("double-supersede is idempotent (true no-op, superseded_at preserved)", async () => {
     const old = await handleRemember(projectDb, globalDb, { content: "o", type: "decision" });
     const fresh = await handleRemember(projectDb, globalDb, { content: "n", type: "decision" });
 
     const r1 = await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: fresh.note_id! });
     expect(r1.superseded).toBe(true);
+    const afterR1 = projectDb.query("SELECT superseded_at FROM notes WHERE id = ?").get(old.note_id) as any;
+    expect(afterR1.superseded_at).toBeTruthy();
 
+    await new Promise((r) => setTimeout(r, 10));
     const r2 = await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: fresh.note_id! });
     expect(r2.superseded).toBe(true);
+    const afterR2 = projectDb.query("SELECT superseded_at FROM notes WHERE id = ?").get(old.note_id) as any;
+    expect(afterR2.superseded_at).toBe(afterR1.superseded_at); // PRESERVED on idempotent call
 
     const linkCount = (projectDb.query(`SELECT COUNT(*) AS c FROM links WHERE from_note_id = ? AND to_note_id = ? AND relationship = 'supersedes'`).get(fresh.note_id!, old.note_id!) as any).c;
     expect(linkCount).toBe(1);
+  });
+
+  test("rejects re-supersede with a different new_id (no chain fork)", async () => {
+    const old = await handleRemember(projectDb, globalDb, { content: "o", type: "decision" });
+    const x = await handleRemember(projectDb, globalDb, { content: "x", type: "decision" });
+    const y = await handleRemember(projectDb, globalDb, { content: "y", type: "decision" });
+
+    const r1 = await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: x.note_id! });
+    expect(r1.superseded).toBe(true);
+
+    const r2 = await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: y.note_id! });
+    expect(r2.superseded).toBe(false);
+    expect(r2.error).toContain("already superseded");
+
+    // Old note still points at X, not Y
+    const oldRow = projectDb.query("SELECT superseded_by FROM notes WHERE id = ?").get(old.note_id) as any;
+    expect(oldRow.superseded_by).toBe(x.note_id!);
+
+    // Only one supersedes link exists (X -> old), no Y -> old
+    const linkCount = (projectDb.query(`SELECT COUNT(*) AS c FROM links WHERE to_note_id = ? AND relationship = 'supersedes'`).get(old.note_id) as any).c;
+    expect(linkCount).toBe(1);
+  });
+
+  test("rejects re-supersede with inline new_content when already superseded", async () => {
+    const old = await handleRemember(projectDb, globalDb, { content: "o", type: "decision" });
+    const x = await handleRemember(projectDb, globalDb, { content: "x", type: "decision" });
+    await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: x.note_id! });
+
+    const countBefore = (projectDb.query(`SELECT COUNT(*) AS c FROM notes`).get() as any).c;
+    const r = await handleSupersede(projectDb, globalDb, {
+      old_id: old.note_id!,
+      new_content: "a new note that should not be created",
+      new_type: "decision",
+    });
+    expect(r.superseded).toBe(false);
+    expect(r.error).toContain("already superseded");
+
+    // No orphan note created (rejection happened BEFORE handleRemember)
+    const countAfter = (projectDb.query(`SELECT COUNT(*) AS c FROM notes`).get() as any).c;
+    expect(countAfter).toBe(countBefore);
   });
 });
