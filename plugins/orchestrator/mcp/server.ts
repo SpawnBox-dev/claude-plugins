@@ -1209,7 +1209,7 @@ server.tool(
       const blocker = projectDb.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);
       if (blocker) {
         projectDb.run(
-          `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+          `INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
            VALUES (?, ?, ?, 'blocks', 'strong', ?)`,
           [generateId(), blocked_by, id, timestamp]
         );

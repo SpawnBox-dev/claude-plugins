@@ -80,4 +80,22 @@ describe("migration 15: note_revisions + link UNIQUE index", () => {
     applyMigrations(db, "project");
     expect(() => applyMigrations(db, "project")).not.toThrow();
   });
+
+  test("INSERT OR IGNORE on links does not throw on duplicate triple, does not insert", () => {
+    const db = new Database(":memory:");
+    applyMigrations(db, "project");
+    const ts = "2026-04-23T12:00:00Z";
+    db.run(`INSERT INTO notes (id, type, content, confidence, resolved, created_at, updated_at) VALUES ('a', 'decision', 'x', 'medium', 0, ?, ?)`, [ts, ts]);
+    db.run(`INSERT INTO notes (id, type, content, confidence, resolved, created_at, updated_at) VALUES ('b', 'decision', 'y', 'medium', 0, ?, ?)`, [ts, ts]);
+    db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at) VALUES ('l1', 'a', 'b', 'blocks', 'strong', ?)`, [ts]);
+    let threw = false;
+    try {
+      db.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at) VALUES ('l2', 'a', 'b', 'blocks', 'strong', ?)`, [ts]);
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+    const count = (db.query("SELECT COUNT(*) AS c FROM links WHERE from_note_id = 'a' AND to_note_id = 'b' AND relationship = 'blocks'").get() as any).c;
+    expect(count).toBe(1);
+  });
 });
