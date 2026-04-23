@@ -62,28 +62,32 @@ export function composeBriefing(
     };
   }
 
-  // Open threads: unresolved open_threads and commitments, last 5
+  // Open threads: unresolved open_threads and commitments, last 5.
+  // R3.2: signal as secondary sort so hot threads float above cold at the
+  // same update time.
   const openThreads = include("open_threads")
     ? projectDb
         .query(
           `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
-           ORDER BY updated_at DESC
+           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
            LIMIT 5`
         )
         .all()
         .map(toSummary)
     : [];
 
-  // Recent decisions: last 5
+  // Recent decisions: last 5.
+  // R3.2: signal as secondary sort so hot decisions surface above cold at
+  // the same creation time.
   const recentDecisions = include("decisions")
     ? projectDb
         .query(
           `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type = 'decision'
-           ORDER BY created_at DESC
+           ORDER BY COALESCE(signal, 0) DESC, created_at DESC
            LIMIT 5`
         )
         .all()
@@ -206,6 +210,9 @@ export function composeBriefing(
   let overdueWork: NoteSummary[] = [];
 
   if (include("work_items")) {
+    // R3.2: priority tier remains the primary sort (critical still beats
+    // high regardless of signal); signal is the tiebreaker WITHIN a priority
+    // tier so hot work items float above cold at the same priority.
     activeWork = projectDb
       .query(
         `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
@@ -213,30 +220,35 @@ export function composeBriefing(
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+           COALESCE(signal, 0) DESC,
            updated_at DESC
          LIMIT 10`
       )
       .all()
       .map(toSummary);
 
+    // R3.2: hot blocked items surface above cold so repeated attention
+    // bubbles stuck work to the top.
     blockedWork = projectDb
       .query(
         `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
-         ORDER BY updated_at DESC
+         ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`
       )
       .all()
       .map(toSummary);
 
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // R3.2: signal as secondary sort so completions that were heavily
+    // referenced right before being marked done show up first.
     recentlyCompleted = projectDb
       .query(
         `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
-         ORDER BY updated_at DESC
+         ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`
       )
       .all(oneDayAgo)

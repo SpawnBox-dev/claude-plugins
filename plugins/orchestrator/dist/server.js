@@ -20421,6 +20421,57 @@ function blobToVector(blob) {
   return new Float32Array(copy);
 }
 
+// mcp/engine/signal.ts
+var DECAY_RATE = 0.95;
+var MAX_DECAY_DAYS = 14;
+var DEFAULT_DEPOSIT = 1;
+var WEAK_DEPOSIT = 0.3;
+function depositSignalBatch(db, noteIds, amount = DEFAULT_DEPOSIT) {
+  if (noteIds.length === 0)
+    return;
+  const now3 = new Date().toISOString();
+  const stmt = db.prepare(`UPDATE notes SET signal = COALESCE(signal, 0) + ?, last_accessed_at = ? WHERE id = ?`);
+  for (const id of noteIds) {
+    stmt.run(amount, now3, id);
+  }
+}
+function decayAllSignals(db) {
+  const rows = db.query(`SELECT id, signal, last_accessed_at FROM notes
+       WHERE signal > 0 AND last_accessed_at IS NOT NULL`).all();
+  if (rows.length === 0)
+    return 0;
+  const now3 = Date.now();
+  const stmt = db.prepare(`UPDATE notes SET signal = ? WHERE id = ?`);
+  let decayed = 0;
+  for (const row of rows) {
+    const lastAccess = new Date(row.last_accessed_at).getTime();
+    const daysSince = (now3 - lastAccess) / (1000 * 60 * 60 * 24);
+    if (daysSince <= 0)
+      continue;
+    const effectiveDays = Math.min(daysSince, MAX_DECAY_DAYS);
+    const newSignal = row.signal * Math.pow(DECAY_RATE, effectiveDays);
+    const finalSignal = newSignal < 0.01 ? 0 : newSignal;
+    if (finalSignal !== row.signal) {
+      stmt.run(finalSignal, row.id);
+      decayed++;
+    }
+  }
+  return decayed;
+}
+function signalBoost(signal) {
+  return 1 + 0.1 * Math.log(1 + Math.max(0, signal));
+}
+function confidenceMultiplier(confidence) {
+  switch (confidence) {
+    case "high":
+      return 1.2;
+    case "low":
+      return 0.8;
+    default:
+      return 1;
+  }
+}
+
 // mcp/engine/linker.ts
 function inferRelationship(fromType, toType) {
   if (fromType === "decision" && toType === "open_thread")
@@ -20456,14 +20507,21 @@ function findRelatedNotes(db, query, limit = 10, includeSuperseded = false) {
   const ftsQuery = terms.join(" OR ");
   try {
     const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
+                COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
            ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
          ORDER BY rank ASC
-         LIMIT ?`).all(ftsQuery, limit);
-    return rows.map((r) => ({
+         LIMIT ?`).all(ftsQuery, limit * 2);
+    const rescored = rows.map((r) => ({
+      row: r,
+      finalScore: r.rank * signalBoost(r.note_signal) * confidenceMultiplier(r.confidence)
+    }));
+    rescored.sort((a, b) => a.finalScore - b.finalScore);
+    const top = rescored.slice(0, limit).map((x) => x.row);
+    return top.map((r) => ({
       id: r.id,
       type: r.type,
       content: r.content,
@@ -20494,6 +20552,14 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   for (const r of ftsResults) {
     noteById.set(r.id, r);
   }
+  const signalById = new Map;
+  if (ftsResults.length > 0) {
+    const ids = ftsResults.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db.query(`SELECT id, COALESCE(signal, 0) AS note_signal FROM notes WHERE id IN (${placeholders})`).all(...ids);
+    for (const r of rows)
+      signalById.set(r.id, r.note_signal);
+  }
   const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e`).all();
   const vecScores = [];
   for (const row of embRows) {
@@ -20505,10 +20571,11 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   const vecRanks = new Map;
   vecScores.forEach((v, i) => vecRanks.set(v.id, i + 1));
   const rrfResults = reciprocalRankFusion(ftsRanks, vecRanks);
-  const candidateTopK = rrfResults.slice(0, limit * 2);
-  for (const rrf of candidateTopK) {
+  const preBoostSlice = rrfResults.slice(0, limit * 4);
+  for (const rrf of preBoostSlice) {
     if (!noteById.has(rrf.id)) {
-      const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by
+      const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by,
+                  COALESCE(signal, 0) AS note_signal
            FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`).get(rrf.id);
       if (row) {
         noteById.set(row.id, {
@@ -20526,9 +20593,20 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
           priority: row.priority ?? null,
           due_date: row.due_date ?? null
         });
+        signalById.set(row.id, row.note_signal);
       }
     }
   }
+  for (const r of rrfResults) {
+    const note = noteById.get(r.id);
+    if (!note)
+      continue;
+    const signal = signalById.get(r.id) ?? 0;
+    const boost = signalBoost(signal) * confidenceMultiplier(note.confidence);
+    r.score = r.score * boost;
+  }
+  rrfResults.sort((a, b) => b.score - a.score);
+  const candidateTopK = rrfResults.slice(0, limit * 2);
   const embMap = new Map;
   for (const row of embRows) {
     embMap.set(row.note_id, blobToVector(row.vector));
@@ -21228,12 +21306,12 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
-           ORDER BY updated_at DESC
+           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
            LIMIT 5`).all().map(toSummary) : [];
   const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type = 'decision'
-           ORDER BY created_at DESC
+           ORDER BY COALESCE(signal, 0) DESC, created_at DESC
            LIMIT 5`).all().map(toSummary) : [];
   let neglectedAreas = [];
   if (include("neglected")) {
@@ -21310,18 +21388,19 @@ function composeBriefing(projectDb2, globalDb2, sections) {
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+           COALESCE(signal, 0) DESC,
            updated_at DESC
          LIMIT 10`).all().map(toSummary);
     blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
-         ORDER BY updated_at DESC
+         ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`).all().map(toSummary);
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
-         ORDER BY updated_at DESC
+         ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`).all(oneDayAgo).map(toSummary);
     const todayStr = new Date().toISOString().slice(0, 10);
     overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
@@ -21722,44 +21801,6 @@ function handlePrepare(projectDb2, globalDb2, input) {
   const autonomyResult = computeAutonomyScore(projectDb2, domain);
   const formatted = formatPackage(pkg, domain, autonomyResult.score);
   return { package: pkg, autonomy: autonomyResult.score, formatted };
-}
-
-// mcp/engine/signal.ts
-var DECAY_RATE = 0.95;
-var MAX_DECAY_DAYS = 14;
-var DEFAULT_DEPOSIT = 1;
-var WEAK_DEPOSIT = 0.3;
-function depositSignalBatch(db, noteIds, amount = DEFAULT_DEPOSIT) {
-  if (noteIds.length === 0)
-    return;
-  const now3 = new Date().toISOString();
-  const stmt = db.prepare(`UPDATE notes SET signal = COALESCE(signal, 0) + ?, last_accessed_at = ? WHERE id = ?`);
-  for (const id of noteIds) {
-    stmt.run(amount, now3, id);
-  }
-}
-function decayAllSignals(db) {
-  const rows = db.query(`SELECT id, signal, last_accessed_at FROM notes
-       WHERE signal > 0 AND last_accessed_at IS NOT NULL`).all();
-  if (rows.length === 0)
-    return 0;
-  const now3 = Date.now();
-  const stmt = db.prepare(`UPDATE notes SET signal = ? WHERE id = ?`);
-  let decayed = 0;
-  for (const row of rows) {
-    const lastAccess = new Date(row.last_accessed_at).getTime();
-    const daysSince = (now3 - lastAccess) / (1000 * 60 * 60 * 24);
-    if (daysSince <= 0)
-      continue;
-    const effectiveDays = Math.min(daysSince, MAX_DECAY_DAYS);
-    const newSignal = row.signal * Math.pow(DECAY_RATE, effectiveDays);
-    const finalSignal = newSignal < 0.01 ? 0 : newSignal;
-    if (finalSignal !== row.signal) {
-      stmt.run(finalSignal, row.id);
-      decayed++;
-    }
-  }
-  return decayed;
 }
 
 // mcp/tools/reflect.ts
@@ -23179,7 +23220,7 @@ server.tool("list_work_items", "List ALL work items, optionally filtered by stat
     query += ` AND tags LIKE ?`;
     params.push(`%${tag}%`);
   }
-  query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, updated_at DESC`;
+  query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, COALESCE(signal, 0) DESC, updated_at DESC`;
   query += ` LIMIT ?`;
   params.push(limit ?? 50);
   const rows = db.query(query).all(...params);
@@ -23232,7 +23273,7 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
     query += ` AND tags LIKE ?`;
     params.push(`%${tag}%`);
   }
-  query += ` ORDER BY updated_at DESC LIMIT ?`;
+  query += ` ORDER BY COALESCE(signal, 0) DESC, updated_at DESC LIMIT ?`;
   params.push(limit ?? 50);
   const rows = db.query(query).all(...params);
   let countQuery = `SELECT COUNT(*) as cnt FROM notes WHERE type IN ('open_thread', 'commitment')`;

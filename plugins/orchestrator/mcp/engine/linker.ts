@@ -7,6 +7,7 @@ import {
   maximalMarginalRelevance,
 } from "../engine/hybrid_search";
 import { blobToVector } from "../engine/embeddings";
+import { signalBoost, confidenceMultiplier } from "./signal";
 
 /**
  * Infer relationship type based on note types.
@@ -82,9 +83,13 @@ export function findRelatedNotes(
   const ftsQuery = terms.join(" OR ");
 
   try {
+    // R3.2: fetch 2x limit so the post-SQL signal/confidence re-rank has
+    // headroom to promote high-signal items that BM25 alone would have
+    // dropped just below the cut line.
     const rows = db
       .query(
         `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
+                COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
@@ -93,7 +98,7 @@ export function findRelatedNotes(
          ORDER BY rank ASC
          LIMIT ?`
       )
-      .all(ftsQuery, limit) as Array<{
+      .all(ftsQuery, limit * 2) as Array<{
       id: string;
       type: string;
       content: string;
@@ -104,10 +109,25 @@ export function findRelatedNotes(
       superseded_by: string | null;
       keywords: string;
       tags: string | null;
+      note_signal: number;
       rank: number;
     }>;
 
-    return rows.map((r) => ({
+    // R3.2: re-rank applying signalBoost + confidenceMultiplier.
+    // SQLite's bm25() returns NEGATIVE scores where more-negative = better match
+    // (ORDER BY rank ASC puts the best match first). To boost a note, we want
+    // its final score to be MORE negative, so we MULTIPLY rank by the boost
+    // (negative * >1 = more-negative). High-signal and high-confidence notes
+    // therefore float toward the top of the list.
+    const rescored = rows.map((r) => ({
+      row: r,
+      finalScore:
+        r.rank * signalBoost(r.note_signal) * confidenceMultiplier(r.confidence),
+    }));
+    rescored.sort((a, b) => a.finalScore - b.finalScore);
+    const top = rescored.slice(0, limit).map((x) => x.row);
+
+    return top.map((r) => ({
       id: r.id,
       type: r.type as NoteSummary["type"],
       content: r.content,
@@ -164,6 +184,21 @@ export async function findRelatedNotesHybrid(
     noteById.set(r.id, r);
   }
 
+  // R3.2: signalById tracks raw signal per note so the boost can be applied
+  // to RRF scores before MMR (preserving the diversity guarantee) and to the
+  // final ordering.
+  const signalById = new Map<string, number>();
+  if (ftsResults.length > 0) {
+    const ids = ftsResults.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = db
+      .query(
+        `SELECT id, COALESCE(signal, 0) AS note_signal FROM notes WHERE id IN (${placeholders})`
+      )
+      .all(...ids) as Array<{ id: string; note_signal: number }>;
+    for (const r of rows) signalById.set(r.id, r.note_signal);
+  }
+
   // 2. Vector search: fetch all embeddings, compute cosine similarity, rank
   const embRows = db
     .query(`SELECT e.note_id, e.vector FROM embeddings e`)
@@ -184,13 +219,16 @@ export async function findRelatedNotesHybrid(
   // 3. Reciprocal Rank Fusion
   const rrfResults = reciprocalRankFusion(ftsRanks, vecRanks);
 
-  // Expand candidate pool: load note data for any ids not already in noteById
-  const candidateTopK = rrfResults.slice(0, limit * 2);
-  for (const rrf of candidateTopK) {
+  // Expand candidate pool: load note data for any ids not already in noteById.
+  // We inspect a wider pre-boost slice so that high-signal items that BM25+vector
+  // alone would have dropped just below the cutoff can still be promoted in.
+  const preBoostSlice = rrfResults.slice(0, limit * 4);
+  for (const rrf of preBoostSlice) {
     if (!noteById.has(rrf.id)) {
       const row = db
         .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by,
+                  COALESCE(signal, 0) AS note_signal
            FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`
         )
         .get(rrf.id) as {
@@ -207,6 +245,7 @@ export async function findRelatedNotesHybrid(
         priority: string | null;
         due_date: string | null;
         superseded_by: string | null;
+        note_signal: number;
       } | null;
 
       if (row) {
@@ -225,9 +264,26 @@ export async function findRelatedNotesHybrid(
           priority: row.priority as NoteSummary["priority"] ?? null,
           due_date: row.due_date ?? null,
         });
+        signalById.set(row.id, row.note_signal);
       }
     }
   }
+
+  // R3.2: apply signal + confidence boost to RRF scores BEFORE MMR so the
+  // diversity guarantee still holds. MMR picks by relevance-minus-similarity;
+  // biasing relevance upward for hot/high-confidence notes is the intended
+  // spend of the pheromone signal. We re-sort rrfResults after boosting so the
+  // candidateTopK slice below reflects boosted ordering.
+  for (const r of rrfResults) {
+    const note = noteById.get(r.id);
+    if (!note) continue;
+    const signal = signalById.get(r.id) ?? 0;
+    const boost = signalBoost(signal) * confidenceMultiplier(note.confidence);
+    r.score = r.score * boost;
+  }
+  rrfResults.sort((a, b) => b.score - a.score);
+
+  const candidateTopK = rrfResults.slice(0, limit * 2);
 
   // 4. MMR: load vectors for top-K candidates that have embeddings
   const embMap = new Map<string, Float32Array>();

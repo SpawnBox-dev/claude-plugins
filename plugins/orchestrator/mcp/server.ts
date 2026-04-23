@@ -1448,7 +1448,9 @@ server.tool(
       params.push(`%${tag}%`);
     }
 
-    query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, updated_at DESC`;
+    // R3.2: priority tier remains the primary sort; signal is the tiebreaker
+    // within a tier so hot work items float up within their priority group.
+    query += ` ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 WHEN 'backlog' THEN 4 ELSE 5 END, COALESCE(signal, 0) DESC, updated_at DESC`;
     query += ` LIMIT ?`;
     params.push(limit ?? 50);
 
@@ -1508,7 +1510,9 @@ server.tool(
       params.push(`%${tag}%`);
     }
 
-    query += ` ORDER BY updated_at DESC LIMIT ?`;
+    // R3.2: signal as secondary sort so hot threads surface above cold
+    // threads at the same update time.
+    query += ` ORDER BY COALESCE(signal, 0) DESC, updated_at DESC LIMIT ?`;
     params.push(limit ?? 50);
 
     const rows = db.query(query).all(...params) as any[];
