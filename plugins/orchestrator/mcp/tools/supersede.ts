@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { NoteType } from "../types";
+import { GLOBAL_TYPES } from "../types";
 import { generateId, now } from "../utils";
 import { handleRemember } from "./remember";
 import type { EmbeddingClient } from "../engine/embeddings";
@@ -55,7 +56,45 @@ export async function handleSupersede(
 
   let newId = input.new_id ?? null;
 
+  // If new_id was provided directly, validate it lives in the same db
+  if (input.new_id) {
+    const sameDbRow = db.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id) as { id: string } | null;
+    if (!sameDbRow) {
+      const otherDb = db === projectDb ? globalDb : projectDb;
+      const crossRow = otherDb.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id) as { id: string } | null;
+      if (crossRow) {
+        return {
+          superseded: false,
+          old_id: input.old_id,
+          new_id: null,
+          error: `cross-scope supersede not supported: old note lives in ${db === projectDb ? "project" : "global"} DB, new_id "${input.new_id}" lives in the other DB. Create a replacement in the same scope and try again.`,
+          message: `Cannot supersede across scopes.`,
+        };
+      }
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: `new_id "${input.new_id}" not found`,
+        message: `No note found with new_id "${input.new_id}".`,
+      };
+    }
+    newId = input.new_id;
+  }
+
   if (!newId && input.new_content && input.new_type) {
+    const newGoesGlobal = GLOBAL_TYPES.includes(input.new_type);
+    const oldIsGlobal = db === globalDb;
+    if (newGoesGlobal !== oldIsGlobal) {
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: `cross-scope supersede not supported: old note is ${oldIsGlobal ? "global" : "project"}-scoped, new_type "${input.new_type}" would route to ${newGoesGlobal ? "global" : "project"}. Choose a compatible new_type or create the replacement manually in the same scope.`,
+        message: `Cannot supersede across scopes.`,
+      };
+    }
+
     const created = await handleRemember(projectDb, globalDb, {
       content: input.new_content,
       type: input.new_type,
@@ -93,7 +132,7 @@ export async function handleSupersede(
     );
 
     db.run(
-      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+      `INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
        VALUES (?, ?, ?, 'supersedes', 'strong', ?)`,
       [generateId(), newId, input.old_id, timestamp]
     );
