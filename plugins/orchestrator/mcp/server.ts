@@ -20,6 +20,7 @@ import { handleOrient, getCrossSessionHealth } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
+import { appendToNoteContent } from "./tools/update_note_helpers";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge } from "./utils";
 import { createAutoLinks } from "./engine/linker";
@@ -831,39 +832,39 @@ server.tool(
 // ── update_note ─────────────────────────────────────────────────────────
 server.tool(
   "update_note",
-  "Modify an existing note's content, context, or tags. Use when knowledge evolves, a preference changes, or a note needs correction. Preserves the note's ID, creation date, and links. Re-indexes keywords for search.",
+  "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content.",
   {
     id: z.string(),
-    content: z.string().optional().describe("New content (replaces existing)"),
+    content: z.string().optional().describe("New content (REPLACES existing)."),
+    append_content: z.string().optional().describe("Timestamped segment to append to existing content. Preferred over content for additive updates - no read-before-write required."),
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
   },
-  async ({ id, content, context, tags, confidence }) => {
+  async ({ id, content, append_content, context, tags, confidence }) => {
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
 
     let db = projectDb;
     let row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
       .get(id) as any | null;
-
     if (!row) {
       db = globalDb;
       row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
         .get(id) as any | null;
     }
-
     if (!row) {
       return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
     }
 
     const updates: string[] = [];
-    const timestamp = now();
 
-    const newContent = content ?? row.content;
-    const newContext = context ?? row.context;
+    if (append_content !== undefined) {
+      appendToNoteContent(db, id, append_content);
+      updates.push("append_content");
+    }
 
-    if (content) updates.push("content");
+    if (content !== undefined) updates.push("content");
     if (context !== undefined) updates.push("context");
     if (tags !== undefined) updates.push("tags");
     if (confidence) updates.push("confidence");
@@ -872,36 +873,39 @@ server.tool(
       return { content: [{ type: "text" as const, text: "No fields to update." }] };
     }
 
-    // Re-extract keywords if content or context changed
-    const newKeywords = (content || context !== undefined)
-      ? extractKeywords([newContent, newContext].filter(Boolean).join(" "))
-      : null;
+    if (content !== undefined || context !== undefined || tags !== undefined || confidence) {
+      const timestamp = now();
+      const newContent = content ?? row.content;
+      const newContext = context ?? row.context;
+      const newKeywords = (content !== undefined || context !== undefined)
+        ? extractKeywords([newContent, newContext].filter(Boolean).join(" "))
+        : null;
 
-    db.run(
-      `UPDATE notes SET
-        content = ?,
-        context = ?,
-        tags = ?,
-        keywords = ?,
-        confidence = ?,
-        updated_at = ?
-       WHERE id = ?`,
-      [
-        newContent,
-        newContext ?? null,
-        tags ?? row.tags,
-        newKeywords ? newKeywords.join(",") : row.keywords,
-        confidence ?? row.confidence ?? "medium",
-        timestamp,
-        id,
-      ]
-    );
+      db.run(
+        `UPDATE notes SET
+          content = ?,
+          context = ?,
+          tags = ?,
+          keywords = ?,
+          confidence = ?,
+          updated_at = ?
+         WHERE id = ?`,
+        [
+          newContent,
+          newContext ?? null,
+          tags ?? row.tags,
+          newKeywords ? newKeywords.join(",") : row.keywords,
+          confidence ?? row.confidence ?? "medium",
+          timestamp,
+          id,
+        ]
+      );
 
-    // Re-embed if content changed
-    if (content && embeddingClient) {
-      embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
-        embeddingClient!.removeEmbedding(db, id);
-      });
+      if (content !== undefined && embeddingClient) {
+        embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
+          embeddingClient!.removeEmbedding(db, id);
+        });
+      }
     }
 
     return {
