@@ -42,4 +42,27 @@ describe("update_note append_content mode", () => {
     const after = projectDb.query("SELECT updated_at FROM notes WHERE id = ?").get(created.note_id!) as any;
     expect(after.updated_at).not.toBe(before.updated_at);
   });
+
+  test("appendToNoteContent updates keywords", async () => {
+    const created = await handleRemember(projectDb, globalDb, { content: "original about apples", type: "decision" });
+    const before = projectDb.query("SELECT keywords FROM notes WHERE id = ?").get(created.note_id!) as any;
+    expect(before.keywords).toContain("apples");
+    appendToNoteContent(projectDb, created.note_id!, "update about bananas and oranges");
+    const after = projectDb.query("SELECT keywords FROM notes WHERE id = ?").get(created.note_id!) as any;
+    expect(after.keywords).toContain("apples");
+    expect(after.keywords).toContain("bananas");
+    expect(after.keywords).toContain("oranges");
+  });
+
+  test("helper append is preserved when row is re-read after append", async () => {
+    // This test documents the pattern server.ts must follow:
+    // after appendToNoteContent, re-read row to see the appended content
+    const created = await handleRemember(projectDb, globalDb, { content: "first", type: "decision" });
+
+    appendToNoteContent(projectDb, created.note_id!, "second");
+    const freshRow = projectDb.query("SELECT content FROM notes WHERE id = ?").get(created.note_id!) as any;
+    expect(freshRow.content).toContain("first");
+    expect(freshRow.content).toContain("second");
+    // If server.ts used stale row here, it would only see "first"
+  });
 });

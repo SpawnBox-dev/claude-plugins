@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { now } from "../utils";
+import { now, extractKeywords } from "../utils";
 
 export interface AppendResult {
   appended: boolean;
@@ -17,9 +17,10 @@ export function appendToNoteContent(
   }
   const timestamp = now();
   const newContent = `${row.content}\n\n--- ${timestamp} ---\n${appendContent}`;
+  const newKeywords = extractKeywords(newContent).join(",");
   db.run(
-    `UPDATE notes SET content = ?, updated_at = ? WHERE id = ?`,
-    [newContent, timestamp, id]
+    `UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`,
+    [newContent, newKeywords, timestamp, id]
   );
   return { appended: true, message: `Appended to note "${id}".` };
 }

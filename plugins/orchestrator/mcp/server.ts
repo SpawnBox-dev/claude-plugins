@@ -836,7 +836,7 @@ server.tool(
   {
     id: z.string(),
     content: z.string().optional().describe("New content (REPLACES existing)."),
-    append_content: z.string().optional().describe("Timestamped segment to append to existing content. Preferred over content for additive updates - no read-before-write required."),
+    append_content: z.string().min(1).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters)."),
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
@@ -857,11 +857,18 @@ server.tool(
       return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
     }
 
+    if (append_content !== undefined && content !== undefined) {
+      return { content: [{ type: "text" as const, text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
+    }
+
     const updates: string[] = [];
 
     if (append_content !== undefined) {
       appendToNoteContent(db, id, append_content);
       updates.push("append_content");
+      // Re-read row so any fall-through UPDATE sees the appended content
+      row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
+        .get(id) as any;
     }
 
     if (content !== undefined) updates.push("content");
