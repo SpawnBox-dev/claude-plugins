@@ -369,3 +369,144 @@ describe("R2.5: lookup include_history + supersede chain", () => {
     expect(supersededByIds).toContain(current.note_id!);
   });
 });
+
+describe("R3.1: ranked link expansion", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  test("link_limit caps the number of linked notes returned", async () => {
+    const seed = await handleRemember(projectDb, globalDb, { content: "seed", type: "decision" });
+    // Create 30 notes and link them all to the seed
+    const ts = new Date().toISOString();
+    for (let i = 0; i < 30; i++) {
+      const id = `linked-${i}`;
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, signal)
+         VALUES (?, 'decision', ?, 'x', '', 'medium', 0, ?, ?, 0)`,
+        [id, `note ${i}`, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+         VALUES (?, ?, ?, 'related_to', 'weak', ?)`,
+        [`link-${i}`, seed.note_id!, id, ts]
+      );
+    }
+    const result = await handleRecall(projectDb, globalDb, { id: seed.note_id!, link_limit: 10 });
+    expect(result.detail).toBeTruthy();
+    expect(result.detail!.links.length).toBeLessThanOrEqual(10);
+    expect(result.detail!.total_link_count).toBe(30);
+  });
+
+  test("link_limit: 0 returns zero linked notes", async () => {
+    const seed = await handleRemember(projectDb, globalDb, { content: "seed", type: "decision" });
+    const ts = new Date().toISOString();
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES ('linked-1', 'decision', 'n', 'x', '', 'medium', 0, ?, ?)`,
+      [ts, ts]
+    );
+    projectDb.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES ('l1', ?, 'linked-1', 'related_to', 'strong', ?)`,
+      [seed.note_id!, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { id: seed.note_id!, link_limit: 0 });
+    expect(result.detail).toBeTruthy();
+    expect(result.detail!.links.length).toBe(0);
+    expect(result.detail!.total_link_count).toBe(1);
+  });
+
+  test("ranked by link strength: strong before moderate before weak", async () => {
+    const seed = await handleRemember(projectDb, globalDb, { content: "seed", type: "decision" });
+    const ts = new Date().toISOString();
+    const entries = [
+      { id: "weak-one", strength: "weak" },
+      { id: "strong-one", strength: "strong" },
+      { id: "moderate-one", strength: "moderate" },
+    ];
+    for (const e of entries) {
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+         VALUES (?, 'decision', ?, 'x', '', 'medium', 0, ?, ?)`,
+        [e.id, e.id, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+         VALUES (?, ?, ?, 'related_to', ?, ?)`,
+        [`link-${e.id}`, seed.note_id!, e.id, e.strength, ts]
+      );
+    }
+    const result = await handleRecall(projectDb, globalDb, { id: seed.note_id!, link_limit: 10 });
+    const ids = result.detail!.links.map((l: any) => l.note.id);
+    expect(ids[0]).toBe("strong-one");
+    expect(ids[1]).toBe("moderate-one");
+    expect(ids[2]).toBe("weak-one");
+  });
+
+  test("ranked by signal within same link strength", async () => {
+    const seed = await handleRemember(projectDb, globalDb, { content: "seed", type: "decision" });
+    const ts = new Date().toISOString();
+    // Two notes with same link strength but different signal
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, signal)
+       VALUES ('hot', 'decision', 'h', 'x', '', 'medium', 0, ?, ?, 5.0)`,
+      [ts, ts]
+    );
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, signal)
+       VALUES ('cold', 'decision', 'c', 'x', '', 'medium', 0, ?, ?, 0)`,
+      [ts, ts]
+    );
+    projectDb.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES ('l1', ?, 'cold', 'related_to', 'moderate', ?)`,
+      [seed.note_id!, ts]
+    );
+    projectDb.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES ('l2', ?, 'hot', 'related_to', 'moderate', ?)`,
+      [seed.note_id!, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { id: seed.note_id!, link_limit: 10 });
+    const ids = result.detail!.links.map((l: any) => l.note.id);
+    expect(ids[0]).toBe("hot");
+    expect(ids[1]).toBe("cold");
+  });
+
+  test("supersedes relationship excluded from general links (rendered in chain instead)", async () => {
+    const old = await handleRemember(projectDb, globalDb, { content: "old", type: "decision" });
+    const current = await handleRemember(projectDb, globalDb, { content: "current", type: "decision" });
+    await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: current.note_id! });
+
+    const result = await handleRecall(projectDb, globalDb, { id: current.note_id! });
+    const linkRelationships = result.detail!.links.map((l: any) => l.relationship);
+    expect(linkRelationships).not.toContain("supersedes");
+    // But the supersede chain DOES include it
+    expect(result.detail!.supersede_chain!.supersedes.length).toBe(1);
+  });
+
+  test("default link_limit is 20", async () => {
+    const seed = await handleRemember(projectDb, globalDb, { content: "seed", type: "decision" });
+    const ts = new Date().toISOString();
+    for (let i = 0; i < 30; i++) {
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+         VALUES (?, 'decision', ?, 'x', '', 'medium', 0, ?, ?)`,
+        [`linked-${i}`, `n${i}`, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+         VALUES (?, ?, ?, 'related_to', 'moderate', ?)`,
+        [`l-${i}`, seed.note_id!, `linked-${i}`, ts]
+      );
+    }
+    const result = await handleRecall(projectDb, globalDb, { id: seed.note_id! });
+    expect(result.detail!.links.length).toBe(20);
+    expect(result.detail!.total_link_count).toBe(30);
+  });
+});

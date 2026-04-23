@@ -12,6 +12,7 @@ export interface RecallInput {
   depth?: number;
   include_superseded?: boolean;
   include_history?: boolean;
+  link_limit?: number;
 }
 
 export interface LinkedNote {
@@ -27,7 +28,12 @@ export interface SupersedeChain {
 
 export interface RecallResult {
   results: NoteSummary[];
-  detail: (Note & { links: LinkedNote[]; revisions?: NoteRevision[]; supersede_chain?: SupersedeChain }) | null;
+  detail: (Note & {
+    links: LinkedNote[];
+    revisions?: NoteRevision[];
+    supersede_chain?: SupersedeChain;
+    total_link_count?: number;
+  }) | null;
   message: string;
 }
 
@@ -128,26 +134,48 @@ function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
 function fetchLinkedNotes(
   db: Database,
   noteId: string,
-  maxDepth = 1
-): LinkedNote[] {
+  maxDepth = 1,
+  linkLimit = 20
+): { links: LinkedNote[]; totalCount: number } {
   const results: LinkedNote[] = [];
   const visited = new Set<string>([noteId]);
 
-  function traverse(currentId: string, currentDepth: number) {
-    if (currentDepth > maxDepth) return;
+  // Count total distinct non-supersede linked notes at depth 1 first (for tail message)
+  const totalCountRow = db.query(
+    `SELECT COUNT(DISTINCT CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END) AS c
+     FROM links l
+     WHERE (l.from_note_id = ? OR l.to_note_id = ?)
+       AND l.relationship != 'supersedes'`
+  ).get(noteId, noteId, noteId) as { c: number };
+  const totalCount = totalCountRow.c;
 
-    const rows = db
-      .query(
-        `SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-                n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
-         FROM links l
-         JOIN notes n ON (
-           CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
-         )
-         WHERE l.from_note_id = ? OR l.to_note_id = ?`
-      )
-      .all(currentId, currentId, currentId) as any[];
+  if (linkLimit === 0) {
+    return { links: [], totalCount };
+  }
+
+  function traverse(currentId: string, currentDepth: number, limit: number): void {
+    if (currentDepth > maxDepth) return;
+    if (limit <= 0) return;
+
+    // Composite ORDER BY: link strength (strong=3, moderate=2, weak=1 DESC), then note signal DESC, then note updated_at DESC
+    // supersedes relationship is excluded (rendered by fetchSupersedeChain instead)
+    const rows = db.query(
+      `SELECT l.relationship, l.from_note_id, l.to_note_id, l.strength AS link_strength,
+              n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date,
+              COALESCE(n.signal, 0) AS note_signal
+       FROM links l
+       JOIN notes n ON (
+         CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
+       )
+       WHERE (l.from_note_id = ? OR l.to_note_id = ?)
+         AND l.relationship != 'supersedes'
+       ORDER BY
+         CASE l.strength WHEN 'strong' THEN 3 WHEN 'moderate' THEN 2 WHEN 'weak' THEN 1 ELSE 0 END DESC,
+         COALESCE(n.signal, 0) DESC,
+         n.updated_at DESC
+       LIMIT ?`
+    ).all(currentId, currentId, currentId, limit) as any[];
 
     for (const r of rows) {
       if (visited.has(r.id)) continue;
@@ -180,15 +208,16 @@ function fetchLinkedNotes(
         },
       });
 
-      // Recurse for deeper hops
-      if (currentDepth < maxDepth) {
-        traverse(r.id, currentDepth + 1);
+      // Recurse for deeper hops - pass remaining limit budget
+      const remaining = limit - results.length;
+      if (currentDepth < maxDepth && remaining > 0) {
+        traverse(r.id, currentDepth + 1, remaining);
       }
     }
   }
 
-  traverse(noteId, 1);
-  return results;
+  traverse(noteId, 1, linkLimit);
+  return { links: results, totalCount };
 }
 
 function getTotalHint(projectDb: Database, globalDb: Database, type?: NoteType): string {
@@ -237,7 +266,8 @@ export async function handleRecall(
 
     note.is_global = isGlobal;
     const depth = input.depth ?? 1;
-    const links = fetchLinkedNotes(db, input.id, depth);
+    const linkLimit = input.link_limit ?? 20;
+    const { links, totalCount } = fetchLinkedNotes(db, input.id, depth, linkLimit);
 
     // R2: always surface supersede chain in detail (cheap single-hop graph query)
     const supersede_chain = fetchSupersedeChain(db, input.id);
@@ -250,8 +280,8 @@ export async function handleRecall(
 
     return {
       results: [],
-      detail: { ...note, links, revisions, supersede_chain },
-      message: `Found note "${input.id}" with ${links.length} link(s)${revisions ? ` and ${revisions.length} revision(s)` : ""}.`,
+      detail: { ...note, links, revisions, supersede_chain, total_link_count: totalCount },
+      message: `Found note "${input.id}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`,
     };
   }
 

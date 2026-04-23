@@ -21018,20 +21018,37 @@ function fetchSupersedeChain(db, noteId) {
     superseded_by: supersededByRows.map(rowToSummary)
   };
 }
-function fetchLinkedNotes(db, noteId, maxDepth = 1) {
+function fetchLinkedNotes(db, noteId, maxDepth = 1, linkLimit = 20) {
   const results = [];
   const visited = new Set([noteId]);
-  function traverse(currentId, currentDepth) {
+  const totalCountRow = db.query(`SELECT COUNT(DISTINCT CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END) AS c
+     FROM links l
+     WHERE (l.from_note_id = ? OR l.to_note_id = ?)
+       AND l.relationship != 'supersedes'`).get(noteId, noteId, noteId);
+  const totalCount = totalCountRow.c;
+  if (linkLimit === 0) {
+    return { links: [], totalCount };
+  }
+  function traverse(currentId, currentDepth, limit) {
     if (currentDepth > maxDepth)
       return;
-    const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-                n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
-         FROM links l
-         JOIN notes n ON (
-           CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
-         )
-         WHERE l.from_note_id = ? OR l.to_note_id = ?`).all(currentId, currentId, currentId);
+    if (limit <= 0)
+      return;
+    const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id, l.strength AS link_strength,
+              n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date,
+              COALESCE(n.signal, 0) AS note_signal
+       FROM links l
+       JOIN notes n ON (
+         CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
+       )
+       WHERE (l.from_note_id = ? OR l.to_note_id = ?)
+         AND l.relationship != 'supersedes'
+       ORDER BY
+         CASE l.strength WHEN 'strong' THEN 3 WHEN 'moderate' THEN 2 WHEN 'weak' THEN 1 ELSE 0 END DESC,
+         COALESCE(n.signal, 0) DESC,
+         n.updated_at DESC
+       LIMIT ?`).all(currentId, currentId, currentId, limit);
     for (const r of rows) {
       if (visited.has(r.id))
         continue;
@@ -21055,13 +21072,14 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
           due_date: r.due_date ?? null
         }
       });
-      if (currentDepth < maxDepth) {
-        traverse(r.id, currentDepth + 1);
+      const remaining = limit - results.length;
+      if (currentDepth < maxDepth && remaining > 0) {
+        traverse(r.id, currentDepth + 1, remaining);
       }
     }
   }
-  traverse(noteId, 1);
-  return results;
+  traverse(noteId, 1, linkLimit);
+  return { links: results, totalCount };
 }
 function getTotalHint(projectDb2, globalDb2, type) {
   try {
@@ -21098,7 +21116,8 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     }
     note.is_global = isGlobal;
     const depth = input.depth ?? 1;
-    const links = fetchLinkedNotes(db, input.id, depth);
+    const linkLimit = input.link_limit ?? 20;
+    const { links, totalCount } = fetchLinkedNotes(db, input.id, depth, linkLimit);
     const supersede_chain = fetchSupersedeChain(db, input.id);
     let revisions = undefined;
     if (input.include_history) {
@@ -21106,8 +21125,8 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     }
     return {
       results: [],
-      detail: { ...note, links, revisions, supersede_chain },
-      message: `Found note "${input.id}" with ${links.length} link(s)${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
+      detail: { ...note, links, revisions, supersede_chain, total_link_count: totalCount },
+      message: `Found note "${input.id}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
     };
   }
   if (input.query) {
@@ -22422,8 +22441,9 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   depth: exports_external.coerce.number().min(1).max(5).optional(),
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
+  link_limit: exports_external.coerce.number().min(0).max(500).optional().describe("Cap on number of linked notes returned in detail-mode lookup. Default 20. Set to 0 to skip linked notes entirely (useful for heavily-connected umbrella notes). Set higher (up to 500) to get the full neighborhood. Superseded-chain links are always shown separately and don't count against this limit."),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, session_id }) => {
+}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
@@ -22433,7 +22453,8 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     limit,
     depth,
     include_superseded,
-    include_history
+    include_history,
+    link_limit
   }, embeddingClient);
   session_id = resolveSessionId(session_id);
   let turn = null;
@@ -22537,6 +22558,12 @@ Linked notes:`;
         const linkedSup = link.note.superseded_by ? ` [SUPERSEDED by ${link.note.superseded_by}]` : "";
         text += `
 ${indent}- **${link.note.id}** [${link.relationship}]${linkedSup} ${link.note.content}`;
+      }
+      if (result.detail.total_link_count !== undefined && result.detail.total_link_count > result.detail.links.length) {
+        const hidden = result.detail.total_link_count - result.detail.links.length;
+        text += `
+
+${hidden} more linked note(s) not shown. Call lookup({id:"${result.detail.id}", link_limit:500}) to see all, or link_limit:0 to skip links entirely.`;
       }
     }
   } else if (result.results.length > 0) {

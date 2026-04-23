@@ -578,9 +578,10 @@ server.tool(
     depth: z.coerce.number().min(1).max(5).optional(),
     include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
     include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
+    link_limit: z.coerce.number().min(0).max(500).optional().describe("Cap on number of linked notes returned in detail-mode lookup. Default 20. Set to 0 to skip linked notes entirely (useful for heavily-connected umbrella notes). Set higher (up to 500) to get the full neighborhood. Superseded-chain links are always shown separately and don't count against this limit."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -594,6 +595,7 @@ server.tool(
         depth,
         include_superseded,
         include_history,
+        link_limit,
       },
       embeddingClient
     );
@@ -701,6 +703,11 @@ server.tool(
             ? ` [SUPERSEDED by ${link.note.superseded_by}]`
             : "";
           text += `\n${indent}- **${link.note.id}** [${link.relationship}]${linkedSup} ${link.note.content}`;
+        }
+        // R3.1: tail message when truncated
+        if (result.detail.total_link_count !== undefined && result.detail.total_link_count > result.detail.links.length) {
+          const hidden = result.detail.total_link_count - result.detail.links.length;
+          text += `\n\n${hidden} more linked note(s) not shown. Call lookup({id:"${result.detail.id}", link_limit:500}) to see all, or link_limit:0 to skip links entirely.`;
         }
       }
     } else if (result.results.length > 0) {
