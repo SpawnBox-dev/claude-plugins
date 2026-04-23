@@ -141,6 +141,18 @@ export interface Link {
   created_at: string;
 }
 
+export interface NoteRevision {
+  id: string;
+  note_id: string;
+  content: string;
+  context: string | null;
+  tags: string | null;
+  keywords: string | null;
+  confidence: string | null;
+  revised_at: string;
+  revised_by_session: string | null;
+}
+
 export interface UserModelEntry {
   id: string;
   dimension: Dimension;

@@ -577,9 +577,10 @@ server.tool(
     limit: z.coerce.number().optional(),
     depth: z.coerce.number().min(1).max(5).optional(),
     include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
+    include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, include_superseded, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -592,6 +593,7 @@ server.tool(
         limit,
         depth,
         include_superseded,
+        include_history,
       },
       embeddingClient
     );
@@ -657,6 +659,35 @@ server.tool(
         ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
         : "";
       text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}\n${result.detail.content}${annotationMarker(result.detail.id)}`;
+
+      // R2: supersede chain (always render when non-empty)
+      if (result.detail.supersede_chain) {
+        const sc = result.detail.supersede_chain;
+        if (sc.supersedes.length > 0) {
+          text += "\n\nSupersedes:";
+          for (const n of sc.supersedes) {
+            text += `\n  - **${n.id}** [${n.type}] ${n.content}`;
+          }
+        }
+        if (sc.superseded_by.length > 0) {
+          text += "\n\nSuperseded by:";
+          for (const n of sc.superseded_by) {
+            text += `\n  - **${n.id}** [${n.type}] ${n.content}`;
+          }
+        }
+      }
+
+      // R2: revision history (only when include_history: true)
+      if (result.detail.revisions && result.detail.revisions.length > 0) {
+        text += `\n\nRevision history (${result.detail.revisions.length} revisions, oldest first):`;
+        for (const rev of result.detail.revisions) {
+          const revAge = formatAge(rev.revised_at);
+          const revSrc = rev.revised_by_session ? ` by:${rev.revised_by_session.slice(0, 8)}` : "";
+          const preview = rev.content.length > 200 ? rev.content.slice(0, 200) + "..." : rev.content;
+          text += `\n  - revised:${revAge}${revSrc}\n    ${preview}`;
+        }
+      }
+
       if (result.detail.superseded_by) {
         text += `\n\n[go to current: lookup({id:"${result.detail.superseded_by}"})]`;
       } else {

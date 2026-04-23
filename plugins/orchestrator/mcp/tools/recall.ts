@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { Note, NoteSummary, NoteType } from "../types";
+import type { Note, NoteSummary, NoteType, NoteRevision } from "../types";
 import { findRelatedNotes, findRelatedNotesHybrid } from "../engine/linker";
 import type { EmbeddingClient } from "../engine/embeddings";
 
@@ -11,6 +11,7 @@ export interface RecallInput {
   limit?: number;
   depth?: number;
   include_superseded?: boolean;
+  include_history?: boolean;
 }
 
 export interface LinkedNote {
@@ -19,9 +20,14 @@ export interface LinkedNote {
   depth: number;
 }
 
+export interface SupersedeChain {
+  supersedes: NoteSummary[];
+  superseded_by: NoteSummary[];
+}
+
 export interface RecallResult {
   results: NoteSummary[];
-  detail: (Note & { links: LinkedNote[] }) | null;
+  detail: (Note & { links: LinkedNote[]; revisions?: NoteRevision[]; supersede_chain?: SupersedeChain }) | null;
   message: string;
 }
 
@@ -58,6 +64,64 @@ function tryFetchNote(db: Database, id: string): Note | null {
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null,
+  };
+}
+
+function fetchRevisions(db: Database, noteId: string): NoteRevision[] {
+  const rows = db.query(
+    `SELECT id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session
+     FROM note_revisions WHERE note_id = ? ORDER BY revised_at ASC`
+  ).all(noteId) as any[];
+  return rows.map((r) => ({
+    id: r.id,
+    note_id: r.note_id,
+    content: r.content,
+    context: r.context ?? null,
+    tags: r.tags ?? null,
+    keywords: r.keywords ?? null,
+    confidence: r.confidence ?? null,
+    revised_at: r.revised_at,
+    revised_by_session: r.revised_by_session ?? null,
+  }));
+}
+
+function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
+  // Outgoing supersedes edges: notes THIS note supersedes
+  const supersedesRows = db.query(
+    `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+     FROM links l JOIN notes n ON l.to_note_id = n.id
+     WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
+     ORDER BY l.created_at ASC`
+  ).all(noteId) as any[];
+
+  const supersededByRows = db.query(
+    `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+     FROM links l JOIN notes n ON l.from_note_id = n.id
+     WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
+     ORDER BY l.created_at ASC`
+  ).all(noteId) as any[];
+
+  const rowToSummary = (r: any): NoteSummary => ({
+    id: r.id,
+    type: r.type,
+    content: r.content.length > 200 ? r.content.slice(0, 200) + `... [truncated - call lookup(id: "${r.id}") for full]` : r.content,
+    confidence: r.confidence,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    source_session: r.source_session ?? null,
+    superseded_by: r.superseded_by ?? null,
+    keywords: r.keywords ? r.keywords.split(",").map((k: string) => k.trim()).filter(Boolean) : [],
+    tags: r.tags ?? null,
+    status: r.status ?? null,
+    priority: r.priority ?? null,
+    due_date: r.due_date ?? null,
+  });
+
+  return {
+    supersedes: supersedesRows.map(rowToSummary),
+    superseded_by: supersededByRows.map(rowToSummary),
   };
 }
 
@@ -175,10 +239,19 @@ export async function handleRecall(
     const depth = input.depth ?? 1;
     const links = fetchLinkedNotes(db, input.id, depth);
 
+    // R2: always surface supersede chain in detail (cheap single-hop graph query)
+    const supersede_chain = fetchSupersedeChain(db, input.id);
+
+    // R2: fetch revisions only when requested
+    let revisions: NoteRevision[] | undefined = undefined;
+    if (input.include_history) {
+      revisions = fetchRevisions(db, input.id);
+    }
+
     return {
       results: [],
-      detail: { ...note, links },
-      message: `Found note "${input.id}" with ${links.length} link(s).`,
+      detail: { ...note, links, revisions, supersede_chain },
+      message: `Found note "${input.id}" with ${links.length} link(s)${revisions ? ` and ${revisions.length} revision(s)` : ""}.`,
     };
   }
 
