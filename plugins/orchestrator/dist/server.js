@@ -19731,6 +19731,21 @@ DROP TABLE _signal_migration_check;
         db.exec("ALTER TABLE session_registry ADD COLUMN last_briefing_at TEXT");
       }
     }
+  },
+  {
+    version: 14,
+    name: "add_superseded_by",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all();
+      if (!cols.some((c) => c.name === "superseded_by")) {
+        db.exec("ALTER TABLE notes ADD COLUMN superseded_by TEXT");
+      }
+      if (!cols.some((c) => c.name === "superseded_at")) {
+        db.exec("ALTER TABLE notes ADD COLUMN superseded_at TEXT");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_notes_superseded_by ON notes(superseded_by)");
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20127,6 +20142,28 @@ function relativeTime(isoTimestamp) {
     return `${diffDay}d ago`;
   return `${Math.floor(diffDay / 7)}w ago`;
 }
+function formatAge(iso, now2 = new Date) {
+  const then = new Date(iso);
+  const diffMs = now2.getTime() - then.getTime();
+  if (!Number.isFinite(diffMs))
+    return "unknown";
+  if (diffMs < 0)
+    return "just now";
+  if (diffMs < 60000)
+    return "just now";
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 60)
+    return `${diffMin}m`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24)
+    return `${diffH}h`;
+  const diffD = Math.floor(diffH / 24);
+  if (diffD < 14)
+    return `${diffD}d`;
+  if (diffD < 60)
+    return `${Math.floor(diffD / 7)}w`;
+  return `${diffD}d`;
+}
 
 // mcp/engine/deduplicator.ts
 function findDuplicates(db, type, content, threshold = 0.6) {
@@ -20382,17 +20419,18 @@ function inferRelationship(fromType, toType) {
     return "enables";
   return "related_to";
 }
-function findRelatedNotes(db, query, limit = 10) {
+function findRelatedNotes(db, query, limit = 10, includeSuperseded = false) {
   const terms = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter((w) => w.length > 2);
   if (terms.length === 0)
     return [];
   const ftsQuery = terms.join(" OR ");
   try {
-    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags,
+    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
+           ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
          ORDER BY rank ASC
          LIMIT ?`).all(ftsQuery, limit);
     return rows.map((r) => ({
@@ -20401,6 +20439,9 @@ function findRelatedNotes(db, query, limit = 10) {
       content: r.content,
       confidence: r.confidence,
       created_at: r.created_at,
+      updated_at: r.updated_at,
+      source_session: r.source_session,
+      superseded_by: r.superseded_by ?? null,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
       tags: r.tags ?? null,
       status: r.status ?? null,
@@ -20412,11 +20453,11 @@ function findRelatedNotes(db, query, limit = 10) {
     return [];
   }
 }
-async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLambda = 0.7) {
+async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLambda = 0.7, includeSuperseded = false) {
   if (!queryVector) {
-    return findRelatedNotes(db, query, limit);
+    return findRelatedNotes(db, query, limit, includeSuperseded);
   }
-  const ftsResults = findRelatedNotes(db, query, limit * 3);
+  const ftsResults = findRelatedNotes(db, query, limit * 3, includeSuperseded);
   const ftsRanks = new Map;
   ftsResults.forEach((r, i) => ftsRanks.set(r.id, i + 1));
   const noteById = new Map;
@@ -20437,8 +20478,8 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   const candidateTopK = rrfResults.slice(0, limit * 2);
   for (const rrf of candidateTopK) {
     if (!noteById.has(rrf.id)) {
-      const row = db.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
-           FROM notes WHERE id = ?`).get(rrf.id);
+      const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by
+           FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`).get(rrf.id);
       if (row) {
         noteById.set(row.id, {
           id: row.id,
@@ -20446,6 +20487,9 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
           content: row.content,
           confidence: row.confidence,
           created_at: row.created_at,
+          updated_at: row.updated_at,
+          source_session: row.source_session,
+          superseded_by: row.superseded_by ?? null,
           keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
           tags: row.tags ?? null,
           status: row.status ?? null,
@@ -20750,10 +20794,80 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
   } catch {}
 }
 
+// mcp/tools/supersede.ts
+async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
+  if (!input.new_id && !(input.new_content && input.new_type)) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: "Must provide either new_id (existing note) or new_content+new_type (inline creation).",
+      message: "supersede requires new_id OR (new_content AND new_type)."
+    };
+  }
+  let db = projectDb2;
+  let oldRow = db.query("SELECT id, type FROM notes WHERE id = ?").get(input.old_id);
+  if (!oldRow) {
+    db = globalDb2;
+    oldRow = db.query("SELECT id, type FROM notes WHERE id = ?").get(input.old_id);
+  }
+  if (!oldRow) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: `old note "${input.old_id}" not found`,
+      message: `No note found with id "${input.old_id}".`
+    };
+  }
+  let newId = input.new_id ?? null;
+  if (!newId && input.new_content && input.new_type) {
+    const created = await handleRemember(projectDb2, globalDb2, {
+      content: input.new_content,
+      type: input.new_type,
+      context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
+      session_id: input.session_id
+    }, embeddingClient);
+    if (!created.note_id) {
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: "failed to create replacement note",
+        message: "supersede failed during replacement creation."
+      };
+    }
+    newId = created.note_id;
+  }
+  if (!newId) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: "no new_id resolved",
+      message: "internal: supersede could not resolve new_id."
+    };
+  }
+  const timestamp = now();
+  db.transaction(() => {
+    db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [newId, timestamp, timestamp, input.old_id]);
+    db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, 'supersedes', 'strong', ?)`, [generateId(), newId, input.old_id, timestamp]);
+  })();
+  const reasonNote = input.reason ? ` Reason: ${input.reason}.` : "";
+  return {
+    superseded: true,
+    old_id: input.old_id,
+    new_id: newId,
+    message: `Superseded "${input.old_id}" with "${newId}".${reasonNote}`
+  };
+}
+
 // mcp/tools/recall.ts
 function tryFetchNote(db, id) {
   const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
-              source AS source_conversation, context, resolved
+              source AS source_conversation, source_session, context, resolved,
+              superseded_by, superseded_at, status, priority, due_date
        FROM notes WHERE id = ?`).get(id);
   if (!row)
     return null;
@@ -20766,7 +20880,9 @@ function tryFetchNote(db, id) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     source_conversation: row.source_conversation ?? null,
-    superseded_by: null,
+    source_session: row.source_session ?? null,
+    superseded_by: row.superseded_by ?? null,
+    superseded_at: row.superseded_at ?? null,
     is_global: false,
     status: row.status ?? null,
     priority: row.priority ?? null,
@@ -20780,7 +20896,8 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
     if (currentDepth > maxDepth)
       return;
     const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags
+                n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+                n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
          FROM links l
          JOIN notes n ON (
            CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
@@ -20799,6 +20916,9 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1) {
           content: r.content.length > 200 ? r.content.slice(0, 200) + `... [truncated - call lookup(id: "${r.id}") for full content]` : r.content,
           confidence: r.confidence,
           created_at: r.created_at,
+          updated_at: r.updated_at,
+          source_session: r.source_session ?? null,
+          superseded_by: r.superseded_by ?? null,
           keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
           tags: r.tags ?? null,
           status: r.status ?? null,
@@ -20868,8 +20988,9 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
         console.error(`[recall] Query embed failed, falling back to FTS5-only:`, err);
       }
     }
-    const projectResults = await findRelatedNotesHybrid(projectDb2, input.query, limit, queryVector);
-    const globalResults = await findRelatedNotesHybrid(globalDb2, input.query, limit, queryVector);
+    const includeSuperseded = input.include_superseded ?? false;
+    const projectResults = await findRelatedNotesHybrid(projectDb2, input.query, limit, queryVector, 0.7, includeSuperseded);
+    const globalResults = await findRelatedNotesHybrid(globalDb2, input.query, limit, queryVector, 0.7, includeSuperseded);
     const GLOBAL_RESERVED = Math.min(3, globalResults.length);
     const seen = new Set;
     const merged = [];
@@ -20920,6 +21041,9 @@ function toSummary(row) {
     content: row.content,
     confidence: row.confidence,
     created_at: row.created_at,
+    updated_at: row.updated_at,
+    source_session: row.source_session ?? null,
+    superseded_by: row.superseded_by ?? null,
     keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
     tags: row.tags ?? null,
     status: row.status ?? null,
@@ -20948,12 +21072,12 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       cross_session: null
     };
   }
-  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
            ORDER BY updated_at DESC
            LIMIT 5`).all().map(toSummary) : [];
-  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
            FROM notes
            WHERE type = 'decision'
            ORDER BY created_at DESC
@@ -21028,26 +21152,26 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let recentlyCompleted = [];
   let overdueWork = [];
   if (include("work_items")) {
-    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
            updated_at DESC
          LIMIT 10`).all().map(toSummary);
-    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY updated_at DESC
          LIMIT 5`).all().map(toSummary);
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
          ORDER BY updated_at DESC
          LIMIT 5`).all(oneDayAgo).map(toSummary);
     const todayStr = new Date().toISOString().slice(0, 10);
-    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
          AND status != 'done' AND resolved = 0
@@ -21077,7 +21201,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
 function composeContextPackage(projectDb2, globalDb2, domain) {
   const pattern = `%${domain}%`;
   function queryByType(db, type, limit = 5) {
-    return db.query(`SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+    return db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
@@ -21154,7 +21278,7 @@ function composeUserProfile(globalDb2) {
 function fetchLatestCheckpoint(db) {
   try {
     const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
-                source AS source_conversation
+                source AS source_conversation, source_session, superseded_by, superseded_at
          FROM notes
          WHERE type = 'checkpoint'
          ORDER BY created_at DESC
@@ -21170,7 +21294,9 @@ function fetchLatestCheckpoint(db) {
       created_at: row.created_at,
       updated_at: row.updated_at,
       source_conversation: row.source_conversation ?? null,
-      superseded_by: null,
+      source_session: row.source_session ?? null,
+      superseded_by: row.superseded_by ?? null,
+      superseded_at: row.superseded_at ?? null,
       is_global: false,
       status: null,
       priority: null,
@@ -21562,6 +21688,22 @@ function handleReflect(projectDb2, globalDb2, input) {
     trajectory_updates: trajectoryUpdates,
     message
   };
+}
+
+// mcp/tools/update_note_helpers.ts
+function appendToNoteContent(db, id, appendContent) {
+  const row = db.query("SELECT content FROM notes WHERE id = ?").get(id);
+  if (!row) {
+    return { appended: false, message: `No note found with id "${id}".` };
+  }
+  const timestamp = now();
+  const newContent = `${row.content}
+
+--- ${timestamp} ---
+${appendContent}`;
+  const newKeywords = extractKeywords(newContent).join(",");
+  db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
+  return { appended: true, message: `Appended to note "${id}".` };
 }
 
 // mcp/engine/session_tracker.ts
@@ -22102,7 +22244,7 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads. Pass `session_id` so sibling sessions can see what you've just created on their next briefing.", {
+server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created.", {
   content: exports_external.string(),
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
@@ -22134,8 +22276,9 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
   limit: exports_external.coerce.number().optional(),
   depth: exports_external.coerce.number().min(1).max(5).optional(),
+  include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, tag, limit, depth, session_id }) => {
+}, async ({ query, id, type, tag, limit, depth, include_superseded, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
@@ -22143,7 +22286,8 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     type,
     tag,
     limit,
-    depth
+    depth,
+    include_superseded
   }, embeddingClient);
   session_id = resolveSessionId(session_id);
   let turn = null;
@@ -22188,18 +22332,31 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   }
   let text = result.message;
   if (result.detail) {
+    const age = formatAge(result.detail.updated_at);
+    const src = result.detail.source_session ? ` by:${result.detail.source_session.slice(0, 8)}` : "";
+    const supSuffix = result.detail.superseded_by ? ` [SUPERSEDED by ${result.detail.superseded_by}]` : "";
     text += `
 
-**${result.detail.type}** (${result.detail.confidence})
+**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}
 ${result.detail.content}${annotationMarker(result.detail.id)}`;
+    if (result.detail.superseded_by) {
+      text += `
+
+[go to current: lookup({id:"${result.detail.superseded_by}"})]`;
+    } else {
+      text += `
+
+[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
+    }
     if (result.detail.links.length > 0) {
       text += `
 
 Linked notes:`;
       for (const link of result.detail.links) {
         const indent = "  ".repeat(link.depth - 1);
+        const linkedSup = link.note.superseded_by ? ` [SUPERSEDED by ${link.note.superseded_by}]` : "";
         text += `
-${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
+${indent}- **${link.note.id}** [${link.relationship}]${linkedSup} ${link.note.content}`;
       }
     }
   } else if (result.results.length > 0) {
@@ -22207,15 +22364,25 @@ ${indent}- **${link.note.id}** [${link.relationship}] ${link.note.content}`;
 `;
     for (const r of result.results) {
       const tagStr = r.tags ? ` {${r.tags}}` : "";
+      const age = formatAge(r.updated_at);
+      const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
+      const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
       text += `
-- **${r.id}** [${r.type}/${r.confidence}]${tagStr} ${r.content}${annotationMarker(r.id)}`;
+- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+      if (r.superseded_by) {
+        text += `
+  [go to current: lookup({id:"${r.superseded_by}"})]`;
+      } else {
+        text += `
+  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+      }
     }
   }
   if (text.length > 15000) {
     text += `
 
 ---
-\u26A0 Large result set (` + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+Large result set (` + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
   }
   return {
     content: [{ type: "text", text }]
@@ -22277,7 +22444,7 @@ ${ns.map((s) => `- ${s}`).join(`
     }]
   };
 });
-server.tool("close_thread", "Mark an open thread, commitment, or work item as resolved/done. Cascades through the knowledge graph: unblocks blocked items, auto-completes parents when all children are done, auto-resolves superseded notes. Use when a tracked issue has been addressed, a question answered, a commitment fulfilled, or a task completed. Pass session_id so any recorded resolution decision carries your attribution.", {
+server.tool("close_thread", "Declare a tracked open_thread, commitment, or work_item settled. Cascades through the graph: unblocks blocked items, auto-completes parent work when all children are done, auto-resolves superseded notes. Closing threads while context is fresh is as important as opening them - prevents future sessions from re-litigating. Equal-priority to note(). Pass session_id so the resolution decision (when a resolution string is provided) carries attribution.", {
   id: exports_external.string(),
   resolution: exports_external.string().optional(),
   session_id: exports_external.string().optional().describe("Session ID - attributed to the resolution decision note if one is created.")
@@ -22328,13 +22495,14 @@ Cascade effects:
     content: [{ type: "text", text: message }]
   };
 });
-server.tool("update_note", "Modify an existing note's content, context, or tags. Use when knowledge evolves, a preference changes, or a note needs correction. Preserves the note's ID, creation date, and links. Re-indexes keywords for search.", {
+server.tool("update_note", "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content.", {
   id: exports_external.string(),
-  content: exports_external.string().optional().describe("New content (replaces existing)"),
+  content: exports_external.string().optional().describe("New content (REPLACES existing)."),
+  append_content: exports_external.string().min(1).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters)."),
   context: exports_external.string().optional().describe("New context (replaces existing)"),
   tags: exports_external.string().optional().describe("New tags (replaces existing)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional()
-}, async ({ id, content, context, tags, confidence }) => {
+}, async ({ id, content, append_content, context, tags, confidence }) => {
   const projectDb2 = getProjectDb();
   const globalDb2 = getGlobalDb();
   let db = projectDb2;
@@ -22346,11 +22514,16 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
   if (!row) {
     return { content: [{ type: "text", text: `No note found with id "${id}".` }] };
   }
+  if (append_content !== undefined && content !== undefined) {
+    return { content: [{ type: "text", text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
+  }
   const updates = [];
-  const timestamp = now();
-  const newContent = content ?? row.content;
-  const newContext = context ?? row.context;
-  if (content)
+  if (append_content !== undefined) {
+    appendToNoteContent(db, id, append_content);
+    updates.push("append_content");
+    row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`).get(id);
+  }
+  if (content !== undefined)
     updates.push("content");
   if (context !== undefined)
     updates.push("context");
@@ -22361,27 +22534,32 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
   if (updates.length === 0) {
     return { content: [{ type: "text", text: "No fields to update." }] };
   }
-  const newKeywords = content || context !== undefined ? extractKeywords([newContent, newContext].filter(Boolean).join(" ")) : null;
-  db.run(`UPDATE notes SET
-        content = ?,
-        context = ?,
-        tags = ?,
-        keywords = ?,
-        confidence = ?,
-        updated_at = ?
-       WHERE id = ?`, [
-    newContent,
-    newContext ?? null,
-    tags ?? row.tags,
-    newKeywords ? newKeywords.join(",") : row.keywords,
-    confidence ?? row.confidence ?? "medium",
-    timestamp,
-    id
-  ]);
-  if (content && embeddingClient) {
-    embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
-      embeddingClient.removeEmbedding(db, id);
-    });
+  if (content !== undefined || context !== undefined || tags !== undefined || confidence) {
+    const timestamp = now();
+    const newContent = content ?? row.content;
+    const newContext = context ?? row.context;
+    const newKeywords = content !== undefined || context !== undefined ? extractKeywords([newContent, newContext].filter(Boolean).join(" ")) : null;
+    db.run(`UPDATE notes SET
+          content = ?,
+          context = ?,
+          tags = ?,
+          keywords = ?,
+          confidence = ?,
+          updated_at = ?
+         WHERE id = ?`, [
+      newContent,
+      newContext ?? null,
+      tags ?? row.tags,
+      newKeywords ? newKeywords.join(",") : row.keywords,
+      confidence ?? row.confidence ?? "medium",
+      timestamp,
+      id
+    ]);
+    if (content !== undefined && embeddingClient) {
+      embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
+        embeddingClient.removeEmbedding(db, id);
+      });
+    }
   }
   return {
     content: [{
@@ -22390,7 +22568,7 @@ server.tool("update_note", "Modify an existing note's content, context, or tags.
     }]
   };
 });
-server.tool("delete_note", "Permanently delete a note from the knowledge base. Use when a note is wrong, outdated, or no longer relevant. Links to/from this note are also removed (CASCADE). Prefer close_thread for resolving issues - use delete_note only for genuinely incorrect or harmful knowledge.", {
+server.tool("delete_note", "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. Links to/from this note are CASCADE-removed. Equal-priority to note() - curation is as important as capture.", {
   id: exports_external.string(),
   reason: exports_external.string().optional().describe("Why this note is being deleted")
 }, async ({ id, reason }) => {
@@ -22413,6 +22591,22 @@ server.tool("delete_note", "Permanently delete a note from the knowledge base. U
       type: "text",
       text: `Deleted ${row.type} note "${id}".${reasonStr}`
     }]
+  };
+});
+server.tool("supersede_note", "Replace an old note with a new one, preserving history. The old note is archived (still retrievable by ID, but hidden from default lookup); the new note surfaces on lookup. Use when a decision was right at the time but is now wrong, or when knowledge has evolved. Treat as equally important to note() - maintaining coherence matters as much as capturing new facts.", {
+  old_id: exports_external.string().describe("ID of the note being superseded."),
+  new_id: exports_external.string().optional().describe("ID of an existing replacement note. Provide this OR new_content+new_type."),
+  new_content: exports_external.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
+  new_type: exports_external.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
+  reason: exports_external.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
+  session_id: exports_external.string().optional().describe("Session ID - enables cross-session attribution on the supersede action.")
+}, async ({ old_id, new_id, new_content, new_type, reason, session_id }) => {
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
+  const result = await handleSupersede(getProjectDb(), getGlobalDb(), { old_id, new_id, new_content, new_type, reason, session_id }, embeddingClient);
+  return {
+    content: [{ type: "text", text: result.message }]
   };
 });
 server.tool("user_profile", "View or update the structured user profile. Shows all learned observations about the user grouped by dimension (preferences, communication style, decision patterns, strengths, blind spots, intent). Use to understand the user better or to explicitly record a user trait.", {
