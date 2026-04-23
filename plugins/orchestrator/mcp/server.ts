@@ -14,6 +14,7 @@ import {
 import type { WorkItemStatus, Dimension } from "./types";
 import { getProjectDb, getGlobalDb } from "./db/connection";
 import { handleRemember } from "./tools/remember";
+import { handleSupersede } from "./tools/supersede";
 import { handleRecall } from "./tools/recall";
 import { handleOrient, getCrossSessionHealth } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
@@ -925,6 +926,33 @@ server.tool(
         type: "text" as const,
         text: `Deleted ${row.type} note "${id}".${reasonStr}`,
       }],
+    };
+  }
+);
+
+// ── supersede_note ────────────────────────────────────────────────────
+server.tool(
+  "supersede_note",
+  "Replace an old note with a new one, preserving history. The old note is archived (still retrievable by ID, but hidden from default lookup); the new note surfaces on lookup. Use when a decision was right at the time but is now wrong, or when knowledge has evolved. Treat as equally important to note() - maintaining coherence matters as much as capturing new facts.",
+  {
+    old_id: z.string().describe("ID of the note being superseded."),
+    new_id: z.string().optional().describe("ID of an existing replacement note. Provide this OR new_content+new_type."),
+    new_content: z.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
+    new_type: z.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
+    reason: z.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
+    session_id: z.string().optional().describe("Session ID - enables cross-session attribution on the supersede action."),
+  },
+  async ({ old_id, new_id, new_content, new_type, reason, session_id }) => {
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
+    const result = await handleSupersede(
+      getProjectDb(),
+      getGlobalDb(),
+      { old_id, new_id, new_content, new_type, reason, session_id },
+      embeddingClient
+    );
+    return {
+      content: [{ type: "text" as const, text: result.message }],
     };
   }
 );
