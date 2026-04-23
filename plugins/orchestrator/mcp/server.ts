@@ -20,7 +20,7 @@ import { handleOrient, getCrossSessionHealth } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
-import { appendToNoteContent } from "./tools/update_note_helpers";
+import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge } from "./utils";
 import { createAutoLinks } from "./engine/linker";
@@ -832,7 +832,7 @@ server.tool(
 // ── update_note ─────────────────────────────────────────────────────────
 server.tool(
   "update_note",
-  "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content.",
+  "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history).",
   {
     id: z.string(),
     content: z.string().optional().describe("New content (REPLACES existing)."),
@@ -840,8 +840,11 @@ server.tool(
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
+    session_id: z.string().optional().describe("Session ID - attributed to the revision snapshot."),
   },
-  async ({ id, content, append_content, context, tags, confidence }) => {
+  async ({ id, content, append_content, context, tags, confidence, session_id }) => {
+    session_id = resolveSessionId(session_id);
+    if (session_id) registerSessionOnce(session_id);
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
 
@@ -881,6 +884,9 @@ server.tool(
     }
 
     if (content !== undefined || context !== undefined || tags !== undefined || confidence) {
+      // R2: snapshot the current row before mutating it
+      snapshotRevision(db, id, session_id ?? null);
+
       const timestamp = now();
       const newContent = content ?? row.content;
       const newContext = context ?? row.context;
