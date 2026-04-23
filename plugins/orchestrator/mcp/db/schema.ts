@@ -214,6 +214,21 @@ DROP TABLE _signal_migration_check;
       }
     },
   },
+  {
+    version: 14,
+    name: "add_superseded_by",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "superseded_by")) {
+        db.exec("ALTER TABLE notes ADD COLUMN superseded_by TEXT");
+      }
+      if (!cols.some((c) => c.name === "superseded_at")) {
+        db.exec("ALTER TABLE notes ADD COLUMN superseded_at TEXT");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_notes_superseded_by ON notes(superseded_by)");
+    },
+  },
 ];
 
 /**
