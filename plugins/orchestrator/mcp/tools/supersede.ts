@@ -86,16 +86,18 @@ export async function handleSupersede(
 
   const timestamp = now();
 
-  db.run(
-    `UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`,
-    [newId, timestamp, timestamp, input.old_id]
-  );
+  db.transaction(() => {
+    db.run(
+      `UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`,
+      [newId, timestamp, timestamp, input.old_id]
+    );
 
-  db.run(
-    `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-     VALUES (?, ?, ?, 'supersedes', 'strong', ?)`,
-    [generateId(), newId, input.old_id, timestamp]
-  );
+    db.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, 'supersedes', 'strong', ?)`,
+      [generateId(), newId, input.old_id, timestamp]
+    );
+  })();
 
   const reasonNote = input.reason ? ` Reason: ${input.reason}.` : "";
   return {

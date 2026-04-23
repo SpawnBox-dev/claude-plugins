@@ -81,4 +81,37 @@ describe("supersede tool", () => {
     expect(result.superseded).toBe(false);
     expect(result.error).toContain("new_id");
   });
+
+  test("atomicity: UPDATE rolls back if link INSERT fails", async () => {
+    // Enable FK enforcement (matches production connection settings) so the
+    // link INSERT with a bogus new_id fails and triggers rollback of the
+    // paired UPDATE on the old note.
+    projectDb.run("PRAGMA foreign_keys = ON");
+
+    const old = await handleRemember(projectDb, globalDb, { content: "o", type: "decision" });
+
+    // Force FK failure: new_id references a note that doesn't exist anywhere.
+    // handleSupersede resolves `db` to projectDb (where the old note lives),
+    // so the INSERT into links with from_note_id = bogus new_id violates the
+    // FK on notes(id).
+    let threw = false;
+    try {
+      await handleSupersede(projectDb, globalDb, {
+        old_id: old.note_id!,
+        new_id: "nonexistent-replacement-id",
+      });
+    } catch {
+      threw = true;
+    }
+
+    // Either the call threw (bun:sqlite FK violation propagates) or it
+    // returned a non-superseded result. Either way, the UPDATE must have
+    // rolled back with the INSERT, leaving the old note unchanged.
+    const oldRow = projectDb
+      .query("SELECT superseded_by, superseded_at FROM notes WHERE id = ?")
+      .get(old.note_id) as { superseded_by: string | null; superseded_at: string | null };
+    expect(oldRow.superseded_by).toBeNull();
+    expect(oldRow.superseded_at).toBeNull();
+    expect(threw).toBe(true);
+  });
 });
