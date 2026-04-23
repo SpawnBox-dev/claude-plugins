@@ -19746,6 +19746,36 @@ DROP TABLE _signal_migration_check;
       }
       db.exec("CREATE INDEX IF NOT EXISTS idx_notes_superseded_by ON notes(superseded_by)");
     }
+  },
+  {
+    version: 15,
+    name: "add_note_revisions_and_link_unique",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      db.exec(`
+        DELETE FROM links
+        WHERE rowid NOT IN (
+          SELECT MIN(rowid) FROM links
+          GROUP BY from_note_id, to_note_id, relationship
+        )
+      `);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique_edge ON links(from_note_id, to_note_id, relationship)`);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS note_revisions (
+          id TEXT PRIMARY KEY,
+          note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+          content TEXT NOT NULL,
+          context TEXT,
+          tags TEXT,
+          keywords TEXT,
+          confidence TEXT,
+          revised_at TEXT NOT NULL,
+          revised_by_session TEXT
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_note_id ON note_revisions(note_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_revised_at ON note_revisions(revised_at)`);
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20820,8 +20850,61 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
       message: `No note found with id "${input.old_id}".`
     };
   }
+  const currentSupersededBy = db.query(`SELECT superseded_by FROM notes WHERE id = ?`).get(input.old_id).superseded_by;
+  if (currentSupersededBy !== null) {
+    if (input.new_id && input.new_id === currentSupersededBy) {
+      return {
+        superseded: true,
+        old_id: input.old_id,
+        new_id: currentSupersededBy,
+        message: `Note "${input.old_id}" was already superseded by "${currentSupersededBy}" - no change.`
+      };
+    }
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: `"${input.old_id}" is already superseded by "${currentSupersededBy}". To change the successor, supersede "${currentSupersededBy}" with the new replacement, or use a different old_id.`,
+      message: `Cannot re-supersede: already points at "${currentSupersededBy}".`
+    };
+  }
   let newId = input.new_id ?? null;
+  if (input.new_id) {
+    const sameDbRow = db.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id);
+    if (!sameDbRow) {
+      const otherDb = db === projectDb2 ? globalDb2 : projectDb2;
+      const crossRow = otherDb.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id);
+      if (crossRow) {
+        return {
+          superseded: false,
+          old_id: input.old_id,
+          new_id: null,
+          error: `cross-scope supersede not supported: old note lives in ${db === projectDb2 ? "project" : "global"} DB, new_id "${input.new_id}" lives in the other DB. Create a replacement in the same scope and try again.`,
+          message: `Cannot supersede across scopes.`
+        };
+      }
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: `new_id "${input.new_id}" not found`,
+        message: `No note found with new_id "${input.new_id}".`
+      };
+    }
+    newId = input.new_id;
+  }
   if (!newId && input.new_content && input.new_type) {
+    const newGoesGlobal = GLOBAL_TYPES.includes(input.new_type);
+    const oldIsGlobal = db === globalDb2;
+    if (newGoesGlobal !== oldIsGlobal) {
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: `cross-scope supersede not supported: old note is ${oldIsGlobal ? "global" : "project"}-scoped, new_type "${input.new_type}" would route to ${newGoesGlobal ? "global" : "project"}. Choose a compatible new_type or create the replacement manually in the same scope.`,
+        message: `Cannot supersede across scopes.`
+      };
+    }
     const created = await handleRemember(projectDb2, globalDb2, {
       content: input.new_content,
       type: input.new_type,
@@ -20851,7 +20934,7 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
   const timestamp = now();
   db.transaction(() => {
     db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [newId, timestamp, timestamp, input.old_id]);
-    db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+    db.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
        VALUES (?, ?, ?, 'supersedes', 'strong', ?)`, [generateId(), newId, input.old_id, timestamp]);
   })();
   const reasonNote = input.reason ? ` Reason: ${input.reason}.` : "";
@@ -20887,6 +20970,52 @@ function tryFetchNote(db, id) {
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null
+  };
+}
+function fetchRevisions(db, noteId) {
+  const rows = db.query(`SELECT id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session
+     FROM note_revisions WHERE note_id = ? ORDER BY revised_at ASC`).all(noteId);
+  return rows.map((r) => ({
+    id: r.id,
+    note_id: r.note_id,
+    content: r.content,
+    context: r.context ?? null,
+    tags: r.tags ?? null,
+    keywords: r.keywords ?? null,
+    confidence: r.confidence ?? null,
+    revised_at: r.revised_at,
+    revised_by_session: r.revised_by_session ?? null
+  }));
+}
+function fetchSupersedeChain(db, noteId) {
+  const supersedesRows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+     FROM links l JOIN notes n ON l.to_note_id = n.id
+     WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
+     ORDER BY l.created_at ASC`).all(noteId);
+  const supersededByRows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+     FROM links l JOIN notes n ON l.from_note_id = n.id
+     WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
+     ORDER BY l.created_at ASC`).all(noteId);
+  const rowToSummary = (r) => ({
+    id: r.id,
+    type: r.type,
+    content: r.content.length > 200 ? r.content.slice(0, 200) + `... [truncated - call lookup(id: "${r.id}") for full]` : r.content,
+    confidence: r.confidence,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    source_session: r.source_session ?? null,
+    superseded_by: r.superseded_by ?? null,
+    keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()).filter(Boolean) : [],
+    tags: r.tags ?? null,
+    status: r.status ?? null,
+    priority: r.priority ?? null,
+    due_date: r.due_date ?? null
+  });
+  return {
+    supersedes: supersedesRows.map(rowToSummary),
+    superseded_by: supersededByRows.map(rowToSummary)
   };
 }
 function fetchLinkedNotes(db, noteId, maxDepth = 1) {
@@ -20970,10 +21099,15 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     note.is_global = isGlobal;
     const depth = input.depth ?? 1;
     const links = fetchLinkedNotes(db, input.id, depth);
+    const supersede_chain = fetchSupersedeChain(db, input.id);
+    let revisions = undefined;
+    if (input.include_history) {
+      revisions = fetchRevisions(db, input.id);
+    }
     return {
       results: [],
-      detail: { ...note, links },
-      message: `Found note "${input.id}" with ${links.length} link(s).`
+      detail: { ...note, links, revisions, supersede_chain },
+      message: `Found note "${input.id}" with ${links.length} link(s)${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
     };
   }
   if (input.query) {
@@ -21705,6 +21839,16 @@ ${appendContent}`;
   db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
   return { appended: true, message: `Appended to note "${id}".` };
 }
+function snapshotRevision(db, noteId, sessionId) {
+  const row = db.query(`SELECT content, context, tags, keywords, confidence FROM notes WHERE id = ?`).get(noteId);
+  if (!row)
+    return null;
+  const revisionId = generateId();
+  const timestamp = now();
+  db.run(`INSERT INTO note_revisions (id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [revisionId, noteId, row.content, row.context, row.tags, row.keywords, row.confidence, timestamp, sessionId ?? null]);
+  return revisionId;
+}
 
 // mcp/engine/session_tracker.ts
 class SessionTracker {
@@ -22277,8 +22421,9 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   limit: exports_external.coerce.number().optional(),
   depth: exports_external.coerce.number().min(1).max(5).optional(),
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
+  include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, tag, limit, depth, include_superseded, session_id }) => {
+}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
@@ -22287,7 +22432,8 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     tag,
     limit,
     depth,
-    include_superseded
+    include_superseded,
+    include_history
   }, embeddingClient);
   session_id = resolveSessionId(session_id);
   let turn = null;
@@ -22339,6 +22485,40 @@ server.tool("lookup", "Search what you already know. Use this before implementin
 
 **${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}
 ${result.detail.content}${annotationMarker(result.detail.id)}`;
+    if (result.detail.supersede_chain) {
+      const sc = result.detail.supersede_chain;
+      if (sc.supersedes.length > 0) {
+        text += `
+
+Supersedes:`;
+        for (const n of sc.supersedes) {
+          text += `
+  - **${n.id}** [${n.type}] ${n.content}`;
+        }
+      }
+      if (sc.superseded_by.length > 0) {
+        text += `
+
+Superseded by:`;
+        for (const n of sc.superseded_by) {
+          text += `
+  - **${n.id}** [${n.type}] ${n.content}`;
+        }
+      }
+    }
+    if (result.detail.revisions && result.detail.revisions.length > 0) {
+      text += `
+
+Revision history (${result.detail.revisions.length} revisions, oldest first):`;
+      for (const rev of result.detail.revisions) {
+        const revAge = formatAge(rev.revised_at);
+        const revSrc = rev.revised_by_session ? ` by:${rev.revised_by_session.slice(0, 8)}` : "";
+        const preview = rev.content.length > 200 ? rev.content.slice(0, 200) + "..." : rev.content;
+        text += `
+  - revised:${revAge}${revSrc}
+    ${preview}`;
+      }
+    }
     if (result.detail.superseded_by) {
       text += `
 
@@ -22495,14 +22675,18 @@ Cascade effects:
     content: [{ type: "text", text: message }]
   };
 });
-server.tool("update_note", "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content.", {
+server.tool("update_note", "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history).", {
   id: exports_external.string(),
   content: exports_external.string().optional().describe("New content (REPLACES existing)."),
   append_content: exports_external.string().min(1).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters)."),
   context: exports_external.string().optional().describe("New context (replaces existing)"),
   tags: exports_external.string().optional().describe("New tags (replaces existing)"),
-  confidence: exports_external.enum(["low", "medium", "high"]).optional()
-}, async ({ id, content, append_content, context, tags, confidence }) => {
+  confidence: exports_external.enum(["low", "medium", "high"]).optional(),
+  session_id: exports_external.string().optional().describe("Session ID - attributed to the revision snapshot.")
+}, async ({ id, content, append_content, context, tags, confidence, session_id }) => {
+  session_id = resolveSessionId(session_id);
+  if (session_id)
+    registerSessionOnce(session_id);
   const projectDb2 = getProjectDb();
   const globalDb2 = getGlobalDb();
   let db = projectDb2;
@@ -22535,6 +22719,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     return { content: [{ type: "text", text: "No fields to update." }] };
   }
   if (content !== undefined || context !== undefined || tags !== undefined || confidence) {
+    snapshotRevision(db, id, session_id ?? null);
     const timestamp = now();
     const newContent = content ?? row.content;
     const newContext = context ?? row.context;
@@ -22787,7 +22972,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   if (blocked_by) {
     const blocker = projectDb2.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);
     if (blocker) {
-      projectDb2.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+      projectDb2.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
            VALUES (?, ?, ?, 'blocks', 'strong', ?)`, [generateId(), blocked_by, id, timestamp]);
       changes.push(`blocked by: ${blocked_by}`);
     }
