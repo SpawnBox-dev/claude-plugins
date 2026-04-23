@@ -575,9 +575,10 @@ server.tool(
     tag: z.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
     limit: z.coerce.number().optional(),
     depth: z.coerce.number().min(1).max(5).optional(),
+    include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, include_superseded, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -589,6 +590,7 @@ server.tool(
         tag,
         limit,
         depth,
+        include_superseded,
       },
       embeddingClient
     );

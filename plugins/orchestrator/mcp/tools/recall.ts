@@ -10,6 +10,7 @@ export interface RecallInput {
   tag?: string;
   limit?: number;
   depth?: number;
+  include_superseded?: boolean;
 }
 
 export interface LinkedNote {
@@ -208,17 +209,23 @@ export async function handleRecall(
       }
     }
 
+    const includeSuperseded = input.include_superseded ?? false;
+
     const projectResults = await findRelatedNotesHybrid(
       projectDb,
       input.query,
       limit,
-      queryVector
+      queryVector,
+      0.7,
+      includeSuperseded
     );
     const globalResults = await findRelatedNotesHybrid(
       globalDb,
       input.query,
       limit,
-      queryVector
+      queryVector,
+      0.7,
+      includeSuperseded
     );
 
     // Interleave with reserved slots for global results.

@@ -66,7 +66,8 @@ export function inferRelationship(
 export function findRelatedNotes(
   db: Database,
   query: string,
-  limit = 10
+  limit = 10,
+  includeSuperseded = false
 ): NoteSummary[] {
   // Convert natural language to FTS5 syntax: split on any non-alphanumeric
   // run (same as FTS5 unicode61 tokenizer), filter short words, join with OR.
@@ -88,6 +89,7 @@ export function findRelatedNotes(
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
+           ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
          ORDER BY rank ASC
          LIMIT ?`
       )
@@ -141,15 +143,16 @@ export async function findRelatedNotesHybrid(
   query: string,
   limit = 10,
   queryVector?: Float32Array,
-  mmrLambda: number = 0.7
+  mmrLambda: number = 0.7,
+  includeSuperseded = false
 ): Promise<NoteSummary[]> {
   // Fallback: no vector, just use existing FTS5 search
   if (!queryVector) {
-    return findRelatedNotes(db, query, limit);
+    return findRelatedNotes(db, query, limit, includeSuperseded);
   }
 
   // 1. FTS5 ranked list
-  const ftsResults = findRelatedNotes(db, query, limit * 3);
+  const ftsResults = findRelatedNotes(db, query, limit * 3, includeSuperseded);
   const ftsRanks = new Map<string, number>();
   ftsResults.forEach((r, i) => ftsRanks.set(r.id, i + 1));
 
@@ -185,8 +188,8 @@ export async function findRelatedNotesHybrid(
     if (!noteById.has(rrf.id)) {
       const row = db
         .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
-           FROM notes WHERE id = ?`
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by
+           FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`
         )
         .get(rrf.id) as {
         id: string;
@@ -201,6 +204,7 @@ export async function findRelatedNotesHybrid(
         status: string | null;
         priority: string | null;
         due_date: string | null;
+        superseded_by: string | null;
       } | null;
 
       if (row) {

@@ -257,3 +257,53 @@ describe("R1.2: NoteSummary carries updated_at and source_session", () => {
     expect(result.detail!.source_session).toBe("session-xyz");
   });
 });
+
+describe("R1.4: default lookup hides superseded notes", () => {
+  test("superseded note is absent from default query result", async () => {
+    const projectDb = makeDb("project");
+    const globalDb = makeDb("global");
+    const ts = "2026-04-23T12:00:00Z";
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, superseded_by, superseded_at)
+       VALUES ('old-1', 'decision', 'outdated claim', 'outdated,claim', '', 'medium', 0, ?, ?, 'new-1', ?)`,
+      [ts, ts, ts]
+    );
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES ('new-1', 'decision', 'current truth', 'current,truth,outdated,claim', '', 'medium', 0, ?, ?)`,
+      [ts, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { query: "outdated" });
+    const ids = result.results.map((r) => r.id);
+    expect(ids).not.toContain("old-1");
+  });
+
+  test("superseded note is retrievable by explicit id lookup", async () => {
+    const projectDb = makeDb("project");
+    const globalDb = makeDb("global");
+    const ts = "2026-04-23T12:00:00Z";
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, superseded_by, superseded_at)
+       VALUES ('old-2', 'decision', 'c', 'k', '', 'medium', 0, ?, ?, 'replacement', ?)`,
+      [ts, ts, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { id: "old-2" });
+    expect(result.detail).toBeTruthy();
+    expect(result.detail!.id).toBe("old-2");
+    expect(result.detail!.superseded_by).toBe("replacement");
+  });
+
+  test("include_superseded: true returns superseded notes in query", async () => {
+    const projectDb = makeDb("project");
+    const globalDb = makeDb("global");
+    const ts = "2026-04-23T12:00:00Z";
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, superseded_by, superseded_at)
+       VALUES ('old-3', 'decision', 'historical claim', 'historical,claim', '', 'medium', 0, ?, ?, 'current', ?)`,
+      [ts, ts, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { query: "historical", include_superseded: true } as any);
+    const ids = result.results.map((r) => r.id);
+    expect(ids).toContain("old-3");
+  });
+});
