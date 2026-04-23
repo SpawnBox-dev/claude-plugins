@@ -97,4 +97,15 @@ describe("formatAge", () => {
     const then = new Date("2026-04-23T11:59:30Z").toISOString();
     expect(formatAge(then, now)).toBe("just now");
   });
+
+  test("invalid ISO returns 'unknown'", () => {
+    expect(formatAge("not an iso")).toBe("unknown");
+    expect(formatAge("")).toBe("unknown");
+  });
+
+  test("future timestamp (clock skew) returns 'just now'", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const future = new Date("2026-04-23T12:05:00Z").toISOString();
+    expect(formatAge(future, now)).toBe("just now");
+  });
 });

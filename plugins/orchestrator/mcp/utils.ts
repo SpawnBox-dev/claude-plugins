@@ -166,6 +166,8 @@ export function relativeTime(isoTimestamp: string): string {
 export function formatAge(iso: string, now: Date = new Date()): string {
   const then = new Date(iso);
   const diffMs = now.getTime() - then.getTime();
+  if (!Number.isFinite(diffMs)) return "unknown";
+  if (diffMs < 0) return "just now";
   if (diffMs < 60_000) return "just now";
   const diffMin = Math.floor(diffMs / 60_000);
   if (diffMin < 60) return `${diffMin}m`;

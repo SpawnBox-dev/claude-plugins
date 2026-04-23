@@ -656,7 +656,11 @@ server.tool(
         ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
         : "";
       text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}\n${result.detail.content}${annotationMarker(result.detail.id)}`;
-      text += `\n\n[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
+      if (result.detail.superseded_by) {
+        text += `\n\n[go to current: lookup({id:"${result.detail.superseded_by}"})]`;
+      } else {
+        text += `\n\n[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
+      }
       if (result.detail.links.length > 0) {
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
@@ -673,8 +677,13 @@ server.tool(
         const tagStr = r.tags ? ` {${r.tags}}` : "";
         const age = formatAge(r.updated_at);
         const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
-        text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr} ${r.content}${annotationMarker(r.id)}`;
-        text += `\n  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+        const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
+        text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+        if (r.superseded_by) {
+          text += `\n  [go to current: lookup({id:"${r.superseded_by}"})]`;
+        } else {
+          text += `\n  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+        }
       }
     }
     if (text.length > 15000) {
