@@ -531,7 +531,7 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Save a piece of knowledge you've just learned, decided, or observed. Use this the moment something noteworthy happens - a decision is made, a pattern is discovered, a gotcha is found, the user corrects you, or a convention is established. Don't batch these up; capture them immediately so future sessions benefit. Before saving, consider whether this is already captured - call lookup with key terms if unsure. The system catches near-exact duplicates automatically, but conceptually similar notes with different wording may slip through. The system auto-links related notes. Tags enable cross-cutting filters (e.g., 'pre-launch', 'post-launch', 'bug', 'feature') that work across lookup, list_work_items, and list_open_threads. Pass `session_id` so sibling sessions can see what you've just created on their next briefing.",
+  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -761,7 +761,7 @@ server.tool(
 // ── close_thread ────────────────────────────────────────────────────────
 server.tool(
   "close_thread",
-  "Mark an open thread, commitment, or work item as resolved/done. Cascades through the knowledge graph: unblocks blocked items, auto-completes parents when all children are done, auto-resolves superseded notes. Use when a tracked issue has been addressed, a question answered, a commitment fulfilled, or a task completed. Pass session_id so any recorded resolution decision carries your attribution.",
+  "Declare a tracked open_thread, commitment, or work_item settled. Cascades through the graph: unblocks blocked items, auto-completes parent work when all children are done, auto-resolves superseded notes. Closing threads while context is fresh is as important as opening them - prevents future sessions from re-litigating. Equal-priority to note(). Pass session_id so the resolution decision (when a resolution string is provided) carries attribution.",
   {
     id: z.string(),
     resolution: z.string().optional(),
@@ -927,7 +927,7 @@ server.tool(
 // ── delete_note ─────────────────────────────────────────────────────────
 server.tool(
   "delete_note",
-  "Permanently delete a note from the knowledge base. Use when a note is wrong, outdated, or no longer relevant. Links to/from this note are also removed (CASCADE). Prefer close_thread for resolving issues - use delete_note only for genuinely incorrect or harmful knowledge.",
+  "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. Links to/from this note are CASCADE-removed. Equal-priority to note() - curation is as important as capture.",
   {
     id: z.string(),
     reason: z.string().optional().describe("Why this note is being deleted"),
