@@ -107,7 +107,9 @@ export interface Note {
   created_at: string;
   updated_at: string;
   source_conversation: string | null;
+  source_session: string | null;
   superseded_by: string | null;
+  superseded_at: string | null;
   is_global: boolean;
   status: WorkItemStatus | null;
   priority: WorkItemPriority | null;
@@ -120,6 +122,8 @@ export interface NoteSummary {
   content: string;
   confidence: ConfidenceLevel;
   created_at: string;
+  updated_at: string;
+  source_session: string | null;
   keywords: string[];
   tags: string | null;
   status: WorkItemStatus | null;

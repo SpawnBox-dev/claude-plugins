@@ -10,6 +10,8 @@ function toSummary(row: any): NoteSummary {
     content: row.content,
     confidence: row.confidence,
     created_at: row.created_at,
+    updated_at: row.updated_at,
+    source_session: row.source_session ?? null,
     keywords: row.keywords
       ? row.keywords
           .split(",")
@@ -63,7 +65,7 @@ export function composeBriefing(
   const openThreads = include("open_threads")
     ? projectDb
         .query(
-          `SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, due_date
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
            ORDER BY updated_at DESC
@@ -77,7 +79,7 @@ export function composeBriefing(
   const recentDecisions = include("decisions")
     ? projectDb
         .query(
-          `SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, due_date
            FROM notes
            WHERE type = 'decision'
            ORDER BY created_at DESC
@@ -205,7 +207,7 @@ export function composeBriefing(
   if (include("work_items")) {
     activeWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
@@ -218,7 +220,7 @@ export function composeBriefing(
 
     blockedWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY updated_at DESC
@@ -230,7 +232,7 @@ export function composeBriefing(
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     recentlyCompleted = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
          ORDER BY updated_at DESC
@@ -243,7 +245,7 @@ export function composeBriefing(
     const todayStr = new Date().toISOString().slice(0, 10);
     overdueWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
          FROM notes
          WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
          AND status != 'done' AND resolved = 0
@@ -303,7 +305,7 @@ export function composeContextPackage(
   ): NoteSummary[] {
     return db
       .query(
-        `SELECT id, type, content, confidence, created_at, keywords, tags, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, due_date
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY

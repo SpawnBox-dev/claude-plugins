@@ -225,3 +225,35 @@ describe("recall tool", () => {
     expect(noteRow.signal).toBe(1);
   });
 });
+
+describe("R1.2: NoteSummary carries updated_at and source_session", () => {
+  test("recall search result includes updated_at", async () => {
+    const projectDb = makeDb("project");
+    const globalDb = makeDb("global");
+    const ts = "2026-04-23T12:00:00Z";
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, source_session)
+       VALUES ('n-1', 'decision', 'event-driven architecture for backend', 'event,driven,architecture,backend', 'test', 'medium', 0, ?, ?, 'session-abc')`,
+      [ts, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { query: "architecture" });
+    expect(result.results.length).toBeGreaterThan(0);
+    expect(result.results[0].updated_at).toBe(ts);
+    expect(result.results[0].source_session).toBe("session-abc");
+  });
+
+  test("recall detail includes updated_at and source_session", async () => {
+    const projectDb = makeDb("project");
+    const globalDb = makeDb("global");
+    const ts = "2026-04-23T12:00:00Z";
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at, source_session)
+       VALUES ('n-2', 'decision', 'c', 'k', 't', 'medium', 0, ?, ?, 'session-xyz')`,
+      [ts, ts]
+    );
+    const result = await handleRecall(projectDb, globalDb, { id: "n-2" });
+    expect(result.detail).toBeTruthy();
+    expect(result.detail!.updated_at).toBe(ts);
+    expect(result.detail!.source_session).toBe("session-xyz");
+  });
+});

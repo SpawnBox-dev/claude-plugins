@@ -28,7 +28,8 @@ function tryFetchNote(db: Database, id: string): Note | null {
   const row = db
     .query(
       `SELECT id, type, content, keywords, confidence, created_at, updated_at,
-              source AS source_conversation, context, resolved
+              source AS source_conversation, source_session, context, resolved,
+              superseded_by, superseded_at, status, priority, due_date
        FROM notes WHERE id = ?`
     )
     .get(id) as any | null;
@@ -49,7 +50,9 @@ function tryFetchNote(db: Database, id: string): Note | null {
     created_at: row.created_at,
     updated_at: row.updated_at,
     source_conversation: row.source_conversation ?? null,
-    superseded_by: null,
+    source_session: row.source_session ?? null,
+    superseded_by: row.superseded_by ?? null,
+    superseded_at: row.superseded_at ?? null,
     is_global: false,
     status: row.status ?? null,
     priority: row.priority ?? null,
@@ -71,7 +74,8 @@ function fetchLinkedNotes(
     const rows = db
       .query(
         `SELECT l.relationship, l.from_note_id, l.to_note_id,
-                n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags
+                n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
+                n.source_session, n.keywords, n.tags, n.status, n.priority, n.due_date
          FROM links l
          JOIN notes n ON (
            CASE WHEN l.from_note_id = ? THEN l.to_note_id ELSE l.from_note_id END = n.id
@@ -95,6 +99,8 @@ function fetchLinkedNotes(
             : r.content,
           confidence: r.confidence,
           created_at: r.created_at,
+          updated_at: r.updated_at,
+          source_session: r.source_session ?? null,
           keywords: r.keywords
             ? r.keywords
                 .split(",")

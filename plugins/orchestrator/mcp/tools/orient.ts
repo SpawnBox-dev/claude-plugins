@@ -24,7 +24,7 @@ function fetchLatestCheckpoint(db: Database): Note | null {
     const row = db
       .query(
         `SELECT id, type, content, keywords, confidence, created_at, updated_at,
-                source AS source_conversation
+                source AS source_conversation, source_session, superseded_by, superseded_at
          FROM notes
          WHERE type = 'checkpoint'
          ORDER BY created_at DESC
@@ -48,7 +48,9 @@ function fetchLatestCheckpoint(db: Database): Note | null {
       created_at: row.created_at,
       updated_at: row.updated_at,
       source_conversation: row.source_conversation ?? null,
-      superseded_by: null,
+      source_session: row.source_session ?? null,
+      superseded_by: row.superseded_by ?? null,
+      superseded_at: row.superseded_at ?? null,
       is_global: false,
       status: null,
       priority: null,

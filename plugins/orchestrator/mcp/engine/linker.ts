@@ -83,7 +83,7 @@ export function findRelatedNotes(
   try {
     const rows = db
       .query(
-        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.keywords, n.tags,
+        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.keywords, n.tags,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
@@ -97,6 +97,8 @@ export function findRelatedNotes(
       content: string;
       confidence: string;
       created_at: string;
+      updated_at: string;
+      source_session: string | null;
       keywords: string;
       tags: string | null;
       rank: number;
@@ -108,6 +110,8 @@ export function findRelatedNotes(
       content: r.content,
       confidence: r.confidence as NoteSummary["confidence"],
       created_at: r.created_at,
+      updated_at: r.updated_at,
+      source_session: r.source_session,
       keywords: r.keywords ? r.keywords.split(",").map((k) => k.trim()) : [],
       tags: r.tags ?? null,
       status: (r as any).status ?? null,
@@ -181,7 +185,7 @@ export async function findRelatedNotesHybrid(
     if (!noteById.has(rrf.id)) {
       const row = db
         .query(
-          `SELECT id, type, content, confidence, created_at, keywords, tags, status, priority, due_date
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date
            FROM notes WHERE id = ?`
         )
         .get(rrf.id) as {
@@ -190,6 +194,8 @@ export async function findRelatedNotesHybrid(
         content: string;
         confidence: string;
         created_at: string;
+        updated_at: string;
+        source_session: string | null;
         keywords: string;
         tags: string | null;
         status: string | null;
@@ -204,6 +210,8 @@ export async function findRelatedNotesHybrid(
           content: row.content,
           confidence: row.confidence as NoteSummary["confidence"],
           created_at: row.created_at,
+          updated_at: row.updated_at,
+          source_session: row.source_session,
           keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
           tags: row.tags ?? null,
           status: row.status as NoteSummary["status"] ?? null,
