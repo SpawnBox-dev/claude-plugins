@@ -20477,9 +20477,9 @@ function confidenceMultiplier(confidence) {
 // mcp/engine/linker.ts
 function inferRelationship(fromType, toType) {
   if (fromType === "decision" && toType === "open_thread")
-    return "supersedes";
+    return "related_to";
   if (fromType === "open_thread" && toType === "decision")
-    return "supersedes";
+    return "related_to";
   if (fromType === "quality_gate" || toType === "quality_gate")
     return "blocks";
   if (fromType === "dependency" || toType === "dependency")
@@ -21079,12 +21079,14 @@ function fetchSupersedeChain(db, noteId) {
             n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
      FROM links l JOIN notes n ON l.to_note_id = n.id
      WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
-     ORDER BY l.created_at ASC`).all(noteId);
+       AND n.superseded_by = ?
+     ORDER BY l.created_at ASC`).all(noteId, noteId);
   const supersededByRows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
             n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
      FROM links l JOIN notes n ON l.from_note_id = n.id
      WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
-     ORDER BY l.created_at ASC`).all(noteId);
+       AND EXISTS (SELECT 1 FROM notes curr WHERE curr.id = ? AND curr.superseded_by = n.id)
+     ORDER BY l.created_at ASC`).all(noteId, noteId);
   const rowToSummary = (r) => ({
     id: r.id,
     type: r.type,

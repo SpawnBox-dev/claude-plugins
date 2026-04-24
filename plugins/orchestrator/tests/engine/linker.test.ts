@@ -108,7 +108,10 @@ describe("linker", () => {
   });
 
   test("infers relationship types based on note types", () => {
-    expect(inferRelationship("decision", "open_thread")).toBe("supersedes");
+    // R3.7: decision <-> open_thread no longer infers supersedes (too strong
+    // a claim from keyword overlap alone). handleSupersede is the only valid
+    // path for supersedes edges; auto-linker defaults to related_to here.
+    expect(inferRelationship("decision", "open_thread")).toBe("related_to");
     expect(inferRelationship("quality_gate", "convention")).toBe("blocks");
     expect(inferRelationship("dependency", "architecture")).toBe("depends_on");
     expect(inferRelationship("anti_pattern", "convention")).toBe("conflicts_with");
@@ -137,8 +140,9 @@ describe("linker", () => {
     ]);
 
     expect(links.length).toBeGreaterThanOrEqual(1);
-    // Decision -> open_thread should be "supersedes"
-    expect(links[0].relationship).toBe("supersedes");
+    // R3.7: decision -> open_thread is now "related_to" (was "supersedes",
+    // which produced false-positive supersede chains on keyword overlap).
+    expect(links[0].relationship).toBe("related_to");
   });
 
   test("does not self-link", () => {
@@ -278,5 +282,15 @@ describe("linker", () => {
       10
     );
     expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("R3.7: inferRelationship no longer produces supersedes edges", () => {
+  test("decision -> open_thread returns related_to (not supersedes)", () => {
+    expect(inferRelationship("decision", "open_thread")).toBe("related_to");
+  });
+
+  test("open_thread -> decision returns related_to (not supersedes)", () => {
+    expect(inferRelationship("open_thread", "decision")).toBe("related_to");
   });
 });

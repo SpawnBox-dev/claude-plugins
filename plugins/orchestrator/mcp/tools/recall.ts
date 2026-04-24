@@ -92,22 +92,33 @@ function fetchRevisions(db: Database, noteId: string): NoteRevision[] {
 }
 
 function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
-  // Outgoing supersedes edges: notes THIS note supersedes
+  // R3.7: filter by the notes.superseded_by column in both directions so that
+  // historical auto-linker supersedes edges (which only exist in the links
+  // table, with no matching column update) don't pollute the chain render.
+  // handleSupersede is the only path that writes BOTH the link AND the column
+  // atomically; any edge where those don't agree is a stale false positive.
+
+  // Outgoing supersedes edges: notes THIS note supersedes. The target note's
+  // superseded_by column must point back at us for the edge to be valid.
   const supersedesRows = db.query(
     `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
             n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
      FROM links l JOIN notes n ON l.to_note_id = n.id
      WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
+       AND n.superseded_by = ?
      ORDER BY l.created_at ASC`
-  ).all(noteId) as any[];
+  ).all(noteId, noteId) as any[];
 
+  // Incoming supersedes edges: notes that supersede THIS. The current note's
+  // superseded_by column must point at the from-node of each edge.
   const supersededByRows = db.query(
     `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
             n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
      FROM links l JOIN notes n ON l.from_note_id = n.id
      WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
+       AND EXISTS (SELECT 1 FROM notes curr WHERE curr.id = ? AND curr.superseded_by = n.id)
      ORDER BY l.created_at ASC`
-  ).all(noteId) as any[];
+  ).all(noteId, noteId) as any[];
 
   const rowToSummary = (r: any): NoteSummary => ({
     id: r.id,

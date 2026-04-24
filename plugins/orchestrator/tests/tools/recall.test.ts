@@ -510,3 +510,45 @@ describe("R3.1: ranked link expansion", () => {
     expect(result.detail!.total_link_count).toBe(30);
   });
 });
+
+describe("R3.7: fetchSupersedeChain filters auto-linker false positives", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  test("auto-linker-inserted supersedes edge is NOT rendered when column doesn't match", async () => {
+    const target = await handleRemember(projectDb, globalDb, { content: "target decision", type: "decision" });
+    // Simulate an auto-linker false positive: insert a supersedes edge WITHOUT
+    // updating notes.superseded_by on the target. Pre-R3.7 this produced a
+    // bogus "Superseded by" entry in the chain; R3.7 filters it out.
+    const ts = new Date().toISOString();
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, created_at, updated_at)
+       VALUES ('fake-pred', 'open_thread', 'unrelated thread', 'x', '', 'medium', 0, ?, ?)`,
+      [ts, ts]
+    );
+    projectDb.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES ('fake-edge', 'fake-pred', ?, 'supersedes', 'weak', ?)`,
+      [target.note_id!, ts]
+    );
+    // target.superseded_by is still NULL - the edge is bogus per R3.7 filter.
+
+    const result = await handleRecall(projectDb, globalDb, { id: target.note_id! });
+    expect(result.detail!.supersede_chain!.superseded_by).toHaveLength(0);
+  });
+
+  test("tool-created supersedes edge IS rendered (column matches)", async () => {
+    const old = await handleRemember(projectDb, globalDb, { content: "old decision", type: "decision" });
+    const current = await handleRemember(projectDb, globalDb, { content: "new decision", type: "decision" });
+    await handleSupersede(projectDb, globalDb, { old_id: old.note_id!, new_id: current.note_id! });
+
+    const result = await handleRecall(projectDb, globalDb, { id: old.note_id! });
+    const supersededByIds = result.detail!.supersede_chain!.superseded_by.map((n: any) => n.id);
+    expect(supersededByIds).toContain(current.note_id!);
+  });
+});

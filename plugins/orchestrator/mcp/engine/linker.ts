@@ -17,9 +17,11 @@ export function inferRelationship(
   fromType: NoteType,
   toType: NoteType
 ): RelationshipType {
-  // Decision supersedes open_thread (the thread was resolved by a decision)
-  if (fromType === "decision" && toType === "open_thread") return "supersedes";
-  if (fromType === "open_thread" && toType === "decision") return "supersedes";
+  // Decision and open_thread are often topically adjacent but supersede is too strong
+  // a claim without explicit user intent. handleSupersede is the ONLY valid path for
+  // supersedes edges; auto-linker defaults to related_to.
+  if (fromType === "decision" && toType === "open_thread") return "related_to";
+  if (fromType === "open_thread" && toType === "decision") return "related_to";
 
   // Quality gates block: they must be passed before proceeding
   if (fromType === "quality_gate" || toType === "quality_gate") return "blocks";

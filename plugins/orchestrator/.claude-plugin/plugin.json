@@ -1,6 +1,6 @@
 {
   "name": "orchestrator",
   "description": "A persistent product co-pilot that learns your project and you. Maintains cross-session knowledge with proactive discovery skills.",
-  "version": "0.23.6",
+  "version": "0.23.7",
   "keywords": ["orchestrator", "memory", "agent", "context", "knowledge"]
 }
