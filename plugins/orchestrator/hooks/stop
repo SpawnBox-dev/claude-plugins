@@ -2,8 +2,13 @@
 set -euo pipefail
 
 # Fires before the main session exits. Blocks once per session to prompt
-# knowledge capture - session context vanishes on exit so anything not
-# captured via note/save_progress/close_thread is lost permanently.
+# knowledge capture AND maintenance - session context vanishes on exit so
+# anything not captured via note/save_progress/update_note/close_thread/
+# supersede_note is lost permanently.
+#
+# R3.4: Maintenance verbs are equal-priority to capture. Also injects a
+# session-activity nudge when sqlite3 is available and the session surfaced
+# >=3 fresh notes via lookup (see session_log table, delivery_type='fresh').
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/_lib.sh"
@@ -14,9 +19,106 @@ STATE_DIR=$(get_state_dir)
 
 MARKER="$STATE_DIR/stop-$SID"
 
+# Attempt to build a session-activity nudge block. Requires sqlite3 on PATH,
+# a project DB at $CLAUDE_PROJECT_DIR/.orchestrator/project.db, and >=3 fresh
+# notes in session_log for this SID. Best-effort: any failure collapses to an
+# empty string and the prompt degrades gracefully to the static maintenance
+# text. Never errors the hook out.
+build_session_nudge() {
+  local nudge=""
+  local db_path=""
+  local fresh_count=0
+
+  # Short-circuit if no sqlite3 available - degrade gracefully.
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # Resolve project DB path using the same precedence as mcp/db/connection.ts:
+  # ORCHESTRATOR_PROJECT_ROOT > CLAUDE_PROJECT_DIR > pwd.
+  local root="${ORCHESTRATOR_PROJECT_ROOT:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+  db_path="$root/.orchestrator/project.db"
+
+  if [ ! -f "$db_path" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # Guard on unknown session id - we can't query meaningfully without it.
+  if [ "$SID" = "unknown" ] || [ -z "$SID" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # Count distinct fresh-surfaced notes this session. Read-only open so
+  # concurrent writers from the MCP server never block us. If sqlite3 fails
+  # (locked, malformed, etc.), count stays 0 and we return empty.
+  fresh_count=$(sqlite3 -readonly "$db_path" \
+    "SELECT COUNT(DISTINCT note_id) FROM session_log WHERE session_id = '$SID' AND delivery_type = 'fresh';" \
+    2>/dev/null || printf '0')
+
+  # Strip any whitespace/newlines from the count.
+  fresh_count=$(printf '%s' "$fresh_count" | tr -d '[:space:]')
+  fresh_count=${fresh_count:-0}
+
+  # Gate: only nudge when the session actually surfaced knowledge (>=3 notes).
+  # Ultra-short sessions don't get nagged.
+  if [ "$fresh_count" -lt 3 ] 2>/dev/null; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # Build a concrete list of up to 5 notes the session surfaced. ORDER BY
+  # n.updated_at ASC so the stalest ones bubble up (most likely to need
+  # maintenance). Truncate content to ~80 chars inline via substr().
+  # Tabs separate columns; | isn't safe (it appears in note content).
+  local rows=""
+  rows=$(sqlite3 -readonly -separator $'\t' "$db_path" \
+    "SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 80)
+     FROM session_log sl
+     JOIN notes n ON sl.note_id = n.id
+     WHERE sl.session_id = '$SID'
+       AND sl.delivery_type = 'fresh'
+     GROUP BY n.id
+     ORDER BY n.updated_at ASC
+     LIMIT 5;" 2>/dev/null | tr -d '\r' || printf '')
+
+  if [ -z "$rows" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # Format rows into a bulleted list. Short IDs (first 8 chars) make the
+  # list scannable; full ID is still usable via lookup({id:"..."}).
+  local formatted=""
+  while IFS=$'\t' read -r nid ntype ncontent; do
+    [ -z "$nid" ] && continue
+    local short_id="${nid:0:8}"
+    formatted+="\n- **${short_id}** [${ntype}] ${ncontent}"
+  done <<< "$rows"
+
+  if [ -z "$formatted" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  local remaining=$((fresh_count - 5))
+  local more_hint=""
+  if [ "$remaining" -gt 0 ] 2>/dev/null; then
+    more_hint="\n...and ${remaining} more - find them with lookup({session_id:\"${SID}\"}) or by tag."
+  fi
+
+  nudge="\n\n### Notes this session surfaced that you may not have maintained (${fresh_count} total):${formatted}${more_hint}\n\nFor each: was it still correct? If not, call update_note / supersede_note. Is the thread/question settled? Call close_thread. Future sessions read these - stale notes actively mislead."
+  printf '%s' "$nudge"
+}
+
 if [ ! -f "$MARKER" ]; then
   touch "$MARKER" 2>/dev/null || true
-  REASON="Before ending this session, complete orchestrator housekeeping:\n\n1. Call \`save_progress\` with a summary of work done, open questions, and next steps.\n\n2. Scan your work for knowledge that would be lost. Call \`note\` for anything that matches:\n\n- A decision you made or recommended (type=decision) - what you chose, what you rejected, why\n- A pattern or convention you followed or established (type=convention)\n- A gotcha, footgun, or thing that broke unexpectedly (type=anti_pattern)\n- An architectural insight about how systems connect (type=architecture)\n- A risk or limitation you discovered (type=risk)\n- Something that was harder than expected or took multiple attempts (type=insight) - what made it hard, what finally worked\n- User behavior or preferences you observed (type=user_pattern, scope=global) - communication style, priorities, how they think\n- Work you completed (call update_work_item status=done if a tracked item)\n\n3. If any open threads were resolved, call \`close_thread\` on them.\n\n4. If this was a long or difficult session, consider running \`retro\` to decay stale signals and consolidate knowledge.\n\nIf nothing applies for step 2, skip it. But most sessions produce at least one decision, gotcha, or user insight worth preserving.\n\nDo this quickly, then you can stop."
+
+  NUDGE=$(build_session_nudge 2>/dev/null || printf '')
+
+  REASON="Before ending this session, complete orchestrator housekeeping. Maintenance verbs are equal-priority to capture - a session that only captures grows the corpus; a session that also maintains makes the knowledge base more accurate and faster to traverse over time.\n\n**1. Curate existing knowledge (update_note / close_thread / supersede_note).** For every lookup result you used this session, ask:\n- Was it still correct? If not, call \`update_note\` (minor correction) or \`supersede_note\` (new note replaces old).\n- Is a tracked thread / commitment / work_item now settled? Call \`close_thread\`.\n- Did you correct a note verbally but never update the note itself? Fix it now - future sessions will read the stale version.\n\n**2. Capture new knowledge (note).** Scan your work for anything that would be lost:\n- A decision you made or recommended (type=decision) - what you chose, what you rejected, why\n- A pattern or convention (type=convention) or anti-pattern / gotcha (type=anti_pattern)\n- An architectural insight (type=architecture), risk (type=risk), or hard-won insight (type=insight)\n- User behavior or preferences (type=user_pattern, scope=global)\n- Work completed on a tracked item (call \`update_work_item\` status=done)\n\n**3. Save progress.** Call \`save_progress\` with a summary of work done, open questions, and next steps.\n\n**4. Optional: \`retro\`.** If this was a long or difficult session, run retro to decay stale signals and consolidate.${NUDGE}\n\nThe orchestrator is a living knowledge base, not an append-only log. Do this quickly, then you can stop."
   ESCAPED=$(escape_for_json "$REASON")
   printf '{"decision":"block","reason":"%s"}' "$ESCAPED"
 else

@@ -407,6 +407,147 @@ describe("hooks", () => {
       );
       expect(stdout.trim()).toBe("");
     });
+
+    test("R3.4: prompt advertises maintenance verbs with equal priority to capture", () => {
+      const { json } = runHook(
+        "stop",
+        '{"session_id":"stop-r34-verbs"}',
+        stateDir
+      );
+      expect(json).not.toBeNull();
+      expect(json.reason).toContain("update_note");
+      expect(json.reason).toContain("close_thread");
+      expect(json.reason).toContain("supersede_note");
+      // Explicit equality framing - maintenance is not an afterthought.
+      expect(json.reason).toContain("equal-priority");
+      // "Curate" framing appears so existing knowledge is actively treated.
+      expect(json.reason.toLowerCase()).toContain("curate");
+    });
+
+    test("R3.4: still prompts capture verbs alongside maintenance", () => {
+      const { json } = runHook(
+        "stop",
+        '{"session_id":"stop-r34-capture"}',
+        stateDir
+      );
+      expect(json.reason).toContain("note");
+      expect(json.reason).toContain("save_progress");
+    });
+
+    test("R3.4: no session-activity nudge when no project DB is present", () => {
+      // stateDir here has no .orchestrator/project.db -> nudge degrades to empty.
+      const { json } = runHook(
+        "stop",
+        '{"session_id":"stop-r34-no-db"}',
+        stateDir
+      );
+      expect(json).not.toBeNull();
+      expect(json.reason).not.toContain(
+        "Notes this session surfaced that you may not have maintained"
+      );
+    });
+
+    test("R3.4: injects session-activity nudge when >=3 fresh notes exist", () => {
+      // Seed a minimal project DB with session_log entries.
+      const dbDir = join(stateDir, ".orchestrator");
+      mkdirSync(dbDir, { recursive: true });
+      const dbPath = join(dbDir, "project.db");
+
+      // Use bun:sqlite directly so we don't depend on the CLI's presence in tests.
+      // The hook itself uses the sqlite3 CLI - tests only need the DB to exist.
+      const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+      const db = new Database(dbPath);
+      db.run(
+        `CREATE TABLE notes (id TEXT PRIMARY KEY, type TEXT, content TEXT, updated_at TEXT)`
+      );
+      db.run(
+        `CREATE TABLE session_log (id TEXT, session_id TEXT, note_id TEXT, surfaced_at TEXT, turn_number INTEGER, delivery_type TEXT)`
+      );
+      const sid = "stop-r34-nudge";
+      const notes = [
+        ["aaaaaaaa-note-1", "decision", "R3.4 test note one content here for preview", "2026-04-01"],
+        ["bbbbbbbb-note-2", "anti_pattern", "R3.4 test note two about gotchas", "2026-04-02"],
+        ["cccccccc-note-3", "convention", "R3.4 test note three on conventions", "2026-04-03"],
+      ];
+      for (const [id, type, content, updated] of notes) {
+        db.run(`INSERT INTO notes VALUES (?, ?, ?, ?)`, [id, type, content, updated]);
+      }
+      db.run(
+        `INSERT INTO session_log VALUES ('1', ?, 'aaaaaaaa-note-1', '2026-04-23T10:00:00Z', 1, 'fresh')`,
+        [sid]
+      );
+      db.run(
+        `INSERT INTO session_log VALUES ('2', ?, 'bbbbbbbb-note-2', '2026-04-23T10:01:00Z', 2, 'fresh')`,
+        [sid]
+      );
+      db.run(
+        `INSERT INTO session_log VALUES ('3', ?, 'cccccccc-note-3', '2026-04-23T10:02:00Z', 3, 'fresh')`,
+        [sid]
+      );
+      // A refresh entry - should NOT make the fresh-count tick.
+      db.run(
+        `INSERT INTO session_log VALUES ('4', ?, 'aaaaaaaa-note-1', '2026-04-23T10:03:00Z', 4, 'refresh')`,
+        [sid]
+      );
+      db.close();
+
+      const { json } = runHook("stop", `{"session_id":"${sid}"}`, stateDir);
+      expect(json).not.toBeNull();
+      // The concrete nudge header MUST appear with the correct count.
+      expect(json.reason).toContain(
+        "Notes this session surfaced that you may not have maintained"
+      );
+      expect(json.reason).toContain("(3 total)");
+      // Short IDs and types appear in the list.
+      expect(json.reason).toContain("aaaaaaaa");
+      expect(json.reason).toContain("bbbbbbbb");
+      expect(json.reason).toContain("cccccccc");
+      expect(json.reason).toContain("[decision]");
+      expect(json.reason).toContain("[anti_pattern]");
+      expect(json.reason).toContain("[convention]");
+      // Nudge-level maintenance prompt.
+      expect(json.reason).toContain("update_note");
+      expect(json.reason).toContain("close_thread");
+    });
+
+    test("R3.4: does NOT inject nudge when fewer than 3 fresh notes surfaced", () => {
+      const dbDir = join(stateDir, ".orchestrator");
+      mkdirSync(dbDir, { recursive: true });
+      const dbPath = join(dbDir, "project.db");
+
+      const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+      const db = new Database(dbPath);
+      db.run(
+        `CREATE TABLE notes (id TEXT PRIMARY KEY, type TEXT, content TEXT, updated_at TEXT)`
+      );
+      db.run(
+        `CREATE TABLE session_log (id TEXT, session_id TEXT, note_id TEXT, surfaced_at TEXT, turn_number INTEGER, delivery_type TEXT)`
+      );
+      const sid = "stop-r34-below-gate";
+      db.run(
+        `INSERT INTO notes VALUES ('aaaaaaaa', 'decision', 'only two notes', '2026-04-01')`
+      );
+      db.run(
+        `INSERT INTO notes VALUES ('bbbbbbbb', 'convention', 'still below gate', '2026-04-02')`
+      );
+      db.run(
+        `INSERT INTO session_log VALUES ('1', ?, 'aaaaaaaa', '2026-04-23T10:00:00Z', 1, 'fresh')`,
+        [sid]
+      );
+      db.run(
+        `INSERT INTO session_log VALUES ('2', ?, 'bbbbbbbb', '2026-04-23T10:01:00Z', 2, 'fresh')`,
+        [sid]
+      );
+      db.close();
+
+      const { json } = runHook("stop", `{"session_id":"${sid}"}`, stateDir);
+      expect(json).not.toBeNull();
+      expect(json.reason).not.toContain(
+        "Notes this session surfaced that you may not have maintained"
+      );
+      // But the static maintenance-verb prompt still fires.
+      expect(json.reason).toContain("update_note");
+    });
   });
 
   describe("subagent-stop", () => {
@@ -429,6 +570,19 @@ describe("hooks", () => {
         stateDir
       );
       expect(stdout.trim()).toBe("");
+    });
+
+    test("R3.4: subagent prompt advertises maintenance verbs equal-priority to capture", () => {
+      const { json } = runHook(
+        "subagent-stop",
+        '{"session_id":"subs-r34"}',
+        stateDir
+      );
+      expect(json).not.toBeNull();
+      expect(json.reason).toContain("update_note");
+      expect(json.reason).toContain("close_thread");
+      expect(json.reason).toContain("supersede_note");
+      expect(json.reason).toContain("equal-priority");
     });
   });
 
