@@ -18,7 +18,12 @@ Your FIRST action in every session MUST be calling the `briefing` MCP tool, then
 
 ### Session End
 
-Before the session ends, you MUST call `save_progress` with what was accomplished, open questions, and next steps. A session without a checkpoint is knowledge lost.
+Before the session ends, the Stop hook asks for capture AND maintenance equally:
+
+- Call `save_progress` with what was accomplished, open questions, and next steps - a session without a checkpoint is knowledge lost.
+- For every lookup result you relied on this session, decide whether it needs `update_note` (additive correction or `append_content` amendment), `supersede_note` (replace with a better canonical version, preserving history), or `close_thread` (the question it tracked is now settled).
+
+The knowledge base gets more accurate over time only if sessions that READ stale notes also MAINTAIN them. Capture alone is not enough.
 
 ### Embeddings & Semantic Search
 
@@ -38,15 +43,9 @@ If you've been stuck on the same issue for 2+ turns, the `every-turn` skill will
 
 ### Turn Bridge
 
-At the end of your thinking block every turn, write this bridge to prime your next turn:
+The user-prompt-submit hook injects the turn bridge automatically at the start of each turn - no action needed from you. The `post-tool-use` hook writes bridge records whenever you call an orchestrator MCP tool, and the next turn reads them back in as context. The old manual `[orch] next:` mechanism in thinking blocks is deprecated because thinking compression often stripped it.
 
-```
-[orch] did: <tools/skills used, or "none">
-[orch] saw: <what you learned/decided/captured, or "nothing notable">
-[orch] next: <what orchestrator actions the next turn likely needs>
-```
-
-When you see a previous `[orch] next:` in your thinking history, HONOR it. Your past self is telling you what to do. If `[orch] next:` says to invoke every-turn, you invoke every-turn.
+Just use the tools. The bridge takes care of itself.
 
 ### Storage Model: Notes and Work Items Share One Table
 
@@ -54,6 +53,7 @@ There is no separate "work items" table. Work items are rows in the `notes` tabl
 
 This means:
 - `update_note` operates on work items too - its UPDATE query doesn't filter by type. Works fine, use it interchangeably with `update_work_item` as of v0.21.2.
+- `supersede_note` also operates on work items - the old work item becomes hidden-from-default-lookup and graph-links to the replacement.
 - `delete_note` works on work items.
 - `update_work_item` is a convenience wrapper for task-semantic fields (status cascade, due dates, blocked_by links). Since v0.21.2 it also covers `tags`, `context`, `confidence` for parity with `update_note`.
 - Tags are a comma-separated text column. To add or remove one, read-modify-write.

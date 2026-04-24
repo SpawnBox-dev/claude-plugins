@@ -32,8 +32,9 @@ Fast, deterministic, no subagent overhead. Use for single actions that don't nee
 | `lookup` | Exact-key retrieval ("find note abc123", "the broker convention") |
 | `check_similar` | Quick pre-implementation similarity check |
 | `note` | Single fast capture |
-| `update_note` | Correction or enrichment |
-| `delete_note` | Remove wrong/harmful knowledge |
+| `update_note` | Correction or enrichment. Use `append_content` mode for additive updates (no read-before-write, keywords auto-refresh) |
+| `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new |
+| `delete_note` | Remove wrong/harmful knowledge (last resort - prefer supersede/close) |
 | `update_work_item` | Status/priority change (trivial state machine) |
 | `close_thread` | Resolve a specific thread |
 | `user_profile` | User observation (YOU see the user, not the concierge) |
@@ -49,7 +50,7 @@ For anything involving judgment, synthesis, or multi-step thought, route to the 
 
 **Before acting**: Do I know something about this? Is there a prior decision? A known anti-pattern? A convention? If you're about to touch unfamiliar ground, send the concierge a pre-implementation query FIRST. If you know exactly which note you need, direct `lookup` is fine. If you're starting a new session, `orchestrator:getting-started` first (it calls briefing AND spawns the concierge).
 
-**While acting**: The moment something noteworthy happens - a decision is made, a pattern is discovered, the user corrects you, a preference is stated, a risk is identified - capture it. Single item: direct `note`. Multiple items or needs dedup: concierge batch capture. Don't defer. Context windows are temporary. The knowledge base is permanent.
+**While acting**: The moment something noteworthy happens - a decision is made, a pattern is discovered, the user corrects you, a preference is stated, a risk is identified, an existing note is now wrong or outdated - capture or correct it. Single new item: direct `note`. Multiple items or needs dedup: concierge batch capture. Existing note is now wrong/outdated: direct `update_note` (additive correction) or `supersede_note` (canonical replacement with history preserved). Don't defer. Context windows are temporary. The knowledge base is permanent.
 
 **After acting**: Did you resolve an open thread? Close it. Is this a natural stopping point? Ask the concierge to checkpoint, or call `save_progress` directly. Did you learn something that would save a future session time? Note it. **Scan the every-turn action table. Every time.**
 

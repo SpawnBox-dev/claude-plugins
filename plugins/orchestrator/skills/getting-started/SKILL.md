@@ -57,6 +57,8 @@ Agent(
 
 Save the returned agent_id. Every subsequent concierge call this session should use `SendMessage(to: "<agent_id>", ...)` to resume, NOT a new Agent call.
 
+**Note:** name the deliverable explicitly in the prompt (the artifact shape, the report format, the question you're asking). The concierge distinguishes Shape A (structured artifact - return what was asked) vs Shape B (batch capture - synthesize and save). Ambiguous asks default to Shape B. See `skills/consult-concierge/SKILL.md` for full framing.
+
 ## Step 3 — Route judgment-heavy work through the concierge
 
 From this point on, default to the concierge for anything judgmental:

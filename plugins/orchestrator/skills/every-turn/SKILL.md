@@ -39,8 +39,9 @@ You have two ways to talk to the orchestrator:
 | Quick fact-check ("was X decided?") | **Direct `lookup`** | Single-note answer |
 | Save 1 note about 1 thing | **Direct `note`** | Fast, no batching needed |
 | Save 3+ things at end of turn | **Concierge** | Type-picking, dedup, consolidation |
-| Update a note's content | **Direct `update_note`** | Specific action |
-| Delete a note (wrong/harmful) | **Direct `delete_note`** | Destructive, main-agent judgment |
+| Update a note's content | **Direct `update_note`** | Specific action. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh |
+| Replace outdated note with new version | **Direct `supersede_note`** | Preserves history, graph-links old->new, hides old from default lookup |
+| Delete a note (genuinely wrong/harmful - last resort) | **Direct `delete_note`** | Destructive, main-agent judgment. Prefer `supersede_note` or `close_thread` when the note was right-at-the-time or now settled |
 | Create a new work item | **Concierge** | Dup check + parent linkage + priority advice |
 | Bump work item status to done | **Direct `update_work_item`** | Trivial state machine |
 | Break down complex work | **Concierge** | Judgment-heavy decomposition |
@@ -74,8 +75,8 @@ Scan what just happened. Did any of these occur?
 | You're blocked on something | → `update_work_item` status=blocked, blocked_by=ID (direct) |
 | You identified new work | → Concierge dup-check, then create (concierge does both) |
 | Complex task needs breakdown | → Concierge `breakdown` with existing-item context |
-| Knowledge evolved or needs correction | → `update_note` direct |
-| A note is wrong or harmful | → `delete_note` direct |
+| Knowledge evolved or needs correction | → `update_note` direct (use `append_content` mode for lightweight timestamped additions) OR `supersede_note` if the correction is substantial enough that the new content should be the canonical one going forward |
+| A note is wrong or harmful | → Prefer `supersede_note` (replace with corrected version, preserves history) or `close_thread` (question was right-at-the-time, now settled). `delete_note` only as last resort |
 | You made an architectural or design choice | → Concierge: "I just decided X. Check for contradictions and save it with the right type." |
 | You discovered a pattern, convention, or gotcha | → Single item: direct `note`. Multiple: concierge batch capture. |
 | Something failed or you pivoted | → Concierge: "Here's what failed and what worked. Save the lessons." |
@@ -143,12 +144,13 @@ After responding, ask yourself: **Did I skip the concierge when judgment was nee
 
 | Primitive | When to call directly |
 |-----------|----------------------|
-| `briefing` | Session start only (getting-started handles it) |
+| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session |
 | `note` | Single fast capture |
-| `lookup` | Exact-key retrieval |
+| `lookup` | Exact-key retrieval. Params worth knowing: `link_limit` (default 20, cap on rendered linked notes with tail message), `include_superseded` (surface replaced versions), `include_history` (walk the revision chain R2 captured before each edit) |
 | `check_similar` | Quick similarity check |
-| `update_note` | Correction/enrichment |
-| `delete_note` | Remove wrong/harmful knowledge |
+| `update_note` | Correction/enrichment. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh, each change snapshots a prior revision |
+| `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new, hides old from default lookup |
+| `delete_note` | Remove genuinely wrong/harmful knowledge. Last resort - prefer `supersede_note` or `close_thread` |
 | `update_work_item` | Status/priority change |
 | `close_thread` | Resolve specific thread |
 | `user_profile` | User observation (you do this, not concierge) |

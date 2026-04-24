@@ -48,14 +48,15 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 |------|---------|
 | `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings |
 | `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks |
-| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking |
+| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, and `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes |
 | `plan` | Curated context package for tasks and subagent hydration |
 | `check_similar` | Find prior art before implementing - semantic similarity against decisions/conventions/anti-patterns |
 | `system_status` | Health check - note counts, embedding coverage, sidecar status, active sessions |
 | `install_embeddings` | First-run setup - detect/install Python and uv dependencies for embedding support |
 | `save_progress` | Checkpoint for next session - what was done, open questions, next steps |
 | `close_thread` | Resolve an open thread with cascade |
-| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change |
+| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change. Supports `append_content` mode for lightweight timestamped additions (no read-before-write). Auto-snapshots a revision (R2) before any content/context/tags/confidence change |
+| `supersede_note` | Replace an old note with a new one (pass `old_id` plus either `new_id` or `new_content`+`new_type`); preserves history. Hidden from default lookup; graph-linked for traceability |
 | `delete_note` | Remove wrong/outdated knowledge |
 | `user_profile` | View/set/remove structured user observations by dimension |
 | `create_work_item` | Track a concrete task with priority and optional due date |
@@ -93,11 +94,11 @@ An Opus/Sonnet subagent (`agents/memory-concierge.md`) that curates knowledge re
 
 1. **Session start** - A hook fires automatically, calling `briefing` to produce a briefing. If embeddings are inactive, the briefing includes setup guidance.
 
-2. **During work** - The `orchestrating` skill guides agents to `lookup` (simple queries) or `consult-concierge` (complex queries) before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. `check_similar` catches prior art before implementing.
+2. **During work** - The `orchestrating` skill guides agents to `lookup` (simple queries) or `consult-concierge` (complex queries) before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. `check_similar` catches prior art before implementing. Lookup ranks linked notes by a composite of link strength, signal, and recency, capped at `link_limit` (default 20) with a tail message so umbrella notes don't blow out the response.
 
 3. **Session tracking** - Every `lookup` with a `session_id` logs which notes were surfaced, enabling dedup annotations (`[already sent N turn(s) ago]`) and cross-session awareness.
 
-4. **Session end** - The Stop hook prompts for `save_progress` and knowledge capture. Notes are classified by type with specific guidance (decisions, conventions, anti-patterns, user preferences).
+4. **Session end** - The Stop hook pushes maintenance verbs (`update_note`, `close_thread`, `supersede_note`) with equal priority to capture - not just `save_progress` and new notes, but correction and curation of notes the session actually relied on. Notes are classified by type with specific guidance (decisions, conventions, anti-patterns, user preferences).
 
 5. **Maintenance** - `retro` runs periodically to consolidate duplicates, decay stale confidence, and identify gaps.
 

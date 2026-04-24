@@ -34,6 +34,15 @@ SendMessage(
 
 **Default model: Sonnet.** Only use Opus when the concierge explicitly says to escalate (genuine contradictions, complex cross-domain synthesis).
 
+## Framing requests: Shape A vs Shape B
+
+The concierge (agents/memory-concierge.md) recognizes two request shapes:
+
+- **Shape A (structured artifact)**: caller asks a specific question or requests a specific output shape ("read X and report on Y with sections A/B/C", "find all work items tagged foo", "investigate how Z works"). Concierge does the investigation and returns exactly the requested artifact. Most common.
+- **Shape B (batch capture / session wrap)**: caller explicitly asks for synthesis + capture ("wrap up the session and save notes", "batch-capture what I've learned"). Concierge scans session activity, writes notes via note/update_note/supersede_note/close_thread, summarizes what was captured.
+
+When spawning or resuming: name the deliverable explicitly. Ambiguous prompts risk the concierge misreading a Shape A ask as Shape B (producing a save_progress-shaped handoff instead of the artifact you wanted).
+
 ## When to use the concierge
 
 Use it freely once spawned - it's cheap per call when resumed. These are the high-value cases:
@@ -81,7 +90,7 @@ Direct MCP calls are faster and simpler for:
 - **Trivial state changes** - `update_work_item(status: "done")`, `close_thread(id: ...)`
 - **Deterministic operations** - `retro`, `system_status`, `save_progress`, `briefing`
 - **User observations** - `user_profile` (the concierge doesn't see the user, you do)
-- **Destructive ops** - `delete_note` requires main-agent judgment
+- **Destructive ops** - `delete_note` and `supersede_note` are both main-agent judgment calls. The concierge can surface candidates but the call to archive or replace stays with you.
 
 ## Key insight
 
