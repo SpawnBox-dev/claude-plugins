@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Note, NoteSummary, NoteType, NoteRevision } from "../types";
 import { findRelatedNotes, findRelatedNotesHybrid } from "../engine/linker";
 import type { EmbeddingClient } from "../engine/embeddings";
+import { parseCodeRefs } from "../utils";
 
 export interface RecallInput {
   query?: string;
@@ -13,6 +14,9 @@ export interface RecallInput {
   include_superseded?: boolean;
   include_history?: boolean;
   link_limit?: number;
+  /** R5 reverse-index: filter search results to notes whose code_refs array
+   *  includes this exact path string. No wildcards; exact match. */
+  code_ref?: string;
 }
 
 export interface LinkedNote {
@@ -42,7 +46,7 @@ function tryFetchNote(db: Database, id: string): Note | null {
     .query(
       `SELECT id, type, content, keywords, confidence, created_at, updated_at,
               source AS source_conversation, source_session, context, resolved,
-              superseded_by, superseded_at, status, priority, due_date
+              superseded_by, superseded_at, status, priority, due_date, code_refs
        FROM notes WHERE id = ?`
     )
     .get(id) as any | null;
@@ -70,6 +74,7 @@ function tryFetchNote(db: Database, id: string): Note | null {
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null,
+    code_refs: parseCodeRefs(row.code_refs ?? null),
   };
 }
 
@@ -102,7 +107,7 @@ function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
   // superseded_by column must point back at us for the edge to be valid.
   const supersedesRows = db.query(
     `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs
      FROM links l JOIN notes n ON l.to_note_id = n.id
      WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
        AND n.superseded_by = ?
@@ -113,7 +118,7 @@ function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
   // superseded_by column must point at the from-node of each edge.
   const supersededByRows = db.query(
     `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs
      FROM links l JOIN notes n ON l.from_note_id = n.id
      WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
        AND EXISTS (SELECT 1 FROM notes curr WHERE curr.id = ? AND curr.superseded_by = n.id)
@@ -134,6 +139,7 @@ function fetchSupersedeChain(db: Database, noteId: string): SupersedeChain {
     status: r.status ?? null,
     priority: r.priority ?? null,
     due_date: r.due_date ?? null,
+    code_refs: parseCodeRefs(r.code_refs ?? null),
   });
 
   return {
@@ -173,7 +179,7 @@ function fetchLinkedNotes(
     const rows = db.query(
       `SELECT l.relationship, l.from_note_id, l.to_note_id, l.strength AS link_strength,
               n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date,
+              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs,
               COALESCE(n.signal, 0) AS note_signal
        FROM links l
        JOIN notes n ON (
@@ -216,6 +222,7 @@ function fetchLinkedNotes(
           status: r.status ?? null,
           priority: r.priority ?? null,
           due_date: r.due_date ?? null,
+          code_refs: parseCodeRefs(r.code_refs ?? null),
         },
       });
 
@@ -382,6 +389,17 @@ export async function handleRecall(
       const tagLower = input.tag.toLowerCase();
       filtered = filtered.filter((r) =>
         r.tags?.toLowerCase().includes(tagLower)
+      );
+    }
+
+    // R5 reverse-index: filter by exact code_ref membership. No index on
+    // code_refs, so a TS post-filter is simpler and safer than an escaped
+    // SQL LIKE. The NoteSummary already carries parsed code_refs from the
+    // per-DB SELECTs above, so this is a plain Array.includes check.
+    if (input.code_ref) {
+      const needle = input.code_ref;
+      filtered = filtered.filter(
+        (r) => Array.isArray(r.code_refs) && r.code_refs.includes(needle)
       );
     }
 

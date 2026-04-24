@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Briefing, BriefingSection, Note, NoteSummary } from "../types";
 import { composeBriefing } from "../engine/composer";
-import { summarizeForBriefing, relativeTime, truncate } from "../utils";
+import { summarizeForBriefing, relativeTime, truncate, parseCodeRefs } from "../utils";
 import type { SessionTracker } from "../engine/session_tracker";
 import { handleReflect } from "./reflect";
 
@@ -55,7 +55,7 @@ function fetchLatestCheckpoint(db: Database): Note | null {
     const row = db
       .query(
         `SELECT id, type, content, keywords, confidence, created_at, updated_at,
-                source AS source_conversation, source_session, superseded_by, superseded_at
+                source AS source_conversation, source_session, superseded_by, superseded_at, code_refs
          FROM notes
          WHERE type = 'checkpoint'
          ORDER BY created_at DESC
@@ -86,6 +86,7 @@ function fetchLatestCheckpoint(db: Database): Note | null {
       status: null,
       priority: null,
       due_date: null,
+      code_refs: parseCodeRefs(row.code_refs ?? null),
     };
   } catch {
     return null;

@@ -279,6 +279,17 @@ DROP TABLE _signal_migration_check;
       `);
     },
   },
+  {
+    version: 17,
+    name: "add_code_refs",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "code_refs")) {
+        db.exec("ALTER TABLE notes ADD COLUMN code_refs TEXT");
+      }
+    },
+  },
 ];
 
 /**

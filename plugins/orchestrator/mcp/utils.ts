@@ -156,6 +156,39 @@ export function relativeTime(isoTimestamp: string): string {
 }
 
 /**
+ * R5: Parse a serialized code_refs JSON array from the notes.code_refs column.
+ * Returns null when the stored value is null/empty, not valid JSON, not an
+ * array, or contains non-string elements. Treats an empty array as null so
+ * downstream renderers consistently skip the "code_refs: []" noise.
+ */
+export function parseCodeRefs(raw: string | null): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed.length > 0 ? parsed : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R5: Serialize a code_refs array for the notes.code_refs column.
+ * Trims each ref, drops empty strings, and de-duplicates. Returns null when
+ * the input is null/undefined/empty so the caller can bind a single consistent
+ * NULL value instead of an empty JSON array.
+ */
+export function stringifyCodeRefs(refs: string[] | null | undefined): string | null {
+  if (!refs || refs.length === 0) return null;
+  const cleaned = Array.from(
+    new Set(refs.map((r) => r.trim()).filter((r) => r.length > 0))
+  );
+  return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+}
+
+/**
  * Compact age formatter for inline rendering in lookup envelopes.
  * Examples: "just now", "3m", "3h", "5d", "2w", "62d"
  *

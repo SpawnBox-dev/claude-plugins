@@ -115,6 +115,7 @@ export interface Note {
   status: WorkItemStatus | null;
   priority: WorkItemPriority | null;
   due_date: string | null;
+  code_refs: string[] | null;
 }
 
 export interface NoteSummary {
@@ -131,6 +132,7 @@ export interface NoteSummary {
   status: WorkItemStatus | null;
   priority: WorkItemPriority | null;
   due_date: string | null;
+  code_refs: string[] | null;
 }
 
 export interface Link {

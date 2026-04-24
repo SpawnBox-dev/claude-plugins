@@ -12,6 +12,9 @@ export interface SupersedeInput {
   new_type?: NoteType;
   reason?: string;
   session_id?: string;
+  /** R5: code_refs passed through to the inline-created replacement note.
+   *  Ignored when new_id is provided (target note keeps its own refs). */
+  code_refs?: string[];
 }
 
 export interface SupersedeResult {
@@ -125,6 +128,7 @@ export async function handleSupersede(
       type: input.new_type,
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
       session_id: input.session_id,
+      code_refs: input.code_refs,
     }, embeddingClient);
     if (!created.note_id) {
       return {

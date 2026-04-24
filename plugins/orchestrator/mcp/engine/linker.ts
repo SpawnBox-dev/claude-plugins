@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { NoteSummary, Link, RelationshipType, NoteType } from "../types";
-import { generateId, now } from "../utils";
+import { generateId, now, parseCodeRefs } from "../utils";
 import {
   cosineSimilarity,
   reciprocalRankFusion,
@@ -91,7 +91,7 @@ export function findRelatedNotes(
     // dropped just below the cut line.
     const rows = db
       .query(
-        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
+        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags, n.code_refs,
                 COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
@@ -112,6 +112,7 @@ export function findRelatedNotes(
       superseded_by: string | null;
       keywords: string;
       tags: string | null;
+      code_refs: string | null;
       note_signal: number;
       rank: number;
     }>;
@@ -144,6 +145,7 @@ export function findRelatedNotes(
       status: (r as any).status ?? null,
       priority: (r as any).priority ?? null,
       due_date: (r as any).due_date ?? null,
+      code_refs: parseCodeRefs(r.code_refs ?? null),
     }));
   } catch (err) {
     // FTS query can still fail on truly pathological input. Log the actual
@@ -230,7 +232,7 @@ export async function findRelatedNotesHybrid(
     if (!noteById.has(rrf.id)) {
       const row = db
         .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by,
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
                   COALESCE(signal, 0) AS note_signal
            FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`
         )
@@ -248,6 +250,7 @@ export async function findRelatedNotesHybrid(
         priority: string | null;
         due_date: string | null;
         superseded_by: string | null;
+        code_refs: string | null;
         note_signal: number;
       } | null;
 
@@ -266,6 +269,7 @@ export async function findRelatedNotesHybrid(
           status: row.status as NoteSummary["status"] ?? null,
           priority: row.priority as NoteSummary["priority"] ?? null,
           due_date: row.due_date ?? null,
+          code_refs: parseCodeRefs(row.code_refs ?? null),
         });
         signalById.set(row.id, row.note_signal);
       }

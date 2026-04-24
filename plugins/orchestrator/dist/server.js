@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join2 } from "path";
-import { existsSync as existsSync2, readFileSync } from "fs";
+import { existsSync as existsSync3, readFileSync } from "fs";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -19791,6 +19791,17 @@ DROP TABLE _signal_migration_check;
         )
       `);
     }
+  },
+  {
+    version: 17,
+    name: "add_code_refs",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(notes)").all();
+      if (!cols.some((c) => c.name === "code_refs")) {
+        db.exec("ALTER TABLE notes ADD COLUMN code_refs TEXT");
+      }
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20187,6 +20198,25 @@ function relativeTime(isoTimestamp) {
     return `${diffDay}d ago`;
   return `${Math.floor(diffDay / 7)}w ago`;
 }
+function parseCodeRefs(raw) {
+  if (!raw)
+    return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed.length > 0 ? parsed : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function stringifyCodeRefs(refs) {
+  if (!refs || refs.length === 0)
+    return null;
+  const cleaned = Array.from(new Set(refs.map((r) => r.trim()).filter((r) => r.length > 0)));
+  return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+}
 function formatAge(iso, now2 = new Date) {
   const then = new Date(iso);
   const diffMs = now2.getTime() - then.getTime();
@@ -20522,7 +20552,7 @@ function findRelatedNotes(db, query, limit = 10, includeSuperseded = false) {
     return [];
   const ftsQuery = terms.join(" OR ");
   try {
-    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags,
+    const rows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags, n.code_refs,
                 COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
@@ -20550,7 +20580,8 @@ function findRelatedNotes(db, query, limit = 10, includeSuperseded = false) {
       tags: r.tags ?? null,
       status: r.status ?? null,
       priority: r.priority ?? null,
-      due_date: r.due_date ?? null
+      due_date: r.due_date ?? null,
+      code_refs: parseCodeRefs(r.code_refs ?? null)
     }));
   } catch (err) {
     console.error(`[linker] findRelatedNotes FTS5 error - query="${ftsQuery}" original="${query}":`, err);
@@ -20590,7 +20621,7 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   const preBoostSlice = rrfResults.slice(0, limit * 4);
   for (const rrf of preBoostSlice) {
     if (!noteById.has(rrf.id)) {
-      const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by,
+      const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
                   COALESCE(signal, 0) AS note_signal
            FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`).get(rrf.id);
       if (row) {
@@ -20607,7 +20638,8 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
           tags: row.tags ?? null,
           status: row.status ?? null,
           priority: row.priority ?? null,
-          due_date: row.due_date ?? null
+          due_date: row.due_date ?? null,
+          code_refs: parseCodeRefs(row.code_refs ?? null)
         });
         signalById.set(row.id, row.note_signal);
       }
@@ -20816,8 +20848,9 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   const tagsStr = tagParts.join(",");
   const noteId = generateId();
   const timestamp = now();
-  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  const codeRefsJson = stringifyCodeRefs(input.code_refs);
+  db.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session, code_refs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     input.type,
     input.content,
@@ -20831,7 +20864,8 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
     null,
     timestamp,
     timestamp,
-    input.session_id ?? null
+    input.session_id ?? null,
+    codeRefsJson
   ]);
   const links = createAutoLinks(db, noteId, keywords);
   if (embeddingClient) {
@@ -21223,7 +21257,8 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
       content: input.new_content,
       type: input.new_type,
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
-      session_id: input.session_id
+      session_id: input.session_id,
+      code_refs: input.code_refs
     }, embeddingClient);
     if (!created.note_id) {
       return {
@@ -21264,7 +21299,7 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
 function tryFetchNote(db, id) {
   const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
               source AS source_conversation, source_session, context, resolved,
-              superseded_by, superseded_at, status, priority, due_date
+              superseded_by, superseded_at, status, priority, due_date, code_refs
        FROM notes WHERE id = ?`).get(id);
   if (!row)
     return null;
@@ -21283,7 +21318,8 @@ function tryFetchNote(db, id) {
     is_global: false,
     status: row.status ?? null,
     priority: row.priority ?? null,
-    due_date: row.due_date ?? null
+    due_date: row.due_date ?? null,
+    code_refs: parseCodeRefs(row.code_refs ?? null)
   };
 }
 function fetchRevisions(db, noteId) {
@@ -21303,13 +21339,13 @@ function fetchRevisions(db, noteId) {
 }
 function fetchSupersedeChain(db, noteId) {
   const supersedesRows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs
      FROM links l JOIN notes n ON l.to_note_id = n.id
      WHERE l.from_note_id = ? AND l.relationship = 'supersedes'
        AND n.superseded_by = ?
      ORDER BY l.created_at ASC`).all(noteId, noteId);
   const supersededByRows = db.query(`SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date
+            n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs
      FROM links l JOIN notes n ON l.from_note_id = n.id
      WHERE l.to_note_id = ? AND l.relationship = 'supersedes'
        AND EXISTS (SELECT 1 FROM notes curr WHERE curr.id = ? AND curr.superseded_by = n.id)
@@ -21327,7 +21363,8 @@ function fetchSupersedeChain(db, noteId) {
     tags: r.tags ?? null,
     status: r.status ?? null,
     priority: r.priority ?? null,
-    due_date: r.due_date ?? null
+    due_date: r.due_date ?? null,
+    code_refs: parseCodeRefs(r.code_refs ?? null)
   });
   return {
     supersedes: supersedesRows.map(rowToSummary),
@@ -21352,7 +21389,7 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1, linkLimit = 20) {
       return;
     const rows = db.query(`SELECT l.relationship, l.from_note_id, l.to_note_id, l.strength AS link_strength,
               n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at,
-              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date,
+              n.source_session, n.superseded_by, n.keywords, n.tags, n.status, n.priority, n.due_date, n.code_refs,
               COALESCE(n.signal, 0) AS note_signal
        FROM links l
        JOIN notes n ON (
@@ -21385,7 +21422,8 @@ function fetchLinkedNotes(db, noteId, maxDepth = 1, linkLimit = 20) {
           tags: r.tags ?? null,
           status: r.status ?? null,
           priority: r.priority ?? null,
-          due_date: r.due_date ?? null
+          due_date: r.due_date ?? null,
+          code_refs: parseCodeRefs(r.code_refs ?? null)
         }
       });
       const remaining = limit - results.length;
@@ -21487,6 +21525,10 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       const tagLower = input.tag.toLowerCase();
       filtered = filtered.filter((r) => r.tags?.toLowerCase().includes(tagLower));
     }
+    if (input.code_ref) {
+      const needle = input.code_ref;
+      filtered = filtered.filter((r) => Array.isArray(r.code_refs) && r.code_refs.includes(needle));
+    }
     const results = filtered.slice(0, limit);
     const totalHint = getTotalHint(projectDb2, globalDb2, input.type);
     return {
@@ -21509,7 +21551,7 @@ var MAX_CANDIDATES_PER_CATEGORY = 10;
 function fetchCurationCandidates(db) {
   const staleCutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const staleRows = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
-            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+            keywords, tags, status, priority, due_date, code_refs, COALESCE(signal, 0) AS note_signal
      FROM notes
      WHERE updated_at < ?
        AND COALESCE(signal, 0) >= ?
@@ -21519,7 +21561,7 @@ function fetchCurationCandidates(db) {
      ORDER BY COALESCE(signal, 0) DESC
      LIMIT ?`).all(staleCutoff, MIN_SIGNAL_FOR_CURATION, MAX_CANDIDATES_PER_CATEGORY);
   const lowConfRows = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
-            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+            keywords, tags, status, priority, due_date, code_refs, COALESCE(signal, 0) AS note_signal
      FROM notes
      WHERE confidence = 'low'
        AND COALESCE(signal, 0) >= ?
@@ -21568,7 +21610,8 @@ function toSummary(row) {
     tags: row.tags ?? null,
     status: row.status ?? null,
     priority: row.priority ?? null,
-    due_date: row.due_date ?? null
+    due_date: row.due_date ?? null,
+    code_refs: parseCodeRefs(row.code_refs ?? null)
   };
 }
 function composeBriefing(projectDb2, globalDb2, sections) {
@@ -21593,12 +21636,12 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       curation_candidates: []
     };
   }
-  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+  const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
            ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
            LIMIT 5`).all().map(toSummary) : [];
-  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+  const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type = 'decision'
            ORDER BY COALESCE(signal, 0) DESC, created_at DESC
@@ -21673,7 +21716,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let recentlyCompleted = [];
   let overdueWork = [];
   if (include("work_items")) {
-    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+    activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
@@ -21681,19 +21724,19 @@ function composeBriefing(projectDb2, globalDb2, sections) {
            COALESCE(signal, 0) DESC,
            updated_at DESC
          LIMIT 10`).all().map(toSummary);
-    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+    blockedWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`).all().map(toSummary);
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+    recentlyCompleted = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
          ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
          LIMIT 5`).all(oneDayAgo).map(toSummary);
     const todayStr = new Date().toISOString().slice(0, 10);
-    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+    overdueWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
          AND status != 'done' AND resolved = 0
@@ -21725,7 +21768,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
 function composeContextPackage(projectDb2, globalDb2, domain) {
   const pattern = `%${domain}%`;
   function queryByType(db, type, limit = 5) {
-    return db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+    return db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY
@@ -21799,6 +21842,8 @@ function composeUserProfile(globalDb2) {
 }
 
 // mcp/tools/reflect.ts
+import { existsSync as existsSync2 } from "fs";
+import path from "path";
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
   const projectDecayed = decayAllSignals(projectDb2);
@@ -21859,13 +21904,35 @@ function handleReflect(projectDb2, globalDb2, input) {
       }
     }
   } catch {}
+  let codeRefsChecked = 0;
+  let codeRefsBroken = 0;
+  const projectRoot = process.env.CLAUDE_PROJECT_DIR || process.env.ORCHESTRATOR_PROJECT_ROOT || null;
+  if (projectRoot) {
+    try {
+      const rows = projectDb2.query(`SELECT id, code_refs FROM notes
+           WHERE code_refs IS NOT NULL AND resolved = 0 AND superseded_by IS NULL`).all();
+      for (const row of rows) {
+        const refs = parseCodeRefs(row.code_refs);
+        if (!refs)
+          continue;
+        for (const ref of refs) {
+          codeRefsChecked++;
+          const fullPath = path.join(projectRoot, ref);
+          if (!existsSync2(fullPath)) {
+            codeRefsBroken++;
+          }
+        }
+      }
+    } catch {}
+  }
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
     totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
     orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
     revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null,
-    trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null
+    trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null,
+    codeRefsChecked > 0 ? `code_refs verified: ${codeRefsChecked} refs across notes; ${codeRefsBroken} broken (missing files).` : null
   ].filter(Boolean).join(" ");
   return {
     signals_decayed: totalDecayed,
@@ -21875,6 +21942,8 @@ function handleReflect(projectDb2, globalDb2, input) {
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,
     trajectory_updates: trajectoryUpdates,
+    code_refs_checked: codeRefsChecked,
+    code_refs_broken: codeRefsBroken,
     message
   };
 }
@@ -21902,7 +21971,7 @@ function recordAutoRetroRun(projectDb2) {
 function fetchLatestCheckpoint(db) {
   try {
     const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
-                source AS source_conversation, source_session, superseded_by, superseded_at
+                source AS source_conversation, source_session, superseded_by, superseded_at, code_refs
          FROM notes
          WHERE type = 'checkpoint'
          ORDER BY created_at DESC
@@ -21924,7 +21993,8 @@ function fetchLatestCheckpoint(db) {
       is_global: false,
       status: null,
       priority: null,
-      due_date: null
+      due_date: null,
+      code_refs: parseCodeRefs(row.code_refs ?? null)
     };
   } catch {
     return null;
@@ -22417,7 +22487,7 @@ function getFallbackSessionId() {
   if (projectDir) {
     const file = join2(projectDir, ".orchestrator-state", "active-session");
     try {
-      if (existsSync2(file)) {
+      if (existsSync3(file)) {
         const raw = readFileSync(file, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
@@ -22771,8 +22841,9 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     action: exports_external.enum(["accept_new", "update_existing", "supersede_existing", "close_existing"]),
     target_id: exports_external.string().optional().describe("Required for update_existing / supersede_existing / close_existing actions. The id of the near-duplicate candidate being acted on."),
     reason: exports_external.string().optional().describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread.")
-  }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved).")
-}, async ({ content, type, context, tags, scope, dimension, session_id, resolution }) => {
+  }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
+  code_refs: exports_external.array(exports_external.string()).optional().describe("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing.")
+}, async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
@@ -22784,7 +22855,8 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     scope,
     dimension,
     session_id,
-    resolution
+    resolution,
+    code_refs
   }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]
@@ -22800,8 +22872,9 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
   link_limit: exports_external.coerce.number().min(0).max(500).optional().describe("Cap on number of linked notes returned in detail-mode lookup. Default 20. Set to 0 to skip linked notes entirely (useful for heavily-connected umbrella notes). Set higher (up to 500) to get the full neighborhood. Superseded-chain links are always shown separately and don't count against this limit."),
+  code_ref: exports_external.string().optional().describe("Filter results to notes that reference this exact file or module path in their code_refs array. Exact string match; no wildcards. Useful for 'what do we know about mcp/server.ts?' queries."),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, session_id }) => {
+}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
@@ -22812,7 +22885,8 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     depth,
     include_superseded,
     include_history,
-    link_limit
+    link_limit,
+    code_ref
   }, embeddingClient);
   session_id = resolveSessionId(session_id);
   let turn = null;
@@ -22862,7 +22936,12 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     const supSuffix = result.detail.superseded_by ? ` [SUPERSEDED by ${result.detail.superseded_by}]` : "";
     text += `
 
-**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}
+**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
+    if (result.detail.code_refs && result.detail.code_refs.length > 0) {
+      text += `
+code_refs: [${result.detail.code_refs.join(", ")}]`;
+    }
+    text += `
 ${result.detail.content}${annotationMarker(result.detail.id)}`;
     if (result.detail.supersede_chain) {
       const sc = result.detail.supersede_chain;
@@ -22934,6 +23013,10 @@ ${hidden} more linked note(s) not shown. Call lookup({id:"${result.detail.id}", 
       const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
       text += `
 - **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+      if (r.code_refs && r.code_refs.length > 0) {
+        text += `
+    code_refs: [${r.code_refs.join(", ")}]`;
+      }
       if (r.superseded_by) {
         text += `
   [go to current: lookup({id:"${r.superseded_by}"})]`;
@@ -23067,8 +23150,9 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   context: exports_external.string().optional().describe("New context (replaces existing)"),
   tags: exports_external.string().optional().describe("New tags (replaces existing)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
+  code_refs: exports_external.array(exports_external.string()).optional().describe("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
   session_id: exports_external.string().optional().describe("Session ID - attributed to the revision snapshot.")
-}, async ({ id, content, append_content, context, tags, confidence, session_id }) => {
+}, async ({ id, content, append_content, context, tags, confidence, code_refs, session_id }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
@@ -23100,6 +23184,8 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     updates.push("tags");
   if (confidence)
     updates.push("confidence");
+  if (code_refs !== undefined)
+    updates.push("code_refs");
   if (updates.length === 0) {
     return { content: [{ type: "text", text: "No fields to update." }] };
   }
@@ -23130,6 +23216,10 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
         embeddingClient.removeEmbedding(db, id);
       });
     }
+  }
+  if (code_refs !== undefined) {
+    const codeRefsJson = stringifyCodeRefs(code_refs);
+    db.run(`UPDATE notes SET code_refs = ?, updated_at = ? WHERE id = ?`, [codeRefsJson, now(), id]);
   }
   return {
     content: [{
@@ -23169,12 +23259,13 @@ server.tool("supersede_note", "Replace an old note with a new one, preserving hi
   new_content: exports_external.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
   new_type: exports_external.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
   reason: exports_external.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
+  code_refs: exports_external.array(exports_external.string()).optional().describe("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
   session_id: exports_external.string().optional().describe("Session ID - enables cross-session attribution on the supersede action.")
-}, async ({ old_id, new_id, new_content, new_type, reason, session_id }) => {
+}, async ({ old_id, new_id, new_content, new_type, reason, code_refs, session_id }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
-  const result = await handleSupersede(getProjectDb(), getGlobalDb(), { old_id, new_id, new_content, new_type, reason, session_id }, embeddingClient);
+  const result = await handleSupersede(getProjectDb(), getGlobalDb(), { old_id, new_id, new_content, new_type, reason, session_id, code_refs }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]
   };
@@ -23238,8 +23329,9 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format"),
   tags: exports_external.string().optional(),
   context: exports_external.string().optional(),
+  code_refs: exports_external.array(exports_external.string()).optional().describe("Array of file or module paths this work item points at. Same format as note() code_refs."),
   session_id: exports_external.string().optional().describe("Session ID that created this work item. Enables cross-session discovery.")
-}, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, session_id }) => {
+}, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, code_refs, session_id }) => {
   const content = rawContent || title || description || "";
   if (!content) {
     return { content: [{ type: "text", text: "Error: provide content (or title) describing what needs to be done." }] };
@@ -23262,8 +23354,9 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
         tagParts.push(t);
     }
   }
-  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+  const codeRefsJson = stringifyCodeRefs(code_refs);
+  projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session, code_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
     noteId,
     "work_item",
     fullContent,
@@ -23277,7 +23370,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
     due_date ?? null,
     timestamp,
     timestamp,
-    session_id ?? null
+    session_id ?? null,
+    codeRefsJson
   ]);
   const links = createAutoLinks(projectDb2, noteId, keywords);
   if (parent_id) {
@@ -23304,8 +23398,9 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   tags: exports_external.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
   context: exports_external.string().optional().describe("Updated context (replaces existing; empty string clears)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
+  code_refs: exports_external.array(exports_external.string()).optional().describe("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
-}, async ({ id, status, priority, due_date, content, tags, context, confidence, blocked_by }) => {
+}, async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
   const projectDb2 = getProjectDb();
   const row = projectDb2.query(`SELECT id, type, content, context, tags, status, priority, due_date FROM notes WHERE id = ?`).get(id);
   if (!row) {
@@ -23353,6 +23448,11 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     if (status === "done")
       updates.push("resolved = 1");
     projectDb2.run(`UPDATE notes SET ${updates.join(", ")} WHERE id = ?`, [id]);
+  }
+  if (code_refs !== undefined) {
+    const codeRefsJson = stringifyCodeRefs(code_refs);
+    projectDb2.run(`UPDATE notes SET code_refs = ?, updated_at = ? WHERE id = ?`, [codeRefsJson, timestamp, id]);
+    changes.push(codeRefsJson ? `code_refs: updated` : `code_refs: cleared`);
   }
   if (blocked_by) {
     const blocker = projectDb2.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);

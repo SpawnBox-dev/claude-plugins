@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Briefing, BriefingSection, ContextPackage, CurationCandidate, NoteSummary, UserProfileEntry } from "../types";
-import { truncate } from "../utils";
+import { truncate, parseCodeRefs } from "../utils";
 
 // R3.3: curation candidates thresholds
 const STALE_DAYS = 30;
@@ -22,7 +22,7 @@ function fetchCurationCandidates(db: Database): CurationCandidate[] {
 
   const staleRows = db.query(
     `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
-            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+            keywords, tags, status, priority, due_date, code_refs, COALESCE(signal, 0) AS note_signal
      FROM notes
      WHERE updated_at < ?
        AND COALESCE(signal, 0) >= ?
@@ -35,7 +35,7 @@ function fetchCurationCandidates(db: Database): CurationCandidate[] {
 
   const lowConfRows = db.query(
     `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
-            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+            keywords, tags, status, priority, due_date, code_refs, COALESCE(signal, 0) AS note_signal
      FROM notes
      WHERE confidence = 'low'
        AND COALESCE(signal, 0) >= ?
@@ -99,6 +99,7 @@ function toSummary(row: any): NoteSummary {
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null,
+    code_refs: parseCodeRefs(row.code_refs ?? null),
   };
 }
 
@@ -145,7 +146,7 @@ export function composeBriefing(
   const openThreads = include("open_threads")
     ? projectDb
         .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
            ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
@@ -161,7 +162,7 @@ export function composeBriefing(
   const recentDecisions = include("decisions")
     ? projectDb
         .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type = 'decision'
            ORDER BY COALESCE(signal, 0) DESC, created_at DESC
@@ -292,7 +293,7 @@ export function composeBriefing(
     // tier so hot work items float above cold at the same priority.
     activeWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status IN ('active', 'planned')
          ORDER BY
@@ -308,7 +309,7 @@ export function composeBriefing(
     // bubbles stuck work to the top.
     blockedWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status = 'blocked'
          ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
@@ -322,7 +323,7 @@ export function composeBriefing(
     // referenced right before being marked done show up first.
     recentlyCompleted = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND status = 'done' AND updated_at >= ?
          ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
@@ -335,7 +336,7 @@ export function composeBriefing(
     const todayStr = new Date().toISOString().slice(0, 10);
     overdueWork = projectDb
       .query(
-        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
          WHERE type = 'work_item' AND due_date IS NOT NULL AND due_date < ?
          AND status != 'done' AND resolved = 0
@@ -401,7 +402,7 @@ export function composeContextPackage(
   ): NoteSummary[] {
     return db
       .query(
-        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
          ORDER BY

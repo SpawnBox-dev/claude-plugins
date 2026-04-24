@@ -1,9 +1,11 @@
 import type { Database } from "bun:sqlite";
 import type { NoteSummary } from "../types";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { computeAutonomyScore } from "../engine/scorer";
 import { decayAllSignals } from "../engine/signal";
 import { mergeDuplicates } from "../engine/deduplicator";
-import { now } from "../utils";
+import { now, parseCodeRefs } from "../utils";
 
 export interface ReflectInput {
   focus?: string;
@@ -17,6 +19,10 @@ export interface ReflectResult {
   autonomy_scores: Record<string, string>;
   revalidation_queue: Array<{ id: string; content: string; type: string }>;
   trajectory_updates: number;
+  /** R5: count of code_ref paths checked against the filesystem during retro. */
+  code_refs_checked: number;
+  /** R5: count of code_refs that pointed at a path which does not exist. */
+  code_refs_broken: number;
   message: string;
 }
 
@@ -136,6 +142,44 @@ export function handleReflect(
     // user_model operations are best-effort
   }
 
+  // R5: code_refs verification pass. When CLAUDE_PROJECT_DIR (or the
+  // orchestrator fallback) is set, iterate non-superseded, non-resolved notes
+  // that declare code_refs and check each path against the filesystem. For
+  // R5 core we just count + include in the summary - future R5.1 can surface
+  // broken refs via curation_candidates.
+  let codeRefsChecked = 0;
+  let codeRefsBroken = 0;
+  const projectRoot =
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    null;
+
+  if (projectRoot) {
+    try {
+      const rows = projectDb
+        .query(
+          `SELECT id, code_refs FROM notes
+           WHERE code_refs IS NOT NULL AND resolved = 0 AND superseded_by IS NULL`
+        )
+        .all() as Array<{ id: string; code_refs: string }>;
+
+      for (const row of rows) {
+        const refs = parseCodeRefs(row.code_refs);
+        if (!refs) continue;
+        for (const ref of refs) {
+          codeRefsChecked++;
+          const fullPath = path.join(projectRoot, ref);
+          if (!existsSync(fullPath)) {
+            codeRefsBroken++;
+          }
+        }
+      }
+    } catch {
+      // code_refs column might not exist on very old DBs that never migrated.
+      // Graceful degradation: skip verification, leave counters at 0.
+    }
+  }
+
   const message = [
     `Reflection complete.`,
     totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
@@ -146,6 +190,9 @@ export function handleReflect(
       : null,
     trajectoryUpdates > 0
       ? `${trajectoryUpdates} user model trajectory update(s).`
+      : null,
+    codeRefsChecked > 0
+      ? `code_refs verified: ${codeRefsChecked} refs across notes; ${codeRefsBroken} broken (missing files).`
       : null,
   ]
     .filter(Boolean)
@@ -159,6 +206,8 @@ export function handleReflect(
     autonomy_scores: autonomyScores,
     revalidation_queue: revalidationRows,
     trajectory_updates: trajectoryUpdates,
+    code_refs_checked: codeRefsChecked,
+    code_refs_broken: codeRefsBroken,
     message,
   };
 }

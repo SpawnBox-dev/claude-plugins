@@ -22,7 +22,7 @@ import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
 import { composeUserProfile } from "./engine/composer";
-import { generateId, now, extractKeywords, formatAge } from "./utils";
+import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 import { SessionTracker } from "./engine/session_tracker";
@@ -560,8 +560,12 @@ server.tool(
       })
       .optional()
       .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
+    code_refs: z
+      .array(z.string())
+      .optional()
+      .describe("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing."),
   },
-  async ({ content, type, context, tags, scope, dimension, session_id, resolution }) => {
+  async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
     session_id = resolveSessionId(session_id);
     if (session_id) registerSessionOnce(session_id);
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
@@ -573,6 +577,7 @@ server.tool(
       dimension: dimension as Dimension | undefined,
       session_id,
       resolution,
+      code_refs,
     }, embeddingClient);
     return {
       content: [{ type: "text" as const, text: result.message }],
@@ -594,9 +599,10 @@ server.tool(
     include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
     include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
     link_limit: z.coerce.number().min(0).max(500).optional().describe("Cap on number of linked notes returned in detail-mode lookup. Default 20. Set to 0 to skip linked notes entirely (useful for heavily-connected umbrella notes). Set higher (up to 500) to get the full neighborhood. Superseded-chain links are always shown separately and don't count against this limit."),
+    code_ref: z.string().optional().describe("Filter results to notes that reference this exact file or module path in their code_refs array. Exact string match; no wildcards. Useful for 'what do we know about mcp/server.ts?' queries."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -611,6 +617,7 @@ server.tool(
         include_superseded,
         include_history,
         link_limit,
+        code_ref,
       },
       embeddingClient
     );
@@ -675,7 +682,11 @@ server.tool(
       const supSuffix = result.detail.superseded_by
         ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
         : "";
-      text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}\n${result.detail.content}${annotationMarker(result.detail.id)}`;
+      text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
+      if (result.detail.code_refs && result.detail.code_refs.length > 0) {
+        text += `\ncode_refs: [${result.detail.code_refs.join(", ")}]`;
+      }
+      text += `\n${result.detail.content}${annotationMarker(result.detail.id)}`;
 
       // R2: supersede chain (always render when non-empty)
       if (result.detail.supersede_chain) {
@@ -733,6 +744,9 @@ server.tool(
         const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
         const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
         text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+        if (r.code_refs && r.code_refs.length > 0) {
+          text += `\n    code_refs: [${r.code_refs.join(", ")}]`;
+        }
         if (r.superseded_by) {
           text += `\n  [go to current: lookup({id:"${r.superseded_by}"})]`;
         } else {
@@ -893,9 +907,10 @@ server.tool(
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
+    code_refs: z.array(z.string()).optional().describe("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
     session_id: z.string().optional().describe("Session ID - attributed to the revision snapshot."),
   },
-  async ({ id, content, append_content, context, tags, confidence, session_id }) => {
+  async ({ id, content, append_content, context, tags, confidence, code_refs, session_id }) => {
     session_id = resolveSessionId(session_id);
     if (session_id) registerSessionOnce(session_id);
     const projectDb = getProjectDb();
@@ -931,6 +946,7 @@ server.tool(
     if (context !== undefined) updates.push("context");
     if (tags !== undefined) updates.push("tags");
     if (confidence) updates.push("confidence");
+    if (code_refs !== undefined) updates.push("code_refs");
 
     if (updates.length === 0) {
       return { content: [{ type: "text" as const, text: "No fields to update." }] };
@@ -972,6 +988,17 @@ server.tool(
           embeddingClient!.removeEmbedding(db, id);
         });
       }
+    }
+
+    // R5: code_refs replacement is independent of the content/context/etc
+    // update path. undefined = unchanged; [] (empty) = clear to NULL; otherwise
+    // replace with the serialized JSON array. stringifyCodeRefs maps [] -> null.
+    if (code_refs !== undefined) {
+      const codeRefsJson = stringifyCodeRefs(code_refs);
+      db.run(
+        `UPDATE notes SET code_refs = ?, updated_at = ? WHERE id = ?`,
+        [codeRefsJson, now(), id]
+      );
     }
 
     return {
@@ -1033,15 +1060,16 @@ server.tool(
     new_content: z.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
     new_type: z.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
     reason: z.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
+    code_refs: z.array(z.string()).optional().describe("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
     session_id: z.string().optional().describe("Session ID - enables cross-session attribution on the supersede action."),
   },
-  async ({ old_id, new_id, new_content, new_type, reason, session_id }) => {
+  async ({ old_id, new_id, new_content, new_type, reason, code_refs, session_id }) => {
     session_id = resolveSessionId(session_id);
     if (session_id) registerSessionOnce(session_id);
     const result = await handleSupersede(
       getProjectDb(),
       getGlobalDb(),
-      { old_id, new_id, new_content, new_type, reason, session_id },
+      { old_id, new_id, new_content, new_type, reason, session_id, code_refs },
       embeddingClient
     );
     return {
@@ -1138,9 +1166,10 @@ server.tool(
     due_date: z.string().optional().describe("Due date in YYYY-MM-DD format"),
     tags: z.string().optional(),
     context: z.string().optional(),
+    code_refs: z.array(z.string()).optional().describe("Array of file or module paths this work item points at. Same format as note() code_refs."),
     session_id: z.string().optional().describe("Session ID that created this work item. Enables cross-session discovery."),
   },
-  async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, session_id }) => {
+  async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, code_refs, session_id }) => {
     // Accept content, title, or description - fold into one content string
     const content = rawContent || title || description || "";
     if (!content) {
@@ -1163,11 +1192,12 @@ server.tool(
       }
     }
 
+    const codeRefsJson = stringifyCodeRefs(code_refs);
     projectDb.run(
-      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session, code_refs)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [noteId, "work_item", fullContent, context ?? null, keywords.join(","), tagParts.join(","),
-       "high", 0, status ?? "planned", priority ?? "medium", due_date ?? null, timestamp, timestamp, session_id ?? null]
+       "high", 0, status ?? "planned", priority ?? "medium", due_date ?? null, timestamp, timestamp, session_id ?? null, codeRefsJson]
     );
 
     const links = createAutoLinks(projectDb, noteId, keywords);
@@ -1206,9 +1236,10 @@ server.tool(
     tags: z.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
     context: z.string().optional().describe("Updated context (replaces existing; empty string clears)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
+    code_refs: z.array(z.string()).optional().describe("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
     blocked_by: z.string().optional().describe("ID of the note blocking this work item (creates blocks link)"),
   },
-  async ({ id, status, priority, due_date, content, tags, context, confidence, blocked_by }) => {
+  async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
     const projectDb = getProjectDb();
 
     const row = projectDb
@@ -1262,6 +1293,18 @@ server.tool(
       updates.push(`updated_at = '${timestamp}'`);
       if (status === "done") updates.push("resolved = 1");
       projectDb.run(`UPDATE notes SET ${updates.join(", ")} WHERE id = ?`, [id]);
+    }
+
+    // R5: code_refs replacement. Separate parameterized UPDATE so we don't
+    // string-concat a JSON payload into the interpolated SQL above. undefined
+    // = unchanged; [] clears to NULL.
+    if (code_refs !== undefined) {
+      const codeRefsJson = stringifyCodeRefs(code_refs);
+      projectDb.run(
+        `UPDATE notes SET code_refs = ?, updated_at = ? WHERE id = ?`,
+        [codeRefsJson, timestamp, id]
+      );
+      changes.push(codeRefsJson ? `code_refs: updated` : `code_refs: cleared`);
     }
 
     if (blocked_by) {

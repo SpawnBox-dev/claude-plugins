@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { NoteType, Dimension } from "../types";
 import { GLOBAL_TYPES, DIMENSIONS } from "../types";
-import { generateId, now, extractKeywords } from "../utils";
+import { generateId, now, extractKeywords, stringifyCodeRefs } from "../utils";
 import { findDuplicates, MIN_SHARED_KEYWORDS } from "../engine/deduplicator";
 import { createAutoLinks } from "../engine/linker";
 import { promoteConfidence } from "../engine/scorer";
@@ -29,6 +29,10 @@ export interface RememberInput {
     target_id?: string;
     reason?: string;
   };
+  /** R5: file/module-level breadcrumbs. Array of path strings, e.g.
+   *  ["mcp/server.ts", "src-tauri/src/core/backup/"]. Not line numbers or
+   *  symbols - orchestrator points at the neighborhood and carries the WHY. */
+  code_refs?: string[];
 }
 
 export interface RememberResult {
@@ -93,10 +97,11 @@ async function insertNote(
 
   const noteId = generateId();
   const timestamp = now();
+  const codeRefsJson = stringifyCodeRefs(input.code_refs);
 
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session, code_refs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       noteId,
       input.type,
@@ -112,6 +117,7 @@ async function insertNote(
       timestamp,
       timestamp,
       input.session_id ?? null,
+      codeRefsJson,
     ]
   );
 
