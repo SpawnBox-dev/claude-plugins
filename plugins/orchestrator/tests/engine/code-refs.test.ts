@@ -223,6 +223,89 @@ describe("R5 code_refs: reverse-index lookup", () => {
     });
     expect(result.results.length).toBe(0);
   });
+
+  // R5.2 Important-3: SQL-level pre-filter for code_ref. Previously the
+  // limit slice ran before the code_ref post-filter, so a needle-in-haystack
+  // query (many FTS matches, few with the right code_ref) could return 0
+  // even though matches exist - the target notes ranked past the 2x-limit
+  // cutoff and never made it to the filter stage. With the pre-filter in
+  // place, SQL narrows to matching-code_ref notes FIRST, and BM25 ranks
+  // only those.
+  test("code_ref filter finds needle-in-haystack notes (correct limit semantics)", async () => {
+    // Seed 30 notes that all match the query keyword, but only 3 carry the
+    // target code_ref. The target notes deliberately have slightly less
+    // dense keyword content than the haystack so they'd rank lower on BM25.
+    for (let i = 0; i < 30; i++) {
+      await handleRemember(projectDb, globalDb, {
+        content: `haystackword item ${i} filler filler filler filler`,
+        type: "insight",
+      });
+    }
+    // Needle notes (3) have the target code_ref. Use keyword-disjoint
+    // phrasing to avoid incidental Jaccard dedup merges.
+    await handleRemember(projectDb, globalDb, {
+      content: "haystackword needle-alpha zeppelin",
+      type: "insight",
+      code_refs: ["target/file.ts"],
+    });
+    await handleRemember(projectDb, globalDb, {
+      content: "haystackword needle-beta goblin",
+      type: "insight",
+      code_refs: ["target/file.ts"],
+    });
+    await handleRemember(projectDb, globalDb, {
+      content: "haystackword needle-gamma kestrel",
+      type: "insight",
+      code_refs: ["target/file.ts"],
+    });
+
+    // Default limit is 10; pre-filter ensures we see all 3 needles despite
+    // 30 competing BM25 matches on the keyword alone.
+    const result = await handleRecall(projectDb, globalDb, {
+      query: "haystackword",
+      code_ref: "target/file.ts",
+    });
+    expect(result.results.length).toBe(3);
+    for (const r of result.results) {
+      expect(r.code_refs).toContain("target/file.ts");
+    }
+  });
+});
+
+// R5.2 Minor-2: path normalization in stringifyCodeRefs.
+describe("R5.2: stringifyCodeRefs path normalization", () => {
+  test("strips leading './' prefix", () => {
+    expect(stringifyCodeRefs(["./mcp/server.ts"])).toBe(JSON.stringify(["mcp/server.ts"]));
+  });
+
+  test("converts backslashes to forward slashes", () => {
+    expect(stringifyCodeRefs(["mcp\\engine\\signal.ts"])).toBe(
+      JSON.stringify(["mcp/engine/signal.ts"])
+    );
+  });
+
+  test("combined: './' and backslashes normalize to canonical form", () => {
+    expect(stringifyCodeRefs(["./mcp\\server.ts", "mcp/server.ts", "mcp\\server.ts"])).toBe(
+      JSON.stringify(["mcp/server.ts"])
+    );
+  });
+
+  test("preserves trailing slash (file vs directory ref distinction)", () => {
+    expect(stringifyCodeRefs(["src/", "src"])).toBe(JSON.stringify(["src/", "src"]));
+  });
+
+  test("trims whitespace alongside normalization", () => {
+    expect(stringifyCodeRefs(["  ./mcp/server.ts  "])).toBe(
+      JSON.stringify(["mcp/server.ts"])
+    );
+  });
+
+  test("only './' prefix stripped, not mid-path './' or '../'", () => {
+    // stringifyCodeRefs is conservative - only the leading './' is stripped.
+    // '../' and interior '.' segments are preserved.
+    const out = stringifyCodeRefs(["../outside.ts", "path/./nested.ts"]);
+    expect(JSON.parse(out!)).toEqual(["../outside.ts", "path/./nested.ts"]);
+  });
 });
 
 describe("R5 code_refs: supersede inline-creation passes code_refs through", () => {

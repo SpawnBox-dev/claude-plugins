@@ -30,17 +30,20 @@ export function snapshotRevision(
   noteId: string,
   sessionId?: string | null
 ): string | null {
+  // R5.2 Important-1: capture code_refs along with the rest of the pre-change
+  // state. Previously code_refs-only updates silently lost their prior value
+  // from revision history.
   const row = db.query(
-    `SELECT content, context, tags, keywords, confidence FROM notes WHERE id = ?`
-  ).get(noteId) as { content: string; context: string | null; tags: string | null; keywords: string | null; confidence: string | null } | null;
+    `SELECT content, context, tags, keywords, confidence, code_refs FROM notes WHERE id = ?`
+  ).get(noteId) as { content: string; context: string | null; tags: string | null; keywords: string | null; confidence: string | null; code_refs: string | null } | null;
   if (!row) return null;
 
   const revisionId = generateId();
   const timestamp = now();
   db.run(
-    `INSERT INTO note_revisions (id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [revisionId, noteId, row.content, row.context, row.tags, row.keywords, row.confidence, timestamp, sessionId ?? null]
+    `INSERT INTO note_revisions (id, note_id, content, context, tags, keywords, confidence, code_refs, revised_at, revised_by_session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [revisionId, noteId, row.content, row.context, row.tags, row.keywords, row.confidence, row.code_refs, timestamp, sessionId ?? null]
   );
   return revisionId;
 }

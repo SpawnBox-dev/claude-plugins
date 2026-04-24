@@ -33,120 +33,157 @@ export function handleReflect(
   globalDb: Database,
   input: ReflectInput
 ): ReflectResult {
-  // Decay pheromone signals on stale notes in both DBs
-  const projectDecayed = decayAllSignals(projectDb);
-  const globalDecayed = decayAllSignals(globalDb);
-  const totalDecayed = projectDecayed + globalDecayed;
-
-  // Merge duplicate notes in both DBs
-  const projectMerged = mergeDuplicates(projectDb);
-  const globalMerged = mergeDuplicates(globalDb);
-  const totalMerged = projectMerged + globalMerged;
-
-  // Count orphan notes (notes with no links in either direction)
-  const orphanCount = (
-    projectDb
-      .query(
-        `SELECT COUNT(*) as cnt FROM notes n
-         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`
-      )
-      .get() as { cnt: number }
-  ).cnt;
-
-  // Get low-confidence unresolved notes for revalidation
-  const revalidationRows = projectDb
-    .query(
-      `SELECT id, content, type FROM notes
-       WHERE confidence = 'low' AND resolved = 0
-       ORDER BY updated_at ASC
-       LIMIT 10`
-    )
-    .all() as Array<{ id: string; content: string; type: string }>;
-
-  // Compute autonomy scores for each domain
-  const autonomyScores: Record<string, string> = {};
+  // R5.2 Critical-2: wrap project-DB maintenance in a transaction and global-DB
+  // maintenance in a separate transaction so partial failure rolls back
+  // cleanly. Without this, a mid-pass throw (e.g. during autonomy scoring)
+  // leaves decay + merge already committed. The next auto-retro run then
+  // double-decays already-decayed notes. With transactions, the throw
+  // propagates out of handleReflect with the work rolled back, and the
+  // caller's finally block still advances the cursor so we don't re-attempt
+  // the same broken state on the next startup.
   const timestamp = now();
+  let projectDecayed = 0;
+  let projectMerged = 0;
+  let orphanCount = 0;
+  let revalidationRows: Array<{ id: string; content: string; type: string }> = [];
+  const autonomyScores: Record<string, string> = {};
+  // autonomyInputs: computed under projectDb read; written under globalDb tx.
+  const autonomyInputs: Array<{
+    domain: string;
+    score: string;
+    recipe_count: number;
+    gate_count: number;
+    anti_pattern_count: number;
+  }> = [];
 
-  for (const domain of DOMAINS) {
-    const result = computeAutonomyScore(projectDb, domain);
-    autonomyScores[domain] = result.score;
+  projectDb.transaction(() => {
+    projectDecayed = decayAllSignals(projectDb);
+    projectMerged = mergeDuplicates(projectDb);
 
-    // Upsert into global DB
-    try {
-      globalDb.run(
-        `INSERT INTO autonomy_scores (id, project, domain, score, recipe_count, gate_count, anti_pattern_count, last_assessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project, domain) DO UPDATE SET
-           score = excluded.score,
-           recipe_count = excluded.recipe_count,
-           gate_count = excluded.gate_count,
-           anti_pattern_count = excluded.anti_pattern_count,
-           last_assessed = excluded.last_assessed`,
-        [
-          `${domain}-score`,
-          "current",
-          domain,
-          result.score,
-          result.recipe_count,
-          result.gate_count,
-          result.anti_pattern_count,
-          timestamp,
-        ]
-      );
-    } catch {
-      // autonomy_scores table might not exist if global DB isn't initialized
-    }
-  }
+    // Count orphan notes (notes with no links in either direction)
+    orphanCount = (
+      projectDb
+        .query(
+          `SELECT COUNT(*) as cnt FROM notes n
+           WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`
+        )
+        .get() as { cnt: number }
+    ).cnt;
 
-  // User model trajectory analysis
-  let trajectoryUpdates = 0;
-  try {
-    // Look at user_pattern notes created in last 7 days
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const recentPatterns = globalDb
+    // Get low-confidence unresolved notes for revalidation
+    revalidationRows = projectDb
       .query(
-        `SELECT content FROM notes
-         WHERE type = 'user_pattern' AND created_at >= ?
-         ORDER BY created_at DESC`
+        `SELECT id, content, type FROM notes
+         WHERE confidence = 'low' AND resolved = 0
+         ORDER BY updated_at ASC
+         LIMIT 10`
       )
-      .all(sevenDaysAgo) as Array<{ content: string }>;
+      .all() as Array<{ id: string; content: string; type: string }>;
 
-    if (recentPatterns.length >= 3) {
-      // If there are many recent user_pattern notes, user preferences are evolving
-      const entries = globalDb
-        .query(`SELECT id, dimension, trajectory, updated_at FROM user_model`)
-        .all() as Array<{ id: string; dimension: string; trajectory: string; updated_at: string }>;
+    // Compute autonomy scores for each domain (reads projectDb; writes
+    // happen below under the global-db transaction).
+    for (const domain of DOMAINS) {
+      const result = computeAutonomyScore(projectDb, domain);
+      autonomyScores[domain] = result.score;
+      autonomyInputs.push({
+        domain,
+        score: result.score,
+        recipe_count: result.recipe_count,
+        gate_count: result.gate_count,
+        anti_pattern_count: result.anti_pattern_count,
+      });
+    }
+  })();
 
-      for (const entry of entries) {
-        const entryAge = Date.now() - new Date(entry.updated_at).getTime();
-        const staleMs = 14 * 24 * 60 * 60 * 1000; // 14 days
+  // User model trajectory analysis + autonomy upsert all happen under the
+  // global-db transaction so a partial failure leaves global-db consistent.
+  let globalDecayed = 0;
+  let globalMerged = 0;
+  let trajectoryUpdates = 0;
+  globalDb.transaction(() => {
+    globalDecayed = decayAllSignals(globalDb);
+    globalMerged = mergeDuplicates(globalDb);
 
-        if (entryAge > staleMs && entry.trajectory !== "regressing") {
-          // Old entry not reinforced - might be regressing
-          globalDb.run(
-            `UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`,
-            [timestamp, entry.id]
-          );
-          trajectoryUpdates++;
-        } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
-          // Recently reinforced - improving
-          globalDb.run(
-            `UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`,
-            [timestamp, entry.id]
-          );
-          trajectoryUpdates++;
-        }
+    for (const row of autonomyInputs) {
+      try {
+        globalDb.run(
+          `INSERT INTO autonomy_scores (id, project, domain, score, recipe_count, gate_count, anti_pattern_count, last_assessed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(project, domain) DO UPDATE SET
+             score = excluded.score,
+             recipe_count = excluded.recipe_count,
+             gate_count = excluded.gate_count,
+             anti_pattern_count = excluded.anti_pattern_count,
+             last_assessed = excluded.last_assessed`,
+          [
+            `${row.domain}-score`,
+            "current",
+            row.domain,
+            row.score,
+            row.recipe_count,
+            row.gate_count,
+            row.anti_pattern_count,
+            timestamp,
+          ]
+        );
+      } catch {
+        // autonomy_scores table might not exist if global DB isn't initialized
       }
     }
-  } catch {
-    // user_model operations are best-effort
-  }
+
+    try {
+      // Look at user_pattern notes created in last 7 days
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const recentPatterns = globalDb
+        .query(
+          `SELECT content FROM notes
+           WHERE type = 'user_pattern' AND created_at >= ?
+           ORDER BY created_at DESC`
+        )
+        .all(sevenDaysAgo) as Array<{ content: string }>;
+
+      if (recentPatterns.length >= 3) {
+        // If there are many recent user_pattern notes, user preferences are evolving
+        const entries = globalDb
+          .query(`SELECT id, dimension, trajectory, updated_at FROM user_model`)
+          .all() as Array<{ id: string; dimension: string; trajectory: string; updated_at: string }>;
+
+        for (const entry of entries) {
+          const entryAge = Date.now() - new Date(entry.updated_at).getTime();
+          const staleMs = 14 * 24 * 60 * 60 * 1000; // 14 days
+
+          if (entryAge > staleMs && entry.trajectory !== "regressing") {
+            // Old entry not reinforced - might be regressing
+            globalDb.run(
+              `UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`,
+              [timestamp, entry.id]
+            );
+            trajectoryUpdates++;
+          } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
+            // Recently reinforced - improving
+            globalDb.run(
+              `UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`,
+              [timestamp, entry.id]
+            );
+            trajectoryUpdates++;
+          }
+        }
+      }
+    } catch {
+      // user_model operations are best-effort
+    }
+  })();
+
+  const totalDecayed = projectDecayed + globalDecayed;
+  const totalMerged = projectMerged + globalMerged;
 
   // R5: code_refs verification pass. When CLAUDE_PROJECT_DIR (or the
-  // orchestrator fallback) is set, iterate non-superseded, non-resolved notes
-  // that declare code_refs and check each path against the filesystem. For
-  // R5 core we just count + include in the summary - future R5.1 can surface
-  // broken refs via curation_candidates.
+  // orchestrator fallback) is set, iterate non-resolved notes that declare
+  // code_refs and check each path against the filesystem.
+  // R5.2 Important-4: verification includes SUPERSEDED notes (they are still
+  // agent-visible via lookup({include_superseded: true}), so broken refs are
+  // worth knowing about). Resolved notes are still skipped - resolved threads
+  // are settled, not worth re-checking.
   let codeRefsChecked = 0;
   let codeRefsBroken = 0;
   const projectRoot =
@@ -159,7 +196,7 @@ export function handleReflect(
       const rows = projectDb
         .query(
           `SELECT id, code_refs FROM notes
-           WHERE code_refs IS NOT NULL AND resolved = 0 AND superseded_by IS NULL`
+           WHERE code_refs IS NOT NULL AND resolved = 0`
         )
         .all() as Array<{ id: string; code_refs: string }>;
 

@@ -290,6 +290,20 @@ DROP TABLE _signal_migration_check;
       }
     },
   },
+  {
+    version: 18,
+    name: "add_code_refs_to_note_revisions",
+    // R5.2 Important-1: revision snapshots didn't capture code_refs, so
+    // code_refs-only updates were silently lost from revision history.
+    // Add the column to note_revisions so snapshotRevision can store it.
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(note_revisions)").all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === "code_refs")) {
+        db.exec("ALTER TABLE note_revisions ADD COLUMN code_refs TEXT");
+      }
+    },
+  },
 ];
 
 /**

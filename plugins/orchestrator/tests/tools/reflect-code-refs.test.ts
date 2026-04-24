@@ -99,13 +99,15 @@ describe("R5 code_refs: retro verification pass", () => {
     }
   });
 
-  test("retro skips resolved and superseded notes", async () => {
+  // R5.2 Important-4: superseded notes are still agent-visible via
+  // lookup({include_superseded: true}), so their code_refs are worth
+  // verifying. Resolved notes remain skipped (thread closed, settled).
+  test("retro skips resolved notes but INCLUDES superseded notes", async () => {
     const tmpRoot = mkdtempSync(path.join(os.tmpdir(), "orch-refs-"));
     try {
       process.env.CLAUDE_PROJECT_DIR = tmpRoot;
 
-      // Note 1: resolved - should be skipped. Use content keyword-disjoint
-      // from the other two to avoid Jaccard dedup (MIN_SHARED_KEYWORDS=3).
+      // Note 1: resolved - still skipped.
       const resolved = await handleRemember(projectDb, globalDb, {
         content: "zeppelin kestrel hibiscus dormant",
         type: "open_thread",
@@ -113,8 +115,7 @@ describe("R5 code_refs: retro verification pass", () => {
       });
       projectDb.run(`UPDATE notes SET resolved = 1 WHERE id = ?`, [resolved.note_id!]);
 
-      // Note 2: superseded - should be skipped. Different type so no cross-
-      // type Jaccard coincidence can merge it with note 1 either.
+      // Note 2: superseded - POST-FIX: included. Broken ref should surface.
       const superseded = await handleRemember(projectDb, globalDb, {
         content: "nebula goblin quicksand marzipan",
         type: "insight",
@@ -125,7 +126,7 @@ describe("R5 code_refs: retro verification pass", () => {
         ["somewhere-else", superseded.note_id!]
       );
 
-      // Note 3: live - should be the only one checked.
+      // Note 3: live.
       await handleRemember(projectDb, globalDb, {
         content: "driftwood xylophone ossuary parabola",
         type: "architecture",
@@ -133,8 +134,10 @@ describe("R5 code_refs: retro verification pass", () => {
       });
 
       const result = handleReflect(projectDb, globalDb, {});
-      expect(result.code_refs_checked).toBe(1);
-      expect(result.code_refs_broken).toBe(1);
+      // Pre-fix: only note 3 was checked (1 ref). Post-fix: notes 2 + 3 are
+      // both checked (2 refs, both broken since tmp dir is empty).
+      expect(result.code_refs_checked).toBe(2);
+      expect(result.code_refs_broken).toBe(2);
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }

@@ -321,15 +321,47 @@ export function handleOrient(
   // R4.4: auto-retro gate. Only fires on session startup (not resume/clear/
   // compact). If retro is stale or has never run, invoke it inline and update
   // the cursor. Any failure is swallowed - briefing must still return.
+  //
+  // R5.2 Critical-1: empty-DB guard. Fire retro only when there's something to
+  // maintain. On a brand-new DB, firing retro would do no work but STILL
+  // advance the `last_retro_run_at` cursor, so the next session 2 days later
+  // (which has actual notes) would skip retro. Check note count first; when
+  // the DB is empty, skip entirely and do NOT write the cursor.
+  //
+  // R5.2 Critical-2: recordAutoRetroRun moved into a finally block. If
+  // handleReflect throws mid-way (e.g. lock contention during autonomy
+  // scoring), the transaction wrapper rolls back the partial work, BUT we
+  // still advance the cursor - "we tried, log the attempt, move on" matches
+  // the user's mental model and prevents double-decay hazards where the next
+  // startup re-runs the broken pass on already-decayed notes.
   let autoRetroSummary: string | null = null;
-  if (input.event === "startup" && shouldAutoRetro(projectDb)) {
+  if (input.event === "startup") {
+    let noteCount = 0;
     try {
-      const retroResult = handleReflect(projectDb, globalDb, {});
-      autoRetroSummary = retroResult.message || "Retro maintenance ran.";
-      recordAutoRetroRun(projectDb);
-    } catch (err) {
-      console.error("[orient] auto-retro failed", err);
-      // Non-fatal; briefing continues
+      const row = projectDb.query("SELECT COUNT(*) AS c FROM notes").get() as { c: number } | null;
+      noteCount = row?.c ?? 0;
+    } catch {
+      // table missing; treat as empty - don't fire retro
+    }
+
+    if (noteCount > 0 && shouldAutoRetro(projectDb)) {
+      try {
+        const retroResult = handleReflect(projectDb, globalDb, {});
+        autoRetroSummary = retroResult.message || "Retro maintenance ran.";
+      } catch (err) {
+        console.error("[orient] auto-retro failed", err);
+        autoRetroSummary = null;
+        // Non-fatal; briefing continues
+      } finally {
+        // ALWAYS advance the cursor - partial-success or full-failure both
+        // count as "we tried". Otherwise a recurring failure would re-attempt
+        // decay/merge on each startup, compounding corruption.
+        try {
+          recordAutoRetroRun(projectDb);
+        } catch (err) {
+          console.error("[orient] could not record retro run", err);
+        }
+      }
     }
   }
 

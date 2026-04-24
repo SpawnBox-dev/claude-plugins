@@ -63,4 +63,34 @@ describe("snapshotRevision", () => {
     expect(revs[0].content).toBe("v1");
     expect(revs[1].content).toBe("v2");
   });
+
+  // R5.2 Important-1: revision snapshots must capture code_refs so that
+  // code_refs-only updates don't silently lose their prior value.
+  test("snapshotRevision captures code_refs", async () => {
+    const created = await handleRemember(projectDb, globalDb, {
+      content: "note with breadcrumbs",
+      type: "decision",
+      code_refs: ["mcp/server.ts", "mcp/engine/signal.ts"],
+    });
+    const revisionId = snapshotRevision(projectDb, created.note_id!);
+    expect(revisionId).toBeTruthy();
+    const rev = projectDb
+      .query("SELECT code_refs FROM note_revisions WHERE id = ?")
+      .get(revisionId!) as any;
+    expect(rev.code_refs).toBeTruthy();
+    expect(JSON.parse(rev.code_refs)).toEqual(["mcp/server.ts", "mcp/engine/signal.ts"]);
+  });
+
+  test("snapshotRevision stores NULL code_refs when note has none", async () => {
+    const created = await handleRemember(projectDb, globalDb, {
+      content: "plain note",
+      type: "decision",
+    });
+    const revisionId = snapshotRevision(projectDb, created.note_id!);
+    expect(revisionId).toBeTruthy();
+    const rev = projectDb
+      .query("SELECT code_refs FROM note_revisions WHERE id = ?")
+      .get(revisionId!) as any;
+    expect(rev.code_refs).toBeNull();
+  });
 });

@@ -112,3 +112,83 @@ describe("R4.4: auto-retro gate on briefing", () => {
     expect(result.formatted).toContain("# Session Briefing");
   });
 });
+
+// R5.2 Critical-1: empty-DB guard - auto-retro must NOT burn the 7-day retro
+// window on a first run that has zero notes. If it fires and writes the
+// cursor, the next session (2 days later, with actual notes) skips retro.
+describe("R5.2 Critical-1: auto-retro empty-DB guard", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = new Database(":memory:");
+    applyMigrations(projectDb, "project");
+    globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "global");
+    // NO seeded notes - this is the first-run scenario.
+  });
+
+  test("auto-retro does NOT fire on empty DB", () => {
+    handleOrient(projectDb, globalDb, { event: "startup" });
+    const row = projectDb
+      .query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'")
+      .get() as any;
+    // Cursor not written - next session with actual notes can still retro.
+    expect(row).toBeNull();
+  });
+
+  test("auto-retro fires on the FIRST session that has notes", async () => {
+    // Simulate first-run empty session: no retro, no cursor.
+    handleOrient(projectDb, globalDb, { event: "startup" });
+    expect(
+      projectDb.query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'").get()
+    ).toBeNull();
+
+    // Second session: now there's a note. Retro should fire.
+    await handleRemember(projectDb, globalDb, {
+      content: "first real note in this project",
+      type: "decision",
+    });
+    handleOrient(projectDb, globalDb, { event: "startup" });
+    const row = projectDb
+      .query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'")
+      .get() as any;
+    expect(row).toBeTruthy();
+    expect(row.value).toBeTruthy();
+  });
+});
+
+// R5.2 Critical-2: when handleReflect throws mid-run, the cursor must still
+// be advanced so auto-retro doesn't re-attempt the broken pass on each
+// subsequent startup (which would double-decay signals).
+describe("R5.2 Critical-2: auto-retro finally block advances cursor on failure", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(async () => {
+    projectDb = new Database(":memory:");
+    applyMigrations(projectDb, "project");
+    globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "global");
+    // Non-empty so the empty-DB guard passes and retro is actually attempted.
+    await handleRemember(projectDb, globalDb, {
+      content: "seed note so retro is eligible",
+      type: "decision",
+    });
+  });
+
+  test("cursor advances even when handleReflect throws", () => {
+    // Close globalDb so handleReflect's first mutation on it throws.
+    globalDb.close();
+    // handleOrient must not re-throw; briefing must still render; cursor
+    // must be advanced (the finally block).
+    const result = handleOrient(projectDb, globalDb, { event: "startup" });
+    expect(result).toBeTruthy();
+    expect(result.formatted).toBeTruthy();
+    const row = projectDb
+      .query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'")
+      .get() as any;
+    expect(row).toBeTruthy();
+    expect(row.value).toBeTruthy();
+  });
+});

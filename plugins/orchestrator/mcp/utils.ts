@@ -176,14 +176,28 @@ export function parseCodeRefs(raw: string | null): string[] | null {
 
 /**
  * R5: Serialize a code_refs array for the notes.code_refs column.
- * Trims each ref, drops empty strings, and de-duplicates. Returns null when
- * the input is null/undefined/empty so the caller can bind a single consistent
- * NULL value instead of an empty JSON array.
+ * Trims each ref, drops empty strings, normalizes paths, and de-duplicates.
+ * Returns null when the input is null/undefined/empty so the caller can bind
+ * a single consistent NULL value instead of an empty JSON array.
+ *
+ * R5.2 Minor-2: path normalization. Leading "./" is stripped and backslashes
+ * are converted to forward slashes so "./mcp/server.ts", "mcp\\server.ts",
+ * and "mcp/server.ts" all store identically. Trailing slashes are preserved
+ * so a directory-ref ("src/") remains distinct from a file-ref ("src").
  */
 export function stringifyCodeRefs(refs: string[] | null | undefined): string | null {
   if (!refs || refs.length === 0) return null;
   const cleaned = Array.from(
-    new Set(refs.map((r) => r.trim()).filter((r) => r.length > 0))
+    new Set(
+      refs
+        .map((r) => {
+          let p = r.trim();
+          p = p.replace(/\\/g, "/");
+          if (p.startsWith("./")) p = p.slice(2);
+          return p;
+        })
+        .filter((r) => r.length > 0)
+    )
   );
   return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
 }

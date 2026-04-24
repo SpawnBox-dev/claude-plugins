@@ -333,13 +333,19 @@ export async function handleRecall(
 
     const includeSuperseded = input.include_superseded ?? false;
 
+    // R5.2 Important-3: propagate code_ref as a SQL-level pre-filter into the
+    // FTS + hybrid search so the 2x-limit slice is already narrowed to notes
+    // referencing the requested path. The TS post-filter below is kept as a
+    // correctness belt (LIKE is a coarse substring check; exact-match happens
+    // after).
     const projectResults = await findRelatedNotesHybrid(
       projectDb,
       input.query,
       limit,
       queryVector,
       0.7,
-      includeSuperseded
+      includeSuperseded,
+      input.code_ref
     );
     const globalResults = await findRelatedNotesHybrid(
       globalDb,
@@ -347,7 +353,8 @@ export async function handleRecall(
       limit,
       queryVector,
       0.7,
-      includeSuperseded
+      includeSuperseded,
+      input.code_ref
     );
 
     // Interleave with reserved slots for global results.

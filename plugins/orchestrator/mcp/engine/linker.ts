@@ -71,7 +71,8 @@ export function findRelatedNotes(
   db: Database,
   query: string,
   limit = 10,
-  includeSuperseded = false
+  includeSuperseded = false,
+  codeRefFilter?: string
 ): NoteSummary[] {
   // Convert natural language to FTS5 syntax: split on any non-alphanumeric
   // run (same as FTS5 unicode61 tokenizer), filter short words, join with OR.
@@ -85,23 +86,39 @@ export function findRelatedNotes(
 
   const ftsQuery = terms.join(" OR ");
 
+  // R5.2 Important-3: when code_ref is supplied, pre-filter at SQL level so the
+  // 2x-limit slice is already narrowed to matching notes. Otherwise, needle-in-
+  // haystack queries can return zero results even when matches exist, because
+  // the post-limit TS filter never gets to see notes that ranked past the cut.
+  // The LIKE is a coarse pre-filter (matches JSON-serialized code_refs array);
+  // the exact-equality TS post-filter in handleRecall is kept as a belt.
+  // Build the LIKE needle by JSON-escaping the path (so quotes/backslashes in
+  // the path can't break the LIKE pattern) and wrapping in quotes + %s.
+  const codeRefClause = codeRefFilter ? `AND n.code_refs LIKE ?` : ``;
+  const escapedForLike = codeRefFilter
+    ? JSON.stringify(codeRefFilter).slice(1, -1)
+    : null;
+  const codeRefLikeParam = escapedForLike !== null ? `%"${escapedForLike}"%` : null;
+
   try {
     // R3.2: fetch 2x limit so the post-SQL signal/confidence re-rank has
     // headroom to promote high-signal items that BM25 alone would have
     // dropped just below the cut line.
-    const rows = db
-      .query(
-        `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags, n.code_refs,
+    const sql = `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags, n.code_refs,
                 COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
            ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
+           ${codeRefClause}
          ORDER BY rank ASC
-         LIMIT ?`
-      )
-      .all(ftsQuery, limit * 2) as Array<{
+         LIMIT ?`;
+    const params: any[] =
+      codeRefLikeParam !== null
+        ? [ftsQuery, codeRefLikeParam, limit * 2]
+        : [ftsQuery, limit * 2];
+    const rows = db.query(sql).all(...params) as Array<{
       id: string;
       type: string;
       content: string;
@@ -171,15 +188,16 @@ export async function findRelatedNotesHybrid(
   limit = 10,
   queryVector?: Float32Array,
   mmrLambda: number = 0.7,
-  includeSuperseded = false
+  includeSuperseded = false,
+  codeRefFilter?: string
 ): Promise<NoteSummary[]> {
   // Fallback: no vector, just use existing FTS5 search
   if (!queryVector) {
-    return findRelatedNotes(db, query, limit, includeSuperseded);
+    return findRelatedNotes(db, query, limit, includeSuperseded, codeRefFilter);
   }
 
   // 1. FTS5 ranked list
-  const ftsResults = findRelatedNotes(db, query, limit * 3, includeSuperseded);
+  const ftsResults = findRelatedNotes(db, query, limit * 3, includeSuperseded, codeRefFilter);
   const ftsRanks = new Map<string, number>();
   ftsResults.forEach((r, i) => ftsRanks.set(r.id, i + 1));
 
@@ -227,16 +245,22 @@ export async function findRelatedNotesHybrid(
   // Expand candidate pool: load note data for any ids not already in noteById.
   // We inspect a wider pre-boost slice so that high-signal items that BM25+vector
   // alone would have dropped just below the cutoff can still be promoted in.
+  // R5.2 Important-3: when codeRefFilter is set, apply the same LIKE pre-filter
+  // here too, so notes pulled in via vector rank but lacking the requested
+  // code_ref don't leak into the candidate pool.
   const preBoostSlice = rrfResults.slice(0, limit * 4);
+  const hybridCodeRefClause = codeRefFilter ? `AND code_refs LIKE ?` : ``;
+  const hybridLikeParam = codeRefFilter
+    ? `%"${JSON.stringify(codeRefFilter).slice(1, -1)}"%`
+    : null;
   for (const rrf of preBoostSlice) {
     if (!noteById.has(rrf.id)) {
-      const row = db
-        .query(
-          `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
+      const sql = `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
                   COALESCE(signal, 0) AS note_signal
-           FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"}`
-        )
-        .get(rrf.id) as {
+           FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"} ${hybridCodeRefClause}`;
+      const params: any[] =
+        hybridLikeParam !== null ? [rrf.id, hybridLikeParam] : [rrf.id];
+      const row = db.query(sql).get(...params) as {
         id: string;
         type: string;
         content: string;
