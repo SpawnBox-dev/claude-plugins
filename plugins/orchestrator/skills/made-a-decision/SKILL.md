@@ -21,4 +21,4 @@ Good decision notes answer these questions for a future session:
 3. Why was this choice made?
 4. Under what conditions should this be revisited?
 
-If the decision overrides a previous one, mention the old decision so the link is clear.
+If the decision overrides a previous one, use `supersede_note(old_id, new_id | new_content+new_type='decision')` to formally mark the replacement. Mentioning in prose alone leaves both at equal rank in lookup; supersede writes the graph edge, hides the old from default search while preserving it for provenance, and surfaces `[SUPERSEDED by X]` hints to future readers of the old note.

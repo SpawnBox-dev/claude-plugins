@@ -16,6 +16,8 @@ If you think "this turn doesn't need it" - that thought is the reason you need i
 
 Your FIRST action in every session MUST be calling the `briefing` MCP tool, then invoking `orchestrator:getting-started`. Do this before responding to the user. No exceptions.
 
+The briefing includes a `curation_candidates` section - stale-but-hot and low-confidence-but-hot notes with their maintenance handles. Scan it internally during startup so you know which notes are worth revisiting as your task touches them. You can also request briefings with specific `sections` to focus on curation when doing dedicated maintenance work. Do NOT dump curation candidates to the user - schedule the maintenance actions silently as part of your work.
+
 ### Session End
 
 Before the session ends, the Stop hook asks for capture AND maintenance equally:
@@ -36,6 +38,8 @@ Notes have a `signal` score (temperature) that represents current relevance. Sig
 ### Prior Art Checking
 
 Before implementing anything, call `check_similar` with your proposed approach. It finds semantically similar decisions, conventions, and anti-patterns - even when the vocabulary doesn't match. This prevents contradicting past work.
+
+When `note()` fires a similarity alert, the alert now shows the top 3 candidates with maintenance handles (R3.5b). Read those alerts as "consider `update_note` / `supersede_note` / merge if these cover the same ground" rather than "just a warning, keep going." Capturing a near-duplicate without touching the candidates leaves the graph with both at equal rank.
 
 ### Struggle Detection
 

@@ -22,4 +22,6 @@ Choose the right type:
 
 When the user corrects you, always record it as high-value knowledge. Their corrections reveal gaps in your understanding that will repeat across sessions.
 
+If the correction invalidates an existing note (you found that note in a lookup earlier this turn), also call `update_note` or `supersede_note` on the old one. Recording the correction without maintaining the wrong-note leaves both in the graph at equal rank - future sessions will hit the wrong one and repeat the same mistake.
+
 Be specific and actionable. "The event bus uses broadcast channels" is better than "events work a certain way."

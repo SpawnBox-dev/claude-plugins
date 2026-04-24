@@ -18,5 +18,6 @@ An approach failed or you found a root cause. Capture the lesson:
 2. If this was a significant debugging session, also call `retro` to run knowledge maintenance
 
 3. If the root cause reveals a broader pattern, record it as a separate `convention` or `risk` note
+4. If the root cause reveals an existing convention / risk / decision that was WRONG, also call `supersede_note` on the old note with the correction as the replacement. Leaving the wrong note in the graph will mislead future sessions - they'll find the stale note first and repeat the failure.
 
 The goal: no future session should hit this same problem and have to rediscover the solution.

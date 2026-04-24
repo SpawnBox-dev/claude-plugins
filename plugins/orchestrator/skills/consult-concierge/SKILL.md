@@ -53,6 +53,7 @@ Use it freely once spawned - it's cheap per call when resumed. These are the hig
 - "Are there anti-patterns around Y?"
 - "Give me everything on Z" (completeness queries)
 - "Trace how decision A connects to conventions B and C" (deep linked exploration)
+- "Trace why we landed on the current decision" - concierge can fetch the supersede chain via `lookup({id: X})` (supersede sections render by default) and the revision history via `lookup({id: X, include_history: true})` to explain evolution, not just the latest answer.
 - Starting unfamiliar work - "I'm about to touch [file/system]. Surface relevant prior art."
 - After context compaction - "Refresh me on what matters for the current task."
 
@@ -60,6 +61,7 @@ Use it freely once spawned - it's cheap per call when resumed. These are the hig
 - End-of-turn batch: "I just did 4 things worth saving. Help me pick types and tags, dedup against existing, save them."
 - Decision made: "I decided X over Y because Z. Check for contradictions and save it."
 - Pattern discovered: "I noticed [convention/anti-pattern]. Is this already documented? If not, save it."
+- Batch maintenance (Shape B): "For every lookup result I relied on this session, check if it's still accurate; update/supersede/close as needed." This is the natural end-of-session counterpart to the Stop hook's maintenance nudge - concierge can scan session activity, verify each referenced note, and make the corrections without round-tripping each one through the main agent.
 - User preference observed: Actually, save user preferences with direct `user_profile` + direct `note` - the concierge doesn't observe the user, you do.
 
 ### Work triage

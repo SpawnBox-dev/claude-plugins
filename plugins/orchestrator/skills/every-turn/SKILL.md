@@ -144,9 +144,9 @@ After responding, ask yourself: **Did I skip the concierge when judgment was nee
 
 | Primitive | When to call directly |
 |-----------|----------------------|
-| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session |
+| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session. Other sections include open threads, recent decisions, work items, user profile, drift warnings, cross-session activity |
 | `note` | Single fast capture |
-| `lookup` | Exact-key retrieval. Params worth knowing: `link_limit` (default 20, cap on rendered linked notes with tail message), `include_superseded` (surface replaced versions), `include_history` (walk the revision chain R2 captured before each edit) |
+| `lookup` | Exact-key retrieval. Params worth knowing: `link_limit` (default 20, cap on rendered linked notes with tail message; raise to 500 for full umbrella-note neighborhoods, lower to 0 to skip links entirely), `include_superseded: true` (opt-in flag to surface replaced notes - off by default so lookup stays clean), `include_history: true` (opt-in flag to walk the revision chain R2 captured before each edit - off by default; use when you need to see how a note evolved) |
 | `check_similar` | Quick similarity check |
 | `update_note` | Correction/enrichment. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh, each change snapshots a prior revision |
 | `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new, hides old from default lookup |

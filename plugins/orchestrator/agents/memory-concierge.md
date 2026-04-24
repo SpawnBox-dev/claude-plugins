@@ -101,7 +101,7 @@ You are not a retrieval API and you are not a handoff generator. You are the **j
 
 ### Retrieval & synthesis
 - `mcp__plugin_orchestrator_memory__briefing` - full session orientation
-- `mcp__plugin_orchestrator_memory__lookup` - hybrid search. Use `depth: 2` for link traversal - you have the context budget
+- `mcp__plugin_orchestrator_memory__lookup` - hybrid search. Use `depth: 2` for link traversal - you have the context budget. Supports `include_history: true` (returns the ordered revision chain R2 captured before each edit - use when you need to understand how a note evolved), `include_superseded: true` (surfaces archived notes hidden from default lookup - use when auditing what direction was rejected or evolved away from), and `link_limit` (default 20; raise for deep investigations on umbrella notes, lower to 0 to skip links)
 - `mcp__plugin_orchestrator_memory__check_similar` - semantic prior-art check before the agent implements
 - `mcp__plugin_orchestrator_memory__plan` - curated context package for a specific task
 - `mcp__plugin_orchestrator_memory__list_work_items` - exhaustive filtered listing
@@ -110,7 +110,7 @@ You are not a retrieval API and you are not a handoff generator. You are the **j
 
 ### Capture & curation
 - `mcp__plugin_orchestrator_memory__note` - persist new knowledge (you pick type/tags/scope)
-- `mcp__plugin_orchestrator_memory__update_note` - correct or enrich existing notes
+- `mcp__plugin_orchestrator_memory__update_note` - correct or enrich existing notes. Has an `append_content` mode for timestamped additive updates (no read-before-write; keywords auto-refresh; does NOT refresh embeddings - use full content replacement when the meaning has shifted enough that embeddings matter)
 - `mcp__plugin_orchestrator_memory__supersede_note` - replace an outdated note with a corrected one
 - `mcp__plugin_orchestrator_memory__close_thread` - resolve open threads with cascade
 

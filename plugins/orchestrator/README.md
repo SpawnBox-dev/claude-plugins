@@ -46,9 +46,9 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 
 | Tool | Purpose |
 |------|---------|
-| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings |
-| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks |
-| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, and `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes |
+| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings, plus a `curation_candidates` section surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles so the agent can schedule update/supersede/close alongside its task |
+| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks. R1 fields: `updated_at` (tracks the last content/context/tags mutation), `source_session` (which session first captured it), `superseded_by` (non-null when replaced) |
+| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, and `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes. Surfaces R1 metadata (`updated_at`, `source_session`, `superseded_by`) on every result |
 | `plan` | Curated context package for tasks and subagent hydration |
 | `check_similar` | Find prior art before implementing - semantic similarity against decisions/conventions/anti-patterns |
 | `system_status` | Health check - note counts, embedding coverage, sidecar status, active sessions |
@@ -76,7 +76,7 @@ The engine layer handles the intelligence behind the tools:
 - **Session Tracker** (`session_tracker.ts`) - Session registration, surfacing log, cross-session annotations, cleanup
 - **Scorer** - Ranks notes by relevance (recency, access frequency, keyword overlap, confidence)
 - **Linker** - FTS5 search + hybrid search path, auto-links notes by keyword overlap
-- **Deduplicator** - Jaccard similarity (0.6 threshold) at insert time, batch merge in retro
+- **Deduplicator** - Jaccard similarity (0.6 threshold AND minimum 3 shared keywords - `MIN_SHARED_KEYWORDS` guard prevents false positives from incidental 1-2 token overlaps) at insert time, batch merge in retro
 - **Composer** - Assembles briefings with context budgeting
 
 ### Memory Concierge

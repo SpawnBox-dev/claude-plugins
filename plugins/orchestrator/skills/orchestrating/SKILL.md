@@ -76,6 +76,6 @@ If you find yourself thinking "I don't want to spawn the concierge just for this
 
 ## The Goal
 
-Every session leaves the knowledge base richer. New conventions discovered. Anti-patterns caught before they repeat. Decisions captured with reasoning. User patterns refined. Open threads tracked to resolution.
+Every session leaves the knowledge base richer AND more accurate - richer via new captures (conventions, anti-patterns, decisions, user patterns, open threads tracked to resolution) AND more accurate via maintenance (`update_note`, `supersede_note`, `close_thread`) on the notes this session read and found wanting. Capture without maintenance grows the graph; maintenance without capture corrects it. Both matter every session.
 
-This isn't maintenance. This is the core value. A session that doesn't enrich the knowledge base is a wasted session.
+This isn't maintenance as overhead. This is the core value. A session that doesn't enrich the knowledge base is a wasted session, and a session that reads stale notes without correcting them leaves future sessions worse off.

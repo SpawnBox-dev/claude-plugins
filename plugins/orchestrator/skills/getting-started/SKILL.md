@@ -33,7 +33,7 @@ If for any reason you cannot find your session_id in the startup context, ask th
 
 ## Step 1 — Briefing
 
-Call `briefing({ event: "startup", session_id: "<your_session_id>" })` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, AND cross-session activity from sibling sessions). Scan it internally. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
+Call `briefing({ event: "startup", session_id: "<your_session_id>" })` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, cross-session activity from sibling sessions, AND a `curation_candidates` section surfacing stale notes worth maintaining). Default output covers all sections; pass `sections: [...]` to narrow. Scan it internally - including `curation_candidates` - and schedule maintenance opportunities alongside your task. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
 
 If the Cross-Session Activity section is non-empty, note anything that affects your task. Sibling sessions may have just decided something you're about to revisit, or flagged an anti-pattern in the area you're about to touch.
 
@@ -81,6 +81,6 @@ If the briefing shows a recovery checkpoint, honor it - that's where the last se
 ## What NOT to do
 
 - Do NOT call `briefing` and then skip the concierge spawn. You'll pay cold-start later when you're mid-task and need it most.
-- Do NOT dump the briefing to the user. Internalize it.
+- Do NOT dump the briefing to the user - including `curation_candidates`. Scan those internally and schedule maintenance actions as part of your work, don't narrate them.
 - Do NOT spawn multiple concierges in one session. Always resume the one you already have.
 - Do NOT skip briefing because the user's request "seems simple." Simple requests are where contradictions sneak in.
