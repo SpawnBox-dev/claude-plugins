@@ -273,7 +273,7 @@ server.tool(
     sections: z
       .array(z.enum(BRIEFING_SECTIONS))
       .optional()
-      .describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint"),
+      .describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint, curation_candidates"),
     session_id: z
       .string()
       .optional()

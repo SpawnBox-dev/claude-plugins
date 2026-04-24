@@ -221,6 +221,24 @@ function formatBriefing(
     lines.push("");
   }
 
+  // R3.3: maintenance-worthy notes. Shown with the actual tool calls the agent
+  // should use to resolve - this keeps the briefing actionable, not just a
+  // passive log of "stuff that looks old".
+  if (include("curation_candidates") && briefing.curation_candidates.length > 0) {
+    lines.push("## Curation Candidates (notes worth reviewing)");
+    for (const c of briefing.curation_candidates) {
+      const reasonTag = c.reason === "stale_but_surfaced"
+        ? `stale ${c.stale_age_days}d`
+        : "low confidence";
+      const contentPreview = c.note.content.length > 120
+        ? c.note.content.slice(0, 120) + "..."
+        : c.note.content;
+      lines.push(`- **${c.note.id}** [${c.note.type}, ${reasonTag}, signal:${c.signal.toFixed(1)}] ${contentPreview}`);
+      lines.push(`  [maintain: update_note({id:"${c.note.id}"}) | supersede_note({old_id:"${c.note.id}"}) | delete_note({id:"${c.note.id}"})]`);
+    }
+    lines.push("");
+  }
+
   if (include("cross_session") && briefing.cross_session) {
     const xs = briefing.cross_session;
     const hasAnything = xs.new_notes.length > 0 || xs.hot_notes.length > 0;

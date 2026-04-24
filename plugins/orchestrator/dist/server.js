@@ -19518,7 +19518,8 @@ var BRIEFING_SECTIONS = [
   "user_model",
   "cross_project",
   "cross_session",
-  "checkpoint"
+  "checkpoint",
+  "curation_candidates"
 ];
 var DIMENSIONS = [
   "communication_style",
@@ -21265,6 +21266,57 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
 }
 
 // mcp/engine/composer.ts
+var STALE_DAYS = 30;
+var MIN_SIGNAL_FOR_CURATION = 1;
+var MAX_CANDIDATES_PER_CATEGORY = 10;
+function fetchCurationCandidates(db) {
+  const staleCutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const staleRows = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
+            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+     FROM notes
+     WHERE updated_at < ?
+       AND COALESCE(signal, 0) >= ?
+       AND resolved = 0
+       AND superseded_by IS NULL
+       AND type NOT IN ('checkpoint', 'work_item')
+     ORDER BY COALESCE(signal, 0) DESC
+     LIMIT ?`).all(staleCutoff, MIN_SIGNAL_FOR_CURATION, MAX_CANDIDATES_PER_CATEGORY);
+  const lowConfRows = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
+            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+     FROM notes
+     WHERE confidence = 'low'
+       AND COALESCE(signal, 0) >= ?
+       AND resolved = 0
+       AND superseded_by IS NULL
+       AND type NOT IN ('checkpoint', 'work_item')
+     ORDER BY COALESCE(signal, 0) DESC
+     LIMIT ?`).all(MIN_SIGNAL_FOR_CURATION, MAX_CANDIDATES_PER_CATEGORY);
+  const toCandidate = (row, reason) => {
+    const updatedMs = new Date(row.updated_at).getTime();
+    const ageDays = Math.floor((Date.now() - updatedMs) / (24 * 60 * 60 * 1000));
+    return {
+      note: toSummary(row),
+      reason,
+      stale_age_days: reason === "stale_but_surfaced" ? ageDays : undefined,
+      signal: row.note_signal
+    };
+  };
+  const seen = new Set;
+  const results = [];
+  for (const row of staleRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      results.push(toCandidate(row, "stale_but_surfaced"));
+    }
+  }
+  for (const row of lowConfRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      results.push(toCandidate(row, "low_confidence_but_surfaced"));
+    }
+  }
+  return results;
+}
 function toSummary(row) {
   return {
     id: row.id,
@@ -21300,7 +21352,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       suggested_focus: null,
       suggested_intensity: "tactical",
       is_first_run: true,
-      cross_session: null
+      cross_session: null,
+      curation_candidates: []
     };
   }
   const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date
@@ -21410,6 +21463,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
          ORDER BY due_date ASC
          LIMIT 10`).all(todayStr).map(toSummary);
   }
+  const curation_candidates = include("curation_candidates") ? fetchCurationCandidates(projectDb2) : [];
   const suggestedFocus = overdueWork.length > 0 ? truncate(overdueWork[0].content, 100) : activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
   const totalActive = openThreads.length + activeWork.length + overdueWork.length;
   const suggestedIntensity = totalActive > 5 ? "strategic" : totalActive > 2 ? "tactical" : "trivial";
@@ -21427,7 +21481,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     suggested_focus: suggestedFocus,
     suggested_intensity: suggestedIntensity,
     is_first_run: false,
-    cross_session: null
+    cross_session: null,
+    curation_candidates
   };
 }
 function composeContextPackage(projectDb2, globalDb2, domain) {
@@ -21674,6 +21729,16 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
     lines.push("## Cross-Project Patterns");
     lines.push(globalPatterns.map((p) => `- ${p}`).join(`
 `));
+    lines.push("");
+  }
+  if (include("curation_candidates") && briefing.curation_candidates.length > 0) {
+    lines.push("## Curation Candidates (notes worth reviewing)");
+    for (const c of briefing.curation_candidates) {
+      const reasonTag = c.reason === "stale_but_surfaced" ? `stale ${c.stale_age_days}d` : "low confidence";
+      const contentPreview = c.note.content.length > 120 ? c.note.content.slice(0, 120) + "..." : c.note.content;
+      lines.push(`- **${c.note.id}** [${c.note.type}, ${reasonTag}, signal:${c.signal.toFixed(1)}] ${contentPreview}`);
+      lines.push(`  [maintain: update_note({id:"${c.note.id}"}) | supersede_note({old_id:"${c.note.id}"}) | delete_note({id:"${c.note.id}"})]`);
+    }
     lines.push("");
   }
   if (include("cross_session") && briefing.cross_session) {
@@ -22251,7 +22316,7 @@ var server = new McpServer({
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
-  sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint"),
+  sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint, curation_candidates"),
   session_id: exports_external.string().optional().describe("Session ID. Required for cross_session updates (what other active sessions have discovered since your last briefing). Strongly recommended - pass your session identifier.")
 }, async ({ event, sections, session_id }) => {
   session_id = resolveSessionId(session_id);

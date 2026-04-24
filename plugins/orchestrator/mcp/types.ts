@@ -64,6 +64,7 @@ export const BRIEFING_SECTIONS = [
   "cross_project",
   "cross_session",
   "checkpoint",
+  "curation_candidates",
 ] as const;
 export type BriefingSection = (typeof BRIEFING_SECTIONS)[number];
 
@@ -192,6 +193,13 @@ export interface CrossSessionUpdate {
   since: string | null;
 }
 
+export interface CurationCandidate {
+  note: NoteSummary;
+  reason: "stale_but_surfaced" | "low_confidence_but_surfaced";
+  stale_age_days?: number;
+  signal: number;
+}
+
 export interface Briefing {
   open_threads: NoteSummary[];
   recent_decisions: NoteSummary[];
@@ -207,6 +215,7 @@ export interface Briefing {
   suggested_intensity: "strategic" | "tactical" | "trivial";
   is_first_run: boolean;
   cross_session: CrossSessionUpdate | null;
+  curation_candidates: CurationCandidate[];
 }
 
 export interface UserProfileEntry {

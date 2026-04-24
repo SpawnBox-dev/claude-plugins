@@ -1,6 +1,82 @@
 import type { Database } from "bun:sqlite";
-import type { Briefing, BriefingSection, ContextPackage, NoteSummary, UserProfileEntry } from "../types";
+import type { Briefing, BriefingSection, ContextPackage, CurationCandidate, NoteSummary, UserProfileEntry } from "../types";
 import { truncate } from "../utils";
+
+// R3.3: curation candidates thresholds
+const STALE_DAYS = 30;
+const MIN_SIGNAL_FOR_CURATION = 1.0;
+const MAX_CANDIDATES_PER_CATEGORY = 10;
+
+/**
+ * R3.3: Fetch notes that look like maintenance targets.
+ *   - stale_but_surfaced: updated_at > STALE_DAYS days ago AND signal >= MIN_SIGNAL_FOR_CURATION
+ *     (notes being READ but never UPDATED - prime candidates for re-verification)
+ *   - low_confidence_but_surfaced: confidence = 'low' AND signal >= MIN_SIGNAL_FOR_CURATION
+ *     (notes being cited but never validated)
+ *
+ * Both categories exclude resolved, superseded, checkpoint, and work_item notes.
+ * When a note qualifies for both, the stale reason wins (stronger signal).
+ */
+function fetchCurationCandidates(db: Database): CurationCandidate[] {
+  const staleCutoff = new Date(Date.now() - STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  const staleRows = db.query(
+    `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
+            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+     FROM notes
+     WHERE updated_at < ?
+       AND COALESCE(signal, 0) >= ?
+       AND resolved = 0
+       AND superseded_by IS NULL
+       AND type NOT IN ('checkpoint', 'work_item')
+     ORDER BY COALESCE(signal, 0) DESC
+     LIMIT ?`
+  ).all(staleCutoff, MIN_SIGNAL_FOR_CURATION, MAX_CANDIDATES_PER_CATEGORY) as any[];
+
+  const lowConfRows = db.query(
+    `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by,
+            keywords, tags, status, priority, due_date, COALESCE(signal, 0) AS note_signal
+     FROM notes
+     WHERE confidence = 'low'
+       AND COALESCE(signal, 0) >= ?
+       AND resolved = 0
+       AND superseded_by IS NULL
+       AND type NOT IN ('checkpoint', 'work_item')
+     ORDER BY COALESCE(signal, 0) DESC
+     LIMIT ?`
+  ).all(MIN_SIGNAL_FOR_CURATION, MAX_CANDIDATES_PER_CATEGORY) as any[];
+
+  const toCandidate = (row: any, reason: CurationCandidate["reason"]): CurationCandidate => {
+    const updatedMs = new Date(row.updated_at).getTime();
+    const ageDays = Math.floor((Date.now() - updatedMs) / (24 * 60 * 60 * 1000));
+    return {
+      note: toSummary(row),
+      reason,
+      stale_age_days: reason === "stale_but_surfaced" ? ageDays : undefined,
+      signal: row.note_signal,
+    };
+  };
+
+  // De-duplicate by note id - if a note qualifies for both, prefer stale reason (stronger signal)
+  const seen = new Set<string>();
+  const results: CurationCandidate[] = [];
+
+  for (const row of staleRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      results.push(toCandidate(row, "stale_but_surfaced"));
+    }
+  }
+
+  for (const row of lowConfRows) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      results.push(toCandidate(row, "low_confidence_but_surfaced"));
+    }
+  }
+
+  return results;
+}
 
 /** Convert a DB row to a NoteSummary. */
 function toSummary(row: any): NoteSummary {
@@ -59,6 +135,7 @@ export function composeBriefing(
       suggested_intensity: "tactical",
       is_first_run: true,
       cross_session: null,
+      curation_candidates: [],
     };
   }
 
@@ -269,6 +346,11 @@ export function composeBriefing(
       .map(toSummary);
   }
 
+  // R3.3: curation candidates - maintenance-worthy notes surfaced at briefing time
+  const curation_candidates = include("curation_candidates")
+    ? fetchCurationCandidates(projectDb)
+    : [];
+
   // Suggested focus: overdue first, then active by priority, then open threads
   const suggestedFocus = overdueWork.length > 0
     ? truncate(overdueWork[0].content, 100)
@@ -298,6 +380,7 @@ export function composeBriefing(
     suggested_intensity: suggestedIntensity,
     is_first_run: false,
     cross_session: null,
+    curation_candidates,
   };
 }
 
