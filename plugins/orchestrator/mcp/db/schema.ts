@@ -265,6 +265,20 @@ DROP TABLE _signal_migration_check;
       db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_revised_at ON note_revisions(revised_at)`);
     },
   },
+  {
+    version: 16,
+    name: "add_plugin_state",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plugin_state (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `);
+    },
+  },
 ];
 
 /**

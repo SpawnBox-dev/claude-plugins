@@ -3,6 +3,37 @@ import type { Briefing, BriefingSection, Note, NoteSummary } from "../types";
 import { composeBriefing } from "../engine/composer";
 import { summarizeForBriefing, relativeTime, truncate } from "../utils";
 import type { SessionTracker } from "../engine/session_tracker";
+import { handleReflect } from "./reflect";
+
+// R4.4: auto-retro gate. If the last retro maintenance pass is older than this
+// interval (or has never run), handleOrient will inline-invoke handleReflect at
+// session startup. This makes the KB maintenance pass non-optional: stale
+// signal, duplicates, and orphan notes get swept even when the user forgets to
+// call retro manually.
+const AUTO_RETRO_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function shouldAutoRetro(projectDb: Database): boolean {
+  try {
+    const row = projectDb
+      .query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'")
+      .get() as { value: string } | null;
+    if (!row) return true; // never run; trigger
+    const lastRun = new Date(row.value);
+    if (Number.isNaN(lastRun.getTime())) return true; // malformed; trigger
+    return Date.now() - lastRun.getTime() > AUTO_RETRO_INTERVAL_MS;
+  } catch {
+    return false; // table missing or query failed; don't block briefing
+  }
+}
+
+function recordAutoRetroRun(projectDb: Database): void {
+  const ts = new Date().toISOString();
+  projectDb.run(
+    `INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ['last_retro_run_at', ts, ts]
+  );
+}
 
 export interface OrientInput {
   event: "startup" | "resume" | "clear" | "compact";
@@ -286,6 +317,21 @@ export function handleOrient(
   input: OrientInput,
   sessionTracker?: SessionTracker | null
 ): OrientResult {
+  // R4.4: auto-retro gate. Only fires on session startup (not resume/clear/
+  // compact). If retro is stale or has never run, invoke it inline and update
+  // the cursor. Any failure is swallowed - briefing must still return.
+  let autoRetroSummary: string | null = null;
+  if (input.event === "startup" && shouldAutoRetro(projectDb)) {
+    try {
+      const retroResult = handleReflect(projectDb, globalDb, {});
+      autoRetroSummary = retroResult.message || "Retro maintenance ran.";
+      recordAutoRetroRun(projectDb);
+    } catch (err) {
+      console.error("[orient] auto-retro failed", err);
+      // Non-fatal; briefing continues
+    }
+  }
+
   const briefing = composeBriefing(projectDb, globalDb, input.sections);
 
   const include = (section: BriefingSection) =>
@@ -316,7 +362,15 @@ export function handleOrient(
     }
   }
 
-  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+  let formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+
+  // R4.4: surface auto-retro result at the top of the briefing when it fired.
+  // The briefing already begins with the "# Session Briefing" header; prepending
+  // an "## Auto-Retro" section before any other content makes it prominent but
+  // non-blocking (other sections still render unchanged).
+  if (autoRetroSummary && !briefing.is_first_run) {
+    formatted = `## Auto-Retro\n${autoRetroSummary}\n\n${formatted}`;
+  }
 
   // Advance the cursor to EXACTLY the same readAt we just queried against.
   if (sessionTracker && input.session_id) {

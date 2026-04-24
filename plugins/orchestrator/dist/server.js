@@ -19777,6 +19777,20 @@ DROP TABLE _signal_migration_check;
       db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_note_id ON note_revisions(note_id)`);
       db.exec(`CREATE INDEX IF NOT EXISTS idx_note_revisions_revised_at ON note_revisions(revised_at)`);
     }
+  },
+  {
+    version: 16,
+    name: "add_plugin_state",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS plugin_state (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `);
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -21784,7 +21798,107 @@ function composeUserProfile(globalDb2) {
   }
 }
 
+// mcp/tools/reflect.ts
+var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
+function handleReflect(projectDb2, globalDb2, input) {
+  const projectDecayed = decayAllSignals(projectDb2);
+  const globalDecayed = decayAllSignals(globalDb2);
+  const totalDecayed = projectDecayed + globalDecayed;
+  const projectMerged = mergeDuplicates(projectDb2);
+  const globalMerged = mergeDuplicates(globalDb2);
+  const totalMerged = projectMerged + globalMerged;
+  const orphanCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes n
+         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`).get().cnt;
+  const revalidationRows = projectDb2.query(`SELECT id, content, type FROM notes
+       WHERE confidence = 'low' AND resolved = 0
+       ORDER BY updated_at ASC
+       LIMIT 10`).all();
+  const autonomyScores = {};
+  const timestamp = now();
+  for (const domain of DOMAINS) {
+    const result = computeAutonomyScore(projectDb2, domain);
+    autonomyScores[domain] = result.score;
+    try {
+      globalDb2.run(`INSERT INTO autonomy_scores (id, project, domain, score, recipe_count, gate_count, anti_pattern_count, last_assessed)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(project, domain) DO UPDATE SET
+           score = excluded.score,
+           recipe_count = excluded.recipe_count,
+           gate_count = excluded.gate_count,
+           anti_pattern_count = excluded.anti_pattern_count,
+           last_assessed = excluded.last_assessed`, [
+        `${domain}-score`,
+        "current",
+        domain,
+        result.score,
+        result.recipe_count,
+        result.gate_count,
+        result.anti_pattern_count,
+        timestamp
+      ]);
+    } catch {}
+  }
+  let trajectoryUpdates = 0;
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const recentPatterns = globalDb2.query(`SELECT content FROM notes
+         WHERE type = 'user_pattern' AND created_at >= ?
+         ORDER BY created_at DESC`).all(sevenDaysAgo);
+    if (recentPatterns.length >= 3) {
+      const entries = globalDb2.query(`SELECT id, dimension, trajectory, updated_at FROM user_model`).all();
+      for (const entry of entries) {
+        const entryAge = Date.now() - new Date(entry.updated_at).getTime();
+        const staleMs = 14 * 24 * 60 * 60 * 1000;
+        if (entryAge > staleMs && entry.trajectory !== "regressing") {
+          globalDb2.run(`UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
+          trajectoryUpdates++;
+        } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
+          globalDb2.run(`UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
+          trajectoryUpdates++;
+        }
+      }
+    }
+  } catch {}
+  const message = [
+    `Reflection complete.`,
+    totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
+    totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
+    orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
+    revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null,
+    trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null
+  ].filter(Boolean).join(" ");
+  return {
+    signals_decayed: totalDecayed,
+    duplicates_found: totalMerged,
+    duplicates_merged: totalMerged,
+    orphan_notes: orphanCount,
+    autonomy_scores: autonomyScores,
+    revalidation_queue: revalidationRows,
+    trajectory_updates: trajectoryUpdates,
+    message
+  };
+}
+
 // mcp/tools/orient.ts
+var AUTO_RETRO_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+function shouldAutoRetro(projectDb2) {
+  try {
+    const row = projectDb2.query("SELECT value FROM plugin_state WHERE key = 'last_retro_run_at'").get();
+    if (!row)
+      return true;
+    const lastRun = new Date(row.value);
+    if (Number.isNaN(lastRun.getTime()))
+      return true;
+    return Date.now() - lastRun.getTime() > AUTO_RETRO_INTERVAL_MS;
+  } catch {
+    return false;
+  }
+}
+function recordAutoRetroRun(projectDb2) {
+  const ts = new Date().toISOString();
+  projectDb2.run(`INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, ["last_retro_run_at", ts, ts]);
+}
 function fetchLatestCheckpoint(db) {
   try {
     const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
@@ -22002,6 +22116,16 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
 `);
 }
 function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
+  let autoRetroSummary = null;
+  if (input.event === "startup" && shouldAutoRetro(projectDb2)) {
+    try {
+      const retroResult = handleReflect(projectDb2, globalDb2, {});
+      autoRetroSummary = retroResult.message || "Retro maintenance ran.";
+      recordAutoRetroRun(projectDb2);
+    } catch (err) {
+      console.error("[orient] auto-retro failed", err);
+    }
+  }
   const briefing = composeBriefing(projectDb2, globalDb2, input.sections);
   const include = (section) => !input.sections || input.sections.length === 0 || input.sections.includes(section);
   const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb2) : null;
@@ -22016,7 +22140,13 @@ function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
       crossSessionLastError = String(err);
     }
   }
-  const formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+  let formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
+  if (autoRetroSummary && !briefing.is_first_run) {
+    formatted = `## Auto-Retro
+${autoRetroSummary}
+
+${formatted}`;
+  }
   if (sessionTracker && input.session_id) {
     try {
       sessionTracker.updateLastBriefing(input.session_id, readAt);
@@ -22089,87 +22219,6 @@ function handlePrepare(projectDb2, globalDb2, input) {
   const autonomyResult = computeAutonomyScore(projectDb2, domain);
   const formatted = formatPackage(pkg, domain, autonomyResult.score);
   return { package: pkg, autonomy: autonomyResult.score, formatted };
-}
-
-// mcp/tools/reflect.ts
-var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
-function handleReflect(projectDb2, globalDb2, input) {
-  const projectDecayed = decayAllSignals(projectDb2);
-  const globalDecayed = decayAllSignals(globalDb2);
-  const totalDecayed = projectDecayed + globalDecayed;
-  const projectMerged = mergeDuplicates(projectDb2);
-  const globalMerged = mergeDuplicates(globalDb2);
-  const totalMerged = projectMerged + globalMerged;
-  const orphanCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes n
-         WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`).get().cnt;
-  const revalidationRows = projectDb2.query(`SELECT id, content, type FROM notes
-       WHERE confidence = 'low' AND resolved = 0
-       ORDER BY updated_at ASC
-       LIMIT 10`).all();
-  const autonomyScores = {};
-  const timestamp = now();
-  for (const domain of DOMAINS) {
-    const result = computeAutonomyScore(projectDb2, domain);
-    autonomyScores[domain] = result.score;
-    try {
-      globalDb2.run(`INSERT INTO autonomy_scores (id, project, domain, score, recipe_count, gate_count, anti_pattern_count, last_assessed)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(project, domain) DO UPDATE SET
-           score = excluded.score,
-           recipe_count = excluded.recipe_count,
-           gate_count = excluded.gate_count,
-           anti_pattern_count = excluded.anti_pattern_count,
-           last_assessed = excluded.last_assessed`, [
-        `${domain}-score`,
-        "current",
-        domain,
-        result.score,
-        result.recipe_count,
-        result.gate_count,
-        result.anti_pattern_count,
-        timestamp
-      ]);
-    } catch {}
-  }
-  let trajectoryUpdates = 0;
-  try {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const recentPatterns = globalDb2.query(`SELECT content FROM notes
-         WHERE type = 'user_pattern' AND created_at >= ?
-         ORDER BY created_at DESC`).all(sevenDaysAgo);
-    if (recentPatterns.length >= 3) {
-      const entries = globalDb2.query(`SELECT id, dimension, trajectory, updated_at FROM user_model`).all();
-      for (const entry of entries) {
-        const entryAge = Date.now() - new Date(entry.updated_at).getTime();
-        const staleMs = 14 * 24 * 60 * 60 * 1000;
-        if (entryAge > staleMs && entry.trajectory !== "regressing") {
-          globalDb2.run(`UPDATE user_model SET trajectory = 'regressing', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
-          trajectoryUpdates++;
-        } else if (entryAge < 3 * 24 * 60 * 60 * 1000 && entry.trajectory !== "improving") {
-          globalDb2.run(`UPDATE user_model SET trajectory = 'improving', updated_at = ? WHERE id = ?`, [timestamp, entry.id]);
-          trajectoryUpdates++;
-        }
-      }
-    }
-  } catch {}
-  const message = [
-    `Reflection complete.`,
-    totalDecayed > 0 ? `${totalDecayed} note signal(s) decayed.` : null,
-    totalMerged > 0 ? `${totalMerged} duplicate note(s) merged.` : null,
-    orphanCount > 0 ? `${orphanCount} orphan note(s) with no links.` : null,
-    revalidationRows.length > 0 ? `${revalidationRows.length} note(s) queued for revalidation.` : null,
-    trajectoryUpdates > 0 ? `${trajectoryUpdates} user model trajectory update(s).` : null
-  ].filter(Boolean).join(" ");
-  return {
-    signals_decayed: totalDecayed,
-    duplicates_found: totalMerged,
-    duplicates_merged: totalMerged,
-    orphan_notes: orphanCount,
-    autonomy_scores: autonomyScores,
-    revalidation_queue: revalidationRows,
-    trajectory_updates: trajectoryUpdates,
-    message
-  };
 }
 
 // mcp/engine/session_tracker.ts
