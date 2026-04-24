@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { NoteType, Dimension } from "../types";
 import { GLOBAL_TYPES, DIMENSIONS } from "../types";
 import { generateId, now, extractKeywords } from "../utils";
-import { findDuplicates } from "../engine/deduplicator";
+import { findDuplicates, MIN_SHARED_KEYWORDS } from "../engine/deduplicator";
 import { createAutoLinks } from "../engine/linker";
 import { promoteConfidence } from "../engine/scorer";
 import { type EmbeddingClient, blobToVector } from "../engine/embeddings";
@@ -130,8 +130,21 @@ export async function handleRemember(
         const relatedNotes = similar.results.filter((r) => r.id !== noteId);
 
         if (relatedNotes.length > 0) {
-          const top = relatedNotes[0];
-          similarityAlert = `\n!! RELATED PRIOR KNOWLEDGE: A similar ${top.type} already exists (id: ${top.id}):\n  "${truncate(top.content, 120)}"\n  Review for consistency. Call lookup(id: "${top.id}") for full context.`;
+          // R3.5b: attribution framing (not authority); show up to top-3 with
+          // inline maintenance handles so the agent can update/supersede rather
+          // than add a parallel duplicate.
+          const topN = relatedNotes.slice(0, 3);
+          const lines = topN.map((r) => {
+            const pct = Math.round(r.similarity * 100);
+            return (
+              `  - **${r.id}** [${r.type}] (${pct}%) "${truncate(r.content, 120)}"\n` +
+              `    [update_note({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`
+            );
+          });
+          similarityAlert =
+            `\n!! Possibly related existing notes (review before adding new - consider update_note / supersede_note / merge if these cover the same ground):\n` +
+            lines.join("\n") +
+            `\n\nIf one of these is the same knowledge you're capturing, update/supersede it instead of adding a duplicate. If they're adjacent but genuinely different, proceed with note() as new.`;
         }
       }
     } catch (err) {
@@ -206,7 +219,11 @@ function writeUserModel(
       const union = new Set([...inputKeywords, ...candidateKeywords]);
       const similarity = union.size > 0 ? intersection.size / union.size : 0;
 
-      if (similarity >= 0.5 && (!bestMatch || similarity > bestMatch.similarity)) {
+      if (
+        intersection.size >= MIN_SHARED_KEYWORDS &&
+        similarity >= 0.5 &&
+        (!bestMatch || similarity > bestMatch.similarity)
+      ) {
         bestMatch = { ...candidate, similarity };
       }
     }

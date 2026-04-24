@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { handleRemember } from "../../mcp/tools/remember";
+import type { EmbeddingClient } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
 
 function makeDb(type: "project" | "global"): Database {
@@ -215,5 +216,236 @@ describe("remember tool", () => {
       .get(result.note_id!) as { source_session: string | null } | null;
     expect(globalNote).toBeTruthy();
     expect(globalNote!.source_session).toBe("global-routing-session");
+  });
+});
+
+// ===========================================================================
+// R3.5b: similarity alert reframe
+//
+// Previously the alert showed ONLY the top-1 embedding match with authority
+// framing ("A similar X already exists") and no action verbs. R3.5b shifts to
+// attribution framing ("Possibly related existing notes"), shows up to top-3
+// candidates, and attaches inline [update_note | supersede_note] maintenance
+// handles to each candidate so the agent can curate instead of add a parallel
+// duplicate.
+//
+// Testing the full alert path requires seeding embeddings. We inject a
+// deterministic mock EmbeddingClient that returns fixed vectors, then
+// pre-seed existing notes' embeddings directly into the embeddings table so
+// the cosine-similarity path in handleCheckSimilar has rows to score against.
+// ===========================================================================
+describe("R3.5b: similarity alert reframe", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  /**
+   * Deterministic embedding client: returns a specific Float32Array for the
+   * new note's content, and lets us seed matching-ish vectors for existing
+   * notes via seedEmbedding().
+   */
+  function makeMockClient(vector: Float32Array): EmbeddingClient {
+    return {
+      // Only embed() is touched by the alert path.
+      embed: async (_texts: string[]) => [vector],
+    } as unknown as EmbeddingClient;
+  }
+
+  function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
+    const blob = Buffer.from(vector.buffer);
+    db.run(
+      `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?)`,
+      [noteId, blob, "bge-m3", new Date().toISOString()]
+    );
+  }
+
+  function insertNoteForAlert(
+    db: Database,
+    opts: { id: string; type: string; content: string }
+  ) {
+    const ts = now();
+    db.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.id,
+        opts.type,
+        opts.content,
+        null,
+        "",
+        opts.type,
+        "medium",
+        0,
+        null,
+        null,
+        null,
+        ts,
+        ts,
+        null,
+      ]
+    );
+  }
+
+  test("alert uses attribution framing, not authority framing", async () => {
+    // Seed a prior decision whose vector matches the query vector exactly
+    // (cosine similarity = 1.0 >= 0.75 threshold).
+    // Use domain-neutral words to avoid the keyword-dedup path so we exercise
+    // the embedding-similarity alert in isolation.
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertNoteForAlert(projectDb, {
+      id: "prior-dec-1",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "prior-dec-1", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+
+    // New framing strings must be present.
+    expect(result.message).toContain("Possibly related existing notes");
+    expect(result.message).toContain("review before adding new");
+
+    // Old authority framing must be gone.
+    expect(result.message).not.toContain("RELATED PRIOR KNOWLEDGE");
+    expect(result.message).not.toContain("A similar");
+    expect(result.message).not.toContain("already exists");
+    expect(result.message).not.toContain("Review for consistency");
+  });
+
+  test("each candidate includes update_note + supersede_note handles", async () => {
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertNoteForAlert(projectDb, {
+      id: "prior-dec-1",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "prior-dec-1", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.message).toContain('update_note({id:"prior-dec-1"})');
+    expect(result.message).toContain('supersede_note({old_id:"prior-dec-1"})');
+  });
+
+  test("shows up to top-3 candidates above threshold", async () => {
+    // Seed 4 prior decisions. The first three get vectors matching query
+    // (similarity 1.0); the fourth gets an orthogonal vector (similarity 0).
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    const orthoVec = new Float32Array([0, 1, 0, 0]);
+
+    insertNoteForAlert(projectDb, {
+      id: "match-a",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    insertNoteForAlert(projectDb, {
+      id: "match-b",
+      type: "decision",
+      content: "beta zeta nu xi",
+    });
+    insertNoteForAlert(projectDb, {
+      id: "match-c",
+      type: "decision",
+      content: "gamma eta phi chi",
+    });
+    insertNoteForAlert(projectDb, {
+      id: "nonmatch-d",
+      type: "decision",
+      content: "pi rho tau upsilon",
+    });
+
+    seedEmbedding(projectDb, "match-a", queryVec);
+    seedEmbedding(projectDb, "match-b", queryVec);
+    seedEmbedding(projectDb, "match-c", queryVec);
+    seedEmbedding(projectDb, "nonmatch-d", orthoVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    // All three matches must appear.
+    expect(result.message).toContain("match-a");
+    expect(result.message).toContain("match-b");
+    expect(result.message).toContain("match-c");
+    // Non-matching vector must NOT appear.
+    expect(result.message).not.toContain("nonmatch-d");
+  });
+
+  test("shows just 1 candidate if only 1 is above threshold", async () => {
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    const orthoVec = new Float32Array([0, 1, 0, 0]);
+
+    insertNoteForAlert(projectDb, {
+      id: "match-only",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    insertNoteForAlert(projectDb, {
+      id: "nonmatch-1",
+      type: "decision",
+      content: "pi rho tau upsilon",
+    });
+
+    seedEmbedding(projectDb, "match-only", queryVec);
+    seedEmbedding(projectDb, "nonmatch-1", orthoVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.message).toContain("match-only");
+    expect(result.message).not.toContain("nonmatch-1");
+    // Only one maintenance-handle block for the single candidate.
+    const handleMatches = result.message.match(/update_note\(\{id:/g) ?? [];
+    expect(handleMatches.length).toBe(1);
+  });
+
+  test("no alert when no embedding client is provided", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
+      content: "omega kappa sigma lambda mu",
+      type: "decision",
+    });
+
+    expect(result.stored).toBe(true);
+    expect(result.message).not.toContain("Possibly related existing notes");
+    expect(result.message).not.toContain("RELATED PRIOR KNOWLEDGE");
   });
 });

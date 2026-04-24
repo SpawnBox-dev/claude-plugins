@@ -1,6 +1,17 @@
 import type { Database } from "bun:sqlite";
 import { extractKeywords, now } from "../utils";
 
+/**
+ * Minimum absolute count of shared keywords required in addition to the
+ * Jaccard ratio threshold for a near-duplicate match.
+ *
+ * Rationale (R3.5a): when both notes have few keywords, even 1-2 shared
+ * tokens can cross a Jaccard ratio of 0.6 and trigger a false-positive
+ * dedup or link. Requiring at least this many shared tokens guards against
+ * tiny-keyword-set coincidences. Exact content matches bypass this gate.
+ */
+export const MIN_SHARED_KEYWORDS = 3;
+
 interface DuplicateMatch {
   id: string;
   content: string;
@@ -63,7 +74,7 @@ export function findDuplicates(
     const union = new Set([...inputKeywords, ...candidateKeywords]);
     const similarity = union.size > 0 ? intersection.size / union.size : 0;
 
-    if (similarity >= threshold) {
+    if (intersection.size >= MIN_SHARED_KEYWORDS && similarity >= threshold) {
       matches.push({ id: candidate.id, content: candidate.content, similarity });
     }
   }
@@ -140,7 +151,7 @@ export function mergeDuplicates(db: Database): number {
           const similarity =
             union.size > 0 ? intersection.size / union.size : 0;
 
-          if (similarity < 0.6) continue;
+          if (similarity < 0.6 || intersection.size < MIN_SHARED_KEYWORDS) continue;
         }
 
         // notes[i] is the survivor (newer), notes[j] gets merged into it

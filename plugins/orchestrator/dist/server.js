@@ -20197,6 +20197,7 @@ function formatAge(iso, now2 = new Date) {
 }
 
 // mcp/engine/deduplicator.ts
+var MIN_SHARED_KEYWORDS = 3;
 function findDuplicates(db, type, content, threshold = 0.6) {
   const normalizedContent = content.trim().toLowerCase();
   const inputKeywords = new Set(extractKeywords(content));
@@ -20213,7 +20214,7 @@ function findDuplicates(db, type, content, threshold = 0.6) {
     const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
     const union3 = new Set([...inputKeywords, ...candidateKeywords]);
     const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-    if (similarity >= threshold) {
+    if (intersection3.size >= MIN_SHARED_KEYWORDS && similarity >= threshold) {
       matches.push({ id: candidate.id, content: candidate.content, similarity });
     }
   }
@@ -20241,7 +20242,7 @@ function mergeDuplicates(db) {
           const intersection3 = new Set([...iKeywords].filter((k) => jKeywords.has(k)));
           const union3 = new Set([...iKeywords, ...jKeywords]);
           const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-          if (similarity < 0.6)
+          if (similarity < 0.6 || intersection3.size < MIN_SHARED_KEYWORDS)
             continue;
         }
         const survivorId = notes[i].id;
@@ -20817,11 +20818,18 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
         });
         const relatedNotes = similar.results.filter((r) => r.id !== noteId);
         if (relatedNotes.length > 0) {
-          const top = relatedNotes[0];
+          const topN = relatedNotes.slice(0, 3);
+          const lines = topN.map((r) => {
+            const pct = Math.round(r.similarity * 100);
+            return `  - **${r.id}** [${r.type}] (${pct}%) "${truncate(r.content, 120)}"
+` + `    [update_note({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+          });
           similarityAlert = `
-!! RELATED PRIOR KNOWLEDGE: A similar ${top.type} already exists (id: ${top.id}):
-  "${truncate(top.content, 120)}"
-  Review for consistency. Call lookup(id: "${top.id}") for full context.`;
+!! Possibly related existing notes (review before adding new - consider update_note / supersede_note / merge if these cover the same ground):
+` + lines.join(`
+`) + `
+
+If one of these is the same knowledge you're capturing, update/supersede it instead of adding a duplicate. If they're adjacent but genuinely different, proceed with note() as new.`;
         }
       }
     } catch (err) {
@@ -20874,7 +20882,7 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
       const intersection3 = new Set([...inputKeywords].filter((k) => candidateKeywords.has(k)));
       const union3 = new Set([...inputKeywords, ...candidateKeywords]);
       const similarity = union3.size > 0 ? intersection3.size / union3.size : 0;
-      if (similarity >= 0.5 && (!bestMatch || similarity > bestMatch.similarity)) {
+      if (intersection3.size >= MIN_SHARED_KEYWORDS && similarity >= 0.5 && (!bestMatch || similarity > bestMatch.similarity)) {
         bestMatch = { ...candidate, similarity };
       }
     }
