@@ -20753,25 +20753,36 @@ function handleCheckSimilar(db, queryVector, input) {
   return { results, message };
 }
 
+// mcp/tools/update_note_helpers.ts
+function appendToNoteContent(db, id, appendContent) {
+  const row = db.query("SELECT content FROM notes WHERE id = ?").get(id);
+  if (!row) {
+    return { appended: false, message: `No note found with id "${id}".` };
+  }
+  const timestamp = now();
+  const newContent = `${row.content}
+
+--- ${timestamp} ---
+${appendContent}`;
+  const newKeywords = extractKeywords(newContent).join(",");
+  db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
+  return { appended: true, message: `Appended to note "${id}".` };
+}
+function snapshotRevision(db, noteId, sessionId) {
+  const row = db.query(`SELECT content, context, tags, keywords, confidence FROM notes WHERE id = ?`).get(noteId);
+  if (!row)
+    return null;
+  const revisionId = generateId();
+  const timestamp = now();
+  db.run(`INSERT INTO note_revisions (id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [revisionId, noteId, row.content, row.context, row.tags, row.keywords, row.confidence, timestamp, sessionId ?? null]);
+  return revisionId;
+}
+
 // mcp/tools/remember.ts
 var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
 var SIMILARITY_ALERT_THRESHOLD = 0.75;
-async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
-  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
-  const db = useGlobal ? globalDb2 : projectDb2;
-  const duplicates = findDuplicates(db, input.type, input.content);
-  if (duplicates.length > 0) {
-    const bestMatch = duplicates[0];
-    const newConfidence = promoteConfidence(db, bestMatch.id);
-    return {
-      stored: false,
-      note_id: bestMatch.id,
-      duplicate: true,
-      promoted: true,
-      links_created: 0,
-      message: `Near-duplicate ${input.type} found - promoted existing note confidence to ${newConfidence}.`
-    };
-  }
+async function insertNote(db, globalDb2, input, embeddingClient) {
   const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
   const tagParts = [input.type];
@@ -20802,35 +20813,13 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     input.session_id ?? null
   ]);
   const links = createAutoLinks(db, noteId, keywords);
-  let similarityAlert = "";
   if (embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
       if (vecs && vecs.length > 0) {
-        const queryVector = vecs[0];
-        const blob = Buffer.from(queryVector.buffer);
+        const blob = Buffer.from(vecs[0].buffer);
         db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
            VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
-        const similar = handleCheckSimilar(db, queryVector, {
-          proposed_action: input.content,
-          types: SIMILARITY_ALERT_TYPES,
-          threshold: SIMILARITY_ALERT_THRESHOLD
-        });
-        const relatedNotes = similar.results.filter((r) => r.id !== noteId);
-        if (relatedNotes.length > 0) {
-          const topN = relatedNotes.slice(0, 3);
-          const lines = topN.map((r) => {
-            const pct = Math.round(r.similarity * 100);
-            return `  - **${r.id}** [${r.type}] (${pct}%) "${truncate(r.content, 120)}"
-` + `    [update_note({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
-          });
-          similarityAlert = `
-!! Possibly related existing notes (review before adding new - consider update_note / supersede_note / merge if these cover the same ground):
-` + lines.join(`
-`) + `
-
-If one of these is the same knowledge you're capturing, update/supersede it instead of adding a duplicate. If they're adjacent but genuinely different, proceed with note() as new.`;
-        }
       }
     } catch (err) {
       console.error(`[embed] Failed to embed note ${noteId}:`, err);
@@ -20839,14 +20828,222 @@ If one of these is the same knowledge you're capturing, update/supersede it inst
   if (input.type === "user_pattern") {
     writeUserModel(globalDb2, input.content, input.context, input.dimension);
   }
+  return { noteId, linksCreated: links.length };
+}
+async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
+  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
+  const db = useGlobal ? globalDb2 : projectDb2;
+  const duplicates = findDuplicates(db, input.type, input.content);
+  if (duplicates.length > 0) {
+    const bestMatch = duplicates[0];
+    const newConfidence = promoteConfidence(db, bestMatch.id);
+    return {
+      stored: false,
+      note_id: bestMatch.id,
+      duplicate: true,
+      promoted: true,
+      links_created: 0,
+      message: `Near-duplicate ${input.type} found - promoted existing note confidence to ${newConfidence}.`
+    };
+  }
+  let preInsertCandidates = [];
+  const isAlertScopeType = SIMILARITY_ALERT_TYPES.includes(input.type);
+  if (isAlertScopeType && embeddingClient) {
+    try {
+      const vecs = await embeddingClient.embed([input.content]);
+      if (vecs && vecs.length > 0) {
+        const queryVector = vecs[0];
+        const similar = handleCheckSimilar(db, queryVector, {
+          proposed_action: input.content,
+          types: SIMILARITY_ALERT_TYPES,
+          threshold: SIMILARITY_ALERT_THRESHOLD
+        });
+        preInsertCandidates = similar.results.slice(0, 3);
+      }
+    } catch (err) {
+      console.error(`[embed] Failed to compute similarity for gate:`, err);
+    }
+  }
+  if (preInsertCandidates.length > 0 && input.resolution === undefined) {
+    const lines = preInsertCandidates.map((c) => {
+      const pct = Math.round(c.similarity * 100);
+      return `  - **${c.id}** [${c.type}] (${pct}%) "${truncate(c.content, 120)}"`;
+    });
+    const message = "Near-duplicate detected. Supply a `resolution` to proceed.\n\n" + `Possibly same knowledge:
+` + lines.join(`
+`) + `
+
+Choose one:
+` + `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different
+` + `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new
+` + `  - resolution: { action: "supersede_existing", target_id: "ID", reason?: "..." }  -- new note supersedes target (preserves history)
+` + `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved`;
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      blocked_on_resolution: true,
+      candidates: preInsertCandidates,
+      message
+    };
+  }
+  if (input.resolution !== undefined) {
+    const action = input.resolution.action;
+    const targetId = input.resolution.target_id;
+    if (action === "accept_new") {
+      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      return {
+        stored: true,
+        note_id: noteId2,
+        duplicate: false,
+        promoted: false,
+        links_created: linksCreated2,
+        message: `Stored ${input.type} note${linksCreated2 > 0 ? ` with ${linksCreated2} auto-link(s)` : ""}. (resolution: accept_new)`
+      };
+    }
+    if (!targetId) {
+      return {
+        stored: false,
+        note_id: null,
+        duplicate: false,
+        promoted: false,
+        links_created: 0,
+        message: `resolution action "${action}" requires target_id. Supply the id of the near-duplicate candidate being acted on.`
+      };
+    }
+    const targetInDb = db.query("SELECT id, type FROM notes WHERE id = ?").get(targetId);
+    if (!targetInDb) {
+      const otherDb = db === projectDb2 ? globalDb2 : projectDb2;
+      const crossRow = otherDb.query("SELECT id FROM notes WHERE id = ?").get(targetId);
+      if (crossRow) {
+        return {
+          stored: false,
+          note_id: null,
+          duplicate: false,
+          promoted: false,
+          links_created: 0,
+          message: `resolution target_id "${targetId}" lives in a different scope than the new note. Cross-scope resolutions are not supported - choose a target in the same scope.`
+        };
+      }
+      return {
+        stored: false,
+        note_id: null,
+        duplicate: false,
+        promoted: false,
+        links_created: 0,
+        message: `resolution target_id "${targetId}" not found. Verify the id from the blocked gate's candidates list.`
+      };
+    }
+    if (action === "update_existing") {
+      appendToNoteContent(db, targetId, input.content);
+      return {
+        stored: false,
+        note_id: targetId,
+        duplicate: false,
+        promoted: false,
+        links_created: 0,
+        message: `Appended new content to target "${targetId}" (resolution: update_existing). No new note created.`
+      };
+    }
+    if (action === "supersede_existing") {
+      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const timestamp = now();
+      db.transaction(() => {
+        db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [noteId2, timestamp, timestamp, targetId]);
+        db.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+           VALUES (?, ?, ?, 'supersedes', 'strong', ?)`, [generateId(), noteId2, targetId, timestamp]);
+      })();
+      const reasonSuffix = input.resolution.reason ? ` Reason: ${input.resolution.reason}.` : "";
+      return {
+        stored: true,
+        note_id: noteId2,
+        duplicate: false,
+        promoted: false,
+        links_created: linksCreated2,
+        message: `Stored ${input.type} note "${noteId2}" and superseded target "${targetId}".${reasonSuffix}`
+      };
+    }
+    if (action === "close_existing") {
+      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const timestamp = now();
+      if (targetInDb.type === "work_item") {
+        db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, targetId]);
+      } else {
+        db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, targetId]);
+      }
+      cascadeResolutionInline(db, targetId, timestamp);
+      const reasonSuffix = input.resolution.reason ? ` Reason: ${input.resolution.reason}.` : "";
+      return {
+        stored: true,
+        note_id: noteId2,
+        duplicate: false,
+        promoted: false,
+        links_created: linksCreated2,
+        message: `Stored ${input.type} note "${noteId2}" and closed target "${targetId}" as resolved.${reasonSuffix}`
+      };
+    }
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      message: `Unknown resolution action "${action}".`
+    };
+  }
+  const { noteId, linksCreated } = await insertNote(db, globalDb2, input, embeddingClient);
   return {
     stored: true,
     note_id: noteId,
     duplicate: false,
     promoted: false,
-    links_created: links.length,
-    message: `Stored ${input.type} note${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.${similarityAlert}`
+    links_created: linksCreated,
+    message: `Stored ${input.type} note${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.`
   };
+}
+function cascadeResolutionInline(db, noteId, timestamp) {
+  const blockedItems = db.query(`SELECT DISTINCT n.id, n.type, n.status FROM links l
+       JOIN notes n ON (
+         (l.from_note_id = ? AND l.to_note_id = n.id) OR
+         (l.to_note_id = ? AND l.from_note_id = n.id)
+       )
+       WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`).all(noteId, noteId, noteId);
+  for (const blocked of blockedItems) {
+    const otherBlockers = db.query(`SELECT COUNT(*) as cnt FROM links l
+         JOIN notes n ON (
+           (l.from_note_id = n.id AND l.to_note_id = ?) OR
+           (l.to_note_id = n.id AND l.from_note_id = ?)
+         )
+         WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`).get(blocked.id, blocked.id, noteId);
+    if (otherBlockers.cnt === 0 && blocked.type === "work_item" && blocked.status === "blocked") {
+      db.run(`UPDATE notes SET status = 'planned', updated_at = ? WHERE id = ?`, [timestamp, blocked.id]);
+    }
+  }
+  const parentLinks = db.query(`SELECT l.to_note_id FROM links l WHERE l.from_note_id = ? AND l.relationship = 'part_of'`).all(noteId);
+  for (const parentLink of parentLinks) {
+    const unresolvedSiblings = db.query(`SELECT COUNT(*) as cnt FROM links l
+         JOIN notes n ON l.from_note_id = n.id
+         WHERE l.to_note_id = ? AND l.relationship = 'part_of'
+         AND n.id != ? AND (n.resolved = 0 OR (n.type = 'work_item' AND n.status != 'done'))`).get(parentLink.to_note_id, noteId);
+    if (unresolvedSiblings.cnt === 0) {
+      const parent = db.query(`SELECT id, type, status FROM notes WHERE id = ?`).get(parentLink.to_note_id);
+      if (parent && parent.status !== "done") {
+        if (parent.type === "work_item") {
+          db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
+        } else {
+          db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
+        }
+      }
+    }
+  }
+  const superseded = db.query(`SELECT n.id FROM links l
+       JOIN notes n ON l.to_note_id = n.id
+       WHERE l.from_note_id = ? AND l.relationship = 'supersedes' AND n.resolved = 0`).all(noteId);
+  for (const sup of superseded) {
+    db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, sup.id]);
+  }
 }
 function inferDimension(content) {
   const lower = content.toLowerCase();
@@ -21959,32 +22156,6 @@ function handleReflect(projectDb2, globalDb2, input) {
   };
 }
 
-// mcp/tools/update_note_helpers.ts
-function appendToNoteContent(db, id, appendContent) {
-  const row = db.query("SELECT content FROM notes WHERE id = ?").get(id);
-  if (!row) {
-    return { appended: false, message: `No note found with id "${id}".` };
-  }
-  const timestamp = now();
-  const newContent = `${row.content}
-
---- ${timestamp} ---
-${appendContent}`;
-  const newKeywords = extractKeywords(newContent).join(",");
-  db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
-  return { appended: true, message: `Appended to note "${id}".` };
-}
-function snapshotRevision(db, noteId, sessionId) {
-  const row = db.query(`SELECT content, context, tags, keywords, confidence FROM notes WHERE id = ?`).get(noteId);
-  if (!row)
-    return null;
-  const revisionId = generateId();
-  const timestamp = now();
-  db.run(`INSERT INTO note_revisions (id, note_id, content, context, tags, keywords, confidence, revised_at, revised_by_session)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [revisionId, noteId, row.content, row.context, row.tags, row.keywords, row.confidence, timestamp, sessionId ?? null]);
-  return revisionId;
-}
-
 // mcp/engine/session_tracker.ts
 class SessionTracker {
   db;
@@ -22523,15 +22694,20 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created.", {
+server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.", {
   content: exports_external.string(),
   type: exports_external.enum(NOTE_TYPES),
   context: exports_external.string().optional(),
   tags: exports_external.string().optional(),
   scope: exports_external.enum(["global", "project"]).optional(),
   dimension: exports_external.enum(DIMENSIONS).optional().describe("For user_pattern notes: explicitly set the dimension instead of relying on auto-inference"),
-  session_id: exports_external.string().optional().describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended.")
-}, async ({ content, type, context, tags, scope, dimension, session_id }) => {
+  session_id: exports_external.string().optional().describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended."),
+  resolution: exports_external.object({
+    action: exports_external.enum(["accept_new", "update_existing", "supersede_existing", "close_existing"]),
+    target_id: exports_external.string().optional().describe("Required for update_existing / supersede_existing / close_existing actions. The id of the near-duplicate candidate being acted on."),
+    reason: exports_external.string().optional().describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread.")
+  }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved).")
+}, async ({ content, type, context, tags, scope, dimension, session_id, resolution }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
@@ -22542,7 +22718,8 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     tags,
     scope,
     dimension,
-    session_id
+    session_id,
+    resolution
   }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]

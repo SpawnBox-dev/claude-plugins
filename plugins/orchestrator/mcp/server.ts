@@ -531,7 +531,7 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created.",
+  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -546,8 +546,22 @@ server.tool(
       .string()
       .optional()
       .describe("Session ID that authored this note. Enables cross-session discovery - other active sessions will see this note in their next briefing under 'Cross-Session Activity'. Strongly recommended."),
+    resolution: z
+      .object({
+        action: z.enum(["accept_new", "update_existing", "supersede_existing", "close_existing"]),
+        target_id: z
+          .string()
+          .optional()
+          .describe("Required for update_existing / supersede_existing / close_existing actions. The id of the near-duplicate candidate being acted on."),
+        reason: z
+          .string()
+          .optional()
+          .describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread."),
+      })
+      .optional()
+      .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
   },
-  async ({ content, type, context, tags, scope, dimension, session_id }) => {
+  async ({ content, type, context, tags, scope, dimension, session_id, resolution }) => {
     session_id = resolveSessionId(session_id);
     if (session_id) registerSessionOnce(session_id);
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
@@ -558,6 +572,7 @@ server.tool(
       scope,
       dimension: dimension as Dimension | undefined,
       session_id,
+      resolution,
     }, embeddingClient);
     return {
       content: [{ type: "text" as const, text: result.message }],

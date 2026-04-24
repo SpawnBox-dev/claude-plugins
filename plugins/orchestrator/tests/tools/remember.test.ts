@@ -219,22 +219,26 @@ describe("remember tool", () => {
   });
 });
 
+// Note: the R3.5b post-insert similarity alert was replaced by the R4
+// pre-insert blocking gate (see "R4: forced-resolution gate" below). The
+// R3.5b tests that asserted informational-alert wording on stored:true
+// results are obsolete - the new behavior returns stored:false with a
+// different message shape.
+
 // ===========================================================================
-// R3.5b: similarity alert reframe
+// R4: forced-resolution gate
 //
-// Previously the alert showed ONLY the top-1 embedding match with authority
-// framing ("A similar X already exists") and no action verbs. R3.5b shifts to
-// attribution framing ("Possibly related existing notes"), shows up to top-3
-// candidates, and attaches inline [update_note | supersede_note] maintenance
-// handles to each candidate so the agent can curate instead of add a parallel
-// duplicate.
+// The R3.5b "informational alert" after insert is replaced by a pre-insert
+// BLOCKING gate. When embedding similarity >= 0.75 against an existing note
+// of an alert-scope type (decision / convention / anti_pattern), note() now
+// REJECTS the write and returns candidates. The caller must re-call with a
+// `resolution` choosing: accept_new, update_existing, supersede_existing,
+// close_existing.
 //
-// Testing the full alert path requires seeding embeddings. We inject a
-// deterministic mock EmbeddingClient that returns fixed vectors, then
-// pre-seed existing notes' embeddings directly into the embeddings table so
-// the cosine-similarity path in handleCheckSimilar has rows to score against.
+// These tests cover each path plus graceful degradation (no embedding client,
+// types outside alert scope).
 // ===========================================================================
-describe("R3.5b: similarity alert reframe", () => {
+describe("R4: forced-resolution gate", () => {
   let projectDb: Database;
   let globalDb: Database;
 
@@ -243,14 +247,8 @@ describe("R3.5b: similarity alert reframe", () => {
     globalDb = makeDb("global");
   });
 
-  /**
-   * Deterministic embedding client: returns a specific Float32Array for the
-   * new note's content, and lets us seed matching-ish vectors for existing
-   * notes via seedEmbedding().
-   */
   function makeMockClient(vector: Float32Array): EmbeddingClient {
     return {
-      // Only embed() is touched by the alert path.
       embed: async (_texts: string[]) => [vector],
     } as unknown as EmbeddingClient;
   }
@@ -264,7 +262,7 @@ describe("R3.5b: similarity alert reframe", () => {
     );
   }
 
-  function insertNoteForAlert(
+  function insertPriorNote(
     db: Database,
     opts: { id: string; type: string; content: string }
   ) {
@@ -291,19 +289,10 @@ describe("R3.5b: similarity alert reframe", () => {
     );
   }
 
-  test("alert uses attribution framing, not authority framing", async () => {
-    // Seed a prior decision whose vector matches the query vector exactly
-    // (cosine similarity = 1.0 >= 0.75 threshold).
-    // Use domain-neutral words to avoid the keyword-dedup path so we exercise
-    // the embedding-similarity alert in isolation.
+  test("no near-duplicate candidates: stores normally without resolution", async () => {
+    // No prior embedded notes. Even with an embedding client, no candidates
+    // => gate does not fire, insert proceeds.
     const queryVec = new Float32Array([1, 0, 0, 0]);
-    insertNoteForAlert(projectDb, {
-      id: "prior-dec-1",
-      type: "decision",
-      content: "alpha epsilon theta iota",
-    });
-    seedEmbedding(projectDb, "prior-dec-1", queryVec);
-
     const result = await handleRemember(
       projectDb,
       globalDb,
@@ -315,26 +304,19 @@ describe("R3.5b: similarity alert reframe", () => {
     );
 
     expect(result.stored).toBe(true);
-
-    // New framing strings must be present.
-    expect(result.message).toContain("Possibly related existing notes");
-    expect(result.message).toContain("review before adding new");
-
-    // Old authority framing must be gone.
-    expect(result.message).not.toContain("RELATED PRIOR KNOWLEDGE");
-    expect(result.message).not.toContain("A similar");
-    expect(result.message).not.toContain("already exists");
-    expect(result.message).not.toContain("Review for consistency");
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.note_id).toBeTruthy();
   });
 
-  test("each candidate includes update_note + supersede_note handles", async () => {
+  test("candidates exist, no resolution: returns blocked_on_resolution", async () => {
+    // Seed a near-duplicate decision with matching embedding.
     const queryVec = new Float32Array([1, 0, 0, 0]);
-    insertNoteForAlert(projectDb, {
-      id: "prior-dec-1",
+    insertPriorNote(projectDb, {
+      id: "prior-block-1",
       type: "decision",
       content: "alpha epsilon theta iota",
     });
-    seedEmbedding(projectDb, "prior-dec-1", queryVec);
+    seedEmbedding(projectDb, "prior-block-1", queryVec);
 
     const result = await handleRemember(
       projectDb,
@@ -346,42 +328,35 @@ describe("R3.5b: similarity alert reframe", () => {
       makeMockClient(queryVec)
     );
 
-    expect(result.stored).toBe(true);
-    expect(result.message).toContain('update_note({id:"prior-dec-1"})');
-    expect(result.message).toContain('supersede_note({old_id:"prior-dec-1"})');
+    expect(result.stored).toBe(false);
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.note_id).toBeNull();
+    expect(result.candidates).toBeTruthy();
+    expect(result.candidates!.length).toBeGreaterThan(0);
+    expect(result.candidates![0].id).toBe("prior-block-1");
+
+    // Message must guide the caller.
+    expect(result.message).toContain("Near-duplicate detected");
+    expect(result.message).toContain("Supply a `resolution`");
+    expect(result.message).toContain("accept_new");
+    expect(result.message).toContain("update_existing");
+    expect(result.message).toContain("supersede_existing");
+    expect(result.message).toContain("close_existing");
+    expect(result.message).toContain("prior-block-1");
+
+    // Verify NO new note was inserted.
+    const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
+    expect(count.cnt).toBe(1); // only the seeded prior note
   });
 
-  test("shows up to top-3 candidates above threshold", async () => {
-    // Seed 4 prior decisions. The first three get vectors matching query
-    // (similarity 1.0); the fourth gets an orthogonal vector (similarity 0).
+  test("resolution: accept_new proceeds with normal insert despite candidates", async () => {
     const queryVec = new Float32Array([1, 0, 0, 0]);
-    const orthoVec = new Float32Array([0, 1, 0, 0]);
-
-    insertNoteForAlert(projectDb, {
-      id: "match-a",
+    insertPriorNote(projectDb, {
+      id: "prior-accept-1",
       type: "decision",
       content: "alpha epsilon theta iota",
     });
-    insertNoteForAlert(projectDb, {
-      id: "match-b",
-      type: "decision",
-      content: "beta zeta nu xi",
-    });
-    insertNoteForAlert(projectDb, {
-      id: "match-c",
-      type: "decision",
-      content: "gamma eta phi chi",
-    });
-    insertNoteForAlert(projectDb, {
-      id: "nonmatch-d",
-      type: "decision",
-      content: "pi rho tau upsilon",
-    });
-
-    seedEmbedding(projectDb, "match-a", queryVec);
-    seedEmbedding(projectDb, "match-b", queryVec);
-    seedEmbedding(projectDb, "match-c", queryVec);
-    seedEmbedding(projectDb, "nonmatch-d", orthoVec);
+    seedEmbedding(projectDb, "prior-accept-1", queryVec);
 
     const result = await handleRemember(
       projectDb,
@@ -389,36 +364,173 @@ describe("R3.5b: similarity alert reframe", () => {
       {
         content: "omega kappa sigma lambda",
         type: "decision",
+        resolution: { action: "accept_new" },
       },
       makeMockClient(queryVec)
     );
 
     expect(result.stored).toBe(true);
-    // All three matches must appear.
-    expect(result.message).toContain("match-a");
-    expect(result.message).toContain("match-b");
-    expect(result.message).toContain("match-c");
-    // Non-matching vector must NOT appear.
-    expect(result.message).not.toContain("nonmatch-d");
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.note_id).toBeTruthy();
+    expect(result.message).toContain("accept_new");
+
+    // New note exists; prior note still exists unchanged.
+    const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
+    expect(count.cnt).toBe(2);
+
+    const prior = projectDb.query("SELECT superseded_by, resolved FROM notes WHERE id = ?")
+      .get("prior-accept-1") as { superseded_by: string | null; resolved: number };
+    expect(prior.superseded_by).toBeNull();
+    expect(prior.resolved).toBe(0);
   });
 
-  test("shows just 1 candidate if only 1 is above threshold", async () => {
+  test("resolution: update_existing appends to target, does not create new note", async () => {
     const queryVec = new Float32Array([1, 0, 0, 0]);
-    const orthoVec = new Float32Array([0, 1, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-update-1",
+      type: "decision",
+      content: "original decision content",
+    });
+    seedEmbedding(projectDb, "prior-update-1", queryVec);
 
-    insertNoteForAlert(projectDb, {
-      id: "match-only",
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "additional observation that refines the decision",
+        type: "decision",
+        resolution: { action: "update_existing", target_id: "prior-update-1" },
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(false);
+    expect(result.note_id).toBe("prior-update-1"); // refers to target
+    expect(result.message).toContain("Appended");
+    expect(result.message).toContain("prior-update-1");
+
+    // Note count unchanged.
+    const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
+    expect(count.cnt).toBe(1);
+
+    // Target content now contains the append.
+    const target = projectDb.query("SELECT content FROM notes WHERE id = ?")
+      .get("prior-update-1") as { content: string };
+    expect(target.content).toContain("original decision content");
+    expect(target.content).toContain("additional observation that refines the decision");
+    expect(target.content).toContain("---"); // appendToNoteContent timestamp separator
+  });
+
+  test("resolution: supersede_existing creates new and supersedes target", async () => {
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-super-1",
+      type: "decision",
+      content: "stale decision content",
+    });
+    seedEmbedding(projectDb, "prior-super-1", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "updated replacement decision",
+        type: "decision",
+        resolution: {
+          action: "supersede_existing",
+          target_id: "prior-super-1",
+          reason: "old version is outdated",
+        },
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.note_id).toBeTruthy();
+    expect(result.note_id).not.toBe("prior-super-1");
+    expect(result.message).toContain("superseded");
+    expect(result.message).toContain("old version is outdated");
+
+    // New note exists.
+    const newNote = projectDb.query("SELECT content FROM notes WHERE id = ?")
+      .get(result.note_id!) as { content: string } | null;
+    expect(newNote).toBeTruthy();
+    expect(newNote!.content).toBe("updated replacement decision");
+
+    // Target is marked superseded.
+    const target = projectDb.query("SELECT superseded_by, superseded_at FROM notes WHERE id = ?")
+      .get("prior-super-1") as { superseded_by: string | null; superseded_at: string | null };
+    expect(target.superseded_by).toBe(result.note_id);
+    expect(target.superseded_at).toBeTruthy();
+
+    // Link in graph.
+    const link = projectDb.query(
+      `SELECT relationship FROM links WHERE from_note_id = ? AND to_note_id = ?`
+    ).get(result.note_id!, "prior-super-1") as { relationship: string } | null;
+    expect(link).toBeTruthy();
+    expect(link!.relationship).toBe("supersedes");
+  });
+
+  test("resolution: close_existing creates new and closes target", async () => {
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-close-1",
+      type: "decision",
+      content: "decision being closed out",
+    });
+    seedEmbedding(projectDb, "prior-close-1", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "final follow-up decision",
+        type: "decision",
+        resolution: {
+          action: "close_existing",
+          target_id: "prior-close-1",
+          reason: "resolved by the new note",
+        },
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.note_id).toBeTruthy();
+    expect(result.note_id).not.toBe("prior-close-1");
+    expect(result.message).toContain("closed target");
+    expect(result.message).toContain("resolved by the new note");
+
+    // New note exists.
+    const newNote = projectDb.query("SELECT id FROM notes WHERE id = ?")
+      .get(result.note_id!) as { id: string } | null;
+    expect(newNote).toBeTruthy();
+
+    // Target is resolved.
+    const target = projectDb.query("SELECT resolved, status, type FROM notes WHERE id = ?")
+      .get("prior-close-1") as { resolved: number; status: string | null; type: string };
+    expect(target.resolved).toBe(1);
+  });
+
+  test("resolution: close_existing on work_item also flips status to done", async () => {
+    // Seed an embedded decision (alert-scope) so the gate has a candidate,
+    // plus a separate work_item that we'll target for close. Use
+    // keyword-disjoint content so Jaccard dedup doesn't intercept.
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-dec-gate",
       type: "decision",
       content: "alpha epsilon theta iota",
     });
-    insertNoteForAlert(projectDb, {
-      id: "nonmatch-1",
-      type: "decision",
-      content: "pi rho tau upsilon",
-    });
+    seedEmbedding(projectDb, "prior-dec-gate", queryVec);
 
-    seedEmbedding(projectDb, "match-only", queryVec);
-    seedEmbedding(projectDb, "nonmatch-1", orthoVec);
+    const workId = "work-to-close";
+    const ts = now();
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+       VALUES (?, 'work_item', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [workId, "mu nu xi omicron", null, "", "work_item", "medium", 0, "in_progress", null, null, ts, ts, null]
+    );
 
     const result = await handleRemember(
       projectDb,
@@ -426,26 +538,126 @@ describe("R3.5b: similarity alert reframe", () => {
       {
         content: "omega kappa sigma lambda",
         type: "decision",
+        resolution: {
+          action: "close_existing",
+          target_id: workId,
+        },
       },
       makeMockClient(queryVec)
     );
 
     expect(result.stored).toBe(true);
-    expect(result.message).toContain("match-only");
-    expect(result.message).not.toContain("nonmatch-1");
-    // Only one maintenance-handle block for the single candidate.
-    const handleMatches = result.message.match(/update_note\(\{id:/g) ?? [];
-    expect(handleMatches.length).toBe(1);
+    const target = projectDb.query("SELECT resolved, status FROM notes WHERE id = ?")
+      .get(workId) as { resolved: number; status: string | null };
+    expect(target.resolved).toBe(1);
+    expect(target.status).toBe("done");
   });
 
-  test("no alert when no embedding client is provided", async () => {
+  test("types outside SIMILARITY_ALERT_TYPES bypass gate (insight)", async () => {
+    // Seed an embedded insight. Even with high-similarity vector, insight
+    // is not in alert scope so the gate does NOT fire.
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-insight-1",
+      type: "insight",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "prior-insight-1", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "insight",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.note_id).toBeTruthy();
+  });
+
+  test("no embedding client: gate does not fire, no alert", async () => {
+    // Seed a prior decision but DO NOT pass an embedding client. Without
+    // the client, no similarity computation happens at all - graceful
+    // degradation matches prior behavior.
+    insertPriorNote(projectDb, {
+      id: "prior-noclient-1",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+
     const result = await handleRemember(projectDb, globalDb, {
-      content: "omega kappa sigma lambda mu",
+      content: "omega kappa sigma lambda",
       type: "decision",
     });
 
     expect(result.stored).toBe(true);
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.note_id).toBeTruthy();
+    // Post-insert alert should be gone - R4 replaces it with the pre-insert gate.
     expect(result.message).not.toContain("Possibly related existing notes");
-    expect(result.message).not.toContain("RELATED PRIOR KNOWLEDGE");
+  });
+
+  test("update_existing without target_id returns clear error, no insert", async () => {
+    // Edge case: caller chose update_existing but forgot target_id. Should
+    // return an actionable error, not crash, and not insert anything.
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-missing-target",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "prior-missing-target", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+        resolution: { action: "update_existing" }, // no target_id
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(false);
+    expect(result.note_id).toBeNull();
+    expect(result.message).toContain("target_id");
+
+    // No new note created.
+    const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
+    expect(count.cnt).toBe(1);
+  });
+
+  test("supersede_existing with nonexistent target_id returns clear error, no insert", async () => {
+    const queryVec = new Float32Array([1, 0, 0, 0]);
+    insertPriorNote(projectDb, {
+      id: "prior-exists",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "prior-exists", queryVec);
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+        resolution: { action: "supersede_existing", target_id: "does-not-exist" },
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(false);
+    expect(result.note_id).toBeNull();
+    expect(result.message).toContain("not found");
+
+    // No new note created.
+    const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
+    expect(count.cnt).toBe(1);
   });
 });
