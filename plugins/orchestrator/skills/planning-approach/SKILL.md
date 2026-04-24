@@ -12,11 +12,12 @@ You're about to tackle something complex. Gather context first:
 
 1. Call `plan` with the task description - this returns domain-specific conventions, anti-patterns, quality gates, and recent decisions
 2. Call `lookup` with keywords related to the specific area you'll be working in. Tune the return shape with `link_limit` (default 20; raise to 500 for a full graph neighborhood when an umbrella note is central to the plan, lower to 0 to skip linked notes entirely when you only need the top-level hit) and `include_history: true` when revision evolution matters to the planning context (e.g., the current note is a successor and you want to see how the decision shifted).
-3. Review the autonomy level:
+3. **For each file or module you expect to touch**, call `lookup({code_ref: 'path/to/file.ts'})` - this returns notes that explicitly point at that file via their code_refs breadcrumb. Reverse-index is complementary to keyword search: keyword finds notes that mention the topic, code_ref finds notes that were scoped to that file at capture time. Run both before implementing.
+4. Review the autonomy level:
    - **MATURE**: Proceed confidently using established patterns
    - **DEVELOPING**: Follow existing conventions, propose for gaps
    - **SPARSE**: Be cautious, ask before architectural decisions, record everything
 
-4. If spawning subagents, pass the context package to them so they work with full knowledge
+5. If spawning subagents, pass the context package to them so they work with full knowledge
 
 This prevents re-learning solved problems and contradicting established patterns.

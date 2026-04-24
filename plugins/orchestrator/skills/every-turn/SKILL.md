@@ -49,8 +49,10 @@ You have two ways to talk to the orchestrator:
 | Close a resolved thread | **Direct `close_thread`** | Specific action |
 | Session checkpoint | **Concierge (end-of-session) or direct `save_progress`** | Concierge can summarize state it already tracked |
 | Set/update user profile observation | **Direct `user_profile`** | You observe the user, not concierge |
-| Run maintenance | **Direct `retro`** | Deterministic |
+| Run maintenance | **Direct `retro`** | Deterministic. Also auto-fires from briefing on a 7-day cadence - no need to call manually unless forcing a refresh |
 | Check health | **Direct `system_status`** | Deterministic |
+| Capture knowledge about specific code | **Direct `note` with `code_refs: [paths]`** | Breadcrumbs at file/module granularity make the note findable later via `lookup({code_ref: 'path'})` |
+| "What do we know about this file?" before editing | **Direct `lookup({code_ref: 'path/to/file'})`** | Reverse-index query - exact path match against the breadcrumb array |
 
 ## BEFORE you act this turn
 
@@ -144,12 +146,12 @@ After responding, ask yourself: **Did I skip the concierge when judgment was nee
 
 | Primitive | When to call directly |
 |-----------|----------------------|
-| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session. Other sections include open threads, recent decisions, work items, user profile, drift warnings, cross-session activity |
-| `note` | Single fast capture |
-| `lookup` | Exact-key retrieval. Params worth knowing: `link_limit` (default 20, cap on rendered linked notes with tail message; raise to 500 for full umbrella-note neighborhoods, lower to 0 to skip links entirely), `include_superseded: true` (opt-in flag to surface replaced notes - off by default so lookup stays clean), `include_history: true` (opt-in flag to walk the revision chain R2 captured before each edit - off by default; use when you need to see how a note evolved) |
+| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session. Other sections include open threads, recent decisions, work items, user profile, drift warnings, cross-session activity. On the first startup of a week, a `## Auto-Retro` section is prepended - that's automatic maintenance (retro ran inline on a 7-day cadence), no action needed from you |
+| `note` | Single fast capture. Pass `code_refs: [paths]` when the knowledge is about specific files so it's findable by file later |
+| `lookup` | Exact-key retrieval. Params worth knowing: `code_ref: 'path/to/file.ts'` (reverse-index filter - returns notes referencing this exact file or module path in their code_refs array; use for "what do we know about this file?" before editing), `link_limit` (default 20, cap on rendered linked notes with tail message; raise to 500 for full umbrella-note neighborhoods, lower to 0 to skip links entirely), `include_superseded: true` (opt-in flag to surface replaced notes - off by default so lookup stays clean), `include_history: true` (opt-in flag to walk the revision chain R2 captured before each edit - off by default; use when you need to see how a note evolved) |
 | `check_similar` | Quick similarity check |
-| `update_note` | Correction/enrichment. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh, each change snapshots a prior revision |
-| `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new, hides old from default lookup |
+| `update_note` | Correction/enrichment. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh, each change snapshots a prior revision. Pass `code_refs: [paths]` to replace the breadcrumb array, or `[]` to clear |
+| `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new, hides old from default lookup. When creating the replacement inline (new_content + new_type), pass `code_refs: [paths]` so breadcrumbs carry forward |
 | `delete_note` | Remove genuinely wrong/harmful knowledge. Last resort - prefer `supersede_note` or `close_thread` |
 | `update_work_item` | Status/priority change |
 | `close_thread` | Resolve specific thread |

@@ -100,8 +100,8 @@ You are not a retrieval API and you are not a handoff generator. You are the **j
 ## Tools Available
 
 ### Retrieval & synthesis
-- `mcp__plugin_orchestrator_memory__briefing` - full session orientation
-- `mcp__plugin_orchestrator_memory__lookup` - hybrid search. Use `depth: 2` for link traversal - you have the context budget. Supports `include_history: true` (returns the ordered revision chain R2 captured before each edit - use when you need to understand how a note evolved), `include_superseded: true` (surfaces archived notes hidden from default lookup - use when auditing what direction was rejected or evolved away from), and `link_limit` (default 20; raise for deep investigations on umbrella notes, lower to 0 to skip links)
+- `mcp__plugin_orchestrator_memory__briefing` - full session orientation. On the first startup of a week, the briefing may be prepended with a `## Auto-Retro` section - that's the automatic 7-day maintenance gate firing. If you're invoked AFTER the main agent's briefing already ran auto-retro, do NOT re-invoke retro yourself on a Shape A/B task unless the caller specifically asks for a forced refresh. Surface any actionable items from the auto-retro summary (broken code_refs count, revalidation queue) to the caller.
+- `mcp__plugin_orchestrator_memory__lookup` - hybrid search. Use `depth: 2` for link traversal - you have the context budget. Supports `code_ref: 'path/to/file'` (reverse-index filter - returns notes that point at this exact file or module path via their code_refs breadcrumb array; use for "what do we know about X file?" queries as a complement to keyword search), `include_history: true` (returns the ordered revision chain R2 captured before each edit - use when you need to understand how a note evolved), `include_superseded: true` (surfaces archived notes hidden from default lookup - use when auditing what direction was rejected or evolved away from), and `link_limit` (default 20; raise for deep investigations on umbrella notes, lower to 0 to skip links)
 - `mcp__plugin_orchestrator_memory__check_similar` - semantic prior-art check before the agent implements
 - `mcp__plugin_orchestrator_memory__plan` - curated context package for a specific task
 - `mcp__plugin_orchestrator_memory__list_work_items` - exhaustive filtered listing
@@ -109,14 +109,14 @@ You are not a retrieval API and you are not a handoff generator. You are the **j
 - `mcp__plugin_orchestrator_memory__system_status` - sidecar health, embedding coverage
 
 ### Capture & curation
-- `mcp__plugin_orchestrator_memory__note` - persist new knowledge (you pick type/tags/scope)
-- `mcp__plugin_orchestrator_memory__update_note` - correct or enrich existing notes. Has an `append_content` mode for timestamped additive updates (no read-before-write; keywords auto-refresh; does NOT refresh embeddings - use full content replacement when the meaning has shifted enough that embeddings matter)
-- `mcp__plugin_orchestrator_memory__supersede_note` - replace an outdated note with a corrected one
+- `mcp__plugin_orchestrator_memory__note` - persist new knowledge (you pick type/tags/scope). Accepts `code_refs: [paths]` - file or module breadcrumbs (not line numbers or symbols). When the note is about specific code, always add code_refs so it's discoverable via lookup({code_ref: 'path'}) later.
+- `mcp__plugin_orchestrator_memory__update_note` - correct or enrich existing notes. Has an `append_content` mode for timestamped additive updates (no read-before-write; keywords auto-refresh; does NOT refresh embeddings - use full content replacement when the meaning has shifted enough that embeddings matter). Accepts `code_refs: [paths]` to replace the breadcrumb array, or `[]` to clear.
+- `mcp__plugin_orchestrator_memory__supersede_note` - replace an outdated note with a corrected one. When creating the replacement inline (new_content + new_type), accepts `code_refs: [paths]` so breadcrumbs carry forward to the successor.
 - `mcp__plugin_orchestrator_memory__close_thread` - resolve open threads with cascade
 
 ### Work triage
-- `mcp__plugin_orchestrator_memory__create_work_item` - after duplicate check
-- `mcp__plugin_orchestrator_memory__update_work_item` - status, priority, content, due date, tags, context, confidence
+- `mcp__plugin_orchestrator_memory__create_work_item` - after duplicate check. Accepts `code_refs: [paths]` for work scoped to specific files - useful for "find all open work on file X" via lookup({code_ref: 'X'}).
+- `mcp__plugin_orchestrator_memory__update_work_item` - status, priority, content, due date, tags, context, confidence, code_refs (pass [] to clear)
 - `mcp__plugin_orchestrator_memory__breakdown` - decompose complex work into parent + children
 
 ### Session lifecycle

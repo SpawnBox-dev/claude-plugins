@@ -46,23 +46,23 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 
 | Tool | Purpose |
 |------|---------|
-| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings, plus a `curation_candidates` section surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles so the agent can schedule update/supersede/close alongside its task |
-| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks. R1 fields: `updated_at` (tracks the last content/context/tags mutation), `source_session` (which session first captured it), `superseded_by` (non-null when replaced) |
-| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, and `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes. Surfaces R1 metadata (`updated_at`, `source_session`, `superseded_by`) on every result |
+| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings, plus a `curation_candidates` section surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles so the agent can schedule update/supersede/close alongside its task. R4.4 auto-retro gate: on the first `event=startup` of a week (7-day cadence based on `plugin_state.last_retro_run_at`), inline-invokes `retro` and prepends the summary as an `## Auto-Retro` section |
+| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks. R1 fields: `updated_at`, `source_session`, `superseded_by`. R5 field: `code_refs: string[]` - file/module path breadcrumbs (not line numbers, not symbols) so notes about specific code are findable via reverse-index lookup |
+| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes, and `code_ref: string` (R5 reverse-index - returns notes that reference this exact file or module path in their code_refs array). Surfaces `updated_at`, `source_session`, `superseded_by`, and `code_refs` inline on every result |
 | `plan` | Curated context package for tasks and subagent hydration |
 | `check_similar` | Find prior art before implementing - semantic similarity against decisions/conventions/anti-patterns |
 | `system_status` | Health check - note counts, embedding coverage, sidecar status, active sessions |
 | `install_embeddings` | First-run setup - detect/install Python and uv dependencies for embedding support |
 | `save_progress` | Checkpoint for next session - what was done, open questions, next steps |
 | `close_thread` | Resolve an open thread with cascade |
-| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change. Supports `append_content` mode for lightweight timestamped additions (no read-before-write). Auto-snapshots a revision (R2) before any content/context/tags/confidence change |
-| `supersede_note` | Replace an old note with a new one (pass `old_id` plus either `new_id` or `new_content`+`new_type`); preserves history. Hidden from default lookup; graph-linked for traceability |
+| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change. Supports `append_content` mode for lightweight timestamped additions (no read-before-write). Auto-snapshots a revision (R2) before any content/context/tags/confidence change. Accepts `code_refs: string[]` to replace breadcrumbs ([] clears to null) |
+| `supersede_note` | Replace an old note with a new one (pass `old_id` plus either `new_id` or `new_content`+`new_type`); preserves history. Hidden from default lookup; graph-linked for traceability. Accepts `code_refs: string[]` on inline-replacement path so breadcrumbs carry forward |
 | `delete_note` | Remove wrong/outdated knowledge |
 | `user_profile` | View/set/remove structured user observations by dimension |
-| `create_work_item` | Track a concrete task with priority and optional due date |
-| `update_work_item` | Change status/priority/content/due date/tags/context/confidence (cascades on status=done) |
+| `create_work_item` | Track a concrete task with priority and optional due date. Accepts `code_refs: string[]` for work scoped to specific files |
+| `update_work_item` | Change status/priority/content/due date/tags/context/confidence/code_refs (cascades on status=done) |
 | `breakdown` | Split complex work into parent + children work items |
-| `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup |
+| `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup. R5 verification pass: when `CLAUDE_PROJECT_DIR` is set, checks file-existence for every path in every note's code_refs and reports `code_refs verified: N checked, M broken`. Also auto-fires weekly from briefing (R4.4 gate) |
 | `list_open_threads` | List all open threads with status and signal |
 | `list_work_items` | List work items filtered by status/priority |
 
@@ -94,13 +94,13 @@ An Opus/Sonnet subagent (`agents/memory-concierge.md`) that curates knowledge re
 
 1. **Session start** - A hook fires automatically, calling `briefing` to produce a briefing. If embeddings are inactive, the briefing includes setup guidance.
 
-2. **During work** - The `orchestrating` skill guides agents to `lookup` (simple queries) or `consult-concierge` (complex queries) before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. `check_similar` catches prior art before implementing. Lookup ranks linked notes by a composite of link strength, signal, and recency, capped at `link_limit` (default 20) with a tail message so umbrella notes don't blow out the response.
+2. **During work** - The `orchestrating` skill guides agents to `lookup` (simple queries) or `consult-concierge` (complex queries) before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. `check_similar` catches prior art before implementing. Lookup ranks linked notes by a composite of link strength, signal, and recency, capped at `link_limit` (default 20). **R5 reverse-index:** notes about specific code carry `code_refs` breadcrumbs (file/module paths); `lookup({code_ref: 'path/to/file'})` filters to notes referencing that exact path - complements keyword search when the question is "what do we know about this file?" rather than "what do we know about this topic?".
 
 3. **Session tracking** - Every `lookup` with a `session_id` logs which notes were surfaced, enabling dedup annotations (`[already sent N turn(s) ago]`) and cross-session awareness.
 
-4. **Session end** - The Stop hook pushes maintenance verbs (`update_note`, `close_thread`, `supersede_note`) with equal priority to capture - not just `save_progress` and new notes, but correction and curation of notes the session actually relied on. Notes are classified by type with specific guidance (decisions, conventions, anti-patterns, user preferences).
+4. **Session end** - The Stop hook pushes maintenance verbs (`update_note`, `close_thread`, `supersede_note`) with equal priority to capture - not just `save_progress` and new notes, but correction and curation of notes the session actually relied on. Notes are classified by type with specific guidance (decisions, conventions, anti-patterns, user preferences). **Retro is no longer an end-of-session action**: R4.4 auto-fires it from briefing on a 7-day cadence. Agents only call retro manually when they want to force an immediate maintenance pass.
 
-5. **Maintenance** - `retro` runs periodically to consolidate duplicates, decay stale confidence, and identify gaps.
+5. **Maintenance** - `retro` runs automatically (weekly gate from briefing) to consolidate duplicates, decay stale confidence, identify gaps, and verify code_refs point at files that still exist in the project tree. Broken code_refs are surfaced in the retro summary as a count; R5.2 will surface individual broken-ref notes in `curation_candidates`.
 
 ## Quick Start
 

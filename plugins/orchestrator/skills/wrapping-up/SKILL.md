@@ -28,6 +28,8 @@ The knowledge base gets more accurate over time only if sessions that READ stale
 
 If you touched >=3 notes this session, the Stop hook will surface a "notes surfaced this session" list (R3.4 nudge) - walk it before moving on.
 
+For any notes you WROTE this session that are about specific code (a gotcha in a file, a pattern for a module, a decision scoped to a subsystem), verify the note carries `code_refs: [paths]`. If you forgot, call `update_note({id, code_refs: [paths]})` now. Without breadcrumbs the note is still keyword-searchable, but invisible when a future agent is editing those files and runs `lookup({code_ref: 'path'})`.
+
 ## Capture pass: save_progress
 
 Call `save_progress` with:
@@ -38,8 +40,10 @@ Call `save_progress` with:
 - **in_flight**: If anything is partially done, describe its state
 
 Also consider:
-- Were any decisions made this session? If not already recorded, `note` them now
+- Were any decisions made this session? If not already recorded, `note` them now (with code_refs if the decision is scoped to specific files)
 - Were any open threads resolved? Call `close_thread` on them
-- Did you learn any conventions or anti-patterns? `note` them
+- Did you learn any conventions or anti-patterns? `note` them (with code_refs when tied to specific files)
+
+**Retro is automatic now.** The orchestrator inline-invokes `retro` from briefing on a 7-day cadence, so you don't need to manually call it at session end unless you want to force an immediate maintenance pass (e.g., after a heavy debugging session where a lot changed). The old "call retro when wrapping up" reflex is stale - `save_progress` remains the required checkpoint step.
 
 The goal: a fresh session reading your checkpoint should feel like they have full continuity, AND the notes they pull up should still be correct.

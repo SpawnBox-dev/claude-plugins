@@ -4,8 +4,8 @@ description: "Show current orchestrator state: open threads, checkpoint, neglect
 
 Show the user a comprehensive view of orchestrator state:
 
-1. Call `briefing` with event "startup" to get the current briefing (includes checkpoint, open threads, decisions, drift warnings, user patterns, cross-project patterns, AND `curation_candidates` surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles)
-2. Call `retro` to get autonomy scores and knowledge health metrics
+1. Call `briefing` with event "startup" to get the current briefing (includes checkpoint, open threads, decisions, drift warnings, user patterns, cross-project patterns, AND `curation_candidates` surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles). Note: on the first startup of a week, briefing may be prepended with an `## Auto-Retro` section - that's the R4.4 auto-retro gate firing (weekly maintenance). Show it to the user if present; it's informational, not an error.
+2. Call `retro` to get autonomy scores and knowledge health metrics (if auto-retro already ran in step 1, the summaries will be recent - mention that to the user so they understand why the output isn't dramatically new)
 3. Present both results clearly, organized by section
 
 Additionally, use these tools for complete inventories:

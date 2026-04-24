@@ -120,19 +120,44 @@ Each R is a shipped (or planned) architectural move. They compound. R2 depends o
 
 **Shipped:** v0.24.0 with R4.1 UX polish in v0.24.1.
 
+### R4.4 - Auto-maintenance gate
+
+**Principle.** Periodic maintenance shouldn't require the agent to remember. The plugin owns the cadence; the agent owns the curation decisions that flow from it.
+
+**Rationale.** Pre-R4.4, `retro` was agent-triggered only. In practice, agents called it inconsistently - some sessions never ran it, some ran it multiple times. Stale signal accumulated (confidence not decayed, orphans not flagged, autonomy scores drifting) until a human noticed. This violated the "always-up-to-date" and "more-accurate-over-time" pillars at the pacing layer. Hooks can't fix it: hooks don't invoke MCP tools, and a cron daemon would add infrastructure for a problem solvable in-process.
+
+**Mechanisms.**
+- `plugin_state` table (migration 16): generic key/value surface for future ephemeral plugin state. First consumer is `last_retro_run_at`.
+- `handleOrient` (briefing) checks `shouldAutoRetro()` - returns true when `last_retro_run_at` is missing or older than 7 days, and only when `event=startup`.
+- When true, briefing inline-invokes `handleReflect` and prepends the output with an `## Auto-Retro` section. `recordAutoRetroRun()` writes the new timestamp so the gate closes for the next 7 days.
+- Manual `retro` calls remain supported. Calling retro manually also resets the 7-day clock.
+- Agents see the auto-retro summary on their first-of-week briefing. The skills (getting-started, wrapping-up) now describe this as expected, not a surprise.
+
+**Shipped:** v0.24.4.
+
 ### R5 - Code is ground truth; orchestrator stores what code cannot
 
-**Principle.** Notes are agent-facing insights: why decisions were made, what was rejected, scars, evolution, patterns, gotchas, architectural intent. They do not duplicate code-level detail (signatures, schemas, implementations) - the code itself is authoritative on those.
+**Principle.** Notes are agent-facing insights: why decisions were made, what was rejected, scars, evolution, patterns, gotchas, architectural intent. They do not duplicate code-level detail (signatures, schemas, implementations) - the code itself is authoritative on those. Notes that are about code carry **breadcrumbs** - file or module paths pointing at the neighborhood the note concerns.
 
-**Rationale.** Today, most projects that use the orchestrator also carry a `/docs` tree inside their own repo: design docs, architecture notes, decision logs. That split duplicates effort and rots at different rates. The end state is that `/docs` in consumer projects retires - the orchestrator replaces it as a richer, typed, embedded, auto-linked, evolution-preserving knowledge base. To get there, notes need a structured `code_refs` field with auto-verification, staleness-via-code-change, and a reverse-index so an agent looking at a file can ask "what notes are about this?".
+**Rationale.** Today, most projects that use the orchestrator also carry a `/docs` tree inside their own repo: design docs, architecture notes, decision logs. That split duplicates effort and rots at different rates. The end state is that `/docs` in consumer projects retires - the orchestrator replaces it as a richer, typed, embedded, auto-linked, evolution-preserving knowledge base. To get there, notes need a structured `code_refs` field with auto-verification on retrieval and a reverse-index so an agent looking at a file can ask "what notes are about this?".
 
-**Mechanisms (planned, not yet shipped).**
-- Structured `code_refs` array on notes: `{path, range?, symbol?, checksum?}`.
-- Auto-verify code_refs against current repo state on retrieval; flag stale when the referenced code no longer exists or has changed materially.
-- Reverse-index: `lookup({code_ref: "path/to/file.ts"})` returns notes that reference that location.
-- Content-convention guidance in tool descriptions: insights only, not signatures.
+**Breadcrumbs, not indexes (R5 refinement).** An earlier design sketch (see decision `ca47f251`) proposed line-range and symbol-name precision on code_refs. That was rejected and superseded by `50e4e67d`: the orchestrator tracks file and module paths only. Rationale:
 
-**Shipped:** not yet. Deferred to a future planning session. This R is documented as committed design intent even though unshipped; the R1-R4 work is groundwork for it.
+- **Division of labor.** Code indexers (the model's own navigation tools + the host harness) already do line-level and symbol-level search well. The orchestrator would duplicate that work badly and fight for authority with tools that are closer to the code.
+- **Churn.** Line numbers drift every commit. Symbol names drift on rename. Breadcrumbs at file/module granularity survive refactors that would invalidate precise refs daily.
+- **Purpose fit.** The orchestrator's job is to answer "why does this neighborhood exist?" - a question that is inherently file-scoped, not line-scoped. The neighborhood is the unit of insight; lines are the unit of code.
+
+So code_refs is a `string[]` of path strings. Agents add paths at the granularity that fits the note's scope (a single file for a file-specific gotcha, a module directory for a subsystem convention). The agent chooses granularity; the plugin stores what the agent gave it.
+
+**Mechanisms.**
+- `code_refs` column on `notes` (migration 17): `TEXT` holding a JSON array of path strings, nullable.
+- All five write tools accept `code_refs`: `note`, `update_note`, `supersede_note`, `create_work_item`, `update_work_item`. `update_note` and `update_work_item` treat `[]` as clear-to-null; `undefined` as leave-unchanged.
+- Reverse-index: `lookup({code_ref: "path/to/file.ts"})` filters results to notes whose `code_refs` array contains that exact string (TS post-filter; no wildcards).
+- Envelope rendering: `lookup` detail + search branches render `code_refs: [path1, path2]` inline when present.
+- Retro verification: when `CLAUDE_PROJECT_DIR` (fallback `ORCHESTRATOR_PROJECT_ROOT`) is set, `retro` iterates notes with code_refs, checks path-existence at the project root, and reports `code_refs verified: N checked, M broken` in its summary. Broken refs are not auto-updated - that's a judgment call (supersede? delete? update?) for the agent.
+- `/docs` migration NOT performed. Jarid explicitly ruled out a one-shot migration: the orchestrator enriches organically as agents touch code and leave breadcrumb-carrying notes, and the R4 near-duplicate gate prevents sludge accumulation. The end state emerges from usage, not from an upfront sweep.
+
+**Shipped:** v0.25.0.
 
 ## Load-bearing constraints
 

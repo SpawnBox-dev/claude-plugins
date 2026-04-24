@@ -58,7 +58,7 @@ Routing constants in `mcp/types.ts`:
 
 ### Schema
 
-Migrations live in `mcp/db/schema.ts`, versioned 1-15 (project) and 100-101 (global-only).
+Migrations live in `mcp/db/schema.ts`, versioned 1-17 (project) and 100-101 (global-only).
 
 The `notes` table holds everything. Work items, decisions, checkpoints, open threads - they are all the same row shape, differentiated by the `type` column. Status, priority, and due date fields are populated only for `type = 'work_item'` but the columns exist on every row.
 
@@ -73,6 +73,7 @@ Core columns (notes):
 | `signal` | Pheromone score, seeded from old `access_count` | v11 |
 | `source_session` | Cross-session attribution | v13 |
 | `superseded_by`, `superseded_at` | R2 supersede bookkeeping | v14 |
+| `code_refs` | JSON array of path strings; file/module breadcrumbs for R5 reverse-index | v17 |
 
 Related tables:
 
@@ -83,6 +84,7 @@ Related tables:
 - `session_log` - per-surfacing log: which note was shown to which session at which turn, `delivery_type` in {fresh, refresh}.
 - `session_registry` - one row per session: `started_at`, `last_active_at`, `last_briefing_at` (v13), concierge handoff state.
 - `migrations` - applied-version tracker.
+- `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). First consumer is `last_retro_run_at`, read by `handleOrient`'s auto-retro gate (R4.4). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
 
 Global-only tables:
 
@@ -110,9 +112,9 @@ Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equ
 
 | Tool | Purpose |
 |---|---|
-| `note` | Capture knowledge not already known. R4 gate: blocks for decision/convention/anti_pattern if similarity >= 0.75 without `resolution`. |
+| `note` | Capture knowledge not already known. R4 gate: blocks for decision/convention/anti_pattern if similarity >= 0.75 without `resolution`. Accepts `code_refs: string[]` (R5 breadcrumbs: file/module paths, not line/symbol). |
 | `save_progress` | Write a `checkpoint`-type note with summary, in-flight, open questions, next steps. |
-| `create_work_item` | Trackable task with priority/status/due/parent. |
+| `create_work_item` | Trackable task with priority/status/due/parent. Accepts `code_refs: string[]`. |
 | `breakdown` | Split a work_item into children via `part_of` links. |
 | `user_profile` | View / set / remove structured user observations in the global `user_model` table. |
 
@@ -120,8 +122,8 @@ Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equ
 
 | Tool | Purpose |
 |---|---|
-| `lookup` | Search by query, type, tag; or detail-mode by id. Supports `include_superseded`, `include_history`, `link_limit`. |
-| `briefing` | Session-start / resume / clear / compact. Returns open threads, decisions, work, user profile, neglected areas, last checkpoint, cross-session activity, curation candidates. |
+| `lookup` | Search by query, type, tag; or detail-mode by id. Supports `include_superseded`, `include_history`, `link_limit`, and the R5 reverse-index via `code_ref: string` (exact-match post-filter against notes' code_refs arrays). |
+| `briefing` | Session-start / resume / clear / compact. Returns open threads, decisions, work, user profile, neglected areas, last checkpoint, cross-session activity, curation candidates. R4.4: inline-invokes retro on 7-day cadence when event=startup and prepends `## Auto-Retro` summary. |
 | `plan` | Domain-scoped context pack: conventions, anti-patterns, quality gates, architecture, recent decisions for a task. |
 | `list_work_items` | Full inventory by status + priority + tag. Not keyword-searched. Signal as secondary sort within priority tier. |
 | `list_open_threads` | Full open-thread inventory. Signal as secondary sort. |
@@ -131,17 +133,17 @@ Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equ
 
 | Tool | Purpose |
 |---|---|
-| `update_note` | `content` replaces (with revision snapshot); `append_content` adds a timestamped segment (no snapshot). Mutually exclusive. |
+| `update_note` | `content` replaces (with revision snapshot); `append_content` adds a timestamped segment (no snapshot). Mutually exclusive. Accepts `code_refs: string[]` to replace the breadcrumb array; `[]` clears to NULL, undefined leaves unchanged. |
 | `close_thread` | Mark `resolved = 1`, cascade: unblock dependents, auto-complete parent if all children done, auto-resolve superseded chain. Optional `resolution` creates a `decision` note. |
-| `supersede_note` | Archive old, surface new. Accepts `new_id` (existing note) or `new_content + new_type` (inline new). |
+| `supersede_note` | Archive old, surface new. Accepts `new_id` (existing note) or `new_content + new_type` (inline new). `code_refs: string[]` on inline-replacement path carries breadcrumbs to the successor; ignored when `new_id` is supplied. |
 | `delete_note` | Hard delete (cascades links). Used sparingly - prefer supersede or close_thread. |
-| `update_work_item` | Status / priority / due / content / tags / context / confidence / blocked_by. Cascades on `status = done`. |
+| `update_work_item` | Status / priority / due / content / tags / context / confidence / blocked_by. Accepts `code_refs: string[]` with same semantics as update_note. Cascades on `status = done`. |
 
 ### Admin
 
 | Tool | Purpose |
 |---|---|
-| `retro` | Decay confidence on stale notes, merge duplicates, identify orphans, queue revalidation, compute autonomy scores, analyze user-model trajectories. |
+| `retro` | Decay confidence on stale notes, merge duplicates, identify orphans, queue revalidation, compute autonomy scores, analyze user-model trajectories. R5 verification pass: when `CLAUDE_PROJECT_DIR` (fallback `ORCHESTRATOR_PROJECT_ROOT`) is set, iterates notes with `code_refs`, checks file-existence at the project root, reports `code_refs verified: N checked, M broken`. Also updates `plugin_state.last_retro_run_at` so auto-retro gate from briefing can skip for another 7 days. |
 | `install_embeddings` | Check + install Python/uv/uvx for the embedding sidecar. |
 | `system_status` | Knowledge base size, embedding coverage, active sessions, cross-session discovery health. |
 
@@ -325,6 +327,14 @@ State-dir marker files ensure once-per-session behavior for prompts that should 
     -> zod validate
     -> registerSessionOnce
     -> handleOrient
+       -> R4.4 auto-retro gate (ONLY when event=startup):
+          shouldAutoRetro(db)
+            -> reads plugin_state.last_retro_run_at
+            -> returns true if missing OR older than 7 days
+          if true:
+            run handleReflect inline
+            recordAutoRetroRun(db) writes new timestamp
+            prepend result to briefing as "## Auto-Retro" section
        -> compose sections in parallel (filtered by `sections` param if given)
           work_items, open_threads, decisions, neglected, drift,
           user_model, cross_project, cross_session, checkpoint, curation_candidates
@@ -333,6 +343,37 @@ State-dir marker files ensure once-per-session behavior for prompts that should 
     -> append "## Setup Available" when sidecar unavailable on startup event
     -> return formatted markdown
 ```
+
+### retro() verification pass (R5)
+
+```
+  handleReflect
+    -> standard maintenance (confidence decay, merge, orphans, autonomy, trajectories)
+    -> code_refs verification (only when CLAUDE_PROJECT_DIR or ORCHESTRATOR_PROJECT_ROOT set):
+       for each note with non-null code_refs:
+         parse JSON array
+         for each path:
+           resolve to absolute via project root
+           fs.existsSync check
+         if any path missing -> count note as "broken"
+       report `code_refs verified: N checked, M broken` in summary
+    -> update plugin_state.last_retro_run_at (closes the 7-day auto-retro gate)
+```
+
+Broken refs are not auto-fixed. That's a judgment call for the agent - supersede the note, update the breadcrumbs, or delete. Future R5.2 will surface broken refs in `curation_candidates`; for now the reflect agent prints the count.
+
+### lookup({code_ref}) reverse-index
+
+```
+  handleRecall (search branch, when code_ref is supplied)
+    -> run the normal keyword/vector search pipeline
+    -> post-filter results in TS:
+       keep notes whose code_refs JSON array contains the exact path string
+       no wildcards, no fuzzy match - exact string equality against array elements
+    -> render envelope as normal, with code_refs: [...] inline
+```
+
+This is a post-filter rather than an index because array-containment queries in SQLite are awkward and the expected cardinality of breadcrumb-tagged notes is small relative to the total corpus. If that assumption inverts (many notes with code_refs, most lookups filtered by path), a dedicated `note_code_refs(note_id, path)` table would be the natural upgrade.
 
 ## Testing
 

@@ -35,6 +35,8 @@ If for any reason you cannot find your session_id in the startup context, ask th
 
 Call `briefing({ event: "startup", session_id: "<your_session_id>" })` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, cross-session activity from sibling sessions, AND a `curation_candidates` section surfacing stale notes worth maintaining). Default output covers all sections; pass `sections: [...]` to narrow. Scan it internally - including `curation_candidates` - and schedule maintenance opportunities alongside your task. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
 
+On the first startup of a week (seven days since the last maintenance pass), the briefing may be prepended with a `## Auto-Retro` section. That's automatic maintenance: the orchestrator inline-invokes `retro` on a 7-day cadence so stale signal decays, orphans get flagged, and the knowledge base stays coherent without requiring the agent to remember. This is expected, not a surprise - scan the summary for anything actionable (broken code_refs, revalidation queue) and fold it into your maintenance plan.
+
 If the Cross-Session Activity section is non-empty, note anything that affects your task. Sibling sessions may have just decided something you're about to revisit, or flagged an anti-pattern in the area you're about to touch.
 
 ## Step 2 — Spawn the Concierge (do this NOW, not later)

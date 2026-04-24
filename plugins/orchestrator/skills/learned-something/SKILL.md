@@ -25,3 +25,5 @@ When the user corrects you, always record it as high-value knowledge. Their corr
 If the correction invalidates an existing note (you found that note in a lookup earlier this turn), also call `update_note` or `supersede_note` on the old one. Recording the correction without maintaining the wrong-note leaves both in the graph at equal rank - future sessions will hit the wrong one and repeat the same mistake.
 
 Be specific and actionable. "The event bus uses broadcast channels" is better than "events work a certain way."
+
+**If the insight is about how specific code works or a gotcha in specific files**, pass `code_refs: [paths]` on the `note` call - file or module paths only. The next agent touching those files will find your insight via `lookup({code_ref: 'path'})` even if they'd never think to search for the keywords you used. Breadcrumbs turn a keyword-only insight into a file-triggered one.

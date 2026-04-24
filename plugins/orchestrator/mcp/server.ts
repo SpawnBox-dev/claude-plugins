@@ -531,7 +531,7 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.",
+  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.",
   {
     content: z.string(),
     type: z.enum(NOTE_TYPES),
@@ -588,7 +588,7 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking.",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
@@ -899,7 +899,7 @@ server.tool(
 // ── update_note ─────────────────────────────────────────────────────────
 server.tool(
   "update_note",
-  "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history).",
+  "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history). Pass `code_refs: [paths]` to replace the note's breadcrumb array when the note points at specific files; pass `[]` to clear. Breadcrumbs are file or module paths only - not line numbers or symbols.",
   {
     id: z.string(),
     content: z.string().optional().describe("New content (REPLACES existing)."),
@@ -1053,7 +1053,7 @@ server.tool(
 // ── supersede_note ────────────────────────────────────────────────────
 server.tool(
   "supersede_note",
-  "Replace an old note with a new one, preserving history. The old note is archived (still retrievable by ID, but hidden from default lookup); the new note surfaces on lookup. Use when a decision was right at the time but is now wrong, or when knowledge has evolved. Treat as equally important to note() - maintaining coherence matters as much as capturing new facts.",
+  "Replace an old note with a new one, preserving history. The old note is archived (still retrievable by ID, but hidden from default lookup); the new note surfaces on lookup. Use when a decision was right at the time but is now wrong, or when knowledge has evolved. Treat as equally important to note() - maintaining coherence matters as much as capturing new facts. When creating the replacement inline (new_content + new_type), pass `code_refs: [paths]` so the replacement carries breadcrumbs forward. Ignored when `new_id` points at an existing note (it keeps its own refs).",
   {
     old_id: z.string().describe("ID of the note being superseded."),
     new_id: z.string().optional().describe("ID of an existing replacement note. Provide this OR new_content+new_type."),
@@ -1155,7 +1155,7 @@ server.tool(
 // ── create_work_item ────────────────────────────────────────────────────
 server.tool(
   "create_work_item",
-  "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work. Pass session_id so sibling sessions can see this item on their next briefing.",
+  "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work. Pass session_id so sibling sessions can see this item on their next briefing. When the work is scoped to specific files, add `code_refs: [paths]` so the item is discoverable via `lookup({code_ref: 'path'})` when an agent next touches that code.",
   {
     content: z.string().optional().describe("What needs to be done - be specific and actionable. This is the primary field."),
     title: z.string().optional().describe("Alias for content (if content not provided, title is used)"),
@@ -1226,7 +1226,7 @@ server.tool(
 // ── update_work_item ────────────────────────────────────────────────────
 server.tool(
   "update_work_item",
-  "Update a work item's status, priority, due date, content, tags, context, or confidence. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks.",
+  "Update a work item's status, priority, due date, content, tags, context, or confidence. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks. Pass `code_refs: [paths]` to replace the breadcrumb array (file or module paths, not symbols); pass `[]` to clear.",
   {
     id: z.string(),
     status: z.enum(WORK_ITEM_STATUSES).optional(),

@@ -18,12 +18,15 @@ Your FIRST action in every session MUST be calling the `briefing` MCP tool, then
 
 The briefing includes a `curation_candidates` section - stale-but-hot and low-confidence-but-hot notes with their maintenance handles. Scan it internally during startup so you know which notes are worth revisiting as your task touches them. You can also request briefings with specific `sections` to focus on curation when doing dedicated maintenance work. Do NOT dump curation candidates to the user - schedule the maintenance actions silently as part of your work.
 
+On the first startup of a week (7-day cadence), the briefing may be prepended with an `## Auto-Retro` section. This is the R4.4 auto-retro gate: `handleOrient` inline-invokes `retro` when `plugin_state.last_retro_run_at` is missing or older than 7 days. Treat it as expected maintenance output, not a surprise - scan it for actionable items (broken code_refs count, revalidation queue) and fold them into your plan.
+
 ### Session End
 
 Before the session ends, the Stop hook asks for capture AND maintenance equally:
 
 - Call `save_progress` with what was accomplished, open questions, and next steps - a session without a checkpoint is knowledge lost.
 - For every lookup result you relied on this session, decide whether it needs `update_note` (additive correction or `append_content` amendment), `supersede_note` (replace with a better canonical version, preserving history), or `close_thread` (the question it tracked is now settled).
+- **Retro is no longer a session-end reflex.** R4.4 auto-fires `retro` from briefing on a 7-day cadence, so you do NOT need to call it at wrap-up. Call it manually only when you want to force an immediate maintenance pass (e.g., after a heavy debugging session that invalidated many notes).
 
 The knowledge base gets more accurate over time only if sessions that READ stale notes also MAINTAIN them. Capture alone is not enough.
 
@@ -39,7 +42,15 @@ Notes have a `signal` score (temperature) that represents current relevance. Sig
 
 Before implementing anything, call `check_similar` with your proposed approach. It finds semantically similar decisions, conventions, and anti-patterns - even when the vocabulary doesn't match. This prevents contradicting past work.
 
+**Reverse-index by file (R5).** Semantic and keyword search are two of three retrieval paths. The third is `lookup({code_ref: 'path/to/file'})` - which returns notes whose `code_refs` breadcrumb array contains that exact path. Before editing a non-trivial file, run a code_ref lookup to pull file-scoped notes that keyword search would miss. It's a complement to `check_similar`, not a replacement.
+
 When `note()` fires a similarity alert, the alert now shows the top 3 candidates with maintenance handles (R3.5b). Read those alerts as "consider `update_note` / `supersede_note` / merge if these cover the same ground" rather than "just a warning, keep going." Capturing a near-duplicate without touching the candidates leaves the graph with both at equal rank.
+
+### Code Breadcrumbs (R5)
+
+When writing a note about specific code - a gotcha in a file, a convention for a module, a decision scoped to a subsystem - pass `code_refs: [paths]` on the write. All five write tools (`note`, `update_note`, `supersede_note`, `create_work_item`, `update_work_item`) accept it. File or module paths only - not line numbers, not symbol names (code indexers handle those). The orchestrator points at the neighborhood where WHY lives; the model's code-navigation tools handle line-level and symbol-level queries.
+
+Without breadcrumbs, a note is only findable via keyword/semantic search. With breadcrumbs, the same note is also findable via reverse-index when a future agent edits one of the tagged files. Both paths matter. Skipping breadcrumbs silently weakens the signal.
 
 ### Struggle Detection
 

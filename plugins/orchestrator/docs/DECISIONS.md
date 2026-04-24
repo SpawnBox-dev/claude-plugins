@@ -6,6 +6,54 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-23 - R5.1 agent-facing text alignment for R4.4 + R5
+
+**Change.** Text-only pass across skills, hooks, agents, docs, README, CLAUDE.md, and commands to surface R4.4 (auto-retro gate) and R5 (code_refs breadcrumbs + reverse-index + retro verification) behaviors to the agent. Same pattern as R3.8 / R3.9 (agent text alignment after code ships). No code, no tests changed.
+
+**Rationale.** R4.4 and R5 shipped significant behaviors, but prose across the plugin hadn't been updated to describe them. Without this pass, `code_refs` is a capable-but-unprompted feature - agents won't use it because no skill tells them to, no hook nudges about it, and the agent-facing docs still describe R5 as "not yet shipped." Field experience with prior R-shipments (R3.7 through R3.9) established this pattern: ship the code, then immediately ship the text. Skipping the text pass strands the feature.
+
+**Rejected.**
+- Batching the text update with a later R5.2 (broken-refs in curation_candidates) - that delays agent awareness of R5 features that are already functional today. Each shipped behavior deserves immediate prose.
+- Adding R5 to EVERY skill (including user-preference, closing-a-thread) - the nudge has to fit a natural moment, or it becomes noise. Only the skills whose moment overlaps with "knowledge about code" get the nudge.
+- Migrating /docs in-repo - still explicitly rejected. Prose enrichment of the orchestrator happens organically via agent usage; one-shot migration would duplicate effort and rot at different rates from the source code.
+
+**Shipped:** v0.25.1.
+
+---
+
+## 2026-04-23 - R5 code_refs breadcrumbs + reverse-index + retro verification
+
+**Change.** Notes gain a `code_refs TEXT` column (JSON array of path strings, nullable) via migration 17. All five write tools (`note`, `update_note`, `supersede_note`, `create_work_item`, `update_work_item`) accept `code_refs: string[]`. `lookup({code_ref: "path"})` reverse-index returns notes that contain that exact path in their breadcrumb array. `retro` gains a verification pass: when `CLAUDE_PROJECT_DIR` (fallback `ORCHESTRATOR_PROJECT_ROOT`) is set, it iterates notes with code_refs, checks path-existence at the project root, reports `code_refs verified: N checked, M broken` in its summary.
+
+**Rationale.** Code is ground truth. The orchestrator stores WHY, not WHAT - and WHY questions are inherently neighborhood-scoped. An agent editing `mcp/server.ts` should find every note ever captured about that file, even when the note's keywords would never match. File/module-level breadcrumbs give agents a file-triggered retrieval path that complements keyword/semantic search. Without breadcrumbs, file-scoped knowledge is only findable by remembering the exact keywords someone else chose at capture time - a brittle, high-miss-rate path.
+
+**Rejected.**
+- Line-range precision (`{path, range}`) and symbol-name precision (`{path, symbol}`) - line numbers churn every commit, symbol names churn on rename. The precision would force constant maintenance and fight for authority with the agent's own code indexers (which already do line/symbol search well). The earlier design sketch (decision `ca47f251`) proposed this and was superseded by `50e4e67d`.
+- A dedicated `note_code_refs(note_id, path)` table with SQL index - premature optimization. TS post-filter over a JSON array is fine at the cardinalities expected in the near term; a table-based index is the natural upgrade if breadcrumb-tagged notes become the dominant population.
+- One-shot `/docs` -> orchestrator migration - explicitly ruled out. The orchestrator enriches organically as agents touch code and leave breadcrumb-carrying notes. A bulk migration would duplicate effort and produce low-signal entries the near-duplicate gate would then churn through.
+- Auto-updating broken refs during retro - that's a judgment call (supersede? delete? update?), not a calculation. Retro counts; the agent decides.
+
+**Shipped:** v0.25.0.
+
+---
+
+## 2026-04-23 - R4.4 auto-retro gate
+
+**Change.** `handleOrient` (briefing) now inline-invokes `handleReflect` on a 7-day cadence. Gate fires only when `event=startup` and `plugin_state.last_retro_run_at` is missing or older than 7 days. When it fires, retro's summary is prepended to the briefing output as an `## Auto-Retro` section, and `plugin_state.last_retro_run_at` is stamped with the new time so the gate closes for another 7 days. Manual `retro` calls still work and also reset the clock.
+
+**Rationale.** Pre-R4.4, `retro` was agent-triggered only. In practice, agents called it inconsistently - some sessions never ran it, some ran it multiple times. Stale signal accumulated (confidence not decayed, orphans not flagged, autonomy scores drifting) until a human noticed. This violated the "always-up-to-date" and "more-accurate-over-time" design pillars at the pacing layer. The fix is to make periodic maintenance automatic: the plugin owns the cadence; the agent owns the curation decisions that flow from the summary.
+
+**Rejected.**
+- External cron daemon or OS scheduler - adds infrastructure for a problem solvable in-process. The MCP server is always warm when an agent is working; the gate can piggyback on the session-start briefing.
+- Hook-based trigger (e.g. SessionStart hook calls retro) - hooks don't invoke MCP tools. They emit text or block; they can't mutate the orchestrator's state directly. Would require an out-of-band MCP client just for this, which is more infrastructure.
+- Weekly cron in an agent's skill ("every Monday call retro") - back to the agent-remembers-to-call-it failure mode that motivated R4.4.
+- Shorter interval (1 day, 3 days) - too chatty; retro output in every briefing would add noise. 7 days matches the cadence at which confidence decay and signal decay produce observable shifts.
+- Longer interval (30 days) - too stale; orphan detection and revalidation lose their value when they surface weeks late.
+
+**Shipped:** v0.24.4.
+
+---
+
 ## 2026-04-23 - R4.1 candidate rank buckets
 
 **Change.** The R4 forced-resolution gate now prefixes each returned candidate with a rank bucket label: `HIGH MATCH` (>= 0.95), `LIKELY RELATED` (0.85-0.94), `ADJACENT` (0.75-0.84). Candidates are sorted descending by similarity so the strongest match is first.
@@ -195,6 +243,7 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
-## Pending
+## What's next
 
-**R5 - code as ground truth.** Not yet shipped. Deferred to a future planning session. Groundwork is in place (the tool surface can accommodate a `code_refs` field without breaking existing notes; the retrieval pipeline can accommodate a reverse-index lookup pattern). Remaining work includes schema migration for `code_refs`, auto-verification on retrieval, reverse-index query, and agent-side content-convention guidance. See DESIGN-PRINCIPLES.md R5 for the full intent.
+- **R5.2 - broken code_refs in curation_candidates.** R5 shipped verification via retro, but broken refs are only surfaced as a count in the retro summary - the agent has to read it and decide what to do. R5.2 will feed broken refs into `briefing.curation_candidates` so they appear alongside stale-but-hot and low-confidence-but-hot entries, with the same maintenance-handle inline envelope. Remaining work: data source in composer.ts, rendering in briefing envelope, rank alongside existing curation candidates.
+- **Loose items.** Assorted ergonomics and polish - see open threads in the orchestrator DB under tag `curation`.
