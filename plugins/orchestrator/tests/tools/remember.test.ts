@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { handleRemember } from "../../mcp/tools/remember";
+import { handleRemember, bucketLabel } from "../../mcp/tools/remember";
 import type { EmbeddingClient } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
 
@@ -337,7 +337,7 @@ describe("R4: forced-resolution gate", () => {
 
     // Message must guide the caller.
     expect(result.message).toContain("Near-duplicate detected");
-    expect(result.message).toContain("Supply a `resolution`");
+    expect(result.message).toContain("Review before choosing resolution");
     expect(result.message).toContain("accept_new");
     expect(result.message).toContain("update_existing");
     expect(result.message).toContain("supersede_existing");
@@ -659,5 +659,271 @@ describe("R4: forced-resolution gate", () => {
     // No new note created.
     const count = projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as { cnt: number };
     expect(count.cnt).toBe(1);
+  });
+});
+
+// ===========================================================================
+// R4.1: candidate rank buckets in gate message
+//
+// R4's gate at the 0.75 threshold surfaces candidates spanning a wide
+// semantic neighborhood. R4.1 makes the rank bucket the PROMINENT visual
+// marker so agents can tell "clearly the same knowledge" from "adjacent but
+// different" at a glance. Three buckets:
+//   - [HIGH MATCH]     (>= 0.95)
+//   - [LIKELY RELATED] (0.85 - 0.94)
+//   - [ADJACENT]       (0.75 - 0.84)
+// The gate message also gains a "Guidance by match strength" block telling
+// the agent which resolution action is typical for each bucket.
+// ===========================================================================
+describe("R4.1: candidate rank buckets in gate message", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  // Craft a Float32Array whose cosine similarity against [1, 0] equals
+  // exactly `targetSim` (up to float precision). Using the unit identity:
+  // cos([1,0], [x,y]) = x/sqrt(x^2 + y^2). Pick x=targetSim, y=sqrt(1 - x^2).
+  function vectorWithSimilarity(targetSim: number): Float32Array {
+    const x = targetSim;
+    const y = Math.sqrt(Math.max(0, 1 - targetSim * targetSim));
+    return new Float32Array([x, y]);
+  }
+
+  function makeMockClient(vector: Float32Array): EmbeddingClient {
+    return {
+      embed: async (_texts: string[]) => [vector],
+    } as unknown as EmbeddingClient;
+  }
+
+  function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
+    const blob = Buffer.from(vector.buffer);
+    db.run(
+      `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?)`,
+      [noteId, blob, "bge-m3", new Date().toISOString()]
+    );
+  }
+
+  function insertPriorNote(
+    db: Database,
+    opts: { id: string; type: string; content: string }
+  ) {
+    const ts = now();
+    db.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.id,
+        opts.type,
+        opts.content,
+        null,
+        "",
+        opts.type,
+        "medium",
+        0,
+        null,
+        null,
+        null,
+        ts,
+        ts,
+        null,
+      ]
+    );
+  }
+
+  // --- Unit: bucketLabel directly --------------------------------------------
+
+  test("bucketLabel returns HIGH MATCH for 0.95+", () => {
+    expect(bucketLabel(0.95)).toBe("HIGH MATCH");
+    expect(bucketLabel(0.97)).toBe("HIGH MATCH");
+    expect(bucketLabel(0.99)).toBe("HIGH MATCH");
+    expect(bucketLabel(1.0)).toBe("HIGH MATCH");
+  });
+
+  test("bucketLabel returns LIKELY RELATED for 0.85 - 0.949", () => {
+    expect(bucketLabel(0.85)).toBe("LIKELY RELATED");
+    expect(bucketLabel(0.87)).toBe("LIKELY RELATED");
+    expect(bucketLabel(0.94)).toBe("LIKELY RELATED");
+    expect(bucketLabel(0.9499)).toBe("LIKELY RELATED");
+  });
+
+  test("bucketLabel returns ADJACENT for 0.75 - 0.849", () => {
+    expect(bucketLabel(0.75)).toBe("ADJACENT");
+    expect(bucketLabel(0.79)).toBe("ADJACENT");
+    expect(bucketLabel(0.84)).toBe("ADJACENT");
+    expect(bucketLabel(0.8499)).toBe("ADJACENT");
+  });
+
+  // --- Integration: rendered gate message shape ------------------------------
+
+  test("candidate at 95%+ renders with HIGH MATCH prefix", async () => {
+    // Query vector is [1, 0]. Seed prior note's embedding to a vector with
+    // cosine similarity ~0.97 vs the query.
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "high-match-1",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "high-match-1", vectorWithSimilarity(0.97));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.message).toContain("[HIGH MATCH ");
+    expect(result.message).toContain("high-match-1");
+    // Must not falsely label it with a lower bucket.
+    expect(result.message).not.toContain("[LIKELY RELATED ");
+    expect(result.message).not.toContain("[ADJACENT ");
+  });
+
+  test("candidate at 85-94% renders with LIKELY RELATED prefix", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "likely-related-1",
+      type: "convention",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "likely-related-1", vectorWithSimilarity(0.88));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "convention",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.message).toContain("[LIKELY RELATED ");
+    expect(result.message).toContain("likely-related-1");
+    expect(result.message).not.toContain("[HIGH MATCH ");
+    expect(result.message).not.toContain("[ADJACENT ");
+  });
+
+  test("candidate at 75-84% renders with ADJACENT prefix", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "adjacent-1",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "adjacent-1", vectorWithSimilarity(0.79));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "anti_pattern",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.message).toContain("[ADJACENT ");
+    expect(result.message).toContain("adjacent-1");
+    expect(result.message).not.toContain("[HIGH MATCH ");
+    expect(result.message).not.toContain("[LIKELY RELATED ");
+  });
+
+  test("guidance block is included when gate fires", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "guidance-1",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "guidance-1", vectorWithSimilarity(0.88));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.message).toContain("Guidance by match strength");
+    expect(result.message).toContain("HIGH MATCH (95%+)");
+    expect(result.message).toContain("LIKELY RELATED (85-94%)");
+    expect(result.message).toContain("ADJACENT (75-84%)");
+    // The four resolution options still render verbatim.
+    expect(result.message).toContain("accept_new");
+    expect(result.message).toContain("update_existing");
+    expect(result.message).toContain("supersede_existing");
+    expect(result.message).toContain("close_existing");
+  });
+
+  test("candidates are sorted descending by similarity", async () => {
+    // Seed three candidates at varying similarity. After sorting, the
+    // message should list HIGH MATCH first, LIKELY RELATED second,
+    // ADJACENT third - regardless of insertion order.
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "sort-adj",
+      type: "decision",
+      content: "adjacent content",
+    });
+    insertPriorNote(projectDb, {
+      id: "sort-high",
+      type: "decision",
+      content: "high-match content",
+    });
+    insertPriorNote(projectDb, {
+      id: "sort-likely",
+      type: "decision",
+      content: "likely-related content",
+    });
+    seedEmbedding(projectDb, "sort-adj", vectorWithSimilarity(0.79));
+    seedEmbedding(projectDb, "sort-high", vectorWithSimilarity(0.97));
+    seedEmbedding(projectDb, "sort-likely", vectorWithSimilarity(0.88));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "decision",
+      },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.candidates).toBeTruthy();
+    // At most top-3 surface; all three should make the cut.
+    expect(result.candidates!.length).toBe(3);
+    expect(result.candidates![0].id).toBe("sort-high");
+    expect(result.candidates![1].id).toBe("sort-likely");
+    expect(result.candidates![2].id).toBe("sort-adj");
+
+    // In the rendered message, HIGH MATCH's position < LIKELY RELATED's
+    // position < ADJACENT's position (strict ordering).
+    const msg = result.message;
+    const posHigh = msg.indexOf("[HIGH MATCH ");
+    const posLikely = msg.indexOf("[LIKELY RELATED ");
+    const posAdj = msg.indexOf("[ADJACENT ");
+    expect(posHigh).toBeGreaterThan(-1);
+    expect(posLikely).toBeGreaterThan(-1);
+    expect(posAdj).toBeGreaterThan(-1);
+    expect(posHigh).toBeLessThan(posLikely);
+    expect(posLikely).toBeLessThan(posAdj);
   });
 });

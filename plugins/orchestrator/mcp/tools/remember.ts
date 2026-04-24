@@ -49,6 +49,25 @@ const SIMILARITY_ALERT_TYPES: NoteType[] = ["decision", "convention", "anti_patt
 const SIMILARITY_ALERT_THRESHOLD = 0.75;
 
 /**
+ * R4.1: Map a cosine similarity score to a rank bucket label. The rank
+ * bucket is the PROMINENT visual marker in the gate message so agents
+ * can distinguish a 97% match (clearly same knowledge) from a 76% match
+ * (adjacent but different) at a glance.
+ *
+ * - HIGH MATCH     (>= 0.95) - likely the same knowledge
+ * - LIKELY RELATED (0.85 - 0.94) - same topic, different angle
+ * - ADJACENT       (0.75 - 0.84) - overlapping vocabulary, likely different
+ *
+ * Below 0.75 the candidate does not surface at all (handleCheckSimilar's
+ * threshold filter), so this helper does not define a below-ADJACENT label.
+ */
+export function bucketLabel(similarity: number): string {
+  if (similarity >= 0.95) return "HIGH MATCH";
+  if (similarity >= 0.85) return "LIKELY RELATED";
+  return "ADJACENT";
+}
+
+/**
  * Insert a new note into the given DB and return the new id. Extracted so
  * both the normal path and the R4 resolution paths (supersede_existing,
  * close_existing, accept_new) share identical insert semantics.
@@ -184,14 +203,33 @@ export async function handleRemember(
 
   // Gate fires: candidates exist AND caller did not supply a resolution.
   if (preInsertCandidates.length > 0 && input.resolution === undefined) {
-    const lines = preInsertCandidates.map((c) => {
-      const pct = Math.round(c.similarity * 100);
-      return `  - **${c.id}** [${c.type}] (${pct}%) "${truncate(c.content, 120)}"`;
-    });
+    // R4.1: Sort descending by similarity so the strongest match is listed
+    // first. handleCheckSimilar already sorts descending, but this is a
+    // defensive sort in case that contract ever changes. Clone the array so
+    // we don't mutate the candidates returned on the result object.
+    const sortedCandidates = preInsertCandidates
+      .slice()
+      .sort((a, b) => b.similarity - a.similarity);
+
+    const candidateLines = sortedCandidates
+      .map((c) => {
+        const pct = Math.round(c.similarity * 100);
+        const bucket = bucketLabel(c.similarity);
+        return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"`;
+      })
+      .join("\n");
+
+    const guidanceBlock =
+      "Guidance by match strength:\n" +
+      "- HIGH MATCH (95%+): likely the same knowledge. Default to update_existing (if additive) or supersede_existing (if replacing).\n" +
+      "- LIKELY RELATED (85-94%): probably the same topic, different angle. Consider update_existing if additive, or accept_new if the angle is distinct enough to warrant a separate note.\n" +
+      "- ADJACENT (75-84%): overlapping vocabulary but likely different concepts. accept_new is usually correct; update/supersede only if you are certain of duplication.";
+
     const message =
-      "Near-duplicate detected. Supply a `resolution` to proceed.\n\n" +
-      "Possibly same knowledge:\n" +
-      lines.join("\n") +
+      "Near-duplicate detected. Review before choosing resolution:\n\n" +
+      candidateLines +
+      "\n\n" +
+      guidanceBlock +
       "\n\nChoose one:\n" +
       `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different\n` +
       `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new\n` +
@@ -205,7 +243,7 @@ export async function handleRemember(
       promoted: false,
       links_created: 0,
       blocked_on_resolution: true,
-      candidates: preInsertCandidates,
+      candidates: sortedCandidates,
       message,
     };
   }

@@ -20782,6 +20782,13 @@ function snapshotRevision(db, noteId, sessionId) {
 // mcp/tools/remember.ts
 var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
 var SIMILARITY_ALERT_THRESHOLD = 0.75;
+function bucketLabel(similarity) {
+  if (similarity >= 0.95)
+    return "HIGH MATCH";
+  if (similarity >= 0.85)
+    return "LIKELY RELATED";
+  return "ADJACENT";
+}
 async function insertNote(db, globalDb2, input, embeddingClient) {
   const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
@@ -20865,13 +20872,22 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     }
   }
   if (preInsertCandidates.length > 0 && input.resolution === undefined) {
-    const lines = preInsertCandidates.map((c) => {
+    const sortedCandidates = preInsertCandidates.slice().sort((a, b) => b.similarity - a.similarity);
+    const candidateLines = sortedCandidates.map((c) => {
       const pct = Math.round(c.similarity * 100);
-      return `  - **${c.id}** [${c.type}] (${pct}%) "${truncate(c.content, 120)}"`;
-    });
-    const message = "Near-duplicate detected. Supply a `resolution` to proceed.\n\n" + `Possibly same knowledge:
-` + lines.join(`
-`) + `
+      const bucket = bucketLabel(c.similarity);
+      return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"`;
+    }).join(`
+`);
+    const guidanceBlock = `Guidance by match strength:
+` + `- HIGH MATCH (95%+): likely the same knowledge. Default to update_existing (if additive) or supersede_existing (if replacing).
+` + `- LIKELY RELATED (85-94%): probably the same topic, different angle. Consider update_existing if additive, or accept_new if the angle is distinct enough to warrant a separate note.
+` + "- ADJACENT (75-84%): overlapping vocabulary but likely different concepts. accept_new is usually correct; update/supersede only if you are certain of duplication.";
+    const message = `Near-duplicate detected. Review before choosing resolution:
+
+` + candidateLines + `
+
+` + guidanceBlock + `
 
 Choose one:
 ` + `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different
@@ -20885,7 +20901,7 @@ Choose one:
       promoted: false,
       links_created: 0,
       blocked_on_resolution: true,
-      candidates: preInsertCandidates,
+      candidates: sortedCandidates,
       message
     };
   }
