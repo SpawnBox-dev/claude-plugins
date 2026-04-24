@@ -8,6 +8,7 @@ import {
 } from "../engine/hybrid_search";
 import { blobToVector } from "../engine/embeddings";
 import { signalBoost, confidenceMultiplier } from "./signal";
+import { MIN_SHARED_KEYWORDS } from "./deduplicator";
 
 /**
  * Infer relationship type based on note types.
@@ -335,12 +336,18 @@ export async function findRelatedNotesHybrid(
 /**
  * Auto-link a note to other notes based on keyword overlap.
  * Creates links in the DB and returns the created Link objects.
+ *
+ * R4.3: default `minOverlap` now uses `MIN_SHARED_KEYWORDS` (3) from the
+ * deduplicator, aligning the auto-linker with the R3.5a discipline that
+ * already guards `findDuplicates`, `mergeDuplicates`, and
+ * `remember.writeUserModel`. Prior to R4.3 this defaulted to 2, producing
+ * false-positive graph links from incidental short-keyword overlaps.
  */
 export function createAutoLinks(
   db: Database,
   noteId: string,
   keywords: string[],
-  minOverlap = 2
+  minOverlap = MIN_SHARED_KEYWORDS
 ): Link[] {
   if (keywords.length === 0) return [];
 

@@ -20642,7 +20642,7 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   }
   return results;
 }
-function createAutoLinks(db, noteId, keywords, minOverlap = 2) {
+function createAutoLinks(db, noteId, keywords, minOverlap = MIN_SHARED_KEYWORDS) {
   if (keywords.length === 0)
     return [];
   const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
@@ -23014,7 +23014,7 @@ Cascade effects:
 server.tool("update_note", "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history).", {
   id: exports_external.string(),
   content: exports_external.string().optional().describe("New content (REPLACES existing)."),
-  append_content: exports_external.string().min(1).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters)."),
+  append_content: exports_external.string().min(1).max(20000).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters). Max 20000 characters per append - for larger additions, chunk into multiple calls or use `content` for a full rewrite."),
   context: exports_external.string().optional().describe("New context (replaces existing)"),
   tags: exports_external.string().optional().describe("New tags (replaces existing)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),

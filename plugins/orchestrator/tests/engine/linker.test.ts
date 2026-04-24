@@ -123,13 +123,13 @@ describe("linker", () => {
   test("auto-links use inferred relationship types", () => {
     const decisionId = insertNote(db, {
       type: "decision",
-      content: "decided to use backup snapshots for data",
-      keywords: "backup,snapshot,data,decided",
+      content: "decided to use backup snapshots for data storage",
+      keywords: "backup,snapshot,data,decided,storage",
     });
     insertNote(db, {
       type: "open_thread",
-      content: "need to figure out backup strategy for data",
-      keywords: "backup,strategy,data,figure",
+      content: "need to figure out backup snapshot storage strategy for data",
+      keywords: "backup,snapshot,storage,data,strategy",
     });
 
     const links = createAutoLinks(db, decisionId, [
@@ -137,6 +137,7 @@ describe("linker", () => {
       "snapshot",
       "data",
       "decided",
+      "storage",
     ]);
 
     expect(links.length).toBeGreaterThanOrEqual(1);
@@ -282,6 +283,62 @@ describe("linker", () => {
       10
     );
     expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("R4.3: createAutoLinks MIN_SHARED_KEYWORDS=3 default", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(":memory:");
+    applyMigrations(db, "project");
+  });
+
+  test("createAutoLinks: 2-shared-keyword notes no longer auto-link (R4.3 - MIN_SHARED_KEYWORDS=3 default)", () => {
+    const id1 = insertNote(db, {
+      content: "source note",
+      keywords: "alpha,beta,gamma,delta",
+    });
+    insertNote(db, {
+      content: "candidate with only 2 shared keywords",
+      keywords: "alpha,beta,epsilon,zeta",
+    });
+
+    const links = createAutoLinks(db, id1, ["alpha", "beta", "gamma", "delta"]);
+    expect(links.length).toBe(0);
+  });
+
+  test("createAutoLinks: 2-shared-keyword notes still link when minOverlap=2 is passed explicitly", () => {
+    const id1 = insertNote(db, {
+      content: "source note",
+      keywords: "alpha,beta,gamma,delta",
+    });
+    const id2 = insertNote(db, {
+      content: "candidate with only 2 shared keywords",
+      keywords: "alpha,beta,epsilon,zeta",
+    });
+
+    const links = createAutoLinks(
+      db,
+      id1,
+      ["alpha", "beta", "gamma", "delta"],
+      2
+    );
+    expect(links.some((l) => l.to_note_id === id2)).toBe(true);
+  });
+
+  test("createAutoLinks: 3+ shared keywords still produce links", () => {
+    const id1 = insertNote(db, {
+      content: "source note",
+      keywords: "alpha,beta,gamma,delta",
+    });
+    const id2 = insertNote(db, {
+      content: "candidate with 3 shared keywords",
+      keywords: "alpha,beta,gamma,zeta",
+    });
+
+    const links = createAutoLinks(db, id1, ["alpha", "beta", "gamma", "delta"]);
+    expect(links.some((l) => l.to_note_id === id2)).toBe(true);
   });
 });
 

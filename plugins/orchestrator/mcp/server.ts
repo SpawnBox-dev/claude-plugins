@@ -889,7 +889,7 @@ server.tool(
   {
     id: z.string(),
     content: z.string().optional().describe("New content (REPLACES existing)."),
-    append_content: z.string().min(1).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters)."),
+    append_content: z.string().min(1).max(20000).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters). Max 20000 characters per append - for larger additions, chunk into multiple calls or use `content` for a full rewrite."),
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),

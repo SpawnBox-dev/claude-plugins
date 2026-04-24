@@ -109,3 +109,41 @@ describe("formatAge", () => {
     expect(formatAge(future, now)).toBe("just now");
   });
 });
+
+describe("formatAge boundaries", () => {
+  test("exactly 60 seconds -> 1m (not 'just now')", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-23T11:59:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("1m");
+  });
+
+  test("exactly 60 minutes -> 1h (not 60m)", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-23T11:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("1h");
+  });
+
+  test("exactly 24 hours -> 1d (not 24h)", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-22T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("1d");
+  });
+
+  test("exactly 14 days -> 2w (enters weeks bucket)", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-04-09T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("2w");
+  });
+
+  test("exactly 60 days -> 60d (leaves weeks bucket)", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-02-22T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("60d");
+  });
+
+  test("59 days -> 8w (last day in weeks bucket)", () => {
+    const now = new Date("2026-04-23T12:00:00Z");
+    const then = new Date("2026-02-23T12:00:00Z").toISOString();
+    expect(formatAge(then, now)).toBe("8w");
+  });
+});

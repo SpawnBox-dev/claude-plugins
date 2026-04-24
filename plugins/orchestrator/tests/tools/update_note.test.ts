@@ -65,6 +65,19 @@ describe("update_note append_content mode", () => {
     expect(freshRow.content).toContain("second");
     // If server.ts used stale row here, it would only see "first"
   });
+
+  test("append_content at 20000 chars is accepted (boundary)", async () => {
+    // R4.3: the 20000-char cap is enforced at the MCP tool boundary via zod.
+    // The helper itself stays unbounded (internal primitive). This test
+    // asserts the boundary value round-trips through the helper so callers
+    // that pass exactly 20000 chars see the expected append behavior.
+    const created = await handleRemember(projectDb, globalDb, { content: "base", type: "decision" });
+    const largeString = "x".repeat(20000);
+    const result = appendToNoteContent(projectDb, created.note_id!, largeString);
+    expect(result.appended).toBe(true);
+    const row = projectDb.query("SELECT content FROM notes WHERE id = ?").get(created.note_id!) as any;
+    expect(row.content).toContain(largeString);
+  });
 });
 
 describe("R2.3: update_note snapshots revisions before mutations", () => {
