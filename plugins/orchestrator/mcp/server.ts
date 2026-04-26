@@ -97,17 +97,21 @@ function registerSessionOnce(sessionId: string): void {
 }
 let sidecarStatus: "ready" | "starting" | "unavailable" | "error" = "starting";
 let sidecarError: string | null = null;
+// Path to the sidecar boot/runtime log. Populated on first startSidecar call so
+// system_status and install_embeddings can surface it when the spawn fails.
+let sidecarLogPath: string | null = null;
 
 async function trySpawn(
   cmd: string[],
   portFile: string,
   label: string,
   timeoutMs: number,
+  logFd: number,
 ): Promise<{ proc: ReturnType<typeof Bun.spawn>; port: number } | null> {
   try {
     const proc = Bun.spawn(cmd, {
-      stdout: "ignore",
-      stderr: "ignore",
+      stdout: logFd >= 0 ? logFd : "ignore",
+      stderr: logFd >= 0 ? logFd : "ignore",
     });
 
     // Wait for port file to appear, polling every 2s up to timeoutMs
@@ -155,6 +159,28 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
   const portFile = resolve(pluginRoot, ".sidecar-port");
+  sidecarLogPath = resolve(pluginRoot, ".sidecar.log");
+
+  // Open the log file (truncated) so spawned sidecars can write stdout/stderr to
+  // it. Replaces the previous stdio: "ignore" which made cold-start failures
+  // (slow connections + 60s timeout + ~2 GB bge-m3 download) self-undiagnosable.
+  // Falls back to "ignore" on open failure — never blocks a sidecar boot.
+  const { openSync } = await import("node:fs");
+  let logFd = -1;
+  try {
+    logFd = openSync(sidecarLogPath, "w");
+  } catch {
+    // Open failed — proceed with stdio: "ignore" behavior (preserves prior path).
+  }
+
+  // Boot timeout — first run must download ~2 GB of bge-m3 model + onnxruntime
+  // wheels, which on residential connections exceeds the previous 60s default.
+  // ORCH_SIDECAR_BOOT_TIMEOUT_MS overrides for slower links (or impatient ones).
+  const envTimeoutRaw = process.env.ORCH_SIDECAR_BOOT_TIMEOUT_MS;
+  const envTimeout = envTimeoutRaw ? parseInt(envTimeoutRaw, 10) : NaN;
+  const envOverride = !isNaN(envTimeout) && envTimeout > 0 ? envTimeout : null;
+  const uvxTimeoutMs = envOverride ?? 180_000;
+  const pythonTimeoutMs = envOverride ?? 30_000;
 
   // Reuse an existing healthy sidecar if one is already running. Each Claude
   // session spawns its own MCP server process, so without reuse we end up with
@@ -192,7 +218,8 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     ["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs],
     portFile,
     "uvx",
-    60000,
+    uvxTimeoutMs,
+    logFd,
   );
 
   // Fall back to direct python
@@ -203,7 +230,8 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       ["python", sidecarPath, ...baseArgs],
       portFile,
       "python",
-      30000,
+      pythonTimeoutMs,
+      logFd,
     );
   }
 
@@ -214,7 +242,8 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       ["python3", sidecarPath, ...baseArgs],
       portFile,
       "python3",
-      30000,
+      pythonTimeoutMs,
+      logFd,
     );
   }
 
@@ -363,6 +392,9 @@ server.tool(
       if (sidecarError) {
         lines.push(`  - Reason: ${sidecarError}`);
       }
+      if (sidecarLogPath) {
+        lines.push(`  - Sidecar log: ${sidecarLogPath} (truncated on each boot attempt)`);
+      }
       lines.push("  - To enable: call `install_embeddings` tool, or manually install uv (https://docs.astral.sh/uv/)");
     }
 
@@ -434,11 +466,26 @@ server.tool(
       }
     } catch {}
 
+    // Detect whether the bge-m3 model is already in the HuggingFace cache.
+    // First-run boot must download ~2 GB from HuggingFace under unauthenticated
+    // rate limits — on slow links that exceeds the spawn timeout. This flag
+    // disambiguates first-run (~minutes) from broken-run (~seconds to fail).
+    let modelCached = false;
+    try {
+      const { existsSync } = await import("node:fs");
+      const { homedir } = await import("node:os");
+      const hubRoot = process.env.HF_HUB_CACHE
+        ? process.env.HF_HUB_CACHE
+        : resolve(process.env.HF_HOME || resolve(homedir(), ".cache", "huggingface"), "hub");
+      modelCached = existsSync(resolve(hubRoot, "models--BAAI--bge-m3"));
+    } catch {}
+
     if (action === "check") {
       lines.push("## Embedding Dependencies Check");
       lines.push("");
       lines.push(`- Python: ${checks.python ? `installed (${checks.pythonPath})` : "NOT FOUND"}`);
       lines.push(`- uv: ${checks.uv ? `installed (${checks.uvPath})` : "NOT FOUND"}`);
+      lines.push(`- bge-m3 model cache: ${modelCached ? "present (~10s boot expected)" : "not yet downloaded (~2 GB on first boot)"}`);
       lines.push(`- Sidecar: ${sidecarStatus}`);
       lines.push("");
 
@@ -484,7 +531,13 @@ server.tool(
         lines.push("Sidecar started successfully! Semantic search is now active.");
         lines.push("Backfilling embeddings for existing notes in the background.");
       } else {
-        lines.push("Sidecar failed to start. Check the logs for details.");
+        lines.push(sidecarLogPath
+          ? `Sidecar failed to start. Check ${sidecarLogPath} for diagnostics.`
+          : "Sidecar failed to start.");
+        if (!modelCached) {
+          lines.push("First-run downloads (~2 GB bge-m3 model + onnxruntime wheels) can exceed the default 180s timeout on slow connections.");
+          lines.push("Override with `ORCH_SIDECAR_BOOT_TIMEOUT_MS=600000` (ms) and call `install_embeddings(install)` again. Subsequent boots are ~10s once cached.");
+        }
       }
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     }
@@ -513,7 +566,13 @@ server.tool(
           lines.push("Sidecar started! Semantic search is now active.");
           lines.push("First run will download the bge-m3 model (~1.5GB). This happens once and is cached.");
         } else {
-          lines.push("uv installed but sidecar didn't start. Try restarting the session.");
+          lines.push(sidecarLogPath
+            ? `uv installed but sidecar didn't start. Check ${sidecarLogPath} for diagnostics.`
+            : "uv installed but sidecar didn't start. Try restarting the session.");
+          if (!modelCached) {
+            lines.push("First-run downloads (~2 GB bge-m3 model + onnxruntime wheels) can exceed the default 180s timeout on slow connections.");
+            lines.push("Override with `ORCH_SIDECAR_BOOT_TIMEOUT_MS=600000` (ms) and call `install_embeddings(install)` again.");
+          }
         }
       } else {
         const stderr = await new Response(proc.stderr).text();

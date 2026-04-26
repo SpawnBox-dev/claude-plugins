@@ -22573,11 +22573,12 @@ function registerSessionOnce(sessionId) {
 }
 var sidecarStatus = "starting";
 var sidecarError = null;
-async function trySpawn(cmd, portFile, label, timeoutMs) {
+var sidecarLogPath = null;
+async function trySpawn(cmd, portFile, label, timeoutMs, logFd) {
   try {
     const proc = Bun.spawn(cmd, {
-      stdout: "ignore",
-      stderr: "ignore"
+      stdout: logFd >= 0 ? logFd : "ignore",
+      stderr: logFd >= 0 ? logFd : "ignore"
     });
     const maxAttempts = Math.ceil(timeoutMs / 2000);
     let port = null;
@@ -22619,6 +22620,17 @@ async function startSidecar() {
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
   const portFile = resolve(pluginRoot, ".sidecar-port");
+  sidecarLogPath = resolve(pluginRoot, ".sidecar.log");
+  const { openSync } = await import("fs");
+  let logFd = -1;
+  try {
+    logFd = openSync(sidecarLogPath, "w");
+  } catch {}
+  const envTimeoutRaw = process.env.ORCH_SIDECAR_BOOT_TIMEOUT_MS;
+  const envTimeout = envTimeoutRaw ? parseInt(envTimeoutRaw, 10) : NaN;
+  const envOverride = !isNaN(envTimeout) && envTimeout > 0 ? envTimeout : null;
+  const uvxTimeoutMs = envOverride ?? 180000;
+  const pythonTimeoutMs = envOverride ?? 30000;
   try {
     const content = await Bun.file(portFile).text();
     const existingPort = parseInt(content.trim(), 10);
@@ -22635,20 +22647,20 @@ async function startSidecar() {
     unlinkSync(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile];
-  let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
+  let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", uvxTimeoutMs, logFd);
   if (!result) {
     try {
       const { unlinkSync } = await import("fs");
       unlinkSync(portFile);
     } catch {}
-    result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
+    result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", pythonTimeoutMs, logFd);
   }
   if (!result) {
     try {
       const { unlinkSync } = await import("fs");
       unlinkSync(portFile);
     } catch {}
-    result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
+    result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", pythonTimeoutMs, logFd);
   }
   if (!result) {
     let hasUv = false;
@@ -22753,6 +22765,9 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     if (sidecarError) {
       lines.push(`  - Reason: ${sidecarError}`);
     }
+    if (sidecarLogPath) {
+      lines.push(`  - Sidecar log: ${sidecarLogPath} (truncated on each boot attempt)`);
+    }
     lines.push("  - To enable: call `install_embeddings` tool, or manually install uv (https://docs.astral.sh/uv/)");
   }
   lines.push(`- **Active sessions** (24h): ${activeSessions}`);
@@ -22806,11 +22821,19 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
       checks4.uvPath = stdout.trim();
     }
   } catch {}
+  let modelCached = false;
+  try {
+    const { existsSync: existsSync4 } = await import("fs");
+    const { homedir: homedir2 } = await import("os");
+    const hubRoot = process.env.HF_HUB_CACHE ? process.env.HF_HUB_CACHE : resolve(process.env.HF_HOME || resolve(homedir2(), ".cache", "huggingface"), "hub");
+    modelCached = existsSync4(resolve(hubRoot, "models--BAAI--bge-m3"));
+  } catch {}
   if (action === "check") {
     lines.push("## Embedding Dependencies Check");
     lines.push("");
     lines.push(`- Python: ${checks4.python ? `installed (${checks4.pythonPath})` : "NOT FOUND"}`);
     lines.push(`- uv: ${checks4.uv ? `installed (${checks4.uvPath})` : "NOT FOUND"}`);
+    lines.push(`- bge-m3 model cache: ${modelCached ? "present (~10s boot expected)" : "not yet downloaded (~2 GB on first boot)"}`);
     lines.push(`- Sidecar: ${sidecarStatus}`);
     lines.push("");
     if (checks4.python && checks4.uv) {
@@ -22850,7 +22873,11 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
       lines.push("Sidecar started successfully! Semantic search is now active.");
       lines.push("Backfilling embeddings for existing notes in the background.");
     } else {
-      lines.push("Sidecar failed to start. Check the logs for details.");
+      lines.push(sidecarLogPath ? `Sidecar failed to start. Check ${sidecarLogPath} for diagnostics.` : "Sidecar failed to start.");
+      if (!modelCached) {
+        lines.push("First-run downloads (~2 GB bge-m3 model + onnxruntime wheels) can exceed the default 180s timeout on slow connections.");
+        lines.push("Override with `ORCH_SIDECAR_BOOT_TIMEOUT_MS=600000` (ms) and call `install_embeddings(install)` again. Subsequent boots are ~10s once cached.");
+      }
     }
     return { content: [{ type: "text", text: lines.join(`
 `) }] };
@@ -22876,7 +22903,11 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
         lines.push("Sidecar started! Semantic search is now active.");
         lines.push("First run will download the bge-m3 model (~1.5GB). This happens once and is cached.");
       } else {
-        lines.push("uv installed but sidecar didn't start. Try restarting the session.");
+        lines.push(sidecarLogPath ? `uv installed but sidecar didn't start. Check ${sidecarLogPath} for diagnostics.` : "uv installed but sidecar didn't start. Try restarting the session.");
+        if (!modelCached) {
+          lines.push("First-run downloads (~2 GB bge-m3 model + onnxruntime wheels) can exceed the default 180s timeout on slow connections.");
+          lines.push("Override with `ORCH_SIDECAR_BOOT_TIMEOUT_MS=600000` (ms) and call `install_embeddings(install)` again.");
+        }
       }
     } else {
       const stderr = await new Response(proc.stderr).text();
