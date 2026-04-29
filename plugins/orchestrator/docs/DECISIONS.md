@@ -6,6 +6,25 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.1 hotfix: hooks.json `server` field uses namespaced MCP name
+
+**Change.** All 8 `mcp_tool` hooks in `hooks.json` change `"server": "memory"` to `"server": "plugin_orchestrator_memory"`. The R6 ship had used the local `.mcp.json` registration key (`memory`), but Claude Code's hook lookup uses the canonical full server name visible to its MCP layer, which is `plugin_<plugin-name>_<server-key>` = `plugin_orchestrator_memory`. Result: every hook dispatch silently failed with "MCP server 'memory' not connected" - so R6 + R7 dispatcher behavior never actually fired in live sessions, even though the agent-callable MCP tools (`send_message`, `update_session_task`, etc.) worked fine because their lookup is done against the same canonical full name.
+
+**Rationale.** Caught by Jarid in field testing 2026-04-28 immediately after the R7 ship, when the new dispatcher's loop-closure / variant rotation / etc. failed to appear in the user-visible additionalContext. Console output: `PostToolUse:... hook error MCP server 'memory' not connected` (8x in a single turn). The fix is a one-character-per-hook string change.
+
+The R6 ship rationale included a "rejected alternative" line acknowledging this exact ambiguity ("the .mcp.json registers the server under the simple key memory, so server: 'memory' in hooks.json matches. Verified at runtime.") - but the verification was inferred, not actually tested with a live hook firing. The claude-code-guide subagent's earlier example used `"server": "my_server"` shape, which led me to use the local key. Should have constructed a minimal working example and confirmed the hook actually fired before claiming verification.
+
+**Rejected.**
+- A second name lookup fallback inside the dispatcher (try `memory`, then `plugin_orchestrator_memory`) - misses the point. The hook config is what tells Claude Code's hook engine which server to dispatch to; the dispatcher itself can't intercept the connection failure.
+- Renaming the local `.mcp.json` key from `memory` to `plugin_orchestrator_memory` - would break the agent-visible tool names (`mcp__plugin_orchestrator_memory__*` would become `mcp__plugin_orchestrator_plugin_orchestrator_memory__*`). The local key and the canonical full name are different by design; the canonical name is the one hook config takes.
+- Using `${MCP_SERVER}` substitution if Claude Code supported it - it doesn't, and a hardcoded string is simpler.
+
+**Lessons captured for future plugin work**: (1) hooks.json `server` field uses the full namespaced name `plugin_<plugin>_<key>`, not the local `.mcp.json` key. (2) When changelog or docs don't show a runtime example, construct one and watch it fire end-to-end before assuming the config shape. The R6 ship had test coverage of the dispatcher logic but no end-to-end test that actually fired a hook through Claude Code's hook engine.
+
+**Shipped:** v0.27.1.
+
+---
+
 ## 2026-04-28 - R7 loop-closure, work-item drift, sibling overlap, expanded hook surface
 
 **Change.** Six dispatcher additions in `mcp/tools/hook_event.ts` plus matching `hooks.json` and `_hook_event` schema updates:

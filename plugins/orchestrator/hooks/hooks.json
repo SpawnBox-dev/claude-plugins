@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "UserPromptSubmit",
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "PreToolUse",
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "PostToolUse",
@@ -69,7 +69,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "PostToolUseFailure",
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "PreCompact",
@@ -100,7 +100,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "Stop",
@@ -115,7 +115,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "StopFailure",
@@ -130,7 +130,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "SubagentStop",
@@ -146,7 +146,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "memory",
+            "server": "plugin_orchestrator_memory",
             "tool": "_hook_event",
             "input": {
               "event": "TaskCompleted",
