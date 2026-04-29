@@ -6,6 +6,29 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.2 hotfix: hooks.json `server` field uses colon-separated `plugin:<name>:<key>` form
+
+**Change.** All 8 `mcp_tool` hooks change `"server": "plugin_orchestrator_memory"` to `"server": "plugin:orchestrator:memory"`. The canonical server name as Claude Code's hook engine sees it is the colon-separated form visible in `/mcp` output, NOT the underscore form embedded in the agent-tool prefix `mcp__plugin_orchestrator_memory__*`.
+
+**Discovery.** R7.1 had switched from the local `.mcp.json` key (`memory`) to the agent-tool-prefix form (`plugin_orchestrator_memory`) on the assumption that the underscore-separated name was the canonical one. Both still failed at the hook engine. After Jarid pasted `/mcp` output:
+
+```
+Built-in MCPs (always available)
+plugin:discord:discord · √ connected
+plugin:docs-manager:docs-manager · √ connected
+plugin:orchestrator:memory · √ connected
+```
+
+The user-visible server identifier in `/mcp` is the colon-separated `plugin:<plugin>:<server-key>` form. That is what `hooks.json server:` field expects. The underscores in the tool prefix `mcp__plugin_orchestrator_memory__*` are just JSON-RPC name encoding (colons aren't legal in tool names so they're substituted with underscores when surfacing as tools), but the underlying server name is colon-separated everywhere else in Claude Code.
+
+**Lessons.** The earlier R7.1 entry's "lessons" applied here: I should have asked Jarid to paste `/mcp` immediately rather than guessing a second name. Two failed iterations could have been one. The correct fact for future plugin work: the `mcp_tool` hook `server` field expects the EXACT string shown in `/mcp` for that server, which for plugin-provided servers is `plugin:<plugin>:<server-key>` (colons, not underscores).
+
+The orchestrator's docs (CLAUDE.md, README, ARCHITECTURE) already note this gotcha after R7.1; updating them again to use the correct colon form is part of this ship. Anti-pattern note in the global KB updated to record the correct convention.
+
+**Shipped:** v0.27.2.
+
+---
+
 ## 2026-04-28 - R7.1 hotfix: hooks.json `server` field uses namespaced MCP name
 
 **Change.** All 8 `mcp_tool` hooks in `hooks.json` change `"server": "memory"` to `"server": "plugin_orchestrator_memory"`. The R6 ship had used the local `.mcp.json` registration key (`memory`), but Claude Code's hook lookup uses the canonical full server name visible to its MCP layer, which is `plugin_<plugin-name>_<server-key>` = `plugin_orchestrator_memory`. Result: every hook dispatch silently failed with "MCP server 'memory' not connected" - so R6 + R7 dispatcher behavior never actually fired in live sessions, even though the agent-callable MCP tools (`send_message`, `update_session_task`, etc.) worked fine because their lookup is done against the same canonical full name.
