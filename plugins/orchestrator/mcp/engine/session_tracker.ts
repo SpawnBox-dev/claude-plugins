@@ -494,6 +494,7 @@ export class SessionTracker {
       `DELETE FROM plugin_state
        WHERE updated_at < ?
          AND (key LIKE 'wi_drift_%'
+              OR key LIKE 'wi_touched_%'
               OR key LIKE 'code_refs_hint_%'
               OR key LIKE 'stop_%'
               OR key LIKE 'subagent_stop_%'

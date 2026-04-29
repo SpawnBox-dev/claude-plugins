@@ -1723,6 +1723,7 @@ server.tool(
     agent_id: z.string().optional(),
     file_path: z.string().optional(),
     user_prompt: z.string().optional(),
+    tool_input_id: z.string().optional(),
   },
   async (args) => {
     if (!sessionTracker) {
@@ -1732,6 +1733,7 @@ server.tool(
     const payload: Record<string, unknown> = {};
     if (args.file_path) payload.file_path = args.file_path;
     if (args.user_prompt) payload.user_prompt = args.user_prompt;
+    if (args.tool_input_id) payload.tool_input_id = args.tool_input_id;
     const result = handleHookEvent(
       { db, tracker: sessionTracker },
       {

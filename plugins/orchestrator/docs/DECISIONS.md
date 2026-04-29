@@ -6,6 +6,28 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.6 Stop-prompt trim + tightened loop-close heuristic
+
+**Change.** Two related UX fixes triggered by field signal: a real spawnbox session (1a5a984f) hit Stop and saw a 3000+ char "Stop hook error" prompt with 5 in-flight work_items (3 of which it didn't actually work on, just saw via briefing) plus a duplicated R3.4 fresh-notes nudge listing 5 more entries.
+
+1. **Trimmed Stop prompt** (`mcp/tools/hook_event.ts` `handleStop`). Removed the standalone `buildStopSessionNudge` function whose output duplicated section 1's "you surfaced N fresh notes" preamble. The R3.4 fresh-notes listing is now integrated directly into the Curate section. Caps lowered: loop-close 5->3, fresh-note list 5->3. Single-paragraph intro instead of two. Order: Loop-close (most actionable when present) -> Curate -> Capture -> Save progress.
+
+2. **Tightened loop-close heuristic** (`listInFlightWorkItemsForSession`). Pre-R7.6 the SQL OR'd `source_session = me` with `EXISTS session_log WHERE session_id = me`, surfacing every work_item the session had ever LOOKED at via lookup. On a heavy spawnbox session that's 5+ items per Stop, mostly noise. R7.6 replaces the session_log amplifier with a per-session `wi_touched_<sid>_<id>` plugin_state marker that's only written when the session actively calls `update_work_item` on that id. Surfaces real intent (I edited this work_item) instead of incidental briefing surfacing.
+
+**Wiring.** `hooks.json` PostToolUse adds `tool_input_id: "${tool_input.id}"` substitution; the `_hook_event` MCP tool gains a `tool_input_id` schema field; `handlePostToolUse` writes the marker when `tool_name === "mcp__plugin_orchestrator_memory__update_work_item"`. `SessionTracker.cleanup()` extended with `wi_touched_%` prefix so markers prune at the same 7-day cadence as other ephemeral hook state.
+
+**Why now.** Jarid pasted a real Stop hook output from a parallel session as field evidence. The prompt was over the soft 5-10k char ceiling that DESIGN-PRINCIPLES.md mandates, AND the loop-close section had legitimate noise (work_items inherited via briefing). Both are exactly the failure modes the principles warn about.
+
+**Rejected.**
+- Suppressing the loop-close section entirely when there's no source_session match - throws away real signal for sessions that DID work on inherited items. The wi_touched marker captures "I actually updated it" which is the right boundary.
+- Tracking ALL orchestrator tool calls per work_item for a richer touched-set - overkill. update_work_item is the canonical "I'm taking action on this" verb; lookup/note are weaker signals.
+- Dropping the prompt to one section at a time over multiple commits - they're tightly coupled (loop-close is a section in the prompt). One commit is cleaner.
+- Renaming "Stop hook error" to something less alarming - that's Claude Code's UX label for any decision:block return; we can't change it from the plugin side.
+
+**Shipped:** v0.28.1.
+
+---
+
 ## 2026-04-28 - R7.5 code-review-driven hardening pass
 
 **Change.** Six independent fixes addressing findings from a code-review subagent pass over R6 → R7.4 (commit range `bb75f5f..b91dc21`). Plus expanded test coverage for each. Bumped to `0.28.0` since scope-filtering changes message delivery semantics (now matches what docs always claimed).

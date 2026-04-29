@@ -244,6 +244,14 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_memory__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
+
+    // R7.6: log work_item touches so loop-close can scope to "I actually
+    // updated this work_item this session," not just "I happened to see it
+    // in a briefing." Cleanly tightens the false-positive amplifier.
+    if (args.tool_name === "mcp__plugin_orchestrator_memory__update_work_item") {
+      const id = args.payload?.tool_input_id as string | undefined;
+      if (id) markWorkItemTouched(ctx.db, args.session_id, id);
+    }
   }
   // Reset struggle counter on any successful tool call.
   resetStruggleCounter(ctx.db, args.session_id);
@@ -352,56 +360,82 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     [key, now()]
   );
 
-  // R7: surgical Stop prompt. Build only the sections that have signal in
-  // this session's state.
+  // R7.6: tightened to fit the design's 5-10k char soft ceiling. Drops the
+  // duplicated fresh-notes section (was redundant with the R3.4 nudge).
+  // Caps loop-close + nudge lists at 3 entries each. Single-paragraph intro.
   const fresh = countFreshSurfaced(ctx.db, args.session_id);
   const inFlight = listInFlightWorkItemsForSession(ctx.db, args.session_id);
+  const freshNoteList = fresh >= 3 ? listFreshSurfacedNotes(ctx.db, args.session_id, 3) : [];
 
-  const sections: string[] = [];
-  sections.push(
-    "Before ending this session, complete orchestrator housekeeping. Maintenance verbs are equal-priority to capture - a session that only captures grows the corpus; a session that also maintains makes the knowledge base more accurate and faster to traverse over time."
+  const parts: string[] = [];
+  parts.push(
+    "Before ending: complete orchestrator housekeeping. Maintenance is equal-priority to capture."
   );
 
-  let sectionNum = 1;
-
-  if (fresh > 0) {
-    sections.push(
-      `**${sectionNum}. Curate existing knowledge (update_note / close_thread / supersede_note).** You surfaced ${fresh} fresh note${fresh === 1 ? "" : "s"} this session. For each one you used:\n- Was it still correct? If not, \`update_note\` (minor correction) or \`supersede_note\` (new canonical version, preserves history).\n- Is a tracked thread now settled? \`close_thread\`.\n- Did you correct a note verbally but never update it? Fix it now.`
-    );
-  } else {
-    sections.push(
-      `**${sectionNum}. Curate existing knowledge (update_note / close_thread / supersede_note).** No fresh notes surfaced this session. Skip if there's nothing to curate, but if you corrected a note verbally without writing the change back, fix it now.`
-    );
-  }
-  sectionNum++;
-
-  sections.push(
-    `**${sectionNum}. Capture new knowledge (note).** Scan your work for anything that would be lost: decisions, conventions, anti-patterns, architecture, risks, insights, user preferences. For notes about specific code, pass \`code_refs: [paths]\`.`
-  );
-  sectionNum++;
+  let n = 1;
 
   if (inFlight.length > 0) {
     const list = inFlight
-      .slice(0, 5)
-      .map((w) => `  - **${w.id.slice(0, 8)}** [${w.status}] ${w.content.slice(0, 80)}`)
+      .slice(0, 3)
+      .map((w) => `  - **${w.id.slice(0, 8)}** [${w.status}] ${w.content.slice(0, 70)}`)
       .join("\n");
-    const more = inFlight.length > 5 ? `\n  ...and ${inFlight.length - 5} more.` : "";
-    sections.push(
-      `**${sectionNum}. Loop-closure (R7).** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"} touched this session:\n${list}${more}\n\nFor each, ask: did this just complete? \`update_work_item({id, status: "done"})\`. If you cannot tell whether the user considers it done, ASK explicitly before ending the session.`
+    const more = inFlight.length > 3 ? `\n  ...and ${inFlight.length - 3} more.` : "";
+    parts.push(
+      `**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:\n${list}${more}\n  -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`
     );
-    sectionNum++;
+    n++;
   }
 
-  sections.push(
-    `**${sectionNum}. Save progress.** Call \`save_progress\` with summary, open questions, next steps.`
+  if (freshNoteList.length > 0) {
+    const list = freshNoteList
+      .map((r) => `  - **${r.id.slice(0, 8)}** [${r.type}] ${r.snippet}`)
+      .join("\n");
+    const more = fresh > freshNoteList.length ? `\n  ...and ${fresh - freshNoteList.length} more (\`lookup({session_id:"${args.session_id}"})\`).` : "";
+    parts.push(
+      `**${n}. Curate (update_note / close_thread / supersede_note).** ${fresh} fresh note${fresh === 1 ? "" : "s"} surfaced. For each you relied on, decide: still correct? thread settled? Top:\n${list}${more}`
+    );
+    n++;
+  } else {
+    parts.push(
+      `**${n}. Curate (update_note / close_thread / supersede_note).** No fresh notes surfaced; skip unless you corrected a note verbally without writing it back.`
+    );
+    n++;
+  }
+
+  parts.push(
+    `**${n}. Capture (note).** Decisions, conventions, anti-patterns, architecture, risks, insights, user preferences from this session. \`code_refs: [paths]\` when about specific code.`
+  );
+  n++;
+
+  parts.push(
+    `**${n}. Save progress.** \`save_progress\` with summary, open questions, next steps.`
   );
 
-  sections.push("Retro is automatic on a 7-day cadence; no manual call needed.");
+  return { decision: "block", reason: parts.join("\n\n") };
+}
 
-  const nudge = buildStopSessionNudge(ctx.db, args.session_id);
-  const reason = sections.join("\n\n") + nudge;
+interface FreshSurfacedNote {
+  id: string;
+  type: string;
+  snippet: string;
+}
 
-  return { decision: "block", reason };
+function listFreshSurfacedNotes(
+  db: Database,
+  sessionId: string,
+  limit: number
+): FreshSurfacedNote[] {
+  return db
+    .query(
+      `SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 70) as snippet
+       FROM session_log sl
+       JOIN notes n ON sl.note_id = n.id
+       WHERE sl.session_id = ? AND sl.delivery_type = 'fresh'
+       GROUP BY n.id
+       ORDER BY n.updated_at ASC
+       LIMIT ?`
+    )
+    .all(sessionId, limit) as FreshSurfacedNote[];
 }
 
 function handleSubagentStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
@@ -654,6 +688,18 @@ function resetStruggleCounter(db: Database, sessionId: string): void {
   db.run(`DELETE FROM plugin_state WHERE key = ?`, [`struggle_${sessionId}`]);
 }
 
+function markWorkItemTouched(db: Database, sessionId: string, workItemId: string): void {
+  // Sanitize the work_item id to avoid SQL-LIKE special chars sneaking into
+  // the plugin_state key (the loop-close query uses string concat against
+  // this key, so % or _ in the id could match other keys).
+  const cleanId = workItemId.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!cleanId) return;
+  db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
+    [`wi_touched_${sanitizeSessionId(sessionId)}_${cleanId}`, now()]
+  );
+}
+
 function countFreshSurfaced(db: Database, sessionId: string): number {
   const row = db
     .query(
@@ -664,34 +710,10 @@ function countFreshSurfaced(db: Database, sessionId: string): number {
   return row?.cnt ?? 0;
 }
 
-function buildStopSessionNudge(db: Database, sessionId: string): string {
-  const fresh = countFreshSurfaced(db, sessionId);
-  if (fresh < 3) return "";
-
-  const rows = db
-    .query(
-      `SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 80) as snippet
-       FROM session_log sl
-       JOIN notes n ON sl.note_id = n.id
-       WHERE sl.session_id = ? AND sl.delivery_type = 'fresh'
-       GROUP BY n.id
-       ORDER BY n.updated_at ASC
-       LIMIT 5`
-    )
-    .all(sessionId) as Array<{ id: string; type: string; snippet: string }>;
-  if (rows.length === 0) return "";
-
-  const formatted = rows
-    .map((r) => `\n- **${r.id.slice(0, 8)}** [${r.type}] ${r.snippet}`)
-    .join("");
-  const remaining = fresh - rows.length;
-  const moreHint =
-    remaining > 0
-      ? `\n...and ${remaining} more - find them with lookup({session_id:"${sessionId}"}) or by tag.`
-      : "";
-
-  return `\n\n### Notes this session surfaced that you may not have maintained (${fresh} total):${formatted}${moreHint}\n\nFor each: was it still correct? If not, call update_note / supersede_note. Is the thread/question settled? Call close_thread.`;
-}
+// R7.6: removed buildStopSessionNudge - the R3.4 fresh-notes nudge is now
+// integrated into the surgical Stop prompt's Curate section directly via
+// listFreshSurfacedNotes(). One section per concern instead of two saying
+// the same thing.
 
 // ── R7: Loop-closure + user-signal ──────────────────────────────────────
 
@@ -705,9 +727,23 @@ function listInFlightWorkItemsForSession(
   db: Database,
   sessionId: string
 ): InFlightWorkItem[] {
-  // Surface in-progress work items the session is plausibly responsible for:
-  // either I created them (source_session = me) OR I surfaced them via lookup
-  // this session (session_log). Capped at 5 for prompt budget.
+  // R7.6 tightened heuristic. Pre-R7.6 this OR'd `source_session = me` with
+  // `session_log surfaced via lookup` - which over-fired on items merely
+  // seen in briefings (the briefing surfaces hot work_items routinely, all
+  // of which would then flag as "in scope"). Field signal: heavy sessions
+  // saw 5+ unrelated work_items in their loop-close prompt every turn,
+  // most belonging to other sessions.
+  //
+  // Tightened to: I created the work_item (source_session = me), OR I
+  // explicitly updated it this session via update_work_item / update_note
+  // (tracked by writing to plugin_state on those tool calls). The `wi_touched_`
+  // markers are written by handlePostToolUse when the tool was an
+  // orchestrator update on a work_item id.
+  //
+  // The `session_log surfaced` amplifier was the noise source. Dropping it
+  // loses signal for "work I picked up but didn't author and didn't edit
+  // this session" - acceptable: agents reading about work_items in
+  // briefings shouldn't be told to close them.
   return db
     .query(
       `SELECT DISTINCT n.id, n.status, n.content
@@ -716,7 +752,10 @@ function listInFlightWorkItemsForSession(
          AND COALESCE(n.status, '') NOT IN ('done', 'cancelled', 'completed')
          AND (
            n.source_session = ?
-           OR EXISTS (SELECT 1 FROM session_log sl WHERE sl.session_id = ? AND sl.note_id = n.id)
+           OR EXISTS (
+             SELECT 1 FROM plugin_state ps
+             WHERE ps.key = 'wi_touched_' || ? || '_' || n.id
+           )
          )
        ORDER BY COALESCE(n.signal, 0) DESC, n.updated_at DESC
        LIMIT 5`

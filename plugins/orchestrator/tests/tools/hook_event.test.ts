@@ -242,10 +242,10 @@ describe("hook_event dispatcher", () => {
 
       const r = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "R34" });
       expect(r.decision).toBe("block");
-      expect(r.reason).toContain("Notes this session surfaced");
+      expect(r.reason).toContain("4 fresh notes surfaced");
       expect(r.reason).toContain("note-0");
-      // 4 fresh - top 5 limit means all 4 listed, no "and N more" hint.
-      expect(r.reason).not.toContain("more - find them with");
+      // 4 fresh - top 3 limit means 1 left as "and N more".
+      expect(r.reason).toContain("and 1 more");
     });
 
     test("R3.4 nudge omitted when session has <3 fresh notes", () => {
@@ -269,7 +269,7 @@ describe("hook_event dispatcher", () => {
       expect(r.reason).not.toContain("Notes this session surfaced");
     });
 
-    test("R3.4 nudge: 'and N more' appears when fresh count > 5", () => {
+    test("R7.6 'and N more' appears when fresh count > 3 (R7.6 cap)", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("R36");
       const ts = now();
@@ -286,7 +286,8 @@ describe("hook_event dispatcher", () => {
         );
       }
       const r = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "R36" });
-      expect(r.reason).toContain("and 2 more");
+      // 7 fresh - 3 listed = 4 more.
+      expect(r.reason).toContain("and 4 more");
     });
 
     test("Stop is idempotent per session: second call passes through", () => {

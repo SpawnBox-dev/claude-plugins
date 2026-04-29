@@ -22570,6 +22570,7 @@ class SessionTracker {
     this.db.run(`DELETE FROM plugin_state
        WHERE updated_at < ?
          AND (key LIKE 'wi_drift_%'
+              OR key LIKE 'wi_touched_%'
               OR key LIKE 'code_refs_hint_%'
               OR key LIKE 'stop_%'
               OR key LIKE 'subagent_stop_%'
@@ -22797,6 +22798,9 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
+function sanitizeSessionId(sid) {
+  return sid.replace(/[^a-zA-Z0-9_-]/g, "");
+}
 var HSO_EVENTS = new Set([
   "UserPromptSubmit",
   "PreToolUse",
@@ -22938,6 +22942,11 @@ function handlePostToolUse(ctx, args) {
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_memory__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
+    if (args.tool_name === "mcp__plugin_orchestrator_memory__update_work_item") {
+      const id = args.payload?.tool_input_id;
+      if (id)
+        markWorkItemTouched(ctx.db, args.session_id, id);
+    }
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
@@ -23018,38 +23027,47 @@ function handleStop(ctx, args) {
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
   const fresh = countFreshSurfaced(ctx.db, args.session_id);
   const inFlight = listInFlightWorkItemsForSession(ctx.db, args.session_id);
-  const sections = [];
-  sections.push("Before ending this session, complete orchestrator housekeeping. Maintenance verbs are equal-priority to capture - a session that only captures grows the corpus; a session that also maintains makes the knowledge base more accurate and faster to traverse over time.");
-  let sectionNum = 1;
-  if (fresh > 0) {
-    sections.push(`**${sectionNum}. Curate existing knowledge (update_note / close_thread / supersede_note).** You surfaced ${fresh} fresh note${fresh === 1 ? "" : "s"} this session. For each one you used:
-- Was it still correct? If not, \`update_note\` (minor correction) or \`supersede_note\` (new canonical version, preserves history).
-- Is a tracked thread now settled? \`close_thread\`.
-- Did you correct a note verbally but never update it? Fix it now.`);
-  } else {
-    sections.push(`**${sectionNum}. Curate existing knowledge (update_note / close_thread / supersede_note).** No fresh notes surfaced this session. Skip if there's nothing to curate, but if you corrected a note verbally without writing the change back, fix it now.`);
-  }
-  sectionNum++;
-  sections.push(`**${sectionNum}. Capture new knowledge (note).** Scan your work for anything that would be lost: decisions, conventions, anti-patterns, architecture, risks, insights, user preferences. For notes about specific code, pass \`code_refs: [paths]\`.`);
-  sectionNum++;
+  const freshNoteList = fresh >= 3 ? listFreshSurfacedNotes(ctx.db, args.session_id, 3) : [];
+  const parts = [];
+  parts.push("Before ending: complete orchestrator housekeeping. Maintenance is equal-priority to capture.");
+  let n = 1;
   if (inFlight.length > 0) {
-    const list = inFlight.slice(0, 5).map((w) => `  - **${w.id.slice(0, 8)}** [${w.status}] ${w.content.slice(0, 80)}`).join(`
+    const list = inFlight.slice(0, 3).map((w) => `  - **${w.id.slice(0, 8)}** [${w.status}] ${w.content.slice(0, 70)}`).join(`
 `);
-    const more = inFlight.length > 5 ? `
-  ...and ${inFlight.length - 5} more.` : "";
-    sections.push(`**${sectionNum}. Loop-closure (R7).** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"} touched this session:
+    const more = inFlight.length > 3 ? `
+  ...and ${inFlight.length - 3} more.` : "";
+    parts.push(`**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:
 ${list}${more}
-
-For each, ask: did this just complete? \`update_work_item({id, status: "done"})\`. If you cannot tell whether the user considers it done, ASK explicitly before ending the session.`);
-    sectionNum++;
+  -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`);
+    n++;
   }
-  sections.push(`**${sectionNum}. Save progress.** Call \`save_progress\` with summary, open questions, next steps.`);
-  sections.push("Retro is automatic on a 7-day cadence; no manual call needed.");
-  const nudge = buildStopSessionNudge(ctx.db, args.session_id);
-  const reason = sections.join(`
+  if (freshNoteList.length > 0) {
+    const list = freshNoteList.map((r) => `  - **${r.id.slice(0, 8)}** [${r.type}] ${r.snippet}`).join(`
+`);
+    const more = fresh > freshNoteList.length ? `
+  ...and ${fresh - freshNoteList.length} more (\`lookup({session_id:"${args.session_id}"})\`).` : "";
+    parts.push(`**${n}. Curate (update_note / close_thread / supersede_note).** ${fresh} fresh note${fresh === 1 ? "" : "s"} surfaced. For each you relied on, decide: still correct? thread settled? Top:
+${list}${more}`);
+    n++;
+  } else {
+    parts.push(`**${n}. Curate (update_note / close_thread / supersede_note).** No fresh notes surfaced; skip unless you corrected a note verbally without writing it back.`);
+    n++;
+  }
+  parts.push(`**${n}. Capture (note).** Decisions, conventions, anti-patterns, architecture, risks, insights, user preferences from this session. \`code_refs: [paths]\` when about specific code.`);
+  n++;
+  parts.push(`**${n}. Save progress.** \`save_progress\` with summary, open questions, next steps.`);
+  return { decision: "block", reason: parts.join(`
 
-`) + nudge;
-  return { decision: "block", reason };
+`) };
+}
+function listFreshSurfacedNotes(db, sessionId, limit) {
+  return db.query(`SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 70) as snippet
+       FROM session_log sl
+       JOIN notes n ON sl.note_id = n.id
+       WHERE sl.session_id = ? AND sl.delivery_type = 'fresh'
+       GROUP BY n.id
+       ORDER BY n.updated_at ASC
+       LIMIT ?`).all(sessionId, limit);
 }
 function handleSubagentStop(ctx, args) {
   const key = `subagent_stop_${args.session_id}`;
@@ -23414,34 +23432,16 @@ function bumpStruggleCounter(db, sessionId) {
 function resetStruggleCounter(db, sessionId) {
   db.run(`DELETE FROM plugin_state WHERE key = ?`, [`struggle_${sessionId}`]);
 }
+function markWorkItemTouched(db, sessionId, workItemId) {
+  const cleanId = workItemId.replace(/[^a-zA-Z0-9_-]/g, "");
+  if (!cleanId)
+    return;
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [`wi_touched_${sanitizeSessionId(sessionId)}_${cleanId}`, now()]);
+}
 function countFreshSurfaced(db, sessionId) {
   const row = db.query(`SELECT COUNT(DISTINCT note_id) as cnt FROM session_log
        WHERE session_id = ? AND delivery_type = 'fresh'`).get(sessionId);
   return row?.cnt ?? 0;
-}
-function buildStopSessionNudge(db, sessionId) {
-  const fresh = countFreshSurfaced(db, sessionId);
-  if (fresh < 3)
-    return "";
-  const rows = db.query(`SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 80) as snippet
-       FROM session_log sl
-       JOIN notes n ON sl.note_id = n.id
-       WHERE sl.session_id = ? AND sl.delivery_type = 'fresh'
-       GROUP BY n.id
-       ORDER BY n.updated_at ASC
-       LIMIT 5`).all(sessionId);
-  if (rows.length === 0)
-    return "";
-  const formatted = rows.map((r) => `
-- **${r.id.slice(0, 8)}** [${r.type}] ${r.snippet}`).join("");
-  const remaining = fresh - rows.length;
-  const moreHint = remaining > 0 ? `
-...and ${remaining} more - find them with lookup({session_id:"${sessionId}"}) or by tag.` : "";
-  return `
-
-### Notes this session surfaced that you may not have maintained (${fresh} total):${formatted}${moreHint}
-
-For each: was it still correct? If not, call update_note / supersede_note. Is the thread/question settled? Call close_thread.`;
 }
 function listInFlightWorkItemsForSession(db, sessionId) {
   return db.query(`SELECT DISTINCT n.id, n.status, n.content
@@ -23450,7 +23450,10 @@ function listInFlightWorkItemsForSession(db, sessionId) {
          AND COALESCE(n.status, '') NOT IN ('done', 'cancelled', 'completed')
          AND (
            n.source_session = ?
-           OR EXISTS (SELECT 1 FROM session_log sl WHERE sl.session_id = ? AND sl.note_id = n.id)
+           OR EXISTS (
+             SELECT 1 FROM plugin_state ps
+             WHERE ps.key = 'wi_touched_' || ? || '_' || n.id
+           )
          )
        ORDER BY COALESCE(n.signal, 0) DESC, n.updated_at DESC
        LIMIT 5`).all(sessionId, sessionId);
@@ -24807,7 +24810,8 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
   tool_name: exports_external.string().optional(),
   agent_id: exports_external.string().optional(),
   file_path: exports_external.string().optional(),
-  user_prompt: exports_external.string().optional()
+  user_prompt: exports_external.string().optional(),
+  tool_input_id: exports_external.string().optional()
 }, async (args) => {
   if (!sessionTracker) {
     return { content: [{ type: "text", text: "{}" }] };
@@ -24818,6 +24822,8 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
     payload.file_path = args.file_path;
   if (args.user_prompt)
     payload.user_prompt = args.user_prompt;
+  if (args.tool_input_id)
+    payload.tool_input_id = args.tool_input_id;
   const result = handleHookEvent({ db, tracker: sessionTracker }, {
     event: args.event,
     session_id: args.session_id,
