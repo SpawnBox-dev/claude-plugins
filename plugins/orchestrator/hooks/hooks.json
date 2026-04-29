@@ -20,7 +20,8 @@
             "tool": "_hook_event",
             "input": {
               "event": "UserPromptSubmit",
-              "session_id": "${session_id}"
+              "session_id": "${session_id}",
+              "user_prompt": "${prompt}"
             }
           }
         ]
@@ -55,7 +56,8 @@
             "input": {
               "event": "PostToolUse",
               "session_id": "${session_id}",
-              "tool_name": "${tool_name}"
+              "tool_name": "${tool_name}",
+              "file_path": "${tool_input.file_path}"
             }
           }
         ]
@@ -108,6 +110,21 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "StopFailure",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [
@@ -117,6 +134,22 @@
             "tool": "_hook_event",
             "input": {
               "event": "SubagentStop",
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}"
+            }
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "TaskCompleted",
               "session_id": "${session_id}",
               "agent_id": "${agent_id}"
             }

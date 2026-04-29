@@ -6,6 +6,38 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7 loop-closure, work-item drift, sibling overlap, expanded hook surface
+
+**Change.** Six dispatcher additions in `mcp/tools/hook_event.ts` plus matching `hooks.json` and `_hook_event` schema updates:
+
+1. **UserPromptSubmit receives `user_prompt`** (wired via `${prompt}` substitution in hooks.json) so the dispatcher can do user-signal detection.
+2. **Loop-closure nudge** — every UserPromptSubmit checks for in-flight `work_item` notes scoped to this session (source_session = me OR session_log shows I surfaced them). When found, injects a one-line nudge listing IDs and explicitly authorizing the agent to ASK the user if completion is unclear. Approval-language regex on the user prompt (`/\b(looks?\s+good|ship\s+it|perfect|...)\b/i`, capped at 300 chars to avoid long-prompt false positives) escalates the nudge to "Close loops NOW".
+3. **Sibling-overlap detection** — when a sibling's `current_task` shares ≥2 meaningful keywords (4+ chars, stopword-filtered) with the user's prompt, the sibling line marks them with `*POTENTIAL OVERLAP*` and adds a coordinate-via-send_message tail. Quiet otherwise.
+4. **Work-item drift nudge** — PostToolUse on Edit/Write/MultiEdit/NotebookEdit looks up in-flight work_items whose `code_refs` contain the file_path; surfaces them with an "update_work_item if your edit advances or completes this" prompt. Once per session+work_item via plugin_state.
+5. **PreToolUse code_refs hint** — when about to edit a file with extant code_refs-tagged notes, injects "this file has N notes tagged - lookup({code_ref}) first". Once per session+file_path. Pairs with Option-B escalation when relevant, fires standalone otherwise.
+6. **SubagentStop split from Stop** (bug fix from R6) — R6 incorrectly merged them; SubagentStop was telling subagents to call `save_progress`, which is the parent's job. Now `handleSubagentStop` is its own branch with text that explicitly says "Do NOT call save_progress" and focuses on capture (note, update_note, close_thread) only.
+7. **Stop prompt becomes surgical** — sections are conditionally numbered based on session state. `Curate` always present. `Loop-closure` only when in-flight work_items exist. `Save progress` always present. R3.4 fresh-notes nudge stays gated at ≥3.
+8. **TaskCompleted hook added** — fires when a subagent task completes; injects "did you capture what the subagent discovered?" so patterns/decisions don't evaporate with subagent context.
+9. **StopFailure hook added** — fires when a turn ends due to API error; emits a systemMessage suggesting strategy change if errors persist. Lightweight, no block.
+10. **VARIANTS pool grows from 14 to 18**: added loop-closure, update-as-you-go, coordination-etiquette, and check-siblings-when-it-matters reminders.
+
+**Rationale.** Live observation (Jarid, 2026-04-28): agents don't proactively close work items unless given an explicit signal that work is done. They also under-use cross-session messaging — they see siblings exist but don't message them when scope overlaps. The orchestrator's "deterministic vs judgment" principle says the plugin should detect signals and prompt; the agent decides what to act on. R7 implements detection at every relevant moment: turn boundaries (loop-closure + user-signal), edits (drift nudge + code_refs hint), task starts (sibling overlap), task completion (capture nudge), failure (strategy nudge).
+
+The bash-merged Stop/SubagentStop bug from R6 was a real regression: subagents got told to checkpoint, which they shouldn't. R7 separates them. Stop prompt also gets surgical sections so routine sessions don't see the same long blockwall every time - the prompt now reflects what actually happened.
+
+**Rejected.**
+- Auto-marking work_items done when "looks good" detected - too aggressive. Plugin detects, agent decides. The escalated prompt asks the agent to act, including asking the user explicitly when uncertain. That preserves "deterministic-vs-judgment".
+- TaskCreated hook (mirror of TaskCompleted) - agents already pass context to subagents OK; the failure mode is on capture, not setup. Skip until field signal says otherwise.
+- PostCompact hook - briefing already auto-pulls on resume; adding PostCompact would just duplicate the same nudge. Skip.
+- Editing distance / fuzzy match for sibling overlap detection instead of keyword intersection - keyword intersection at ≥2 shared 4+-char tokens is a good cheap filter; refine later if false-positive rate is high. False-negatives cost nothing (no overlap detected = silent), false-positives cost only one line of additionalContext.
+- Lowering the approval-prompt length cap below 300 chars - tested examples like "ok cool, also can you fix..." (90 chars) which SHOULD escalate. 300 is a reasonable upper bound for quick-signal prompts.
+- Per-edit code_refs hint repetition - once per session per file_path is enough; repetition becomes noise.
+- Hardcoded approval phrase list with stricter punctuation requirements - regex with `\b` word boundaries handles punctuation naturally.
+
+**Shipped:** v0.27.0.
+
+---
+
 ## 2026-04-28 - R6.1 agent-facing text alignment for R6
 
 **Change.** Text-only pass across `CLAUDE.md`, `README.md`, `agents/memory-concierge.md`, and skills `every-turn`, `orchestrating`, `getting-started`, `wrapping-up`, `planning-approach` to surface R6 (cross-session messaging + active-task broadcast) behaviors to the agent. Two new VARIANTS added to the rotating UserPromptSubmit reminders in `mcp/tools/hook_event.ts` so agents see messaging cues organically. README's tool table, file-structure tree, test count, hook count, and dist size updated to match v0.26.0 reality. No schema, no engine, no tool changes.

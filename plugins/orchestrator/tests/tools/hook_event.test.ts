@@ -296,5 +296,354 @@ describe("hook_event dispatcher", () => {
       const second = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "I" });
       expect(second.decision).toBeUndefined();
     });
+
+    test("R7: SubagentStop prompt instructs subagent NOT to call save_progress (parent's job)", () => {
+      const { db, tracker } = freshSetup();
+      const r = handleHookEvent({ db, tracker }, { event: "SubagentStop", session_id: "SS" });
+      expect(r.decision).toBe("block");
+      // The prompt should explicitly tell the subagent not to call save_progress.
+      expect(r.reason).toMatch(/Do NOT call.*save_progress/);
+      expect(r.reason).toContain("note");
+      expect(r.reason).toContain("close_thread");
+    });
+
+    test("R7: Stop prompt now includes loop-closure section when in-flight work_items exist", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("LC");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-1', 'work_item', 'Build R7 dispatcher', 'in_progress', 'LC', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "LC" });
+      expect(r.decision).toBe("block");
+      expect(r.reason).toContain("Loop-closure");
+      expect(r.reason).toContain("wi-1");
+    });
+
+    test("R7: Stop prompt omits loop-closure section when no in-flight work_items exist", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("NO-LC");
+      const r = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "NO-LC" });
+      expect(r.reason).not.toContain("Loop-closure (R7)");
+    });
+  });
+
+  describe("R7 loop-closure in UserPromptSubmit", () => {
+    test("in-flight work_items in scope produce a loop-close nudge", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("U");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-x', 'work_item', 'finish R7', 'in_progress', 'U', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "U",
+          payload: { user_prompt: "what's next?" },
+        }
+      );
+      expect(r.additionalContext).toContain("Loop-close check");
+      expect(r.additionalContext).toContain("wi-x");
+    });
+
+    test("approval signal in user prompt escalates to 'Close loops NOW'", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("A");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-a', 'work_item', 'task', 'in_progress', 'A', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "A",
+          payload: { user_prompt: "looks good, ship it" },
+        }
+      );
+      expect(r.additionalContext).toContain("User just signaled approval");
+      expect(r.additionalContext).toContain("Close loops NOW");
+    });
+
+    test("long user prompt does NOT trigger approval escalation even with matching word", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("L");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-l', 'work_item', 'task', 'in_progress', 'L', ?, ?)`,
+        [ts, ts]
+      );
+      const longPrompt = "ok " + "a very long prompt with much detail ".repeat(20) + "and looks good somewhere in here";
+      expect(longPrompt.length).toBeGreaterThan(300);
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "L", payload: { user_prompt: longPrompt } }
+      );
+      expect(r.additionalContext).not.toContain("User just signaled approval");
+      expect(r.additionalContext).toContain("Loop-close check");
+    });
+
+    test("no in-flight work_items -> no loop-close nudge regardless of user signal", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("Z");
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "Z", payload: { user_prompt: "looks good!" } }
+      );
+      expect(r.additionalContext).not.toContain("Loop-close");
+      expect(r.additionalContext).not.toContain("Close loops NOW");
+    });
+
+    test("done work_items are NOT surfaced in loop-close", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("D");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-done', 'work_item', 'finished', 'done', 'D', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "D", payload: { user_prompt: "next?" } }
+      );
+      expect(r.additionalContext).not.toContain("wi-done");
+    });
+  });
+
+  describe("R7 sibling-overlap detection", () => {
+    test("keyword overlap between user prompt and sibling task flags POTENTIAL OVERLAP", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("me");
+      tracker.registerSession("sibling");
+      tracker.updateCurrentTask("sibling", "refactoring authentication middleware");
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "me",
+          payload: {
+            user_prompt: "let me fix the authentication flow in the middleware layer",
+          },
+        }
+      );
+      expect(r.additionalContext).toContain("POTENTIAL OVERLAP");
+      expect(r.additionalContext).toContain("send_message");
+    });
+
+    test("no keyword overlap -> sibling listed without overlap marker", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("me");
+      tracker.registerSession("sib");
+      tracker.updateCurrentTask("sib", "writing telemetry tests");
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "me",
+          payload: { user_prompt: "let's improve the docker startup logic" },
+        }
+      );
+      expect(r.additionalContext).not.toContain("POTENTIAL OVERLAP");
+      expect(r.additionalContext).toContain("sib");
+    });
+  });
+
+  describe("R7 PreToolUse code_refs hint", () => {
+    test("file with extant code_refs note injects file-specific hint at turn 1", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CR");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, code_refs, created_at, updated_at)
+         VALUES ('hint-note', 'convention', 'always validate input', '["src/api.ts"]', ?, ?)`,
+        [ts, ts]
+      );
+      handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "CR" });
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PreToolUse",
+          session_id: "CR",
+          tool_name: "Edit",
+          payload: { file_path: "src/api.ts" },
+        }
+      );
+      expect(r.additionalContext).toContain("src/api.ts");
+      expect(r.additionalContext).toContain("note");
+    });
+
+    test("code_refs hint fires only once per session per file_path", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CR2");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, code_refs, created_at, updated_at)
+         VALUES ('h1', 'convention', 'foo', '["src/x.ts"]', ?, ?)`,
+        [ts, ts]
+      );
+      handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "CR2" });
+
+      const r1 = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PreToolUse",
+          session_id: "CR2",
+          tool_name: "Edit",
+          payload: { file_path: "src/x.ts" },
+        }
+      );
+      const r2 = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PreToolUse",
+          session_id: "CR2",
+          tool_name: "Edit",
+          payload: { file_path: "src/x.ts" },
+        }
+      );
+      expect(r1.additionalContext).toContain("src/x.ts");
+      // Second time: no code_refs hint (warned already, no new content).
+      // additionalContext may be undefined (clean) or just NOT contain the hint.
+      if (r2.additionalContext) {
+        expect(r2.additionalContext).not.toContain("note");
+      }
+    });
+
+    test("file with no tagged notes -> no code_refs hint", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CR3");
+      handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "CR3" });
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PreToolUse",
+          session_id: "CR3",
+          tool_name: "Edit",
+          payload: { file_path: "src/untagged.ts" },
+        }
+      );
+      // Turn 1, no orch activity, would normally be silent. No hint either.
+      expect(r.additionalContext).toBeUndefined();
+    });
+  });
+
+  describe("R7 PostToolUse work-item drift nudge", () => {
+    test("editing a file tied to in-flight work_item via code_refs surfaces it", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("WI");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, code_refs, source_session, created_at, updated_at)
+         VALUES ('wi-edit', 'work_item', 'refactor api layer', 'in_progress', '["src/api.ts"]', 'WI', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PostToolUse",
+          session_id: "WI",
+          tool_name: "Edit",
+          payload: { file_path: "src/api.ts" },
+        }
+      );
+      expect(r.additionalContext).toContain("wi-edit");
+      expect(r.additionalContext).toContain("update_work_item");
+    });
+
+    test("drift nudge fires once per session per work_item", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("DR");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, code_refs, source_session, created_at, updated_at)
+         VALUES ('wi-once', 'work_item', 'task', 'in_progress', '["src/y.ts"]', 'DR', ?, ?)`,
+        [ts, ts]
+      );
+      const r1 = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PostToolUse",
+          session_id: "DR",
+          tool_name: "Edit",
+          payload: { file_path: "src/y.ts" },
+        }
+      );
+      const r2 = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PostToolUse",
+          session_id: "DR",
+          tool_name: "Edit",
+          payload: { file_path: "src/y.ts" },
+        }
+      );
+      expect(r1.additionalContext).toContain("wi-once");
+      // r2 may be empty or have other content but not the same nudge.
+      if (r2.additionalContext) {
+        expect(r2.additionalContext).not.toContain("wi-once");
+      }
+    });
+
+    test("done work_item does NOT trigger drift nudge", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("DN");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, code_refs, source_session, created_at, updated_at)
+         VALUES ('wi-d', 'work_item', 'shipped', 'done', '["src/z.ts"]', 'DN', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PostToolUse",
+          session_id: "DN",
+          tool_name: "Edit",
+          payload: { file_path: "src/z.ts" },
+        }
+      );
+      expect(r.additionalContext).toBeUndefined();
+    });
+  });
+
+  describe("R7 TaskCompleted hook", () => {
+    test("emits a capture nudge with the subagent id", () => {
+      const { db, tracker } = freshSetup();
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "TaskCompleted", session_id: "T", agent_id: "abcd1234efghij" }
+      );
+      expect(r.additionalContext).toContain("abcd1234");
+      expect(r.additionalContext).toContain("capture");
+    });
+
+    test("falls back to 'subagent' label when agent_id is missing", () => {
+      const { db, tracker } = freshSetup();
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "TaskCompleted", session_id: "T2" }
+      );
+      expect(r.additionalContext).toContain("subagent");
+    });
+  });
+
+  describe("R7 StopFailure hook", () => {
+    test("emits a systemMessage on API-error stop without blocking", () => {
+      const { db, tracker } = freshSetup();
+      const r = handleHookEvent({ db, tracker }, { event: "StopFailure", session_id: "F" });
+      expect(r.systemMessage).toBeDefined();
+      expect(r.systemMessage).toContain("API error");
+      expect(r.decision).toBeUndefined();
+    });
   });
 });

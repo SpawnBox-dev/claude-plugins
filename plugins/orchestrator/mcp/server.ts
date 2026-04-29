@@ -1714,18 +1714,24 @@ server.tool(
       "PostToolUseFailure",
       "PreCompact",
       "Stop",
+      "StopFailure",
       "SubagentStop",
+      "TaskCompleted",
     ]),
     session_id: z.string(),
     tool_name: z.string().optional(),
     agent_id: z.string().optional(),
     file_path: z.string().optional(),
+    user_prompt: z.string().optional(),
   },
   async (args) => {
     if (!sessionTracker) {
       return { content: [{ type: "text" as const, text: "{}" }] };
     }
     const db = getProjectDb();
+    const payload: Record<string, unknown> = {};
+    if (args.file_path) payload.file_path = args.file_path;
+    if (args.user_prompt) payload.user_prompt = args.user_prompt;
     const result = handleHookEvent(
       { db, tracker: sessionTracker },
       {
@@ -1733,7 +1739,7 @@ server.tool(
         session_id: args.session_id,
         tool_name: args.tool_name,
         agent_id: args.agent_id,
-        payload: args.file_path ? { file_path: args.file_path } : undefined,
+        payload: Object.keys(payload).length > 0 ? payload : undefined,
       }
     );
 
