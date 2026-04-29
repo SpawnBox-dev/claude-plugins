@@ -36,10 +36,18 @@ export interface SendMessageInput {
 // boot (loadInboxCounters) and maintained incrementally by sendMessage and
 // drainInbox. The slow path (drainInbox) always trusts the DB, so missed
 // counter bumps from sibling processes cause delayed delivery, not lost
-// messages. The 30s refresh interval bounds that delay.
+// messages.
+//
+// R7.5: dropped from 30s to 5s. The 30s window was generous for an
+// inter-agent coordination tool whose densest delivery surface is
+// PostToolUse `.*`. Plus opportunistic per-session re-check below: when
+// peekInbox sees a 0-entry already in the Map, it does a single indexed
+// SELECT to confirm. Truly idle sessions still pay zero cost (no Map entry
+// = no opportunistic check fired); only sessions known to have polled the
+// inbox eat the small extra check.
 const inboxCounters = new Map<string, number>();
 let lastCounterRefreshAt = 0;
-const COUNTER_REFRESH_INTERVAL_MS = 30_000;
+const COUNTER_REFRESH_INTERVAL_MS = 5_000;
 
 export function loadInboxCounters(db: Database): void {
   // Per-session unread = direct messages targeted at the session that the
@@ -142,14 +150,76 @@ export interface PeekResult {
 }
 
 // O(1) check for pending messages. Falls back to DB query at most once per
-// COUNTER_REFRESH_INTERVAL_MS to recover from sibling-process writes the
-// in-memory counter missed.
+// COUNTER_REFRESH_INTERVAL_MS (5s) to recover from sibling-process writes
+// the in-memory counter missed.
+//
+// R7.5 opportunistic re-check: if the Map has a 0-entry for this session
+// (i.e. we polled before and saw empty), confirm with a single indexed
+// SELECT against session_messages. Closes the cross-process drift window
+// for sessions actively polling without forcing the global refresh on every
+// call. Truly idle sessions (no Map entry) skip the check entirely - they
+// still hit the global refresh path on the 5s cadence.
 export function peekInbox(db: Database, sessionId: string): PeekResult {
   maybeRefreshCounters(db);
-  return { count: inboxCounters.get(sessionId) ?? 0 };
+  const cached = inboxCounters.get(sessionId);
+  if (cached === undefined || cached > 0) {
+    return { count: cached ?? 0 };
+  }
+  // Cached 0 - do a cheap indexed confirmation. Single LIMIT 1 against an
+  // index, sub-millisecond at expected cardinality.
+  const ts = now();
+  const row = db
+    .query(
+      `SELECT m.id FROM session_messages m
+       WHERE (m.to_session = ? OR m.to_session IS NULL)
+         AND m.from_session != ?
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM session_message_reads r
+           WHERE r.msg_id = m.id AND r.session_id = ?
+         )
+       LIMIT 1`
+    )
+    .get(sessionId, sessionId, ts, sessionId);
+  if (row) {
+    // Cross-process write missed our counter - fix it. We don't know the
+    // exact count without a COUNT(*) query, so set to 1 (sentinel) - drain
+    // will compute the truth.
+    inboxCounters.set(sessionId, 1);
+    return { count: 1 };
+  }
+  return { count: 0 };
 }
 
-export function drainInbox(db: Database, sessionId: string): SessionMessage[] {
+export interface DrainContext {
+  /** Recipient's currently-edited file path, if any. Used to match scope.code_ref. */
+  currentFilePath?: string;
+  /** Recipient's current_task string, if any. Used to substring-match scope.task_contains. */
+  currentTask?: string;
+}
+
+/**
+ * Drain inbox with optional scope filtering. Messages whose scope matches
+ * the recipient's context are delivered and marked read; messages whose
+ * scope does NOT match are LEFT UNREAD - they'll be eligible for delivery
+ * on a future call where the context matches. Unscoped messages always
+ * deliver.
+ *
+ * Match rules (R7.5):
+ * - scope.code_ref: matches if `currentFilePath` contains scope.code_ref
+ *   as a substring. Allows file (`src/foo.ts`) or directory (`src/foo/`)
+ *   breadcrumbs to match nested paths the recipient is editing.
+ * - scope.task_contains: matches if `currentTask` contains the substring
+ *   (case-insensitive).
+ * - Both fields present: any-match (OR), so a message tagged with both is
+ *   delivered when either matches the recipient's context.
+ * - Neither field present (scope = null): always delivers (unscoped).
+ */
+export function drainInbox(
+  db: Database,
+  sessionId: string,
+  context?: DrainContext
+): SessionMessage[] {
   const ts = now();
   const rows = db
     .query(
@@ -182,30 +252,78 @@ export function drainInbox(db: Database, sessionId: string): SessionMessage[] {
     return [];
   }
 
+  // R7.5: split into eligible (matches scope or has none) vs deferred
+  // (scoped but no match in current context). Mark only eligible as read.
+  // Pre-parse scope once; malformed JSON is treated as unscoped (no get-stuck).
+  type EligibleRow = (typeof rows)[number] & { parsedScope: MessageScope | null };
+  const eligible: EligibleRow[] = [];
+  let deferred = 0;
+  for (const r of rows) {
+    let parsedScope: MessageScope | null = null;
+    if (r.scope) {
+      try {
+        parsedScope = JSON.parse(r.scope) as MessageScope;
+      } catch {
+        // Malformed scope - treat as unscoped to avoid getting stuck.
+        parsedScope = null;
+      }
+    }
+    if (parsedScope === null || matchesScope(parsedScope, context)) {
+      eligible.push({ ...r, parsedScope });
+    } else {
+      deferred++;
+    }
+  }
+
+  if (eligible.length === 0) {
+    // Everything was deferred. Don't write 0 to the counter - we still have
+    // pending messages, just none for this context. Set to deferred count
+    // so future polls in matching contexts will trigger drain.
+    inboxCounters.set(sessionId, deferred);
+    return [];
+  }
+
   const insertRead = db.prepare(
     `INSERT OR IGNORE INTO session_message_reads (msg_id, session_id, read_at) VALUES (?, ?, ?)`
   );
   db.run("BEGIN");
   try {
-    for (const row of rows) insertRead.run(row.id, sessionId, ts);
+    for (const row of eligible) insertRead.run(row.id, sessionId, ts);
     db.run("COMMIT");
   } catch (err) {
     db.run("ROLLBACK");
     throw err;
   }
 
-  inboxCounters.set(sessionId, 0);
+  // Counter reflects what's still pending after this drain.
+  inboxCounters.set(sessionId, deferred);
 
-  return rows.map((r) => ({
+  return eligible.map((r) => ({
     id: r.id,
     from_session: r.from_session,
     to_session: r.to_session,
-    scope: r.scope ? (JSON.parse(r.scope) as MessageScope) : null,
+    scope: r.parsedScope,
     body: r.body,
     priority: r.priority as MessagePriority,
     created_at: r.created_at,
     expires_at: r.expires_at,
   }));
+}
+
+function matchesScope(scope: MessageScope, context?: DrainContext): boolean {
+  // Empty scope object (no filterable fields) - treat as unscoped.
+  if (!scope.code_ref && !scope.task_contains) return true;
+  // No context provided - scoped messages can't match anything.
+  if (!context) return false;
+  if (scope.code_ref && context.currentFilePath) {
+    if (context.currentFilePath.includes(scope.code_ref)) return true;
+  }
+  if (scope.task_contains && context.currentTask) {
+    if (context.currentTask.toLowerCase().includes(scope.task_contains.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Test-only: reset module state between tests so the counter map doesn't

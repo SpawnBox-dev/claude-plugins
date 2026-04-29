@@ -114,7 +114,7 @@ describe("cross-session messaging integration", () => {
     expect(r1.additionalContext).toBeUndefined();
   });
 
-  test("PostToolUse delivers a scoped message with its scope label inline", () => {
+  test("PostToolUse delivers a scoped message when file_path matches scope.code_ref (R7.5)", () => {
     const { db, tracker } = freshSetup();
     tracker.registerSession("E");
     tracker.registerSession("Sender");
@@ -125,13 +125,45 @@ describe("cross-session messaging integration", () => {
       scope: { code_ref: "src/foo.ts" },
     });
 
+    // R7.5: scoped delivery requires matching context. The PostToolUse
+    // dispatcher passes file_path through as drain context.
     const result = handleHookEvent(
       { db, tracker },
-      { event: "PostToolUse", session_id: "E", tool_name: "Read" }
+      {
+        event: "PostToolUse",
+        session_id: "E",
+        tool_name: "Edit",
+        payload: { file_path: "/abs/src/foo.ts" },
+      }
     );
 
     expect(result.additionalContext).toContain("known race");
     expect(result.additionalContext).toContain("scoped to src/foo.ts");
+  });
+
+  test("PostToolUse on unrelated file does NOT deliver a scoped message (R7.5)", () => {
+    const { db, tracker } = freshSetup();
+    tracker.registerSession("E2");
+    tracker.registerSession("Sender2");
+    sendMessage(db, {
+      from_session: "Sender2",
+      to_session: "E2",
+      body: "scoped to api",
+      scope: { code_ref: "src/api.ts" },
+    });
+
+    const result = handleHookEvent(
+      { db, tracker },
+      {
+        event: "PostToolUse",
+        session_id: "E2",
+        tool_name: "Read",
+        payload: { file_path: "src/utils.ts" },
+      }
+    );
+
+    // Message stays queued; not delivered.
+    expect(result.additionalContext).toBeUndefined();
   });
 
   test("PostToolUse fast path delivers pending direct message", () => {

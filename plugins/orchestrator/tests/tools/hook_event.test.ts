@@ -373,6 +373,108 @@ describe("hook_event dispatcher", () => {
       expect(r.additionalContext).toContain("Close loops NOW");
     });
 
+    test("R7.5: anchored regex rejects 'done' in 'everything you've done'", () => {
+      // The exact false-positive Jarid hit in R7. With the tightened R7.5
+      // regex, this prompt should NOT trigger the approval escalation.
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("J");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-j', 'work_item', 'task', 'in_progress', 'J', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "J",
+          payload: { user_prompt: "want to maybe run code-reviewer over everything you've done this sesh?" },
+        }
+      );
+      // Soft loop-close still fires (in-flight work_item exists), but NOT the strong "Close loops NOW" escalation.
+      expect(r.additionalContext).toContain("Loop-close check");
+      expect(r.additionalContext).not.toContain("Close loops NOW");
+    });
+
+    test("R7.5: 'thanks for trying' does not trigger approval", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("T");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-t', 'work_item', 'task', 'in_progress', 'T', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "T",
+          payload: { user_prompt: "thanks for trying but that broke things" },
+        }
+      );
+      expect(r.additionalContext).not.toContain("Close loops NOW");
+    });
+
+    test("R7.5: 'looks good' as the whole prompt DOES trigger approval", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("OK");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-ok', 'work_item', 'task', 'in_progress', 'OK', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "OK",
+          payload: { user_prompt: "looks good!" },
+        }
+      );
+      expect(r.additionalContext).toContain("Close loops NOW");
+    });
+
+    test("R7.5: 'lgtm' triggers approval", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("L");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-l', 'work_item', 'task', 'in_progress', 'L', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "L", payload: { user_prompt: "lgtm" } }
+      );
+      expect(r.additionalContext).toContain("Close loops NOW");
+    });
+
+    test("R7.5: 'all done' triggers approval but bare 'done' does not", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("D");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-d', 'work_item', 'task', 'in_progress', 'D', ?, ?)`,
+        [ts, ts]
+      );
+      const allDone = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "D", payload: { user_prompt: "all done" } }
+      );
+      expect(allDone.additionalContext).toContain("Close loops NOW");
+
+      const bareDone = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "D", payload: { user_prompt: "is this done correctly?" } }
+      );
+      expect(bareDone.additionalContext).not.toContain("Close loops NOW");
+    });
+
     test("long user prompt does NOT trigger approval escalation even with matching word", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("L");

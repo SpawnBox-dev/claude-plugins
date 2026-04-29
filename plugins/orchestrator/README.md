@@ -67,7 +67,7 @@ Cross-session awareness via `session_log`, `session_registry`, `session_messages
 | `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup. R5 verification pass: when `CLAUDE_PROJECT_DIR` is set, checks file-existence for every path in every note's code_refs and reports `code_refs verified: N checked, M broken`. Also auto-fires weekly from briefing (R4.4 gate) |
 | `list_open_threads` | List all open threads with status and signal |
 | `list_work_items` | List work items filtered by status/priority |
-| `send_message` | R6: leave a message for another active session, or broadcast to all active siblings. Optional `scope_code_ref`/`scope_task_contains`, `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary. |
+| `send_message` | R6: leave a message for another active session, or broadcast to all active siblings. Optional `scope_code_ref`/`scope_task_contains` (R7.5: actual filters - delivered only when recipient's edit path or current_task matches), `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary. |
 | `read_messages` | R6: drain the caller's inbox. Hooks call this automatically; agents rarely need to. |
 | `update_session_task` | R6: broadcast `current_task` so sibling sessions see what you're working on - both in hook-time activity injection and in their next briefing |
 

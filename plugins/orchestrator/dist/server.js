@@ -22567,13 +22567,23 @@ class SessionTracker {
     this.db.run(`DELETE FROM session_registry WHERE last_active_at < ?`, [
       sevenDaysAgo
     ]);
+    this.db.run(`DELETE FROM plugin_state
+       WHERE updated_at < ?
+         AND (key LIKE 'wi_drift_%'
+              OR key LIKE 'code_refs_hint_%'
+              OR key LIKE 'stop_%'
+              OR key LIKE 'subagent_stop_%'
+              OR key LIKE 'bridge_%'
+              OR key LIKE 'orch_active_%'
+              OR key LIKE 'preuse_warned_%'
+              OR key LIKE 'struggle_%')`, [sevenDaysAgo]);
   }
 }
 
 // mcp/engine/messaging.ts
 var inboxCounters = new Map;
 var lastCounterRefreshAt = 0;
-var COUNTER_REFRESH_INTERVAL_MS = 30000;
+var COUNTER_REFRESH_INTERVAL_MS = 5000;
 function loadInboxCounters(db) {
   const ts = now();
   const directRows = db.query(`SELECT m.to_session AS recipient, COUNT(*) AS cnt
@@ -22640,9 +22650,27 @@ function sendMessage(db, input) {
 }
 function peekInbox(db, sessionId) {
   maybeRefreshCounters(db);
-  return { count: inboxCounters.get(sessionId) ?? 0 };
+  const cached2 = inboxCounters.get(sessionId);
+  if (cached2 === undefined || cached2 > 0) {
+    return { count: cached2 ?? 0 };
+  }
+  const ts = now();
+  const row = db.query(`SELECT m.id FROM session_messages m
+       WHERE (m.to_session = ? OR m.to_session IS NULL)
+         AND m.from_session != ?
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM session_message_reads r
+           WHERE r.msg_id = m.id AND r.session_id = ?
+         )
+       LIMIT 1`).get(sessionId, sessionId, ts, sessionId);
+  if (row) {
+    inboxCounters.set(sessionId, 1);
+    return { count: 1 };
+  }
+  return { count: 0 };
 }
-function drainInbox(db, sessionId) {
+function drainInbox(db, sessionId, context) {
   const ts = now();
   const rows = db.query(`SELECT id, from_session, to_session, scope, body, priority, created_at, expires_at
        FROM session_messages m
@@ -22660,27 +22688,64 @@ function drainInbox(db, sessionId) {
     inboxCounters.set(sessionId, 0);
     return [];
   }
+  const eligible = [];
+  let deferred = 0;
+  for (const r of rows) {
+    let parsedScope = null;
+    if (r.scope) {
+      try {
+        parsedScope = JSON.parse(r.scope);
+      } catch {
+        parsedScope = null;
+      }
+    }
+    if (parsedScope === null || matchesScope(parsedScope, context)) {
+      eligible.push({ ...r, parsedScope });
+    } else {
+      deferred++;
+    }
+  }
+  if (eligible.length === 0) {
+    inboxCounters.set(sessionId, deferred);
+    return [];
+  }
   const insertRead = db.prepare(`INSERT OR IGNORE INTO session_message_reads (msg_id, session_id, read_at) VALUES (?, ?, ?)`);
   db.run("BEGIN");
   try {
-    for (const row of rows)
+    for (const row of eligible)
       insertRead.run(row.id, sessionId, ts);
     db.run("COMMIT");
   } catch (err) {
     db.run("ROLLBACK");
     throw err;
   }
-  inboxCounters.set(sessionId, 0);
-  return rows.map((r) => ({
+  inboxCounters.set(sessionId, deferred);
+  return eligible.map((r) => ({
     id: r.id,
     from_session: r.from_session,
     to_session: r.to_session,
-    scope: r.scope ? JSON.parse(r.scope) : null,
+    scope: r.parsedScope,
     body: r.body,
     priority: r.priority,
     created_at: r.created_at,
     expires_at: r.expires_at
   }));
+}
+function matchesScope(scope, context) {
+  if (!scope.code_ref && !scope.task_contains)
+    return true;
+  if (!context)
+    return false;
+  if (scope.code_ref && context.currentFilePath) {
+    if (context.currentFilePath.includes(scope.code_ref))
+      return true;
+  }
+  if (scope.task_contains && context.currentTask) {
+    if (context.currentTask.toLowerCase().includes(scope.task_contains.toLowerCase())) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // mcp/tools/messaging.ts
@@ -22814,8 +22879,12 @@ function handleUserPromptSubmit(ctx, args) {
   const turn = ctx.tracker.nextTurn(args.session_id);
   resetTurnState(ctx.db, args.session_id);
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
-  const messages = drainIfPending(ctx, args.session_id);
   const userPrompt = args.payload?.user_prompt ?? "";
+  const sessionRow = ctx.tracker.getSession(args.session_id);
+  const drainCtx = {
+    currentTask: sessionRow?.current_task ?? undefined
+  };
+  const messages = drainIfPending(ctx, args.session_id, drainCtx);
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
@@ -22872,7 +22941,13 @@ function handlePostToolUse(ctx, args) {
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
-  const messages = drainIfPending(ctx, args.session_id);
+  const filePath = args.payload?.file_path;
+  const sessionRow = ctx.tracker.getSession(args.session_id);
+  const drainCtx = {
+    currentFilePath: filePath,
+    currentTask: sessionRow?.current_task ?? undefined
+  };
+  const messages = drainIfPending(ctx, args.session_id, drainCtx);
   const parts = [];
   if (driftNudge)
     parts.push(driftNudge);
@@ -23013,11 +23088,11 @@ function handleTaskCompleted(_ctx, args) {
     additionalContext: `[orch] Subagent ${aid} just completed. Did it surface anything worth keeping? Capture decisions, patterns, anti-patterns, or gotchas it discovered before its context evaporates. Single item: \`note\`. Multiple: send the concierge a batch-capture request. Do NOT just take the subagent's result and move on.`
   };
 }
-function drainIfPending(ctx, sessionId) {
+function drainIfPending(ctx, sessionId, drainContext) {
   const peek = peekInbox(ctx.db, sessionId);
   if (peek.count === 0)
     return "";
-  const msgs = drainInbox(ctx.db, sessionId);
+  const msgs = drainInbox(ctx.db, sessionId, drainContext);
   if (msgs.length === 0)
     return "";
   const lines = msgs.map((m) => {
@@ -23163,7 +23238,6 @@ var STOPWORDS = new Set([
   "want",
   "need",
   "like",
-  "want",
   "try",
   "run",
   "use",
@@ -23183,6 +23257,7 @@ var STOPWORDS = new Set([
   "help",
   "work",
   "working",
+  "working",
   "done",
   "ok",
   "okay",
@@ -23198,7 +23273,85 @@ var STOPWORDS = new Set([
   "many",
   "few",
   "next",
-  "last"
+  "last",
+  "function",
+  "functions",
+  "method",
+  "methods",
+  "class",
+  "classes",
+  "interface",
+  "interfaces",
+  "type",
+  "types",
+  "value",
+  "values",
+  "variable",
+  "variables",
+  "parameter",
+  "parameters",
+  "argument",
+  "arguments",
+  "return",
+  "returns",
+  "import",
+  "imports",
+  "export",
+  "exports",
+  "module",
+  "modules",
+  "test",
+  "tests",
+  "testing",
+  "spec",
+  "specs",
+  "mock",
+  "mocks",
+  "stub",
+  "stubs",
+  "error",
+  "errors",
+  "exception",
+  "exceptions",
+  "bug",
+  "bugs",
+  "issue",
+  "issues",
+  "problem",
+  "problems",
+  "code",
+  "codes",
+  "file",
+  "files",
+  "folder",
+  "folders",
+  "dir",
+  "directory",
+  "path",
+  "paths",
+  "string",
+  "strings",
+  "number",
+  "numbers",
+  "array",
+  "arrays",
+  "object",
+  "objects",
+  "null",
+  "undefined",
+  "state",
+  "states",
+  "prop",
+  "props",
+  "data",
+  "items",
+  "item",
+  "list",
+  "lists",
+  "true",
+  "false",
+  "none",
+  "void"
 ]);
 function extractMeaningfulKeywords(text) {
   if (!text)
@@ -23302,13 +23455,20 @@ function listInFlightWorkItemsForSession(db, sessionId) {
        ORDER BY COALESCE(n.signal, 0) DESC, n.updated_at DESC
        LIMIT 5`).all(sessionId, sessionId);
 }
-var APPROVAL_REGEX = /\b(looks?\s+good|ship\s+it|perfect|great|all\s+good|nailed\s+it|works?(\s+now)?|yep|done|sweet|approved?|lgtm|nice|thanks?|thank\s+you|that('?s| is)\s+(it|right))\b/i;
+var APPROVAL_REGEX = /^(?:looks?\s+good|ship\s+it|lgtm|approved?|all\s+good|nailed\s+it|that('?s|\s+is)\s+(it|right|perfect)|works?\s+now|all\s+done|i'?m\s+done|we'?re\s+done|good\s+to\s+go|good\s+to\s+ship|let'?s\s+ship)\b[\s.!]*$/i;
 function userPromptSignalsApproval(prompt) {
   if (!prompt)
     return false;
   if (prompt.length > 300)
     return false;
-  return APPROVAL_REGEX.test(prompt);
+  const trimmed = prompt.trim();
+  if (APPROVAL_REGEX.test(trimmed))
+    return true;
+  const firstClause = trimmed.split(/[,.;!?]/, 1)[0]?.trim();
+  if (firstClause && firstClause !== trimmed && APPROVAL_REGEX.test(firstClause)) {
+    return true;
+  }
+  return false;
 }
 function composeLoopCloseNudge(ctx, sessionId, userPrompt) {
   const inFlight = listInFlightWorkItemsForSession(ctx.db, sessionId);

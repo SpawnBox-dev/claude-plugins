@@ -472,6 +472,12 @@ export class SessionTracker {
    * Time-based cleanup:
    * 1. DELETE FROM session_log WHERE surfaced_at < 7 days ago
    * 2. DELETE FROM session_registry WHERE last_active_at < 7 days ago
+   * 3. R7.5: DELETE FROM plugin_state ephemeral hook keys older than 7 days.
+   *    Some R7 keys (stop_, subagent_stop_, wi_drift_, code_refs_hint_)
+   *    were leaking forever - they're written once and never deleted on
+   *    use, so without prefix-cleanup they accumulate ~1000 rows/week on
+   *    an active project. Non-ephemeral keys (last_retro_run_at) don't
+   *    match these prefixes, so this is safe.
    */
   cleanup(): void {
     const sevenDaysAgo = new Date(
@@ -484,5 +490,18 @@ export class SessionTracker {
     this.db.run(`DELETE FROM session_registry WHERE last_active_at < ?`, [
       sevenDaysAgo,
     ]);
+    this.db.run(
+      `DELETE FROM plugin_state
+       WHERE updated_at < ?
+         AND (key LIKE 'wi_drift_%'
+              OR key LIKE 'code_refs_hint_%'
+              OR key LIKE 'stop_%'
+              OR key LIKE 'subagent_stop_%'
+              OR key LIKE 'bridge_%'
+              OR key LIKE 'orch_active_%'
+              OR key LIKE 'preuse_warned_%'
+              OR key LIKE 'struggle_%')`,
+      [sevenDaysAgo]
+    );
   }
 }

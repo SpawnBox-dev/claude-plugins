@@ -1,7 +1,17 @@
 import type { Database } from "bun:sqlite";
-import { peekInbox, drainInbox } from "../engine/messaging";
+import { peekInbox, drainInbox, type DrainContext } from "../engine/messaging";
 import type { SessionTracker } from "../engine/session_tracker";
 import { now } from "../utils";
+
+// R7.5: defense-in-depth sanitization on session_id values used as
+// plugin_state key suffixes. The bash session-start regex-validates the
+// session_id before writing the fallback file, but the dispatcher receives
+// session_id directly from hook input - unvalidated. Real Claude Code IDs
+// are UUID-shaped so this is belt-and-suspenders, but a malformed value
+// like `me_%` could over-delete on `LIKE 'orch_active_<sid>_%'` cleanup.
+function sanitizeSessionId(sid: string): string {
+  return sid.replace(/[^a-zA-Z0-9_-]/g, "");
+}
 
 // Hook event names mirror Claude Code's hook event surface. Each branch is
 // responsible for the entire response shape (additionalContext,
@@ -156,8 +166,16 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   resetTurnState(ctx.db, args.session_id);
 
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
-  const messages = drainIfPending(ctx, args.session_id);
   const userPrompt = (args.payload?.user_prompt as string | undefined) ?? "";
+  // R7.5: scope-filtering drain context. UserPromptSubmit doesn't know which
+  // file the agent will edit next, so currentFilePath is omitted. We do
+  // pass current_task so task_contains-scoped messages route to the right
+  // session at turn boundary.
+  const sessionRow = ctx.tracker.getSession(args.session_id);
+  const drainCtx: DrainContext = {
+    currentTask: sessionRow?.current_task ?? undefined,
+  };
+  const messages = drainIfPending(ctx, args.session_id, drainCtx);
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
 
@@ -236,7 +254,14 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
 
   // Densest delivery surface. O(1) fast path via in-memory counter.
-  const messages = drainIfPending(ctx, args.session_id);
+  // R7.5: pass file_path + current_task so scoped messages route correctly.
+  const filePath = args.payload?.file_path as string | undefined;
+  const sessionRow = ctx.tracker.getSession(args.session_id);
+  const drainCtx: DrainContext = {
+    currentFilePath: filePath,
+    currentTask: sessionRow?.current_task ?? undefined,
+  };
+  const messages = drainIfPending(ctx, args.session_id, drainCtx);
 
   const parts: string[] = [];
   if (driftNudge) parts.push(driftNudge);
@@ -438,10 +463,14 @@ function handleTaskCompleted(_ctx: HookCtx, args: HookEventArgs): HookEventRespo
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function drainIfPending(ctx: HookCtx, sessionId: string): string {
+function drainIfPending(
+  ctx: HookCtx,
+  sessionId: string,
+  drainContext?: DrainContext
+): string {
   const peek = peekInbox(ctx.db, sessionId);
   if (peek.count === 0) return "";
-  const msgs = drainInbox(ctx.db, sessionId);
+  const msgs = drainInbox(ctx.db, sessionId, drainContext);
   if (msgs.length === 0) return "";
   const lines = msgs.map((m) => {
     const tag = m.priority === "high" ? "[HIGH]" : m.priority === "low" ? "[low]" : "•";
@@ -493,17 +522,38 @@ function renderSiblingActivity(
   return block;
 }
 
+// R7.5: extended with code-vocabulary words that would otherwise trigger
+// false-positive POTENTIAL OVERLAP markers between code-heavy prompts.
+// "want" was duplicated in the original list - deduped. Two unrelated tasks
+// each saying "test the function that updates state" share `function`,
+// `update`, `state` - all stopwords now.
 const STOPWORDS = new Set([
+  // Articles, conjunctions, copulas
   "the","a","an","and","or","but","if","then","else","is","are","was","were","be","been",
   "have","has","had","do","does","did","will","would","could","should","may","might","must",
+  // Prepositions, pronouns, demonstratives
   "to","of","in","on","at","for","with","from","by","as","into","onto","that","this","these",
   "those","it","its","i","you","we","they","he","she","them","us","my","your","our","their",
+  // Question words, polarity, modifiers
   "what","when","where","why","how","which","who","whom","not","no","yes","so","just","also",
   "very","really","still","only","ever","never","more","less","most","least","some","any",
-  "all","none","each","every","one","two","new","old","make","made","get","got","let","lets",
-  "want","need","like","want","try","run","use","using","add","fix","update","check","take",
-  "show","see","look","know","think","tell","ask","help","work","working","done","ok","okay",
+  "all","none","each","every","one","two","new","old",
+  // Common low-information verbs
+  "make","made","get","got","let","lets","want","need","like","try","run","use","using",
+  "add","fix","update","check","take","show","see","look","know","think","tell","ask","help",
+  "work","working","working","done","ok","okay",
+  // Adverbs of position/time
   "now","up","down","out","back","over","under","again","much","many","few","next","last",
+  // R7.5 code-vocabulary stopwords - high-frequency in coding prompts, low overlap signal
+  "function","functions","method","methods","class","classes","interface","interfaces","type","types",
+  "value","values","variable","variables","parameter","parameters","argument","arguments",
+  "return","returns","import","imports","export","exports","module","modules",
+  "test","tests","testing","spec","specs","mock","mocks","stub","stubs",
+  "error","errors","exception","exceptions","bug","bugs","issue","issues","problem","problems",
+  "code","codes","file","files","folder","folders","dir","directory","path","paths",
+  "string","strings","number","numbers","array","arrays","object","objects","null","undefined",
+  "state","states","prop","props","data","items","item","list","lists",
+  "true","false","none","void",
 ]);
 
 function extractMeaningfulKeywords(text: string): Set<string> {
@@ -674,15 +724,33 @@ function listInFlightWorkItemsForSession(
     .all(sessionId, sessionId) as InFlightWorkItem[];
 }
 
+// R7.5: anchored start, optional trailing punctuation, multi-word phrases or
+// unambiguous tokens only. Bare singletons like "done", "thanks", "great",
+// "nice", "perfect", "sweet", "yep" are dropped - in field testing those
+// matched casual usage ("everything you've done", "thanks for trying",
+// "perfect storm", "great pain") and triggered the strong "Close loops NOW"
+// escalation in the wrong direction. Honors the orchestrator's "no
+// prompt-layer shims" principle: a noisy escalation trains agents to ignore
+// the real ones.
 const APPROVAL_REGEX =
-  /\b(looks?\s+good|ship\s+it|perfect|great|all\s+good|nailed\s+it|works?(\s+now)?|yep|done|sweet|approved?|lgtm|nice|thanks?|thank\s+you|that('?s| is)\s+(it|right))\b/i;
+  /^(?:looks?\s+good|ship\s+it|lgtm|approved?|all\s+good|nailed\s+it|that('?s|\s+is)\s+(it|right|perfect)|works?\s+now|all\s+done|i'?m\s+done|we'?re\s+done|good\s+to\s+go|good\s+to\s+ship|let'?s\s+ship)\b[\s.!]*$/i;
 
 function userPromptSignalsApproval(prompt: string): boolean {
   if (!prompt) return false;
-  // Only detect on short prompts (<300 chars). Long prompts that happen to
-  // contain "looks good" in unrelated context shouldn't trigger.
+  // Only detect on short prompts (<300 chars). Anchored regex requires the
+  // approval phrase to be the entire prompt (modulo trailing punctuation),
+  // so long-prompt false positives can't sneak in either.
   if (prompt.length > 300) return false;
-  return APPROVAL_REGEX.test(prompt);
+  const trimmed = prompt.trim();
+  if (APPROVAL_REGEX.test(trimmed)) return true;
+  // Multi-clause approval like "looks good, ship it" - check the FIRST
+  // clause delimited by , . ; ! ?. If the leading clause is a clean
+  // approval phrase, treat the prompt as approval.
+  const firstClause = trimmed.split(/[,.;!?]/, 1)[0]?.trim();
+  if (firstClause && firstClause !== trimmed && APPROVAL_REGEX.test(firstClause)) {
+    return true;
+  }
+  return false;
 }
 
 function composeLoopCloseNudge(

@@ -6,6 +6,41 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.5 code-review-driven hardening pass
+
+**Change.** Six independent fixes addressing findings from a code-review subagent pass over R6 → R7.4 (commit range `bb75f5f..b91dc21`). Plus expanded test coverage for each. Bumped to `0.28.0` since scope-filtering changes message delivery semantics (now matches what docs always claimed).
+
+1. **APPROVAL_REGEX hardened** (`mcp/tools/hook_event.ts`). Anchored start, requires phrase to be the entire prompt (modulo trailing punctuation) OR the first clause split on `,.;!?`. Bare singletons `done`, `nice`, `thanks`, `great`, `perfect`, `sweet`, `yep` dropped; field-tested false positives ("everything you've done", "thanks for trying", "great pain", "perfect storm") all silenced. New tokens added: `lgtm`, `all done`, `i'm done`, `we're done`, `good to go`, `good to ship`, `let's ship`. Tightening matters because the false-positive escalation reverses direction (soft "Loop-close check" → strong "Close loops NOW"), exactly the failure mode CLAUDE.md "no prompt-layer shims" warns about.
+
+2. **Scope filtering implemented in `drainInbox`** (`mcp/engine/messaging.ts`). Before R7.5, `MessageScope.code_ref` and `task_contains` were accepted, persisted, displayed, and explicitly documented as filters - but had no effect on delivery. R7.5 makes them real:
+   - `scope.code_ref`: substring-match against recipient's `currentFilePath` (so `src/foo.ts` scope matches `/abs/path/src/foo.ts` edits).
+   - `scope.task_contains`: case-insensitive substring against recipient's `current_task`.
+   - Both fields: any-match (OR).
+   - Unscoped messages always deliver.
+   - Deferred (scope mismatch) messages stay unread for future drain in matching context.
+   The dispatcher now passes `currentFilePath` from PostToolUse tool_input + `currentTask` from session_registry.
+
+3. **plugin_state cleanup extended** (`mcp/engine/session_tracker.ts`). `SessionTracker.cleanup()` now prunes ephemeral hook keys older than 7 days. Pre-R7.5, `stop_*`, `subagent_stop_*`, `wi_drift_*`, `code_refs_hint_*` (and a few others written-once) leaked forever, accumulating ~1000 rows/week on an active project. Non-ephemeral keys (`last_retro_run_at`) don't match any prefix in the DELETE so they're safe.
+
+4. **inboxCounter refresh interval 30s → 5s + opportunistic re-check** (`mcp/engine/messaging.ts`). The 30s window dropped fast-path delivery for up to 30s after a sibling-process write. R7.5 lowers the global refresh to 5s AND adds a per-call opportunistic check: when `peekInbox` sees a 0-entry already in the Map (i.e. polled before, saw empty), do a single indexed `LIMIT 1` SELECT to confirm. Truly idle sessions (no Map entry) skip the check; only polled-but-empty sessions eat the small cost. Cross-process drift window collapses from 30s to "next peek call".
+
+5. **STOPWORDS extended with code-vocabulary** (`mcp/tools/hook_event.ts`). Added `function`/`class`/`error`/`update`/`test`/`code`/`file`/`type`/`value`/`state`/`return`/`import` and ~30 others. Pre-R7.5, two unrelated code-heavy tasks ("test the function that updates state") would share enough common-coding-words to trigger `*POTENTIAL OVERLAP*` falsely. Also deduped `"want"` (was listed twice).
+
+6. **sanitizeSessionId helper** (`mcp/tools/hook_event.ts`). Defense-in-depth: dispatcher receives session_id from hook input unvalidated. Real Claude Code session_ids are UUID-shaped, but a malformed value with `_` or `%` could over-delete on `LIKE 'orch_active_<sid>_%'` cleanup. Helper strips non-`[a-zA-Z0-9_-]` characters before any string interpolation.
+
+**Test additions:** 18 new tests in `tests/engine/messaging.test.ts` (scope filtering: deferred-not-delivered, code_ref substring match, task_contains case-insensitivity, any-match for both fields, malformed JSON treated as unscoped, deferred messages don't get marked read, counter reflects deferred count). 5 new tests in `tests/tools/hook_event.test.ts` (the exact false-positive prompt that bit Jarid in R7, multi-clause approval, anchored regex behavior, lgtm/all-done detection). Updated cross-session integration test to match new scope-filter semantics. Total: 440 tests, 0 fail.
+
+**Rationale.** Jarid asked "do you need to exercise all the hooks and stuff to make sure there are no errors?" - R7.4 added schema-validation tests for envelope shape; R7.5 adds the same rigor to behavioral tests for the dispatcher's logic branches. Then asked "fix then ship" after I summarized findings, with full authorization. The code-reviewer subagent's verdict was "ship as-is, fix 2 items first" but consolidating into one commit is cleaner than four small ones (per the user's "complete removals in one pass" pattern).
+
+**Rejected.**
+- Demoting scope to display-label (the lighter alternative to implementing filtering) - docs already promised filtering, restoring honesty was preferred over revising the contract.
+- Per-prefix DELETE counts in cleanup() - one batched DELETE with OR'd LIKE clauses scans the same index range as separate statements would. SQLite handles it fine at the expected cardinality.
+- Splitting into per-fix R-shipments (R7.5, R7.6, R7.7, ...) - all 6 are independent and small. One coherent commit is more reviewable than six small ones.
+
+**Shipped:** v0.28.0.
+
+---
+
 ## 2026-04-28 - R7.4: schema-validated envelope tests + builder hardening
 
 **Change.** Extracted the hook envelope builder from `mcp/server.ts` into `mcp/tools/hook_event.ts:buildHookEnvelope`. Added `tests/tools/hook_envelope.test.ts` which validates the envelope output for every hook event x every plausible payload combination against a copy of Claude Code's hook output schema. Hardened the builder per findings:

@@ -62,15 +62,21 @@ The UserPromptSubmit hook injects the turn bridge automatically at the start of 
 
 Just use the tools. The bridge takes care of itself.
 
-### Cross-Session Coordination (R6)
+### Cross-Session Coordination (R6 + R7.5)
 
 When multiple Claude sessions run against the same project, you can see what siblings are doing AND exchange messages with them in near-realtime.
 
 - **Broadcast your task**: when you start major work, call `update_session_task("...")` so siblings see your `current_task` in their hook-time activity injection AND in their next briefing's Cross-Session Activity section.
-- **Message a sibling**: `send_message({body, to_session?, scope_code_ref?, priority?, ttl_seconds?})`. Omit `to_session` to broadcast. Optional scope filters and TTL.
-- **Inbox is auto-drained**: PostToolUse hook delivers messages on every tool call. Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
+- **Message a sibling**: `send_message({body, to_session?, scope_code_ref?, scope_task_contains?, priority?, ttl_seconds?})`. Omit `to_session` to broadcast.
+- **Scope filters (R7.5) actually filter delivery**:
+  - `scope_code_ref: "src/foo.ts"` - delivered only when the recipient is editing/has just edited a path containing that string. Substring match.
+  - `scope_task_contains: "refactor"` - delivered only when the recipient's `current_task` contains that substring (case-insensitive).
+  - Both: any-match (OR). Either field matching causes delivery.
+  - Unscoped messages always deliver.
+  - Scoped messages without matching context stay queued; they deliver later when the recipient's context matches. They never expire (unless `ttl_seconds` is also set).
+- **Inbox is auto-drained**: PostToolUse hook delivers messages on every tool call (passing the touched file_path as scope context). UserPromptSubmit drains at turn boundary (passing recipient's current_task). Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
 
-Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
+Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6/R7/R7.5 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
 
 ### Hook Substrate (R6)
 

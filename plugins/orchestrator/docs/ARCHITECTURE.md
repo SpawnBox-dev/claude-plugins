@@ -232,16 +232,16 @@ The ANTS (Adaptive Note Temperature System) pheromone model:
 
 `promoteConfidence` - bumps a note's confidence (low->medium, medium->high) on auto-dedup, repeat surfacing, or re-validation.
 
-### messaging.ts (R6)
+### messaging.ts (R6 + R7.5)
 
-Cross-session inter-agent messaging engine. Three primitives:
+Cross-session inter-agent messaging engine. Four primitives:
 
 - `sendMessage(db, input)` - inserts a row into `session_messages`. Direct (`to_session` set) or broadcast (`to_session` null). On send, increments the in-memory `inboxCounters` map for affected recipients (target session for direct; all sibling sessions active in the last 24h for broadcasts).
-- `peekInbox(db, sessionId)` - O(1) check via `inboxCounters` map. Auto-refreshes from DB at most once per `COUNTER_REFRESH_INTERVAL_MS` (30s) to recover from sibling-process writes the local counter missed. The hook fast path: if peek returns 0, the dispatcher returns no `additionalContext` at all - the model pays zero token cost.
-- `drainInbox(db, sessionId)` - SQL pull of all unread messages addressed to the session (or broadcast and not from the session). Marks each as read via `session_message_reads`. Resets the in-memory counter to 0.
+- `peekInbox(db, sessionId)` - O(1) check via `inboxCounters` map. Auto-refreshes from DB at most once per `COUNTER_REFRESH_INTERVAL_MS` (R7.5: 5s, was 30s) to recover from sibling-process writes the local counter missed. **R7.5 opportunistic re-check**: when the Map has a 0-entry for this session (polled before, saw empty), peek does a single indexed `LIMIT 1` SELECT to confirm before returning 0. Truly idle sessions (no Map entry) skip the check; the truly-empty zero-cost path is preserved for the common case. Cross-process drift window: `next peek call` instead of 30s.
+- `drainInbox(db, sessionId, context?)` - SQL pull of all unread messages addressed to the session, then **R7.5 scope filter**: each message's `scope.code_ref` is substring-matched against `context.currentFilePath`, and `scope.task_contains` is case-insensitive substring-matched against `context.currentTask`. Either field matching delivers (any-match OR). Unscoped messages always deliver. Scoped messages without matching context stay unread (deferred) and remain eligible for delivery on a future call where the context matches. Marks only eligible messages as read via `session_message_reads`. The counter is set to the deferred count after each drain so future polls in matching contexts trigger drain.
 - `loadInboxCounters(db)` - called once at MCP server boot to prime the counter map from the DB. After that, the map is maintained incrementally.
 
-The counter map is per-process. A sibling MCP server's writes go to the DB; this process won't see the counter bump until the next refresh. The drain path always trusts the DB, so missed counter bumps cause delayed delivery (bounded by `COUNTER_REFRESH_INTERVAL_MS`), never lost messages.
+The counter map is per-process. A sibling MCP server's writes go to the DB; this process won't see the counter bump until the next refresh. The drain path always trusts the DB, so missed counter bumps cause delayed delivery (bounded by the opportunistic re-check), never lost messages.
 
 ## Skills and agents
 
