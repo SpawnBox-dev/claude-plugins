@@ -27,6 +27,13 @@ import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
+import { loadInboxCounters } from "./engine/messaging";
+import {
+  handleSendMessage,
+  handleReadMessages,
+  handleUpdateSessionTask,
+} from "./tools/messaging";
+import { handleHookEvent, type HookEvent } from "./tools/hook_event";
 
 // ── Session ID fallback ─────────────────────────────────────────────────
 //
@@ -1615,6 +1622,141 @@ server.tool(
   }
 );
 
+// ── R6: Cross-session messaging tools ───────────────────────────────────
+
+server.tool(
+  "send_message",
+  "Leave a message for another active Claude session, or broadcast to all active sessions. Messages are delivered via hooks at every model-think boundary (PostToolUse, UserPromptSubmit, Stop, etc.) so the recipient sees them with minimal delay. Use this when you've discovered something a sibling session needs to know, or when you need to coordinate work that's actively happening in another window.",
+  {
+    body: z.string().min(1).max(4000),
+    to_session: z
+      .string()
+      .optional()
+      .describe("Recipient session_id. Omit for broadcast to all active siblings."),
+    scope_code_ref: z
+      .string()
+      .optional()
+      .describe("Optional file/module path. The recipient hook may filter delivery to sessions that touch this path."),
+    scope_task_contains: z
+      .string()
+      .optional()
+      .describe("Optional substring; only sessions whose current_task contains it should treat the message as relevant."),
+    priority: z.enum(["low", "normal", "high"]).optional(),
+    ttl_seconds: z
+      .coerce
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("Optional time-to-live; expired messages are silently dropped."),
+    session_id: z.string().optional().describe("Sender session_id. Defaults to fallback."),
+  },
+  async (args) => {
+    const from = resolveSessionId(args.session_id);
+    if (!from) {
+      return { content: [{ type: "text" as const, text: "send_message requires a session_id." }] };
+    }
+    const db = getProjectDb();
+    const text = handleSendMessage(db, {
+      from_session: from,
+      to_session: args.to_session,
+      body: args.body,
+      scope_code_ref: args.scope_code_ref,
+      scope_task_contains: args.scope_task_contains,
+      priority: args.priority,
+      ttl_seconds: args.ttl_seconds,
+    });
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.tool(
+  "read_messages",
+  "Drain your inbox of pending inter-session messages. Marks each as read for your session_id. Hooks call this automatically when peekInbox shows pending messages; you rarely need to call it directly, but you can to flush the queue mid-task.",
+  { session_id: z.string().optional() },
+  async (args) => {
+    const sid = resolveSessionId(args.session_id);
+    if (!sid) {
+      return { content: [{ type: "text" as const, text: "read_messages requires a session_id." }] };
+    }
+    const db = getProjectDb();
+    const text = handleReadMessages(db, { session_id: sid });
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.tool(
+  "update_session_task",
+  "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in lightweight hook-time injections. Call when you start a major task; the activity awareness is what lets sibling agents know they're not alone in the codebase.",
+  { task: z.string().min(1).max(500), session_id: z.string().optional() },
+  async (args) => {
+    const sid = resolveSessionId(args.session_id);
+    if (!sid || !sessionTracker) {
+      return {
+        content: [
+          { type: "text" as const, text: "update_session_task requires a session_id and active tracker." },
+        ],
+      };
+    }
+    const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+    return { content: [{ type: "text" as const, text }] };
+  }
+);
+
+server.tool(
+  "_hook_event",
+  "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.",
+  {
+    event: z.enum([
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "PreCompact",
+      "Stop",
+      "SubagentStop",
+    ]),
+    session_id: z.string(),
+    tool_name: z.string().optional(),
+    agent_id: z.string().optional(),
+    file_path: z.string().optional(),
+  },
+  async (args) => {
+    if (!sessionTracker) {
+      return { content: [{ type: "text" as const, text: "{}" }] };
+    }
+    const db = getProjectDb();
+    const result = handleHookEvent(
+      { db, tracker: sessionTracker },
+      {
+        event: args.event as HookEvent,
+        session_id: args.session_id,
+        tool_name: args.tool_name,
+        agent_id: args.agent_id,
+        payload: args.file_path ? { file_path: args.file_path } : undefined,
+      }
+    );
+
+    // Build the hookSpecificOutput envelope per Claude Code's hook contract.
+    const envelope: Record<string, unknown> = {
+      hookSpecificOutput: { hookEventName: args.event },
+    };
+    const hso = envelope.hookSpecificOutput as Record<string, unknown>;
+    if (result.additionalContext) hso.additionalContext = result.additionalContext;
+    if (result.permissionDecision) {
+      hso.permissionDecision = result.permissionDecision;
+      if (result.permissionDecisionReason) hso.permissionDecisionReason = result.permissionDecisionReason;
+    }
+    if (result.decision === "block") {
+      envelope.decision = "block";
+      if (result.reason) envelope.reason = result.reason;
+    }
+    if (result.systemMessage) envelope.systemMessage = result.systemMessage;
+
+    return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }] };
+  }
+);
+
 // ── Cascade resolution helper ───────────────────────────────────────────
 function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, timestamp: string): string[] {
   const results: string[] = [];
@@ -1702,6 +1844,10 @@ async function main() {
   // Initialize session tracker and clean up stale sessions
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
+
+  // R6: prime the in-memory inbox counter map so peekInbox in the hook
+  // dispatcher can answer in O(1) without touching the DB on idle turns.
+  loadInboxCounters(getProjectDb());
 
   // Connect transport FIRST so MCP tools are available immediately
   const transport = new StdioServerTransport();

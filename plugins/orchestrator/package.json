@@ -1,6 +1,6 @@
 {
   "name": "orchestrator",
-  "version": "0.25.2",
+  "version": "0.26.0",
   "description": "A persistent product co-pilot that learns your project and you",
   "type": "module",
   "scripts": {

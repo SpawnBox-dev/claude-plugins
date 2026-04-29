@@ -19813,6 +19813,36 @@ DROP TABLE _signal_migration_check;
         db.exec("ALTER TABLE note_revisions ADD COLUMN code_refs TEXT");
       }
     }
+  },
+  {
+    version: 19,
+    name: "add_session_messages",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_messages (
+          id TEXT PRIMARY KEY,
+          from_session TEXT NOT NULL,
+          to_session TEXT,
+          scope TEXT,
+          body TEXT NOT NULL,
+          priority TEXT NOT NULL DEFAULT 'normal',
+          created_at TEXT NOT NULL,
+          expires_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_msgs_to ON session_messages(to_session, created_at);
+        CREATE INDEX IF NOT EXISTS idx_msgs_from ON session_messages(from_session, created_at);
+        CREATE INDEX IF NOT EXISTS idx_msgs_broadcast ON session_messages(created_at) WHERE to_session IS NULL;
+
+        CREATE TABLE IF NOT EXISTS session_message_reads (
+          msg_id TEXT NOT NULL REFERENCES session_messages(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL,
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (msg_id, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_msg_reads_session ON session_message_reads(session_id);
+      `);
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -22431,6 +22461,13 @@ class SessionTracker {
   updateCurrentTask(sessionId, task) {
     this.db.run(`UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`, [task, now(), sessionId]);
   }
+  getActiveSiblings(sessionId) {
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    return this.db.query(`SELECT session_id, current_task, last_active_at FROM session_registry
+         WHERE session_id != ? AND last_active_at > ?
+         ORDER BY last_active_at DESC
+         LIMIT 5`).all(sessionId, twentyFourHoursAgo);
+  }
   updateLastBriefing(sessionId, at) {
     const ts = at ?? now();
     this.db.run(`UPDATE session_registry SET last_briefing_at = ?, last_active_at = ? WHERE session_id = ?`, [ts, ts, sessionId]);
@@ -22531,6 +22568,402 @@ class SessionTracker {
       sevenDaysAgo
     ]);
   }
+}
+
+// mcp/engine/messaging.ts
+var inboxCounters = new Map;
+var lastCounterRefreshAt = 0;
+var COUNTER_REFRESH_INTERVAL_MS = 30000;
+function loadInboxCounters(db) {
+  const ts = now();
+  const directRows = db.query(`SELECT m.to_session AS recipient, COUNT(*) AS cnt
+       FROM session_messages m
+       WHERE m.to_session IS NOT NULL
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM session_message_reads r
+           WHERE r.msg_id = m.id AND r.session_id = m.to_session
+         )
+       GROUP BY m.to_session`).all(ts);
+  const broadcastRows = db.query(`SELECT sr.session_id AS recipient, COUNT(*) AS cnt
+       FROM session_registry sr
+       JOIN session_messages m ON m.to_session IS NULL
+       WHERE m.from_session != sr.session_id
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM session_message_reads r
+           WHERE r.msg_id = m.id AND r.session_id = sr.session_id
+         )
+       GROUP BY sr.session_id`).all(ts);
+  inboxCounters.clear();
+  for (const r of directRows)
+    inboxCounters.set(r.recipient, r.cnt);
+  for (const r of broadcastRows) {
+    inboxCounters.set(r.recipient, (inboxCounters.get(r.recipient) ?? 0) + r.cnt);
+  }
+  lastCounterRefreshAt = Date.now();
+}
+function maybeRefreshCounters(db) {
+  if (Date.now() - lastCounterRefreshAt > COUNTER_REFRESH_INTERVAL_MS) {
+    loadInboxCounters(db);
+  }
+}
+function sendMessage(db, input) {
+  const id = generateId();
+  const created_at = now();
+  const expires_at = input.ttl_seconds ? new Date(Date.now() + input.ttl_seconds * 1000).toISOString() : null;
+  const scope = input.scope ? JSON.stringify(input.scope) : null;
+  const priority = input.priority ?? "normal";
+  db.run(`INSERT INTO session_messages
+     (id, from_session, to_session, scope, body, priority, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [id, input.from_session, input.to_session ?? null, scope, input.body, priority, created_at, expires_at]);
+  if (input.to_session) {
+    inboxCounters.set(input.to_session, (inboxCounters.get(input.to_session) ?? 0) + 1);
+  } else {
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const siblings = db.query(`SELECT session_id FROM session_registry
+         WHERE session_id != ? AND last_active_at > ?`).all(input.from_session, twentyFourHoursAgo);
+    for (const s of siblings) {
+      inboxCounters.set(s.session_id, (inboxCounters.get(s.session_id) ?? 0) + 1);
+    }
+  }
+  return {
+    id,
+    from_session: input.from_session,
+    to_session: input.to_session ?? null,
+    scope: input.scope ?? null,
+    body: input.body,
+    priority,
+    created_at,
+    expires_at
+  };
+}
+function peekInbox(db, sessionId) {
+  maybeRefreshCounters(db);
+  return { count: inboxCounters.get(sessionId) ?? 0 };
+}
+function drainInbox(db, sessionId) {
+  const ts = now();
+  const rows = db.query(`SELECT id, from_session, to_session, scope, body, priority, created_at, expires_at
+       FROM session_messages m
+       WHERE (m.to_session = ? OR m.to_session IS NULL)
+         AND m.from_session != ?
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM session_message_reads r
+           WHERE r.msg_id = m.id AND r.session_id = ?
+         )
+       ORDER BY
+         CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+         created_at`).all(sessionId, sessionId, ts, sessionId);
+  if (rows.length === 0) {
+    inboxCounters.set(sessionId, 0);
+    return [];
+  }
+  const insertRead = db.prepare(`INSERT OR IGNORE INTO session_message_reads (msg_id, session_id, read_at) VALUES (?, ?, ?)`);
+  db.run("BEGIN");
+  try {
+    for (const row of rows)
+      insertRead.run(row.id, sessionId, ts);
+    db.run("COMMIT");
+  } catch (err) {
+    db.run("ROLLBACK");
+    throw err;
+  }
+  inboxCounters.set(sessionId, 0);
+  return rows.map((r) => ({
+    id: r.id,
+    from_session: r.from_session,
+    to_session: r.to_session,
+    scope: r.scope ? JSON.parse(r.scope) : null,
+    body: r.body,
+    priority: r.priority,
+    created_at: r.created_at,
+    expires_at: r.expires_at
+  }));
+}
+
+// mcp/tools/messaging.ts
+function handleSendMessage(db, args) {
+  const scope = args.scope_code_ref || args.scope_task_contains ? {
+    code_ref: args.scope_code_ref,
+    task_contains: args.scope_task_contains
+  } : undefined;
+  const input = {
+    from_session: args.from_session,
+    to_session: args.to_session,
+    body: args.body,
+    scope,
+    priority: args.priority,
+    ttl_seconds: args.ttl_seconds
+  };
+  const msg = sendMessage(db, input);
+  const target = msg.to_session ?? "broadcast";
+  return `Message ${msg.id.slice(0, 8)} sent (-> ${target}, priority: ${msg.priority}).`;
+}
+function handleReadMessages(db, args) {
+  const msgs = drainInbox(db, args.session_id);
+  if (msgs.length === 0)
+    return "Inbox empty.";
+  const lines = msgs.map((m) => {
+    const target = m.to_session ? `direct` : `broadcast`;
+    const age = ageOf(m.created_at);
+    const scopeStr = m.scope ? ` (scope: ${[
+      m.scope.code_ref ? `code_ref=${m.scope.code_ref}` : null,
+      m.scope.task_contains ? `task~${m.scope.task_contains}` : null
+    ].filter(Boolean).join(", ")})` : "";
+    return `- **${m.priority.toUpperCase()}** [${target}]${scopeStr} from ${m.from_session.slice(0, 8)} ${age} ago: ${m.body}`;
+  });
+  return `Drained ${msgs.length} message(s):
+${lines.join(`
+`)}`;
+}
+function ageOf(ts) {
+  const ms = Date.now() - new Date(ts).getTime();
+  if (ms < 60000)
+    return `${Math.round(ms / 1000)}s`;
+  if (ms < 3600000)
+    return `${Math.round(ms / 60000)}m`;
+  return `${Math.round(ms / 3600000)}h`;
+}
+function handleUpdateSessionTask(tracker, args) {
+  tracker.updateCurrentTask(args.session_id, args.task);
+  return `Current task updated.`;
+}
+
+// mcp/tools/hook_event.ts
+var VARIANTS = [
+  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table.",
+  "[orch] What prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears.",
+  "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table.",
+  "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
+  "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now.",
+  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
+  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and invoke orchestrator:consult-concierge. Do not hammer.",
+  "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
+  "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
+  "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items or orchestrator:consult-concierge. Direct lookup misses items with different vocabulary.",
+  "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
+  "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path."
+];
+function handleHookEvent(ctx, args) {
+  switch (args.event) {
+    case "UserPromptSubmit":
+      return handleUserPromptSubmit(ctx, args);
+    case "PreToolUse":
+      return handlePreToolUse(ctx, args);
+    case "PostToolUse":
+      return handlePostToolUse(ctx, args);
+    case "PostToolUseFailure":
+      return handlePostToolUseFailure(ctx, args);
+    case "PreCompact":
+      return handlePreCompact(ctx, args);
+    case "Stop":
+    case "SubagentStop":
+      return handleStop(ctx, args);
+    default:
+      return {};
+  }
+}
+function handleUserPromptSubmit(ctx, args) {
+  ctx.tracker.registerSession(args.session_id);
+  const turn = ctx.tracker.nextTurn(args.session_id);
+  resetTurnState(ctx.db, args.session_id);
+  const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
+  const messages = drainIfPending(ctx, args.session_id);
+  const siblingLine = renderSiblingActivity(ctx, args.session_id);
+  const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
+  const parts = [reminder];
+  if (bridge)
+    parts.push(`Last turn bridge: ${bridge}`);
+  if (siblingLine)
+    parts.push(siblingLine);
+  if (messages)
+    parts.push(messages);
+  return { additionalContext: parts.join(`
+
+`) };
+}
+function handlePreToolUse(ctx, args) {
+  const turn = ctx.tracker.getCurrentTurn(args.session_id);
+  if (turn < 2)
+    return {};
+  if (sessionHadOrchActivityThisTurn(ctx.db, args.session_id, turn))
+    return {};
+  if (warnedThisTurn(ctx.db, args.session_id, turn))
+    return {};
+  markWarnedThisTurn(ctx.db, args.session_id, turn);
+  if (turn >= 4) {
+    return {
+      permissionDecision: "ask",
+      permissionDecisionReason: `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. Approve to proceed (explicit choice to skip orch this turn) or deny and run orchestrator:consult-concierge / lookup / briefing first to check for relevant decisions, conventions, or anti-patterns.`
+    };
+  }
+  return {
+    permissionDecision: "allow",
+    additionalContext: `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup can save 20 minutes of rework. From turn 4 this becomes an interactive approval prompt.`
+  };
+}
+function handlePostToolUse(ctx, args) {
+  if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_memory__")) {
+    markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
+    appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
+  }
+  resetStruggleCounter(ctx.db, args.session_id);
+  const messages = drainIfPending(ctx, args.session_id);
+  if (messages)
+    return { additionalContext: messages };
+  return {};
+}
+function handlePostToolUseFailure(ctx, args) {
+  const next = bumpStruggleCounter(ctx.db, args.session_id);
+  if (next < 2)
+    return {};
+  if (next >= 3) {
+    return {
+      additionalContext: `[orch] STOP. ${next} consecutive tool failures. You are stuck. Invoke orchestrator:consult-concierge NOW with: (1) what you are trying to accomplish, (2) what you have tried, (3) what errors you are seeing. Do not retry until you have consulted the knowledge base.`
+    };
+  }
+  return {
+    additionalContext: `[orch] Two tool calls failed in a row. Before trying a third approach, consider invoking orchestrator:consult-concierge. The knowledge base may have a documented gotcha for this exact situation.`
+  };
+}
+function handlePreCompact(_ctx, _args) {
+  return {
+    systemMessage: "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost."
+  };
+}
+function handleStop(ctx, args) {
+  const key = args.event === "Stop" ? `stop_${args.session_id}` : `subagent_stop_${args.session_id}`;
+  const exists = ctx.db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(key);
+  if (exists)
+    return {};
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
+  const nudge = buildStopSessionNudge(ctx.db, args.session_id);
+  const reason = `Before ending this session, complete orchestrator housekeeping. Maintenance verbs are equal-priority to capture - a session that only captures grows the corpus; a session that also maintains makes the knowledge base more accurate and faster to traverse over time.
+
+**1. Curate existing knowledge (update_note / close_thread / supersede_note).** For every lookup result you used this session, ask:
+- Was it still correct? If not, call \`update_note\` (minor correction) or \`supersede_note\` (new note replaces old).
+- Is a tracked thread / commitment / work_item now settled? Call \`close_thread\`.
+- Did you correct a note verbally but never update the note itself? Fix it now - future sessions will read the stale version.
+
+**2. Capture new knowledge (note).** Scan your work for anything that would be lost:
+- A decision you made or recommended (type=decision) - what you chose, what you rejected, why
+- A pattern or convention (type=convention) or anti-pattern / gotcha (type=anti_pattern)
+- An architectural insight (type=architecture), risk (type=risk), or hard-won insight (type=insight)
+- User behavior or preferences (type=user_pattern, scope=global)
+- Work completed on a tracked item (call \`update_work_item\` status=done)
+- **For notes about specific code**, pass \`code_refs: [paths]\` (file or module paths - not line numbers or symbols).
+
+**3. Save progress.** Call \`save_progress\` with a summary of work done, open questions, and next steps.
+
+**4. Retro is automatic.** \`retro\` now auto-fires from \`briefing\` on a 7-day cadence, so you do NOT need to call it at session end. Call it manually only if you want to force an immediate maintenance pass.${nudge}
+
+The orchestrator is a living knowledge base, not an append-only log. Do this quickly, then you can stop.`;
+  return { decision: "block", reason };
+}
+function drainIfPending(ctx, sessionId) {
+  const peek = peekInbox(ctx.db, sessionId);
+  if (peek.count === 0)
+    return "";
+  const msgs = drainInbox(ctx.db, sessionId);
+  if (msgs.length === 0)
+    return "";
+  const lines = msgs.map((m) => {
+    const tag = m.priority === "high" ? "[HIGH]" : m.priority === "low" ? "[low]" : "\u2022";
+    const where = m.to_session ? "direct" : "broadcast";
+    const scopeStr = m.scope?.code_ref ? ` {scoped to ${m.scope.code_ref}}` : m.scope?.task_contains ? ` {scoped to task~${m.scope.task_contains}}` : "";
+    return `${tag} [${where} from ${m.from_session.slice(0, 8)}]${scopeStr}: ${m.body}`;
+  });
+  return `### Inter-session messages (${msgs.length})
+${lines.join(`
+`)}`;
+}
+function renderSiblingActivity(ctx, sessionId) {
+  const sibs = ctx.tracker.getActiveSiblings(sessionId);
+  if (sibs.length === 0)
+    return "";
+  const lines = sibs.map((s) => {
+    const id = s.session_id.slice(0, 8);
+    const task = s.current_task ? `: ${s.current_task.slice(0, 80)}` : ": (no task set)";
+    return `  - ${id}${task}`;
+  });
+  return `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:
+${lines.join(`
+`)}`;
+}
+function composeBridgeFromLog(ctx, sessionId, turn) {
+  const prevTurn = turn - 1;
+  if (prevTurn < 1)
+    return "";
+  const key = `bridge_${sessionId}_${prevTurn}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  if (!row || !row.value)
+    return "";
+  ctx.db.run(`DELETE FROM plugin_state WHERE key = ?`, [key]);
+  return row.value;
+}
+function appendBridgeAction(db, sessionId, turn, toolName) {
+  const action = toolName.replace("mcp__plugin_orchestrator_memory__", "");
+  const key = `bridge_${sessionId}_${turn}`;
+  const existing = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  const next = existing?.value ? `${existing.value}, ${action}` : action;
+  db.run(`INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, [key, next, now()]);
+}
+function resetTurnState(db, sessionId) {
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [`struggle_${sessionId}`]);
+  db.run(`DELETE FROM plugin_state WHERE key LIKE ?`, [`orch_active_${sessionId}_%`]);
+  db.run(`DELETE FROM plugin_state WHERE key LIKE ?`, [`preuse_warned_${sessionId}_%`]);
+}
+function sessionHadOrchActivityThisTurn(db, sessionId, turn) {
+  return db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(`orch_active_${sessionId}_${turn}`) !== null;
+}
+function markOrchActivityThisTurn(db, sessionId, turn) {
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [`orch_active_${sessionId}_${turn}`, now()]);
+}
+function warnedThisTurn(db, sessionId, turn) {
+  return db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(`preuse_warned_${sessionId}_${turn}`) !== null;
+}
+function markWarnedThisTurn(db, sessionId, turn) {
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [`preuse_warned_${sessionId}_${turn}`, now()]);
+}
+function bumpStruggleCounter(db, sessionId) {
+  const key = `struggle_${sessionId}`;
+  const row = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  const next = (row ? parseInt(row.value, 10) : 0) + 1;
+  db.run(`INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, [key, String(next), now()]);
+  return next;
+}
+function resetStruggleCounter(db, sessionId) {
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [`struggle_${sessionId}`]);
+}
+function buildStopSessionNudge(db, sessionId) {
+  const countRow = db.query(`SELECT COUNT(DISTINCT note_id) as cnt FROM session_log
+       WHERE session_id = ? AND delivery_type = 'fresh'`).get(sessionId);
+  const fresh = countRow?.cnt ?? 0;
+  if (fresh < 3)
+    return "";
+  const rows = db.query(`SELECT n.id, n.type, substr(replace(replace(n.content, char(10), ' '), char(13), ' '), 1, 80) as snippet
+       FROM session_log sl
+       JOIN notes n ON sl.note_id = n.id
+       WHERE sl.session_id = ? AND sl.delivery_type = 'fresh'
+       GROUP BY n.id
+       ORDER BY n.updated_at ASC
+       LIMIT 5`).all(sessionId);
+  if (rows.length === 0)
+    return "";
+  const formatted = rows.map((r) => `
+- **${r.id.slice(0, 8)}** [${r.type}] ${r.snippet}`).join("");
+  const remaining = fresh - rows.length;
+  const moreHint = remaining > 0 ? `
+...and ${remaining} more - find them with lookup({session_id:"${sessionId}"}) or by tag.` : "";
+  return `
+
+### Notes this session surfaced that you may not have maintained (${fresh} total):${formatted}${moreHint}
+
+For each: was it still correct? If not, call update_note / supersede_note. Is the thread/question settled? Call close_thread. Future sessions read these - stale notes actively mislead.`;
 }
 
 // mcp/server.ts
@@ -23783,6 +24216,98 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
+server.tool("send_message", "Leave a message for another active Claude session, or broadcast to all active sessions. Messages are delivered via hooks at every model-think boundary (PostToolUse, UserPromptSubmit, Stop, etc.) so the recipient sees them with minimal delay. Use this when you've discovered something a sibling session needs to know, or when you need to coordinate work that's actively happening in another window.", {
+  body: exports_external.string().min(1).max(4000),
+  to_session: exports_external.string().optional().describe("Recipient session_id. Omit for broadcast to all active siblings."),
+  scope_code_ref: exports_external.string().optional().describe("Optional file/module path. The recipient hook may filter delivery to sessions that touch this path."),
+  scope_task_contains: exports_external.string().optional().describe("Optional substring; only sessions whose current_task contains it should treat the message as relevant."),
+  priority: exports_external.enum(["low", "normal", "high"]).optional(),
+  ttl_seconds: exports_external.coerce.number().int().positive().optional().describe("Optional time-to-live; expired messages are silently dropped."),
+  session_id: exports_external.string().optional().describe("Sender session_id. Defaults to fallback.")
+}, async (args) => {
+  const from = resolveSessionId(args.session_id);
+  if (!from) {
+    return { content: [{ type: "text", text: "send_message requires a session_id." }] };
+  }
+  const db = getProjectDb();
+  const text = handleSendMessage(db, {
+    from_session: from,
+    to_session: args.to_session,
+    body: args.body,
+    scope_code_ref: args.scope_code_ref,
+    scope_task_contains: args.scope_task_contains,
+    priority: args.priority,
+    ttl_seconds: args.ttl_seconds
+  });
+  return { content: [{ type: "text", text }] };
+});
+server.tool("read_messages", "Drain your inbox of pending inter-session messages. Marks each as read for your session_id. Hooks call this automatically when peekInbox shows pending messages; you rarely need to call it directly, but you can to flush the queue mid-task.", { session_id: exports_external.string().optional() }, async (args) => {
+  const sid = resolveSessionId(args.session_id);
+  if (!sid) {
+    return { content: [{ type: "text", text: "read_messages requires a session_id." }] };
+  }
+  const db = getProjectDb();
+  const text = handleReadMessages(db, { session_id: sid });
+  return { content: [{ type: "text", text }] };
+});
+server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in lightweight hook-time injections. Call when you start a major task; the activity awareness is what lets sibling agents know they're not alone in the codebase.", { task: exports_external.string().min(1).max(500), session_id: exports_external.string().optional() }, async (args) => {
+  const sid = resolveSessionId(args.session_id);
+  if (!sid || !sessionTracker) {
+    return {
+      content: [
+        { type: "text", text: "update_session_task requires a session_id and active tracker." }
+      ]
+    };
+  }
+  const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+  return { content: [{ type: "text", text }] };
+});
+server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.", {
+  event: exports_external.enum([
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PreCompact",
+    "Stop",
+    "SubagentStop"
+  ]),
+  session_id: exports_external.string(),
+  tool_name: exports_external.string().optional(),
+  agent_id: exports_external.string().optional(),
+  file_path: exports_external.string().optional()
+}, async (args) => {
+  if (!sessionTracker) {
+    return { content: [{ type: "text", text: "{}" }] };
+  }
+  const db = getProjectDb();
+  const result = handleHookEvent({ db, tracker: sessionTracker }, {
+    event: args.event,
+    session_id: args.session_id,
+    tool_name: args.tool_name,
+    agent_id: args.agent_id,
+    payload: args.file_path ? { file_path: args.file_path } : undefined
+  });
+  const envelope = {
+    hookSpecificOutput: { hookEventName: args.event }
+  };
+  const hso = envelope.hookSpecificOutput;
+  if (result.additionalContext)
+    hso.additionalContext = result.additionalContext;
+  if (result.permissionDecision) {
+    hso.permissionDecision = result.permissionDecision;
+    if (result.permissionDecisionReason)
+      hso.permissionDecisionReason = result.permissionDecisionReason;
+  }
+  if (result.decision === "block") {
+    envelope.decision = "block";
+    if (result.reason)
+      envelope.reason = result.reason;
+  }
+  if (result.systemMessage)
+    envelope.systemMessage = result.systemMessage;
+  return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
+});
 function cascadeResolution(db, noteId, timestamp) {
   const results = [];
   const blockedItems = db.query(`SELECT DISTINCT n.id, n.type, n.status FROM links l
@@ -23833,6 +24358,7 @@ function cascadeResolution(db, noteId, timestamp) {
 async function main() {
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
+  loadInboxCounters(getProjectDb());
   const transport = new StdioServerTransport;
   await server.connect(transport);
   startSidecar().then((client) => {

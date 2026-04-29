@@ -15,8 +15,13 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "UserPromptSubmit",
+              "session_id": "${session_id}"
+            }
           }
         ]
       }
@@ -26,19 +31,32 @@
         "matcher": "Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "PreToolUse",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "file_path": "${tool_input.file_path}"
+            }
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__plugin_orchestrator_memory__.*",
+        "matcher": ".*",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-tool-use"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "PostToolUse",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}"
+            }
           }
         ]
       }
@@ -48,8 +66,14 @@
         "matcher": "Write|Edit|MultiEdit|Bash|mcp__.*",
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/post-tool-use-failure"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "PostToolUseFailure",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}"
+            }
           }
         ]
       }
@@ -58,8 +82,13 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-compact"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "PreCompact",
+              "session_id": "${session_id}"
+            }
           }
         ]
       }
@@ -68,8 +97,13 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/stop"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "Stop",
+              "session_id": "${session_id}"
+            }
           }
         ]
       }
@@ -78,8 +112,14 @@
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-stop"
+            "type": "mcp_tool",
+            "server": "memory",
+            "tool": "_hook_event",
+            "input": {
+              "event": "SubagentStop",
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}"
+            }
           }
         ]
       }

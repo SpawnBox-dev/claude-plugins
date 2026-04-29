@@ -6,6 +6,28 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R6 cross-session inter-agent messaging
+
+**Change.** Two new tables (migration 19): `session_messages` (one row per send, with optional `to_session`, `scope` JSON, `priority`, `expires_at`) and `session_message_reads` (per-recipient read tracking so broadcasts work uniformly). Three new agent-callable MCP tools: `send_message`, `read_messages`, `update_session_task`. One internal dispatcher tool: `_hook_event`. Seven of eight bash hooks migrate to `type: "mcp_tool"` and route through `_hook_event`; `session-start` stays bash for cold-start safety. The hook fast path uses an in-memory `inboxCounters` map (Map<sessionId, number>) so `peekInbox` answers in O(1) and the dispatcher returns no `additionalContext` on idle turns - zero token cost when nothing is pending. The `PostToolUse` matcher widens to `.*` so messages are delivered after every tool call, not just orchestrator MCP calls.
+
+**Rationale.** Pre-R6, sibling sessions could see each other's *captured* notes via the `cross_session` section in briefing, but couldn't actively coordinate. The `session_registry.current_task` column existed but nothing wrote to it. There was no inbox primitive. Inter-session communication was passive and turn-boundary-only. R6 makes it active and dense: layering `PostToolUse` + `UserPromptSubmit` + `PreToolUse` + `Stop` + `SubagentStop` hits every model-think boundary, so a message left by session A becomes visible to session B at its next tool call (~milliseconds in practice). The in-memory counter keeps the per-hook cost at O(1) when nothing is pending, satisfying the load-bearing "token-light when idle" constraint - if a hook returns empty `additionalContext`, the model doesn't pay any token cost for the hook firing.
+
+The bash-to-mcp_tool migration is bundled into R6 because (a) the new dispatcher logic belongs in TypeScript with shared DB access, (b) keeping bash hooks alongside mcp_tool hooks for the same plugin would be incoherent (one substrate, not two), and (c) per the user's "complete removals in one pass" pattern, decoupling-then-removing-later was rejected. `_lib.sh`, `run-hook.cmd`, and the seven migrated bash scripts were deleted as part of the same shipment.
+
+**Rejected.**
+- Migrating SessionStart to mcp_tool - cold-start race; the MCP server may not be connected yet at first session boot. The hook would produce a non-blocking error (per Claude Code hook docs), but losing the boot directive is a real UX regression. Keeping bash here costs 60 lines and has no downside. The state-dir cleanup that the old session-start did is now done at MCP boot via `loadInboxCounters` priming the counter map, so the bash version is purely the boot-directive emitter and fallback-file writer.
+- Per-event MCP tools (`hook_user_prompt_submit`, `hook_pre_tool_use`, ...) - pollutes the agent-visible tool list with 7 internal tools. Single `_hook_event` dispatcher with `_` prefix and a clear "agents should not call this directly" description is cleaner.
+- Per-message `read_at` column without a separate `session_message_reads` table - works for direct messages but breaks for broadcasts (one row, many recipients). The reads table normalizes both shapes under one query.
+- WebSocket / pub-sub between MCP servers - over-engineered for the cardinality (handful of concurrent sessions per project). DB + in-memory counter is enough.
+- Polling MCP server in a background loop - Claude Code agents have no event loop while idle; only hooks can deliver context to a thinking model, and only at hook boundaries.
+- Forwarding via Claude Code's `SendMessage` primitive - confirmed via changelog and docs to be agent-teams-only and intra-session. Cannot cross between two separately-spawned Claude Code processes. Cross-session messaging MUST go through shared state, and SQLite is the canonical pattern.
+- Dropping the legacy `PreToolUse` Option-B escalation (turn-counter-driven nag for sessions that haven't called any orchestrator tool by turn 4) - flagged in the plan as tangential, but ultimately preserved inline in the dispatcher as a regression-avoiding default. The behavior is unchanged from the bash hook.
+- Per-tool MCP server name in hooks.json (e.g. `plugin_orchestrator_memory`) - the `.mcp.json` registers the server under the simple key `memory`, so `server: "memory"` in hooks.json matches. Verified at runtime.
+
+**Shipped:** v0.26.0.
+
+---
+
 ## 2026-04-23 - R5.1 agent-facing text alignment for R4.4 + R5
 
 **Change.** Text-only pass across skills, hooks, agents, docs, README, CLAUDE.md, and commands to surface R4.4 (auto-retro gate) and R5 (code_refs breadcrumbs + reverse-index + retro verification) behaviors to the agent. Same pattern as R3.8 / R3.9 (agent text alignment after code ships). No code, no tests changed.

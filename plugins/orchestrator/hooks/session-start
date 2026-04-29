@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fires when a session starts, resumes, clears, or recovers from compaction.
-# Injects the mandatory startup directive, surfaces the runtime session_id
-# so the agent can pass it to every orchestrator tool call (enables
-# cross-session discovery), and cleans up stale state files from old sessions.
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/_lib.sh"
+# SessionStart stays bash because the MCP server may not be connected yet
+# at the moment this hook fires (cold-start race). Emits the boot directive
+# and surfaces session_id to the agent. All other hook logic moved to the
+# _hook_event MCP tool dispatcher in R6.
 
 EVENT_TYPE="${CLAUDE_HOOK_EVENT_NAME:-startup}"
-
 case "$EVENT_TYPE" in
   compact) ORIENT_EVENT="compact" ;;
   clear)   ORIENT_EVENT="clear" ;;
@@ -18,52 +14,47 @@ case "$EVENT_TYPE" in
   *)       ORIENT_EVENT="startup" ;;
 esac
 
-STATE_DIR=$(get_state_dir)
-# Clean up state files from sessions older than 7 days. Use find where
-# available; failures are non-fatal because state files are advisory.
-find "$STATE_DIR" -type f -mtime +7 ! -name '.gitignore' -delete 2>/dev/null || true
-
-# Try to read session_id from stdin (SessionStart hook input may or may not
-# include it depending on Claude Code version). Never block on this - if
-# stdin is empty or non-JSON, fall back gracefully.
 INPUT=""
-if [ -t 0 ]; then
-    INPUT=""
-else
-    INPUT=$(cat 2>/dev/null || printf '')
-fi
+if [ ! -t 0 ]; then INPUT=$(cat 2>/dev/null || printf ''); fi
 
 SID=""
 if [ -n "$INPUT" ]; then
-    SID=$(get_session_id "$INPUT")
-    if [ "$SID" = "unknown" ]; then SID=""; fi
+  SID=$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4 || printf '')
+  case "$SID" in
+    *[!a-zA-Z0-9_-]*|"") SID="" ;;
+  esac
 fi
 
-# Persist session_id to a fallback file that the MCP server can read when a
-# tool call arrives without an explicit session_id param. This is the safety
-# net behind the banner approach: even if the model fails to pass session_id,
-# the server reads this file and attributes the call correctly. Each new
-# session overwrites the file, so multi-session users should pass session_id
-# explicitly - but single-session users get perfect continuity for free.
-if [ -n "$SID" ]; then
-    printf '%s' "$SID" > "$STATE_DIR/active-session" 2>/dev/null || true
+# Persist to fallback file - the MCP server reads this when an agent forgets
+# to pass session_id. Path matches getFallbackSessionId in mcp/server.ts.
+if [ -n "$SID" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  STATE_DIR="$CLAUDE_PROJECT_DIR/.orchestrator-state"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s' "$SID" > "$STATE_DIR/active-session" 2>/dev/null || true
+  if [ ! -f "$STATE_DIR/.gitignore" ]; then
+    printf '*\n' > "$STATE_DIR/.gitignore" 2>/dev/null || true
+  fi
 fi
 
 SID_LINE=""
 if [ -n "$SID" ]; then
-    SID_LINE="\n\nYour session ID for this conversation is: ${SID}\nPass this as \`session_id\` on EVERY orchestrator tool call (briefing, note, lookup, create_work_item, update_work_item, save_progress, breakdown, close_thread, update_note, supersede_note, delete_note). It enables cross-session discovery so sibling sessions see what you create and you see what they're working on. Save the session ID in your working memory and reuse it throughout the session - never invent a new one. A fallback file has also been written so the MCP server can recover your session_id if you forget to pass it, but explicit is better - especially if multiple Claude sessions are running against this project."
+  SID_LINE="\\n\\nYour session ID for this conversation is: ${SID}\\nPass this as \\\`session_id\\\` on EVERY orchestrator tool call. It enables cross-session discovery so sibling sessions see what you create and you see what they're working on."
 fi
 
-CONTEXT="MANDATORY FIRST ACTIONS: (1) Call the orchestrator MCP \`briefing\` tool with event \"${ORIENT_EVENT}\" AND session_id set. (2) Invoke the \`orchestrator:getting-started\` skill via the Skill tool. (3) From now on, invoke \`orchestrator:every-turn\` EVERY turn before and after acting. These are not optional.\n\nRED FLAGS - if you think any of these, you are rationalizing and MUST stop:\n- \"This is just a quick fix\" -> Quick fixes create decisions. Lookup first.\n- \"I already know this codebase\" -> You know THIS context window. Previous sessions knew more.\n- \"I'll note it later\" -> Later never comes. Context compaction erases your memory. Note NOW.\n- \"Nothing noteworthy happened\" -> Re-evaluate. Zero-signal turns are rare.\n- \"The user just wants speed\" -> Speed without context causes rework.\n- \"I'll check the knowledge base after\" -> Checking AFTER means you already contradicted past decisions.${SID_LINE}"
-ESCAPED=$(escape_for_json "$CONTEXT")
+CONTEXT="MANDATORY FIRST ACTIONS: (1) Call \\\`briefing\\\` with event \\\"${ORIENT_EVENT}\\\" AND session_id set. (2) Invoke \\\`orchestrator:getting-started\\\`. (3) From now on, invoke \\\`orchestrator:every-turn\\\` EVERY turn before and after acting. These are not optional.${SID_LINE}"
+
+# Bash JSON escape: backslash, quote, newline, tab, control chars.
+ESC="$CONTEXT"
+ESC="${ESC//\\/\\\\}"
+ESC="${ESC//\"/\\\"}"
+ESC="${ESC//$'\n'/\\n}"
+ESC="${ESC//$'\r'/\\r}"
+ESC="${ESC//$'\t'/\\t}"
 
 cat <<EOF
 {
-  "additional_context": "${ESCAPED}",
-  "hookSpecificOutput": {
-    "hookEventName": "SessionStart",
-    "additionalContext": "${ESCAPED}"
-  }
+  "additional_context": "${ESC}",
+  "hookSpecificOutput": { "hookEventName": "SessionStart", "additionalContext": "${ESC}" }
 }
 EOF
 

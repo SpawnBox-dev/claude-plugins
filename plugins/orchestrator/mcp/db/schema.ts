@@ -304,6 +304,43 @@ DROP TABLE _signal_migration_check;
       }
     },
   },
+  {
+    version: 19,
+    name: "add_session_messages",
+    // R6: cross-session inter-agent messaging. session_messages holds the
+    // payloads (one row per send), session_message_reads tracks per-recipient
+    // read state so broadcasts can have many recipients and direct messages
+    // are uniformly modeled. Indexes are tuned for the hot read path
+    // (drainInbox: WHERE to_session = ? OR to_session IS NULL, NOT EXISTS in
+    // reads) and the broadcast partial index keeps the broadcast queue
+    // separate from direct messages for fast scan.
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_messages (
+          id TEXT PRIMARY KEY,
+          from_session TEXT NOT NULL,
+          to_session TEXT,
+          scope TEXT,
+          body TEXT NOT NULL,
+          priority TEXT NOT NULL DEFAULT 'normal',
+          created_at TEXT NOT NULL,
+          expires_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_msgs_to ON session_messages(to_session, created_at);
+        CREATE INDEX IF NOT EXISTS idx_msgs_from ON session_messages(from_session, created_at);
+        CREATE INDEX IF NOT EXISTS idx_msgs_broadcast ON session_messages(created_at) WHERE to_session IS NULL;
+
+        CREATE TABLE IF NOT EXISTS session_message_reads (
+          msg_id TEXT NOT NULL REFERENCES session_messages(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL,
+          read_at TEXT NOT NULL,
+          PRIMARY KEY (msg_id, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_msg_reads_session ON session_message_reads(session_id);
+      `);
+    },
+  },
 ];
 
 /**

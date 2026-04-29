@@ -14,7 +14,7 @@ plugins/orchestrator/
     utils.ts                     # generateId, now, extractKeywords, formatAge
     db/
       connection.ts              # getProjectDb, getGlobalDb, WAL + busy_timeout
-      schema.ts                  # 15 project migrations + 2 global
+      schema.ts                  # 19 project migrations + 2 global
     engine/
       composer.ts                # briefing assembly, user profile composition
       linker.ts                  # FTS5 search, hybrid RRF+MMR, auto-linker
@@ -24,6 +24,7 @@ plugins/orchestrator/
       scorer.ts                  # confidence promotion
       session_tracker.ts         # session_log / session_registry, cross-session
       signal.ts                  # pheromone deposit / decay / boost (ANTS)
+      messaging.ts               # R6 inter-session inbox + in-memory counter fast path
     tools/
       remember.ts                # note() handler + R4 gate
       recall.ts                  # lookup() handler
@@ -33,6 +34,8 @@ plugins/orchestrator/
       reflect.ts                 # retro() handler
       check_similar.ts           # check_similar() handler
       update_note_helpers.ts     # snapshotRevision, appendToNoteContent
+      messaging.ts               # R6 send_message / read_messages / update_session_task handlers
+      hook_event.ts              # R6 _hook_event dispatcher (per-event hook logic)
   skills/                        # 13 proactive skill prompts
   agents/                        # memory-concierge, orchestrator-reflect
   hooks/                         # bash scripts for 8 Claude Code hook points
@@ -58,7 +61,7 @@ Routing constants in `mcp/types.ts`:
 
 ### Schema
 
-Migrations live in `mcp/db/schema.ts`, versioned 1-17 (project) and 100-101 (global-only).
+Migrations live in `mcp/db/schema.ts`, versioned 1-19 (project) and 100-101 (global-only).
 
 The `notes` table holds everything. Work items, decisions, checkpoints, open threads - they are all the same row shape, differentiated by the `type` column. Status, priority, and due date fields are populated only for `type = 'work_item'` but the columns exist on every row.
 
@@ -84,7 +87,9 @@ Related tables:
 - `session_log` - per-surfacing log: which note was shown to which session at which turn, `delivery_type` in {fresh, refresh}.
 - `session_registry` - one row per session: `started_at`, `last_active_at`, `last_briefing_at` (v13), concierge handoff state.
 - `migrations` - applied-version tracker.
-- `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). First consumer is `last_retro_run_at`, read by `handleOrient`'s auto-retro gate (R4.4). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
+- `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). Consumers: `last_retro_run_at` (R4.4 auto-retro gate), R6 hook-state keys (`bridge_<sid>_<turn>`, `orch_active_<sid>_<turn>`, `preuse_warned_<sid>_<turn>`, `struggle_<sid>`, `stop_<sid>`, `subagent_stop_<sid>`). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
+- `session_messages` - R6 inter-session messaging payloads (migration 19). Direct or broadcast. Optional JSON `scope` for code-ref / task-substring filtering. Optional `expires_at` TTL.
+- `session_message_reads` - R6 per-recipient read tracking. Composite PK `(msg_id, session_id)`; CASCADE-deleted with the message.
 
 Global-only tables:
 
@@ -106,7 +111,7 @@ RELATIONSHIP_TYPES = [
 
 ## MCP tool surface
 
-Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equal-priority intent is visible at a glance.
+Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal `_hook_event` for hook routing). Grouped by verb class so their equal-priority intent is visible at a glance.
 
 ### Capture
 
@@ -139,6 +144,14 @@ Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equ
 | `delete_note` | Hard delete (cascades links). Used sparingly - prefer supersede or close_thread. |
 | `update_work_item` | Status / priority / due / content / tags / context / confidence / blocked_by. Accepts `code_refs: string[]` with same semantics as update_note. Cascades on `status = done`. |
 
+### Inter-session messaging (R6)
+
+| Tool | Purpose |
+|---|---|
+| `send_message` | Leave a direct message for another active session, or broadcast to all active siblings. Optional `scope_code_ref` / `scope_task_contains` for delivery filtering. Optional `priority` and `ttl_seconds`. |
+| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. Hooks call this automatically; agents rarely need to. |
+| `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task`). Sibling sessions see this in cross-session briefing AND in lightweight hook-time injections. |
+
 ### Admin
 
 | Tool | Purpose |
@@ -146,6 +159,12 @@ Nineteen tools registered in `mcp/server.ts`. Grouped by verb class so their equ
 | `retro` | Decay confidence on stale notes, merge duplicates, identify orphans, queue revalidation, compute autonomy scores, analyze user-model trajectories. R5 verification pass: when `CLAUDE_PROJECT_DIR` (fallback `ORCHESTRATOR_PROJECT_ROOT`) is set, iterates notes with `code_refs`, checks file-existence at the project root, reports `code_refs verified: N checked, M broken`. Also updates `plugin_state.last_retro_run_at` so auto-retro gate from briefing can skip for another 7 days. |
 | `install_embeddings` | Check + install Python/uv/uvx for the embedding sidecar. |
 | `system_status` | Knowledge base size, embedding coverage, active sessions, cross-session discovery health. |
+
+### Internal (hook-only)
+
+| Tool | Purpose |
+|---|---|
+| `_hook_event` | Dispatcher invoked by `type:"mcp_tool"` hooks via `hooks.json`. Routes per `event` name (UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure / PreCompact / Stop / SubagentStop). Returns `hookSpecificOutput`-shaped JSON. Agents do not call this directly; the leading `_` flags it as internal. |
 
 ## Engine components
 
@@ -213,6 +232,17 @@ The ANTS (Adaptive Note Temperature System) pheromone model:
 
 `promoteConfidence` - bumps a note's confidence (low->medium, medium->high) on auto-dedup, repeat surfacing, or re-validation.
 
+### messaging.ts (R6)
+
+Cross-session inter-agent messaging engine. Three primitives:
+
+- `sendMessage(db, input)` - inserts a row into `session_messages`. Direct (`to_session` set) or broadcast (`to_session` null). On send, increments the in-memory `inboxCounters` map for affected recipients (target session for direct; all sibling sessions active in the last 24h for broadcasts).
+- `peekInbox(db, sessionId)` - O(1) check via `inboxCounters` map. Auto-refreshes from DB at most once per `COUNTER_REFRESH_INTERVAL_MS` (30s) to recover from sibling-process writes the local counter missed. The hook fast path: if peek returns 0, the dispatcher returns no `additionalContext` at all - the model pays zero token cost.
+- `drainInbox(db, sessionId)` - SQL pull of all unread messages addressed to the session (or broadcast and not from the session). Marks each as read via `session_message_reads`. Resets the in-memory counter to 0.
+- `loadInboxCounters(db)` - called once at MCP server boot to prime the counter map from the DB. After that, the map is maintained incrementally.
+
+The counter map is per-process. A sibling MCP server's writes go to the DB; this process won't see the counter bump until the next refresh. The drain path always trusts the DB, so missed counter bumps cause delayed delivery (bounded by `COUNTER_REFRESH_INTERVAL_MS`), never lost messages.
+
 ## Skills and agents
 
 ### Skills (13)
@@ -242,20 +272,20 @@ Located in `agents/`.
 
 ## Hook flow
 
-Bash scripts under `hooks/`, registered in `hooks/hooks.json`. All hooks are best-effort and share `_lib.sh` for state-dir helpers. State dir is `$CLAUDE_PROJECT_DIR/.orchestrator-state/` - scoped to the project, not global.
+Eight hooks registered in `hooks/hooks.json`. Seven use `type: "mcp_tool"` and dispatch through the `_hook_event` MCP tool (R6). One — `SessionStart` — stays bash because the MCP server may not be connected yet at first session boot. Hook state is in `plugin_state` (per-session keys), not in a state-dir.
 
-| Hook point | Purpose |
-|---|---|
-| `SessionStart` | Writes `active-session` file (used by server.ts `getFallbackSessionId` when the agent forgets to pass session_id). Emits MANDATORY FIRST ACTIONS system-reminder text. |
-| `UserPromptSubmit` | Emits rotating `[orch] ...` turn bridge reminders. |
-| `PreToolUse` on Write/Edit/MultiEdit | Discipline nudge before edits. |
-| `PostToolUse` on `mcp__plugin_orchestrator_memory__.*` | Post-capture confirmation / follow-up nudges. |
-| `PostToolUseFailure` | Surface failure patterns. |
-| `PreCompact` | Flush capture targets before context compaction. |
-| `Stop` | Maintenance-verb prompt (R3.4) + session-activity nudge pulled from `session_log`. |
-| `SubagentStop` | Sibling of Stop for subagent threads. |
+| Hook point | Type | Purpose |
+|---|---|---|
+| `SessionStart` | `command` (bash) | Writes `active-session` file (read by `server.ts:getFallbackSessionId` when the agent forgets to pass session_id). Emits MANDATORY FIRST ACTIONS system-reminder text. |
+| `UserPromptSubmit` | `mcp_tool` -> `_hook_event` | Increments per-session turn counter, resets per-turn struggle/orch-active markers, picks rotating reminder, surfaces last-turn bridge from `plugin_state`, injects sibling activity, drains pending inter-session messages. |
+| `PreToolUse` on Write/Edit/MultiEdit/NotebookEdit | `mcp_tool` -> `_hook_event` | (1) Code-scoped message delivery: drains messages whose `scope.code_ref` matches the file being edited, restoring others to the queue. (2) Option-B escalation: soft nudge on turn 2-3 when no orchestrator tool fired this turn; `permissionDecision: "ask"` on turn 4+. |
+| `PostToolUse` matcher `.*` | `mcp_tool` -> `_hook_event` | Densest delivery surface. O(1) fast path via `inboxCounters` map. Drains pending direct + broadcast messages. Also: on orchestrator-tool calls, marks orch-active for the turn (defangs Option-B for the rest of the turn) and appends to the next turn's bridge in `plugin_state`. |
+| `PostToolUseFailure` | `mcp_tool` -> `_hook_event` | Bumps `struggle_<sid>` counter; soft nudge at 2 consecutive, hard escalation at 3+. Reset by `UserPromptSubmit` (new turn) or any successful `PostToolUse`. |
+| `PreCompact` | `mcp_tool` -> `_hook_event` | Emits `systemMessage` reminding the model to flush uncaptured knowledge before the window shrinks. |
+| `Stop` | `mcp_tool` -> `_hook_event` | Once-per-session block (gated by `plugin_state` marker key). Maintenance-verb prompt + session-activity nudge pulled from `session_log` when the session surfaced >=3 fresh notes. |
+| `SubagentStop` | `mcp_tool` -> `_hook_event` | Sibling of Stop for subagent threads. Same once-per-session marker pattern, separate key. |
 
-State-dir marker files ensure once-per-session behavior for prompts that should not repeat.
+The dispatcher pattern keeps all hook logic in `mcp/tools/hook_event.ts` with shared DB access, replaces fragile bash JSON escaping with TypeScript, and lets the in-memory counter answer 99% of `PostToolUse` calls without a SQL round-trip.
 
 ## Retrieval pipeline composition
 

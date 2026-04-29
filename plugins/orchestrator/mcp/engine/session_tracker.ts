@@ -231,6 +231,33 @@ export class SessionTracker {
   }
 
   /**
+   * Returns sibling sessions active within the last 24 hours, with their
+   * current_task. Used by the hook surface to inject one-line activity
+   * awareness when present. Capped at 5 to keep additionalContext tight.
+   */
+  getActiveSiblings(sessionId: string): Array<{
+    session_id: string;
+    current_task: string | null;
+    last_active_at: string;
+  }> {
+    const twentyFourHoursAgo = new Date(
+      Date.now() - 24 * 60 * 60 * 1000
+    ).toISOString();
+    return this.db
+      .query(
+        `SELECT session_id, current_task, last_active_at FROM session_registry
+         WHERE session_id != ? AND last_active_at > ?
+         ORDER BY last_active_at DESC
+         LIMIT 5`
+      )
+      .all(sessionId, twentyFourHoursAgo) as Array<{
+        session_id: string;
+        current_task: string | null;
+        last_active_at: string;
+      }>;
+  }
+
+  /**
    * Update a session's last_briefing_at cursor. Called at the end of
    * handleOrient so the NEXT briefing can compute "new since last briefing"
    * against a stable cursor.
