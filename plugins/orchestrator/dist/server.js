@@ -22732,6 +22732,39 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
+var HSO_EVENTS = new Set([
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse"
+]);
+function buildHookEnvelope(event, result) {
+  const envelope = {};
+  if (HSO_EVENTS.has(event)) {
+    const permitHsoPermission = event === "PreToolUse";
+    const hasHsoContent = Boolean(result.additionalContext) || permitHsoPermission && Boolean(result.permissionDecision);
+    if (hasHsoContent) {
+      const hso = { hookEventName: event };
+      if (result.additionalContext)
+        hso.additionalContext = result.additionalContext;
+      if (permitHsoPermission && result.permissionDecision) {
+        hso.permissionDecision = result.permissionDecision;
+        if (result.permissionDecisionReason)
+          hso.permissionDecisionReason = result.permissionDecisionReason;
+      }
+      envelope.hookSpecificOutput = hso;
+    }
+  } else if (result.additionalContext && !result.systemMessage) {
+    envelope.systemMessage = result.additionalContext;
+  }
+  if (result.decision === "block") {
+    envelope.decision = "block";
+    if (result.reason)
+      envelope.reason = result.reason;
+  }
+  if (result.systemMessage)
+    envelope.systemMessage = result.systemMessage;
+  return envelope;
+}
 var VARIANTS = [
   "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table.",
   "[orch] What prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears.",
@@ -24632,33 +24665,7 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
     agent_id: args.agent_id,
     payload: Object.keys(payload).length > 0 ? payload : undefined
   });
-  const HSO_EVENTS = new Set([
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolBatch"
-  ]);
-  const envelope = {};
-  if (HSO_EVENTS.has(args.event)) {
-    const hso = { hookEventName: args.event };
-    if (result.additionalContext)
-      hso.additionalContext = result.additionalContext;
-    if (result.permissionDecision) {
-      hso.permissionDecision = result.permissionDecision;
-      if (result.permissionDecisionReason)
-        hso.permissionDecisionReason = result.permissionDecisionReason;
-    }
-    envelope.hookSpecificOutput = hso;
-  } else if (result.additionalContext && !result.systemMessage) {
-    envelope.systemMessage = result.additionalContext;
-  }
-  if (result.decision === "block") {
-    envelope.decision = "block";
-    if (result.reason)
-      envelope.reason = result.reason;
-  }
-  if (result.systemMessage)
-    envelope.systemMessage = result.systemMessage;
+  const envelope = buildHookEnvelope(args.event, result);
   return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
 });
 function cascadeResolution(db, noteId, timestamp) {

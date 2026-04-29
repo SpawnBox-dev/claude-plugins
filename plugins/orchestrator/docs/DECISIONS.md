@@ -6,6 +6,27 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.4: schema-validated envelope tests + builder hardening
+
+**Change.** Extracted the hook envelope builder from `mcp/server.ts` into `mcp/tools/hook_event.ts:buildHookEnvelope`. Added `tests/tools/hook_envelope.test.ts` which validates the envelope output for every hook event x every plausible payload combination against a copy of Claude Code's hook output schema. Hardened the builder per findings:
+
+1. **Skip empty HSO**: when an HSO event has no additionalContext and no permissionDecision, the builder no longer emits `hookSpecificOutput: {hookEventName}` with nothing else. Empty HSO is wasteful (and for UserPromptSubmit, schema-invalid because additionalContext is required there).
+2. **PreToolUse-only permissionDecision**: per the schema, permissionDecision in HSO is PreToolUse-only. The builder now strips it for any other HSO event (defensive against future dispatcher branches that might accidentally set it).
+
+**Discovery.** Jarid asked "do you need to exercise all the hooks and stuff to make sure there are no errors?" - exactly the gap that bit R7.2 (server name) and R7.3 (HSO on non-HSO events). Wrote a per-event x per-payload schema-validation test pass. Caught two latent bugs the dispatcher never exposed in practice but would have if a future branch had returned a different combination.
+
+**Lessons.** Schema-shape validation belongs at unit-test time, not at runtime via Claude Code's hook engine. The new test:
+- Mirrors the schema as a small validator (no ajv runtime dep needed).
+- Tests every event in `ALL_EVENTS` x every payload variant (`additionalContext only`, `permissionDecision ask`, `decision block`, `systemMessage only`, `additionalContext + decision block`).
+- Has a "regression: would-have-caught past bugs" suite that synthesizes the broken envelope shape R7.3 fixed and verifies the validator catches it.
+- Has a drift-guard: if `HSO_EVENTS` set ever falls out of sync with the schema's documented HSO event names, the test fires.
+
+This is the right shape for any future plugin work: build the envelope through the same code path the runtime uses, validate against a schema check, run on every test pass.
+
+**Shipped:** v0.27.4.
+
+---
+
 ## 2026-04-28 - R7.3 hotfix: hookSpecificOutput limited to 4 events per CC schema
 
 **Change.** The `_hook_event` envelope builder in `mcp/server.ts` now only includes `hookSpecificOutput` for events whose schema documents it: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolBatch`. For all other events (`Stop`, `SubagentStop`, `StopFailure`, `PreCompact`, `PostToolUseFailure`, `TaskCompleted`), the envelope uses top-level fields only (`decision`/`reason`/`systemMessage`). When the dispatcher returns `additionalContext` for a non-HSO event, the wrapper folds it into top-level `systemMessage` so the message still reaches the model.

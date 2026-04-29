@@ -35,6 +35,65 @@ export interface HookEventResponse {
   systemMessage?: string;
 }
 
+// Events whose schema documents a `hookSpecificOutput` envelope shape.
+// All other events use top-level fields only - emitting `hookSpecificOutput`
+// for them triggers schema validation failure ("Hook JSON output validation
+// failed - (root): Invalid input"). Source: Claude Code hook output schema.
+export const HSO_EVENTS: ReadonlySet<HookEvent | "PostToolBatch"> = new Set([
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  // PostToolBatch is in the schema but we don't currently route it.
+] as const);
+
+/**
+ * Build the JSON envelope Claude Code's hook engine expects, given a
+ * dispatcher result. Centralizes the HSO/non-HSO split so the tool wrapper
+ * and tests share one implementation. Returns a plain object ready to be
+ * JSON.stringify'd.
+ */
+export function buildHookEnvelope(
+  event: HookEvent,
+  result: HookEventResponse
+): Record<string, unknown> {
+  const envelope: Record<string, unknown> = {};
+
+  if (HSO_EVENTS.has(event)) {
+    // Only emit hookSpecificOutput when there's actual content to deliver.
+    // An HSO with just `hookEventName` and nothing else is wasteful, and
+    // for UserPromptSubmit the schema REQUIRES additionalContext - emitting
+    // an empty HSO there triggers schema validation failure. Per the schema,
+    // permissionDecision in HSO is PreToolUse-only.
+    const permitHsoPermission = event === "PreToolUse";
+    const hasHsoContent =
+      Boolean(result.additionalContext) ||
+      (permitHsoPermission && Boolean(result.permissionDecision));
+    if (hasHsoContent) {
+      const hso: Record<string, unknown> = { hookEventName: event };
+      if (result.additionalContext) hso.additionalContext = result.additionalContext;
+      if (permitHsoPermission && result.permissionDecision) {
+        hso.permissionDecision = result.permissionDecision;
+        if (result.permissionDecisionReason)
+          hso.permissionDecisionReason = result.permissionDecisionReason;
+      }
+      envelope.hookSpecificOutput = hso;
+    }
+  } else if (result.additionalContext && !result.systemMessage) {
+    // Non-HSO events (Stop, SubagentStop, PreCompact, StopFailure,
+    // PostToolUseFailure, TaskCompleted) can't carry additionalContext.
+    // Fold it into top-level systemMessage so the message reaches the model.
+    envelope.systemMessage = result.additionalContext;
+  }
+
+  if (result.decision === "block") {
+    envelope.decision = "block";
+    if (result.reason) envelope.reason = result.reason;
+  }
+  if (result.systemMessage) envelope.systemMessage = result.systemMessage;
+
+  return envelope;
+}
+
 const VARIANTS = [
   "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table.",
   "[orch] What prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears.",

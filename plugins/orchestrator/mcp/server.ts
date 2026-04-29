@@ -33,7 +33,7 @@ import {
   handleReadMessages,
   handleUpdateSessionTask,
 } from "./tools/messaging";
-import { handleHookEvent, type HookEvent } from "./tools/hook_event";
+import { handleHookEvent, buildHookEnvelope, type HookEvent } from "./tools/hook_event";
 
 // ── Session ID fallback ─────────────────────────────────────────────────
 //
@@ -1743,41 +1743,7 @@ server.tool(
       }
     );
 
-    // Build envelope per Claude Code's hook output schema. `hookSpecificOutput`
-    // is ONLY valid for these 4 events; any other event using it triggers
-    // schema validation failure ("Hook JSON output validation failed").
-    // For other events, additionalContext has no canonical home, so fold it
-    // into top-level `systemMessage`.
-    const HSO_EVENTS = new Set([
-      "UserPromptSubmit",
-      "PreToolUse",
-      "PostToolUse",
-      "PostToolBatch",
-    ]);
-    const envelope: Record<string, unknown> = {};
-
-    if (HSO_EVENTS.has(args.event)) {
-      const hso: Record<string, unknown> = { hookEventName: args.event };
-      if (result.additionalContext) hso.additionalContext = result.additionalContext;
-      if (result.permissionDecision) {
-        hso.permissionDecision = result.permissionDecision;
-        if (result.permissionDecisionReason)
-          hso.permissionDecisionReason = result.permissionDecisionReason;
-      }
-      envelope.hookSpecificOutput = hso;
-    } else if (result.additionalContext && !result.systemMessage) {
-      // Non-HSO events (Stop, SubagentStop, PreCompact, StopFailure,
-      // PostToolUseFailure, TaskCompleted) can't carry additionalContext.
-      // Surface it via systemMessage so the message still reaches the model.
-      envelope.systemMessage = result.additionalContext;
-    }
-
-    if (result.decision === "block") {
-      envelope.decision = "block";
-      if (result.reason) envelope.reason = result.reason;
-    }
-    if (result.systemMessage) envelope.systemMessage = result.systemMessage;
-
+    const envelope = buildHookEnvelope(args.event as HookEvent, result);
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }] };
   }
 );
