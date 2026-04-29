@@ -53,6 +53,9 @@ You have two ways to talk to the orchestrator:
 | Check health | **Direct `system_status`** | Deterministic |
 | Capture knowledge about specific code | **Direct `note` with `code_refs: [paths]`** | Breadcrumbs at file/module granularity make the note findable later via `lookup({code_ref: 'path'})` |
 | "What do we know about this file?" before editing | **Direct `lookup({code_ref: 'path/to/file'})`** | Reverse-index query - exact path match against the breadcrumb array |
+| Starting a major task that sibling sessions might overlap with | **Direct `update_session_task`** | Broadcasts your `current_task` so sibling sessions see it in their hook-time activity injection |
+| Discovered something a sibling session needs to know | **Direct `send_message`** | Targeted (`to_session`) or broadcast (omit). Optional `scope_code_ref` for file-scoped delivery, `priority` for urgency, `ttl_seconds` for expiring nudges |
+| Pending inbox messages from siblings | **Auto-drained by hook** | PostToolUse drains every tool call; UserPromptSubmit drains every turn. Manual `read_messages` only needed to flush mid-task |
 
 ## BEFORE you act this turn
 
@@ -73,7 +76,9 @@ Scan what just happened. Did any of these occur?
 | What happened | Action |
 |--------------|--------|
 | You completed a task or step | → `update_work_item` status=done (direct, fast) |
-| You started working on something trackable | → Ask concierge: "Should this be a new work item? Any overlaps with in-flight work?" |
+| You started working on something trackable | → Ask concierge: "Should this be a new work item? Any overlaps with in-flight work?" + `update_session_task` to broadcast it to siblings |
+| You discovered something a sibling session needs to know | → `send_message` (targeted via `to_session`, or broadcast). Add `scope_code_ref` if it's about a specific file. Use `priority: "high"` only when actionable urgency, otherwise default `normal`. |
+| Inter-session message arrived in your additionalContext | → Acknowledge and act before continuing. The sender invested in routing it to you; treat the inbox as you would a Slack DM, not a notification you can ignore. |
 | You're blocked on something | → `update_work_item` status=blocked, blocked_by=ID (direct) |
 | You identified new work | → Concierge dup-check, then create (concierge does both) |
 | Complex task needs breakdown | → Concierge `breakdown` with existing-item context |
@@ -160,5 +165,8 @@ After responding, ask yourself: **Did I skip the concierge when judgment was nee
 | `system_status` | Health check |
 | `list_work_items` | Filtered enumeration |
 | `list_open_threads` | Filtered enumeration |
+| `send_message` | Leave a note for a sibling session. `to_session` for direct, omit for broadcast. Optional `scope_code_ref` / `scope_task_contains`, `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary (PostToolUse / UserPromptSubmit / Stop). |
+| `read_messages` | Drain your inbox manually. Hooks call this automatically; you rarely need to. |
+| `update_session_task` | Broadcast your `current_task`. Siblings see it in their hook-time activity injection AND in their next briefing's Cross-Session Activity. Call when starting a major task. |
 
 For everything else, talk to the concierge.

@@ -39,13 +39,15 @@ const VARIANTS = [
   "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table.",
   "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
   "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now.",
-  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
+  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, send_message, update_session_task. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
   "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and invoke orchestrator:consult-concierge. Do not hammer.",
   "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
   "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
   "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items or orchestrator:consult-concierge. Direct lookup misses items with different vocabulary.",
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
+  "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they know what you're touching. Discovered something they need? send_message - direct or broadcast.",
+  "[orch] R6 inbox: messages from sibling sessions surface inline at every PostToolUse boundary. Empty inbox = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
 ];
 
 interface HookCtx {

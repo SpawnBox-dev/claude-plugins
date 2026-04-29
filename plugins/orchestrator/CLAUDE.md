@@ -58,9 +58,25 @@ If you've been stuck on the same issue for 2+ turns, the `every-turn` skill will
 
 ### Turn Bridge
 
-The user-prompt-submit hook injects the turn bridge automatically at the start of each turn - no action needed from you. The `post-tool-use` hook writes bridge records whenever you call an orchestrator MCP tool, and the next turn reads them back in as context. The old manual `[orch] next:` mechanism in thinking blocks is deprecated because thinking compression often stripped it.
+The UserPromptSubmit hook injects the turn bridge automatically at the start of each turn - no action needed from you. The PostToolUse hook records the bridge whenever you call an orchestrator MCP tool, and the next turn reads it back in as context. The old manual `[orch] next:` mechanism in thinking blocks is deprecated because thinking compression often stripped it.
 
 Just use the tools. The bridge takes care of itself.
+
+### Cross-Session Coordination (R6)
+
+When multiple Claude sessions run against the same project, you can see what siblings are doing AND exchange messages with them in near-realtime.
+
+- **Broadcast your task**: when you start major work, call `update_session_task("...")` so siblings see your `current_task` in their hook-time activity injection AND in their next briefing's Cross-Session Activity section.
+- **Message a sibling**: `send_message({body, to_session?, scope_code_ref?, priority?, ttl_seconds?})`. Omit `to_session` to broadcast. Optional scope filters and TTL.
+- **Inbox is auto-drained**: PostToolUse hook delivers messages on every tool call. Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
+
+Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
+
+### Hook Substrate (R6)
+
+Seven of eight hooks now use `type: "mcp_tool"` and route through a single `_hook_event` dispatcher (`mcp/tools/hook_event.ts`). Only SessionStart remains bash because the MCP server may not be connected yet at first session boot. All hook state that used to live in `$CLAUDE_PROJECT_DIR/.orchestrator-state/*` files now lives in the `plugin_state` table per session+turn keys (turn counter, bridge, orch-active, struggle, stop markers).
+
+Bash hooks are not the substrate anymore. If you need to extend hook behavior, edit `mcp/tools/hook_event.ts` and add a branch under the matching event.
 
 ### Storage Model: Notes and Work Items Share One Table
 

@@ -6,6 +6,24 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R6.1 agent-facing text alignment for R6
+
+**Change.** Text-only pass across `CLAUDE.md`, `README.md`, `agents/memory-concierge.md`, and skills `every-turn`, `orchestrating`, `getting-started`, `wrapping-up`, `planning-approach` to surface R6 (cross-session messaging + active-task broadcast) behaviors to the agent. Two new VARIANTS added to the rotating UserPromptSubmit reminders in `mcp/tools/hook_event.ts` so agents see messaging cues organically. README's tool table, file-structure tree, test count, hook count, and dist size updated to match v0.26.0 reality. No schema, no engine, no tool changes.
+
+**Rationale.** R6 shipped capable-but-unprompted: `send_message`, `read_messages`, and `update_session_task` were registered and tested but no skill, hook reminder, or top-level CLAUDE.md instruction told agents when to use them. Same failure mode as R3.7-pre-R3.8 and R5-pre-R5.1 - if the prose doesn't catch up, the feature is stranded. The pattern this repo has settled on: ship code, then immediately ship the text. R6.1 closes the loop.
+
+The user (Jarid) flagged the gap directly after R6 commit, so this is also a reaffirmation that the R-rhythm has prose alignment baked in - it is part of the R-shipment, not a deferred follow-up. Future R-class work should plan for the prose pass alongside the code, not behind it.
+
+**Rejected.**
+- Deferring R6.1 by 1-2 weeks via `/schedule` - the reason this pattern is canonical is that prose drift compounds: agents who don't know about a feature don't use it, lack of usage means no field signal, lack of field signal means no R-bumps. Deferring is exactly the failure mode R3.8 and R5.1 corrected.
+- A heavy README rewrite around messaging - kept additions surgical, slotted next to existing R5 / R4.4 entries rather than restructuring. Same shape as the R5.1 pass.
+- Adding messaging to EVERY skill (e.g. `closing-a-thread`, `learned-something`, `user-preference`) - the nudge has to fit a natural moment. Only skills whose moment overlaps with cross-session coordination got the prose.
+- Removing the legacy `Cross-Session Activity` section from briefing in favor of inline messages - kept both. Briefing is the on-ramp; inline messages are the active channel. Different roles, both load-bearing.
+
+**Shipped:** v0.26.1.
+
+---
+
 ## 2026-04-28 - R6 cross-session inter-agent messaging
 
 **Change.** Two new tables (migration 19): `session_messages` (one row per send, with optional `to_session`, `scope` JSON, `priority`, `expires_at`) and `session_message_reads` (per-recipient read tracking so broadcasts work uniformly). Three new agent-callable MCP tools: `send_message`, `read_messages`, `update_session_task`. One internal dispatcher tool: `_hook_event`. Seven of eight bash hooks migrate to `type: "mcp_tool"` and route through `_hook_event`; `session-start` stays bash for cold-start safety. The hook fast path uses an in-memory `inboxCounters` map (Map<sessionId, number>) so `peekInbox` answers in O(1) and the dispatcher returns no `additionalContext` on idle turns - zero token cost when nothing is pending. The `PostToolUse` matcher widens to `.*` so messages are delivered after every tool call, not just orchestrator MCP calls.

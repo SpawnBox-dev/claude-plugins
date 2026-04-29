@@ -46,4 +46,6 @@ Also consider:
 
 **Retro is automatic now.** The orchestrator inline-invokes `retro` from briefing on a 7-day cadence, so you don't need to manually call it at session end unless you want to force an immediate maintenance pass (e.g., after a heavy debugging session where a lot changed). The old "call retro when wrapping up" reflex is stale - `save_progress` remains the required checkpoint step.
 
+**Inter-session messages are auto-handled.** The Stop hook drains your inbox before the session closes. You don't need to call `read_messages` in wrap-up. If you sent messages to siblings via `send_message` this session, they'll be delivered to those sessions at their next hook boundary - no follow-up needed from you.
+
 The goal: a fresh session reading your checkpoint should feel like they have full continuity, AND the notes they pull up should still be correct.

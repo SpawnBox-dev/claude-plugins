@@ -41,6 +41,9 @@ Fast, deterministic, no subagent overhead. Use for single actions that don't nee
 | `retro` | Maintenance |
 | `system_status` | Health check |
 | `list_work_items` / `list_open_threads` | Filtered enumeration |
+| `send_message` | R6: leave a message for a sibling session. Direct (`to_session`) or broadcast (omit). Optional `scope_code_ref`, `priority`, `ttl_seconds` |
+| `read_messages` | R6: drain your inbox manually (hooks do this automatically every PostToolUse) |
+| `update_session_task` | R6: broadcast `current_task` so siblings see what you're touching |
 
 For anything involving judgment, synthesis, or multi-step thought, route to the concierge instead.
 
@@ -83,6 +86,23 @@ When the knowledge you're capturing is about specific code - a gotcha in a file,
 ## Auto-Maintenance
 
 `retro` now runs automatically from `briefing` on a 7-day cadence (auto-retro gate). Agents do not need to remember to call retro at session end - the next first-of-week startup will inline-invoke it. Manual `retro` calls are still supported for force-refresh after a heavy debugging session. The old reflex of "call retro on wrap-up" is stale; `save_progress` remains the required checkpoint step.
+
+## Cross-Session Coordination (R6)
+
+Multiple Claude sessions can run against the same project simultaneously - different windows, different terminals, different agents working in parallel. Pre-R6, you only saw what siblings *captured*. Post-R6, you can see what they're *doing right now* and exchange messages with them.
+
+**Mechanics**:
+- `update_session_task("...")` broadcasts your `current_task` so siblings see it in their hook-time injection (and in their next briefing's Cross-Session Activity).
+- `send_message({body, to_session?, scope_code_ref?, priority?, ttl_seconds?})` leaves a message in a target session's inbox - or broadcasts if you omit `to_session`.
+- The PostToolUse hook drains pending messages on every tool call. Empty inbox = zero token cost (in-memory counter short-circuits the DB query). Inbox messages render inline in your `additionalContext` between turns.
+- You rarely need to call `read_messages` directly - the hook does it. Use it only to flush mid-task.
+
+**When this matters**:
+- You start a major task that might overlap with sibling work → `update_session_task` so they don't blindly stomp the same files.
+- You discover something a sibling session would want to know (a gotcha, a failed approach, a decision you just made that affects their area) → `send_message` to their session_id, or broadcast.
+- You see a sibling task in your hook-time injection that conflicts with what you're about to do → `send_message` to coordinate before you both edit the same file.
+
+**Treat the inbox like Slack DMs, not notifications.** When a message arrives in your additionalContext, the sender invested deliberate effort in routing it to you - acknowledge and act before continuing your own work. Ignoring inter-session messages erodes the coordination value of the whole system.
 
 ## The Goal
 

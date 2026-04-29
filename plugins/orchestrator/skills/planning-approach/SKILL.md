@@ -20,4 +20,6 @@ You're about to tackle something complex. Gather context first:
 
 5. If spawning subagents, pass the context package to them so they work with full knowledge
 
-This prevents re-learning solved problems and contradicting established patterns.
+6. **Cross-session check (R6)**: if your briefing surfaced active sibling sessions, scan their `current_task` lines. Are any of them touching code your plan needs? If yes, `send_message({to_session, body})` to coordinate before you both invest in conflicting work. Then `update_session_task("planning <area>")` so your siblings see what you're about to start.
+
+This prevents re-learning solved problems, contradicting established patterns, and stomping sibling work.

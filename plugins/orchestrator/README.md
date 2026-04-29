@@ -33,14 +33,16 @@ A Python HTTP server (`sidecar/embed_server.py`) runs the ONNX bge-m3 model loca
 - Health check: `GET /health` - Embed: `POST /embed`
 - Graceful degradation: if sidecar doesn't start, all features work via FTS5
 
-### Session Tracking
+### Session Tracking & Inter-Agent Messaging
 
-Cross-session awareness via `session_log` and `session_registry` tables:
+Cross-session awareness via `session_log`, `session_registry`, `session_messages`, and `session_message_reads` tables:
 
 - Tracks which notes were surfaced in each session
 - Annotates search results: `[already sent N turn(s) ago]`, `[sent to N other session(s)]`
 - In-memory per-session turn counters for progressive disclosure
 - 7-day cleanup for stale sessions
+- **R6 inter-agent messaging**: agents can `send_message` to a specific sibling session or broadcast to all active siblings. Optional scope filters (`code_ref`, `task_contains`), priority, and TTL. Delivered via hooks at every model-think boundary (PostToolUse, UserPromptSubmit, Stop, etc). An in-memory unread-counter map keeps the hook fast path O(1) - empty inbox = zero token cost on idle turns.
+- **Active task broadcast**: `update_session_task` sets `session_registry.current_task` so siblings see what each session is working on in real time, both via the briefing's Cross-Session Activity section and via lightweight hook-time injections.
 
 ### MCP Tools
 
@@ -65,6 +67,9 @@ Cross-session awareness via `session_log` and `session_registry` tables:
 | `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup. R5 verification pass: when `CLAUDE_PROJECT_DIR` is set, checks file-existence for every path in every note's code_refs and reports `code_refs verified: N checked, M broken`. Also auto-fires weekly from briefing (R4.4 gate) |
 | `list_open_threads` | List all open threads with status and signal |
 | `list_work_items` | List work items filtered by status/priority |
+| `send_message` | R6: leave a message for another active session, or broadcast to all active siblings. Optional `scope_code_ref`/`scope_task_contains`, `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary. |
+| `read_messages` | R6: drain the caller's inbox. Hooks call this automatically; agents rarely need to. |
+| `update_session_task` | R6: broadcast `current_task` so sibling sessions see what you're working on - both in hook-time activity injection and in their next briefing |
 
 ### Engine
 
@@ -145,7 +150,7 @@ Requirements: Python 3.10+ and uv (auto-installed via `pip install uv` if Python
 # Type check
 bun run typecheck
 
-# Run tests (114 tests)
+# Run tests (333 tests)
 bun test
 
 # Build (bundles to dist/server.js)
@@ -167,11 +172,12 @@ orchestrator-plugin/
     utils.ts                    # Keyword extraction, formatting, IDs
     db/
       connection.ts             # Project + global DB connections
-      schema.ts                 # 10 migrations (notes, FTS5, embeddings, sessions)
+      schema.ts                 # 19 migrations (notes, FTS5, embeddings, sessions, messaging)
     engine/
       embeddings.ts             # Sidecar client (EmbeddingClient, blobToVector)
       hybrid_search.ts          # Cosine, RRF, MMR, activation boost
-      session_tracker.ts        # Session log, registry, annotations
+      session_tracker.ts        # Session log, registry, annotations, getActiveSiblings
+      messaging.ts              # R6 cross-session inbox + in-memory counter fast path
       composer.ts               # Briefing assembly
       deduplicator.ts           # Jaccard similarity, merge duplicates
       linker.ts                 # FTS5 search, hybrid search, auto-linking
@@ -184,6 +190,8 @@ orchestrator-plugin/
       prepare.ts                # Context package for subagent hydration
       reflect.ts                # Maintenance handler
       check_similar.ts          # Similarity check handler
+      messaging.ts              # R6 send_message / read_messages / update_session_task handlers
+      hook_event.ts             # R6 _hook_event dispatcher (per-event hook logic)
   sidecar/
     embed_server.py             # Python ONNX embedding server
     requirements.txt            # Python deps
@@ -191,9 +199,9 @@ orchestrator-plugin/
     memory-concierge.md         # Concierge agent definition
     orchestrator-reflect.md     # Reflect agent definition
   skills/                       # 13 skills for orchestrated workflow
-  hooks/                        # Session lifecycle hooks (start, stop, compact, submit)
+  hooks/                        # 1 bash hook (session-start) + 7 mcp_tool dispatches in hooks.json
   commands/                     # Slash commands
-  tests/                        # 114 tests across 14 files
+  tests/                        # 333 tests across 31 files
   dist/
-    server.js                   # Bundled MCP server (~0.76 MB)
+    server.js                   # Bundled MCP server (~0.86 MB)
 ```

@@ -61,7 +61,18 @@ Save the returned agent_id. Every subsequent concierge call this session should 
 
 **Note:** name the deliverable explicitly in the prompt (the artifact shape, the report format, the question you're asking). The concierge distinguishes Shape A (structured artifact - return what was asked) vs Shape B (batch capture - synthesize and save). Ambiguous asks default to Shape B. See `skills/consult-concierge/SKILL.md` for full framing.
 
-## Step 3 — Route judgment-heavy work through the concierge
+## Step 3 — Broadcast your task to siblings (R6)
+
+If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` so:
+
+- Sibling sessions see what you're working on in their hook-time activity injection
+- Their next briefing's Cross-Session Activity surfaces your task
+
+You can update it again later if your scope shifts. Skip this step on trivial / read-only sessions where overlap isn't a risk - it's not mandatory, just high-leverage when multiple agents are active.
+
+You can also `send_message({body, to_session: "<sid>"})` if the briefing surfaced a sibling session whose work directly affects yours - leave them a message before you both blindly edit the same file.
+
+## Step 4 — Route judgment-heavy work through the concierge
 
 From this point on, default to the concierge for anything judgmental:
 - Multi-note batch captures at end of task
@@ -72,7 +83,7 @@ From this point on, default to the concierge for anything judgmental:
 
 Use direct MCP calls only for exact-key retrieval, trivial writes, and deterministic operations. See `orchestrator:every-turn` for the full operation routing table.
 
-## Step 4 — Work the task
+## Step 5 — Work the task
 
 Proceed with the user's request. The concierge is now in context, resumable with SendMessage, and ready for the judgment-heavy calls you'll need throughout the session.
 
