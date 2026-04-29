@@ -24632,16 +24632,25 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
     agent_id: args.agent_id,
     payload: Object.keys(payload).length > 0 ? payload : undefined
   });
-  const envelope = {
-    hookSpecificOutput: { hookEventName: args.event }
-  };
-  const hso = envelope.hookSpecificOutput;
-  if (result.additionalContext)
-    hso.additionalContext = result.additionalContext;
-  if (result.permissionDecision) {
-    hso.permissionDecision = result.permissionDecision;
-    if (result.permissionDecisionReason)
-      hso.permissionDecisionReason = result.permissionDecisionReason;
+  const HSO_EVENTS = new Set([
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolBatch"
+  ]);
+  const envelope = {};
+  if (HSO_EVENTS.has(args.event)) {
+    const hso = { hookEventName: args.event };
+    if (result.additionalContext)
+      hso.additionalContext = result.additionalContext;
+    if (result.permissionDecision) {
+      hso.permissionDecision = result.permissionDecision;
+      if (result.permissionDecisionReason)
+        hso.permissionDecisionReason = result.permissionDecisionReason;
+    }
+    envelope.hookSpecificOutput = hso;
+  } else if (result.additionalContext && !result.systemMessage) {
+    envelope.systemMessage = result.additionalContext;
   }
   if (result.decision === "block") {
     envelope.decision = "block";

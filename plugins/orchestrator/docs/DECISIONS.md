@@ -6,6 +6,18 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-28 - R7.3 hotfix: hookSpecificOutput limited to 4 events per CC schema
+
+**Change.** The `_hook_event` envelope builder in `mcp/server.ts` now only includes `hookSpecificOutput` for events whose schema documents it: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolBatch`. For all other events (`Stop`, `SubagentStop`, `StopFailure`, `PreCompact`, `PostToolUseFailure`, `TaskCompleted`), the envelope uses top-level fields only (`decision`/`reason`/`systemMessage`). When the dispatcher returns `additionalContext` for a non-HSO event, the wrapper folds it into top-level `systemMessage` so the message still reaches the model.
+
+**Discovery.** Stop hook fired and produced: `Hook JSON output validation failed — (root): Invalid input`. The error dump showed Claude Code's hook schema explicitly lists `hookSpecificOutput` shapes for only 4 events. The R6 dispatcher always wrapped responses in `hookSpecificOutput: { hookEventName: <event> }`, so any non-HSO event triggered schema validation failure regardless of payload.
+
+**Lessons.** PostToolBatch IS real (it's in the schema after all - the earlier claude-code-guide claim wasn't entirely fabrication, just misattributed in their context). The orchestrator now has it ready for future use should we need it. Schema validation errors are loud and exact - they include the offending JSON and the expected schema right in the console output, which made this fix a one-pass diagnose vs the multi-iteration server-name bug.
+
+**Shipped:** v0.27.3.
+
+---
+
 ## 2026-04-28 - R7.2 hotfix: hooks.json `server` field uses colon-separated `plugin:<name>:<key>` form
 
 **Change.** All 8 `mcp_tool` hooks change `"server": "plugin_orchestrator_memory"` to `"server": "plugin:orchestrator:memory"`. The canonical server name as Claude Code's hook engine sees it is the colon-separated form visible in `/mcp` output, NOT the underscore form embedded in the agent-tool prefix `mcp__plugin_orchestrator_memory__*`.
