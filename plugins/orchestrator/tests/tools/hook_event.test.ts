@@ -298,6 +298,68 @@ describe("hook_event dispatcher", () => {
       expect(second.decision).toBeUndefined();
     });
 
+    test("R7.7: PreCompact stamps a marker that suppresses the immediate Stop block", () => {
+      // Field-observed bug: /compact fires PreCompact + Stop on the same boundary,
+      // and the Stop block derails the compact flow with redundant housekeeping
+      // text (PreCompact already requested capture). PreCompact should arm a
+      // suppression marker that handleStop honors.
+      const { db, tracker } = freshSetup();
+      const pre = handleHookEvent({ db, tracker }, { event: "PreCompact", session_id: "CMP" });
+      expect(pre.systemMessage).toContain("Context compaction imminent");
+
+      const stop = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "CMP" });
+      // The compaction-driven Stop must NOT block.
+      expect(stop.decision).toBeUndefined();
+      expect(stop.reason).toBeUndefined();
+    });
+
+    test("R7.7: Stop block is restored on the NEXT real (non-compact) stop", () => {
+      // After PreCompact suppresses one Stop, the marker is consumed - the
+      // next genuine Stop (post-compact, after user finishes) blocks normally.
+      const { db, tracker } = freshSetup();
+      handleHookEvent({ db, tracker }, { event: "PreCompact", session_id: "CMP2" });
+      const compactStop = handleHookEvent(
+        { db, tracker },
+        { event: "Stop", session_id: "CMP2" }
+      );
+      expect(compactStop.decision).toBeUndefined();
+
+      const realStop = handleHookEvent(
+        { db, tracker },
+        { event: "Stop", session_id: "CMP2" }
+      );
+      expect(realStop.decision).toBe("block");
+      expect(realStop.reason).toContain("orchestrator housekeeping");
+    });
+
+    test("R7.7: stale compacting marker (>60s old) does NOT suppress Stop", () => {
+      // If a PreCompact happened long ago and was somehow not consumed (e.g.
+      // compaction aborted, session reused), a normal Stop must still block.
+      const { db, tracker } = freshSetup();
+      const oldTs = String(Date.now() - 5 * 60_000); // 5 minutes ago
+      db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+        [`compacting_STALE`, oldTs, now()]
+      );
+      const stop = handleHookEvent(
+        { db, tracker },
+        { event: "Stop", session_id: "STALE" }
+      );
+      expect(stop.decision).toBe("block");
+    });
+
+    test("R7.7: PreCompact still emits its capture systemMessage", () => {
+      // The marker is a side-effect; the systemMessage to the agent must
+      // continue to land (it's the ONE remaining capture nudge at /compact).
+      const { db, tracker } = freshSetup();
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "PreCompact", session_id: "PC" }
+      );
+      expect(r.systemMessage).toContain("save_progress");
+      expect(r.systemMessage).toContain("note()");
+    });
+
     test("R7: SubagentStop prompt instructs subagent NOT to call save_progress (parent's job)", () => {
       const { db, tracker } = freshSetup();
       const r = handleHookEvent({ db, tracker }, { event: "SubagentStop", session_id: "SS" });

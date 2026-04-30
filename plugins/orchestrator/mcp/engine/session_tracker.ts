@@ -501,7 +501,8 @@ export class SessionTracker {
               OR key LIKE 'bridge_%'
               OR key LIKE 'orch_active_%'
               OR key LIKE 'preuse_warned_%'
-              OR key LIKE 'struggle_%')`,
+              OR key LIKE 'struggle_%'
+              OR key LIKE 'compacting_%')`,
       [sevenDaysAgo]
     );
   }

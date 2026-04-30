@@ -6,6 +6,28 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-30 - R7.7 Suppress Stop block during /compact
+
+**Change.** A real spawnbox session (46673070) ran `/compact` and saw both the PreCompact `systemMessage` ("capture knowledge NOW...") AND the Stop hook fire and BLOCK with the full housekeeping prompt ("Before ending: complete orchestrator housekeeping... 27 fresh notes surfaced...") on the same boundary. Jarid pasted it as a field error. Two problems: (a) redundant capture prompts back-to-back at exactly the moment context is most fragile, (b) `decision: "block"` from Stop derails the compact flow with a "Stop hook error" surface.
+
+Fix: `handlePreCompact` writes a `compacting_<sid>` plugin_state marker with the current epoch ms. `handleStop` checks for that marker; if it exists and is fresher than 60s, the Stop returns `{}` (no block) and consumes the marker so the NEXT real Stop blocks normally. PreCompact's `systemMessage` is the one capture nudge that lands at the compact boundary.
+
+**Why now.** Pure UX bug, easy to verify, easy to fix. The two prompts were saying overlapping things at the worst possible moment.
+
+**Rejected.**
+- Removing the Stop block entirely - real Stop (end-of-session) DOES need the housekeeping prompt; only the compaction-driven Stop is redundant.
+- Detecting compaction by looking at the registry's `compaction_count` increment - that field updates on `briefing(event:"recover")` calls, not at PreCompact time. PreCompact is the canonical signal.
+- Suppressing PreCompact's `systemMessage` and keeping Stop's block - Stop's block is louder and shows as "Stop hook error", a worse surface during /compact.
+- Window of 30s instead of 60s - real PreCompact-then-Stop delta is sub-second; 60s gives generous slack for slow IO without bleeding into legitimate post-compact stops.
+
+**Test additions:** 4 new tests in `tests/tools/hook_event.test.ts`: PreCompact stamps marker -> Stop suppressed; second Stop after consumption blocks normally; stale marker (>60s) does NOT suppress; PreCompact still emits its capture systemMessage. Total: 444 tests, 0 fail.
+
+**Wiring.** `SessionTracker.cleanup()` extended with `compacting_%` prefix so any orphaned markers prune at the 7-day cadence with the rest of the ephemeral hook state.
+
+**Shipped:** v0.28.2.
+
+---
+
 ## 2026-04-28 - R7.6 Stop-prompt trim + tightened loop-close heuristic
 
 **Change.** Two related UX fixes triggered by field signal: a real spawnbox session (1a5a984f) hit Stop and saw a 3000+ char "Stop hook error" prompt with 5 in-flight work_items (3 of which it didn't actually work on, just saw via briefing) plus a duplicated R3.4 fresh-notes nudge listing 5 more entries.

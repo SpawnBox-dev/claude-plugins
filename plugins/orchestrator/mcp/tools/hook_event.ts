@@ -340,7 +340,23 @@ function handlePostToolUseFailure(ctx: HookCtx, args: HookEventArgs): HookEventR
   };
 }
 
-function handlePreCompact(_ctx: HookCtx, _args: HookEventArgs): HookEventResponse {
+// R7.7: when /compact runs, the engine fires PreCompact AND Stop on the
+// same boundary - both with overlapping "capture knowledge / curate notes"
+// prompts. The Stop block also derails the compact flow itself. PreCompact
+// stamps this marker so handleStop can detect a compaction-driven stop and
+// skip its block. 60s window is generous; real Stop-after-PreCompact is sub-second.
+const COMPACT_STOP_SUPPRESS_WINDOW_MS = 60_000;
+
+function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
+  const sid = sanitizeSessionId(args.session_id);
+  if (sid) {
+    // Store numeric epoch ms (not the ISO string from now()) so the
+    // suppression-window check in handleStop can compare directly.
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [`compacting_${sid}`, String(Date.now()), now()]
+    );
+  }
   return {
     systemMessage:
       "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost.",
@@ -348,6 +364,29 @@ function handlePreCompact(_ctx: HookCtx, _args: HookEventArgs): HookEventRespons
 }
 
 function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
+  // R7.7: suppress the housekeeping block when this Stop is compaction-driven.
+  // PreCompact already requested the same capture work; double-prompting at
+  // the compact boundary derails the flow and bloats the prompt right when
+  // context is most fragile.
+  const sid = sanitizeSessionId(args.session_id);
+  if (sid) {
+    const compactRow = ctx.db
+      .query(`SELECT value FROM plugin_state WHERE key = ?`)
+      .get(`compacting_${sid}`) as { value: string } | null;
+    if (compactRow?.value) {
+      const compactedAt = parseInt(compactRow.value, 10);
+      if (
+        Number.isFinite(compactedAt) &&
+        Date.now() - compactedAt < COMPACT_STOP_SUPPRESS_WINDOW_MS
+      ) {
+        // Clear the marker so the NEXT real Stop (post-compact, after the
+        // user has continued and finished) blocks normally.
+        ctx.db.run(`DELETE FROM plugin_state WHERE key = ?`, [`compacting_${sid}`]);
+        return {};
+      }
+    }
+  }
+
   // Block once per session id, then pass through. Reuse plugin_state with a
   // marker key.
   const key = `stop_${args.session_id}`;
