@@ -96,7 +96,7 @@ describe("messaging", () => {
     expect(drainInbox(db, "A")).toHaveLength(0);
   });
 
-  test("scope is round-tripped through JSON when delivered", () => {
+  test("scope is round-tripped through JSON as a display label", () => {
     const db = freshDb();
     sendMessage(db, {
       from_session: "A",
@@ -104,148 +104,18 @@ describe("messaging", () => {
       body: "scoped",
       scope: { code_ref: "src/foo.ts", task_contains: "refactor" },
     });
-    // R7.5: drainInbox now filters by scope. Provide matching context.
-    const msgs = drainInbox(db, "B", { currentFilePath: "src/foo.ts" });
+    // R7.9: scope is metadata only, not a delivery filter.
+    const msgs = drainInbox(db, "B");
+    expect(msgs).toHaveLength(1);
     expect(msgs[0].scope).toEqual({ code_ref: "src/foo.ts", task_contains: "refactor" });
   });
 });
 
-describe("R7.5 scope filtering", () => {
-  test("scoped message NOT delivered without matching context", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "watch this file",
-      scope: { code_ref: "src/foo.ts" },
-    });
-    // Drain with no context - scoped message stays queued.
-    const msgs = drainInbox(db, "B");
-    expect(msgs).toHaveLength(0);
-    // And it remains in the inbox for the next call with matching context.
-    const msgs2 = drainInbox(db, "B", { currentFilePath: "src/foo.ts" });
-    expect(msgs2).toHaveLength(1);
-    expect(msgs2[0].body).toBe("watch this file");
-  });
-
-  test("scoped message delivered when currentFilePath contains scope.code_ref", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "scoped",
-      scope: { code_ref: "src/foo.ts" },
-    });
-    // Path contains the scope.code_ref as substring.
-    const msgs = drainInbox(db, "B", { currentFilePath: "/abs/path/to/src/foo.ts" });
-    expect(msgs).toHaveLength(1);
-  });
-
-  test("scoped message delivered when currentTask contains scope.task_contains (case-insensitive)", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "task-scoped",
-      scope: { task_contains: "refactor" },
-    });
-    const msgs = drainInbox(db, "B", { currentTask: "Refactoring observer pattern" });
-    expect(msgs).toHaveLength(1);
-  });
-
-  test("scope with both fields delivers when EITHER matches (any-match)", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "either",
-      scope: { code_ref: "src/foo.ts", task_contains: "refactor" },
-    });
-    const msgs = drainInbox(db, "B", { currentTask: "doing the refactor" });
-    expect(msgs).toHaveLength(1);
-  });
-
-  test("unscoped messages always delivered regardless of context", () => {
-    const db = freshDb();
-    sendMessage(db, { from_session: "A", to_session: "B", body: "no scope" });
-    const msgs = drainInbox(db, "B");
-    expect(msgs).toHaveLength(1);
-  });
-
-  test("deferred scoped messages do not get marked read", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "scoped",
-      scope: { code_ref: "src/foo.ts" },
-    });
-    // First drain with non-matching context: 0 delivered, message stays.
-    expect(drainInbox(db, "B", { currentFilePath: "other.ts" })).toHaveLength(0);
-    // Second drain with matching context: 1 delivered.
-    expect(drainInbox(db, "B", { currentFilePath: "src/foo.ts" })).toHaveLength(1);
-    // Third drain: idempotent, message is now marked read.
-    expect(drainInbox(db, "B", { currentFilePath: "src/foo.ts" })).toHaveLength(0);
-  });
-
-  test("malformed scope JSON treated as unscoped (no get-stuck)", () => {
-    const db = freshDb();
-    db.run(
-      `INSERT INTO session_messages (id, from_session, to_session, scope, body, priority, created_at)
-       VALUES ('bad', 'A', 'B', '{not valid json', 'body', 'normal', ?)`,
-      [now()]
-    );
-    const msgs = drainInbox(db, "B");
-    expect(msgs).toHaveLength(1);
-  });
-
-  test("counter reflects deferred message count after partial drain", () => {
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "deferred",
-      scope: { code_ref: "src/foo.ts" },
-    });
-    sendMessage(db, { from_session: "A", to_session: "B", body: "unscoped" });
-    // Drain with non-matching context: only unscoped delivers.
-    const msgs = drainInbox(db, "B", { currentFilePath: "other.ts" });
-    expect(msgs).toHaveLength(1);
-    expect(msgs[0].body).toBe("unscoped");
-    // Counter should report 1 still pending (the scoped one).
-    // Note: counter is in-memory and after drain reflects deferred count.
-    // We don't expose it directly, but peekInbox returns it.
-  });
-});
-
-describe("R7.8 bypassScope flag", () => {
-  test("bypassScope:true delivers scoped messages even with no matching context", () => {
-    // Field-observed bug: explicit `read_messages` from the bot called
-    // engineDrain with no context, R7.5's matchesScope returned false for
-    // every scoped message (no context can't match anything), inbox came
-    // back empty even though messages were queued. Explicit reads are
-    // user-driven "show me everything queued" - should bypass scope filter.
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "scoped",
-      scope: { code_ref: "src/foo.ts" },
-    });
-    sendMessage(db, { from_session: "A", to_session: "B", body: "unscoped" });
-
-    // Without bypass + without context: only unscoped delivers (R7.5 behavior).
-    const filtered = drainInbox(db, "B");
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0].body).toBe("unscoped");
-
-    // bypassScope: scoped messages also deliver, even with no context.
-    const all = drainInbox(db, "B", { bypassScope: true });
-    expect(all).toHaveLength(1); // only the scoped one remains; unscoped already drained
-    expect(all[0].body).toBe("scoped");
-  });
-
-  test("bypassScope:true delivers scoped messages on a fresh inbox", () => {
+describe("R7.9 single-path delivery", () => {
+  test("scoped messages always deliver regardless of recipient context", () => {
+    // R7.9 rollback: scope is a display label, not a filter. A message
+    // queued with scope_code_ref MUST deliver on the next drain even when
+    // the recipient never touched that file.
     const db = freshDb();
     sendMessage(db, {
       from_session: "A",
@@ -261,14 +131,16 @@ describe("R7.8 bypassScope flag", () => {
     });
     sendMessage(db, { from_session: "A", to_session: "B", body: "plain" });
 
-    // All three deliver via bypass, regardless of context.
-    const msgs = drainInbox(db, "B", { bypassScope: true });
+    const msgs = drainInbox(db, "B");
     expect(msgs).toHaveLength(3);
     const bodies = msgs.map((m) => m.body).sort();
     expect(bodies).toEqual(["code-scoped", "plain", "task-scoped"]);
+    // Scope metadata still surfaces on the result for inline rendering.
+    const codeScoped = msgs.find((m) => m.body === "code-scoped");
+    expect(codeScoped?.scope).toEqual({ code_ref: "src/foo.ts" });
   });
 
-  test("bypassScope:true marks all delivered messages read (idempotent)", () => {
+  test("drain marks every delivered message read (idempotent)", () => {
     const db = freshDb();
     sendMessage(db, {
       from_session: "A",
@@ -276,29 +148,19 @@ describe("R7.8 bypassScope flag", () => {
       body: "scoped",
       scope: { code_ref: "src/foo.ts" },
     });
-
-    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(1);
-    // Second bypass call: already marked read.
-    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(0);
-  });
-
-  test("bypassScope:false (default) preserves R7.5 deferral behavior", () => {
-    // Regression guard: opting out of bypass should leave the auto-drain path
-    // exactly as R7.5 documented it.
-    const db = freshDb();
-    sendMessage(db, {
-      from_session: "A",
-      to_session: "B",
-      body: "scoped",
-      scope: { code_ref: "src/foo.ts" },
-    });
-
-    // Auto-drain path: no bypass, no matching context => deferred.
+    expect(drainInbox(db, "B")).toHaveLength(1);
     expect(drainInbox(db, "B")).toHaveLength(0);
-    expect(drainInbox(db, "B", {})).toHaveLength(0);
-    expect(drainInbox(db, "B", { bypassScope: false })).toHaveLength(0);
+  });
 
-    // Now an explicit read with bypass surfaces it.
-    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(1);
+  test("malformed scope JSON delivers as unscoped (no get-stuck)", () => {
+    const db = freshDb();
+    db.run(
+      `INSERT INTO session_messages (id, from_session, to_session, scope, body, priority, created_at)
+       VALUES ('bad', 'A', 'B', '{not valid json', 'body', 'normal', ?)`,
+      [now()]
+    );
+    const msgs = drainInbox(db, "B");
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].scope).toBeNull();
   });
 });

@@ -62,22 +62,18 @@ The UserPromptSubmit hook injects the turn bridge automatically at the start of 
 
 Just use the tools. The bridge takes care of itself.
 
-### Cross-Session Coordination (R6 + R7.5)
+### Cross-Session Coordination (R6 + R7.9)
 
 When multiple Claude sessions run against the same project, you can see what siblings are doing AND exchange messages with them in near-realtime.
 
 - **Broadcast your task**: when you start major work, call `update_session_task("...")` so siblings see your `current_task` in their hook-time activity injection AND in their next briefing's Cross-Session Activity section.
 - **Message a sibling**: `send_message({body, to_session?, scope_code_ref?, scope_task_contains?, priority?, ttl_seconds?})`. Omit `to_session` to broadcast.
-- **Scope filters (R7.5) actually filter delivery**:
-  - `scope_code_ref: "src/foo.ts"` - delivered only when the recipient is editing/has just edited a path containing that string. Substring match.
-  - `scope_task_contains: "refactor"` - delivered only when the recipient's `current_task` contains that substring (case-insensitive).
-  - Both: any-match (OR). Either field matching causes delivery.
-  - Unscoped messages always deliver.
-  - Scoped messages without matching context stay queued; they deliver later when the recipient's context matches. They never expire (unless `ttl_seconds` is also set).
-- **Inbox is auto-drained**: PostToolUse hook delivers messages on every tool call (passing the touched file_path as scope context). UserPromptSubmit drains at turn boundary (passing recipient's current_task). Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
-- **Explicit `read_messages` bypasses scope filtering** (R7.8): when you call the `read_messages` tool directly (vs. waiting for auto-drain), every queued message delivers regardless of scope. Use this if you suspect a scoped message is queued but auto-drain hasn't surfaced it because your context never matched. Auto-drain on hook boundaries continues to honor scope filtering as the opportunistic context-aware path.
+- **Single-path delivery (R7.9)**: every queued message delivers on the recipient's next drain - whether that's the auto-drain on a hook boundary (PostToolUse / UserPromptSubmit) or an explicit `read_messages` call. There are no contexts under which a queued message can be hidden from the recipient. "Message sent" means "will deliver."
+- **`scope_code_ref` and `scope_task_contains` are display labels, not filters**: they render inline as `{scoped to src/foo.ts}` so the recipient understands the context the sender had in mind, but they DO NOT gate delivery. R7.5 originally implemented these as a filter; R7.9 rolled it back because conditional delivery the sender can't observe is a footgun (see DECISIONS.md R7.9 for the field bug history).
+- **Inbox auto-drain**: PostToolUse hook delivers messages on every tool call. UserPromptSubmit drains at turn boundary. Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
+- **Noise control**: use `priority: "low"` for non-urgent FYI; `ttl_seconds` to expire messages the recipient doesn't need after a deadline. Don't try to use scope to suppress delivery.
 
-Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6/R7/R7.5 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
+Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6/R7/R7.9 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
 
 ### Hook Substrate (R6)
 

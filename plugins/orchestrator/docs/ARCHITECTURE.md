@@ -88,7 +88,7 @@ Related tables:
 - `session_registry` - one row per session: `started_at`, `last_active_at`, `last_briefing_at` (v13), concierge handoff state.
 - `migrations` - applied-version tracker.
 - `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). Consumers: `last_retro_run_at` (R4.4 auto-retro gate), R6 hook-state keys (`bridge_<sid>_<turn>`, `orch_active_<sid>_<turn>`, `preuse_warned_<sid>_<turn>`, `struggle_<sid>`, `stop_<sid>`, `subagent_stop_<sid>`). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
-- `session_messages` - R6 inter-session messaging payloads (migration 19). Direct or broadcast. Optional JSON `scope` for code-ref / task-substring filtering. Optional `expires_at` TTL.
+- `session_messages` - R6 inter-session messaging payloads (migration 19). Direct or broadcast. Optional JSON `scope` rendered as a display label inline (R7.9: was a delivery filter in R7.5-R7.8, rolled back to label-only). Optional `expires_at` TTL.
 - `session_message_reads` - R6 per-recipient read tracking. Composite PK `(msg_id, session_id)`; CASCADE-deleted with the message.
 
 Global-only tables:
@@ -148,8 +148,8 @@ Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal
 
 | Tool | Purpose |
 |---|---|
-| `send_message` | Leave a direct message for another active session, or broadcast to all active siblings. Optional `scope_code_ref` / `scope_task_contains` for delivery filtering. Optional `priority` and `ttl_seconds`. |
-| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. Bypasses scope filtering (R7.8) - explicit user-driven reads return everything queued, unlike the auto-drain path which is context-aware. Hooks call the auto-drain path automatically; agents call this when they want to manually flush their inbox. |
+| `send_message` | Leave a direct message for another active session, or broadcast to all active siblings. Optional `scope_code_ref` / `scope_task_contains` are rendered inline as display labels (R7.9) so the recipient understands sender intent - they do NOT gate delivery. Use `priority` and `ttl_seconds` for noise/expiry control. |
+| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. R7.9: single-path delivery - returns every queued message regardless of context. Hooks auto-drain on every tool call and turn boundary; agents call this for explicit manual flush. |
 | `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task`). Sibling sessions see this in cross-session briefing AND in lightweight hook-time injections. |
 
 ### Admin

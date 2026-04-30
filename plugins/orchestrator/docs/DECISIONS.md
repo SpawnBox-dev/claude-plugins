@@ -6,6 +6,41 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-30 - R7.9 Roll back scope-as-filter; messaging is single-path
+
+**Change.** Scope filtering on `drainInbox` (introduced R7.5, patched R7.8 with a `bypassScope` flag) is removed entirely. `MessageScope.code_ref` and `MessageScope.task_contains` survive as display labels rendered inline (`{scoped to src/foo.ts}`) so the recipient understands the sender's intent, but they DO NOT gate delivery. Every queued message delivers on the recipient's next drain - whether that's the auto-drain at a hook boundary or an explicit `read_messages` call.
+
+`DrainContext.bypassScope`, `currentFilePath`, `currentTask`, and the `matchesScope` helper are gone. `DrainContext` is kept as a placeholder for forward-compat. Hook callsites in `hook_event.ts` (`handleUserPromptSubmit`, `handlePostToolUse`) no longer build a context object before calling `drainInbox`. `handleReadMessages` no longer passes a `bypassScope` flag.
+
+**Why.** Field signal was unambiguous. R7.5 silently dropped scoped messages whose recipients never matched the scope (`be30d33d`, `61deff24`). R7.8 patched explicit-read to bypass, but auto-drain still silently held them. After I described the resulting two-path system, Jarid pushed back: *"is there a reason we have two vectors? does that seem like a good system?"* That was the moment to step back.
+
+A messaging system where the sender can't know whether their message will be delivered (because it depends on recipient context the sender can't observe) has lied to the sender. The "Message sent" receipt becomes meaningless. Scope-as-filter sounded clever but the use case (opportunistic context-aware delivery) was theoretical and not field-validated; the field bugs all came from the silent-drop side. Cross-session coordination messages are low-volume and almost always "I want this person to see this now" - the value of conditional delivery is near zero.
+
+**Single-path contract (now).**
+1. Drain (any path) returns every queued message for the recipient and marks them all read.
+2. Scope is metadata. Renders inline. Doesn't filter.
+3. Sender gets a real "delivered on next drain" guarantee.
+4. Noise control belongs to `priority` and `ttl_seconds`, both sender-observable.
+
+**Rejected.**
+- Keeping R7.8's bypass flag and just documenting the two paths better - the documentation can't paper over the underlying contract failure. If the sender can't predict delivery, no amount of doc warning fixes it.
+- Always-deliver-eventually with a TTL "give up after X minutes" - more state to track and a worse user model. Better to deliver immediately and let TTL handle obsolescence.
+- Promoting scope to a sender-side priority signal (e.g. "low priority unless context matches") - same problem in a hat.
+- Removing `MessageScope` entirely from the type - unnecessary; the metadata is harmless and useful. Keeping it as a label preserves senders' ability to communicate context without forcing recipients into conditional delivery.
+
+**Doc updates.**
+- `CLAUDE.md` Cross-Session Coordination section rewritten: single-path contract, scope as label, noise via priority/ttl.
+- `ARCHITECTURE.md` `session_messages` table description and `send_message`/`read_messages` tool rows rewritten.
+- DECISIONS.md R7.5 and R7.8 entries kept as historical record (don't rewrite history; this entry replaces them functionally).
+
+**Test changes.** Removed: 7 tests for R7.5 scope filtering (deferred-not-delivered, code_ref match, task_contains match, any-match, deferred unread, etc.) + 4 R7.8 bypass tests. Replaced with: 3 R7.9 tests (scoped messages always deliver, idempotent re-drain, malformed JSON delivers as unscoped). Integration test rewritten: PostToolUse on unrelated file STILL delivers + explicit read works without auto-drain. Total: 441 tests / 0 fail (was 449 with the deleted scope-filter tests).
+
+**Stale notes (will close after ship).** This work resolves work_item `be30d33d` (already closed in R7.8, still correct). Convention note `1f5a...` (the two-path delivery contract) becomes stale immediately - need to update to "single-path delivery contract" pointing at this entry.
+
+**Shipped:** v0.28.4.
+
+---
+
 ## 2026-04-30 - R7.8 Explicit read_messages bypasses scope filter
 
 **Change.** `handleReadMessages` (`mcp/tools/messaging.ts`) now calls `engineDrain` with `{ bypassScope: true }`. New flag added to `DrainContext` in `mcp/engine/messaging.ts`; when set, messages with non-matching scopes are still delivered. Default `bypassScope: false` preserves R7.5 auto-drain semantics on the PostToolUse / UserPromptSubmit path.

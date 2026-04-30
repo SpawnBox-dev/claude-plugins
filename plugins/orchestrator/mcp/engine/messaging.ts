@@ -191,42 +191,33 @@ export function peekInbox(db: Database, sessionId: string): PeekResult {
   return { count: 0 };
 }
 
+// R7.9: DrainContext kept as a placeholder (currently no fields used) to
+// preserve the engine call signature for future context-aware features.
+// R7.5/R7.8 scope filtering was removed - see DECISIONS.md R7.9 for full
+// rationale. Short version: "delivered" must mean "delivered". Conditional
+// delivery based on recipient context the sender can't see is a footgun.
+// `MessageScope` survives as a display label rendered inline so recipients
+// understand the sender's intent, but it never gates delivery.
 export interface DrainContext {
-  /** Recipient's currently-edited file path, if any. Used to match scope.code_ref. */
-  currentFilePath?: string;
-  /** Recipient's current_task string, if any. Used to substring-match scope.task_contains. */
-  currentTask?: string;
-  /**
-   * R7.8: when true, scope filtering is skipped and ALL pending messages
-   * deliver. Use only for explicit user-driven reads (`read_messages` tool)
-   * where the intent is "show me everything queued" - not for the auto-drain
-   * path on PostToolUse/UserPromptSubmit, where opportunistic context-aware
-   * delivery is the whole point.
-   */
-  bypassScope?: boolean;
+  /** Reserved for future use. R7.9 dropped scope-based filtering entirely. */
+  _reserved?: never;
 }
 
 /**
- * Drain inbox with optional scope filtering. Messages whose scope matches
- * the recipient's context are delivered and marked read; messages whose
- * scope does NOT match are LEFT UNREAD - they'll be eligible for delivery
- * on a future call where the context matches. Unscoped messages always
- * deliver.
+ * Drain inbox: returns every queued message for the recipient and marks
+ * them all read. Single-path delivery contract (R7.9): no filtering, no
+ * deferral, no opportunistic-vs-explicit split. The `context` parameter is
+ * accepted for API stability but unused.
  *
- * Match rules (R7.5):
- * - scope.code_ref: matches if `currentFilePath` contains scope.code_ref
- *   as a substring. Allows file (`src/foo.ts`) or directory (`src/foo/`)
- *   breadcrumbs to match nested paths the recipient is editing.
- * - scope.task_contains: matches if `currentTask` contains the substring
- *   (case-insensitive).
- * - Both fields present: any-match (OR), so a message tagged with both is
- *   delivered when either matches the recipient's context.
- * - Neither field present (scope = null): always delivers (unscoped).
+ * Scope (`MessageScope.code_ref` / `task_contains`) is preserved on the
+ * returned message and rendered as a display label inline ("[scoped to ...]")
+ * so the recipient understands the context the sender had in mind. It does
+ * NOT affect delivery.
  */
 export function drainInbox(
   db: Database,
   sessionId: string,
-  context?: DrainContext
+  _context?: DrainContext
 ): SessionMessage[] {
   const ts = now();
   const rows = db
@@ -260,82 +251,41 @@ export function drainInbox(
     return [];
   }
 
-  // R7.5: split into eligible (matches scope or has none) vs deferred
-  // (scoped but no match in current context). Mark only eligible as read.
-  // Pre-parse scope once; malformed JSON is treated as unscoped (no get-stuck).
-  type EligibleRow = (typeof rows)[number] & { parsedScope: MessageScope | null };
-  const eligible: EligibleRow[] = [];
-  let deferred = 0;
-  for (const r of rows) {
-    let parsedScope: MessageScope | null = null;
-    if (r.scope) {
-      try {
-        parsedScope = JSON.parse(r.scope) as MessageScope;
-      } catch {
-        // Malformed scope - treat as unscoped to avoid getting stuck.
-        parsedScope = null;
-      }
-    }
-    if (
-      parsedScope === null ||
-      context?.bypassScope ||
-      matchesScope(parsedScope, context)
-    ) {
-      eligible.push({ ...r, parsedScope });
-    } else {
-      deferred++;
-    }
-  }
-
-  if (eligible.length === 0) {
-    // Everything was deferred. Don't write 0 to the counter - we still have
-    // pending messages, just none for this context. Set to deferred count
-    // so future polls in matching contexts will trigger drain.
-    inboxCounters.set(sessionId, deferred);
-    return [];
-  }
-
   const insertRead = db.prepare(
     `INSERT OR IGNORE INTO session_message_reads (msg_id, session_id, read_at) VALUES (?, ?, ?)`
   );
   db.run("BEGIN");
   try {
-    for (const row of eligible) insertRead.run(row.id, sessionId, ts);
+    for (const row of rows) insertRead.run(row.id, sessionId, ts);
     db.run("COMMIT");
   } catch (err) {
     db.run("ROLLBACK");
     throw err;
   }
 
-  // Counter reflects what's still pending after this drain.
-  inboxCounters.set(sessionId, deferred);
+  inboxCounters.set(sessionId, 0);
 
-  return eligible.map((r) => ({
-    id: r.id,
-    from_session: r.from_session,
-    to_session: r.to_session,
-    scope: r.parsedScope,
-    body: r.body,
-    priority: r.priority as MessagePriority,
-    created_at: r.created_at,
-    expires_at: r.expires_at,
-  }));
-}
-
-function matchesScope(scope: MessageScope, context?: DrainContext): boolean {
-  // Empty scope object (no filterable fields) - treat as unscoped.
-  if (!scope.code_ref && !scope.task_contains) return true;
-  // No context provided - scoped messages can't match anything.
-  if (!context) return false;
-  if (scope.code_ref && context.currentFilePath) {
-    if (context.currentFilePath.includes(scope.code_ref)) return true;
-  }
-  if (scope.task_contains && context.currentTask) {
-    if (context.currentTask.toLowerCase().includes(scope.task_contains.toLowerCase())) {
-      return true;
+  return rows.map((r) => {
+    let parsedScope: MessageScope | null = null;
+    if (r.scope) {
+      try {
+        parsedScope = JSON.parse(r.scope) as MessageScope;
+      } catch {
+        // Malformed scope JSON -> drop the label gracefully.
+        parsedScope = null;
+      }
     }
-  }
-  return false;
+    return {
+      id: r.id,
+      from_session: r.from_session,
+      to_session: r.to_session,
+      scope: parsedScope,
+      body: r.body,
+      priority: r.priority as MessagePriority,
+      created_at: r.created_at,
+      expires_at: r.expires_at,
+    };
+  });
 }
 
 // Test-only: reset module state between tests so the counter map doesn't

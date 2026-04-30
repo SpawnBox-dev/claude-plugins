@@ -115,7 +115,7 @@ describe("cross-session messaging integration", () => {
     expect(r1.additionalContext).toBeUndefined();
   });
 
-  test("PostToolUse delivers a scoped message when file_path matches scope.code_ref (R7.5)", () => {
+  test("R7.9: PostToolUse delivers a scoped message and renders the scope label", () => {
     const { db, tracker } = freshSetup();
     tracker.registerSession("E");
     tracker.registerSession("Sender");
@@ -126,8 +126,9 @@ describe("cross-session messaging integration", () => {
       scope: { code_ref: "src/foo.ts" },
     });
 
-    // R7.5: scoped delivery requires matching context. The PostToolUse
-    // dispatcher passes file_path through as drain context.
+    // R7.9: every drain delivers every queued message regardless of which
+    // file the recipient is touching. The scope is preserved as a display
+    // label so the recipient understands the sender's intent.
     const result = handleHookEvent(
       { db, tracker },
       {
@@ -142,7 +143,10 @@ describe("cross-session messaging integration", () => {
     expect(result.additionalContext).toContain("scoped to src/foo.ts");
   });
 
-  test("PostToolUse on unrelated file does NOT deliver a scoped message (R7.5)", () => {
+  test("R7.9: PostToolUse on unrelated file STILL delivers scoped messages", () => {
+    // Regression guard: pre-R7.9 this test asserted non-delivery (scope as
+    // filter). R7.9 collapsed to single-path delivery - scope is metadata,
+    // not a gate. This test pins the new contract.
     const { db, tracker } = freshSetup();
     tracker.registerSession("E2");
     tracker.registerSession("Sender2");
@@ -163,8 +167,8 @@ describe("cross-session messaging integration", () => {
       }
     );
 
-    // Message stays queued; not delivered.
-    expect(result.additionalContext).toBeUndefined();
+    expect(result.additionalContext).toContain("scoped to api");
+    expect(result.additionalContext).toContain("scoped to src/api.ts");
   });
 
   test("PostToolUse fast path delivers pending direct message", () => {
@@ -183,12 +187,11 @@ describe("cross-session messaging integration", () => {
     expect(result.additionalContext).toContain("HIGH");
   });
 
-  test("R7.8: handleReadMessages surfaces scoped messages even with no context", () => {
-    // The exact field bug from work_item be30d33d. Sender sets scope_code_ref;
-    // recipient never touches that path. Pre-R7.8 the auto-drain path
-    // deferred them (correct), but the recipient's explicit `read_messages`
-    // call ALSO deferred them via the same scope filter (wrong - explicit
-    // read should bypass). Result: "Inbox empty" while messages are queued.
+  test("R7.9: scoped messages deliver on any drain path (auto and explicit)", () => {
+    // The R7.5/R7.8 two-path system was rolled back in R7.9: scope is a
+    // display label only. Both auto-drain (PostToolUse) and explicit
+    // `read_messages` MUST deliver every queued message regardless of
+    // recipient context.
     const { db, tracker } = freshSetup();
     tracker.registerSession("Sender");
     tracker.registerSession("Bot");
@@ -200,7 +203,7 @@ describe("cross-session messaging integration", () => {
       scope: { code_ref: "plugins/orchestrator/skills/triage.md" },
     });
 
-    // Auto-drain on a turn that doesn't touch the scoped path: deferred.
+    // Auto-drain on a turn that doesn't touch the scoped path: still delivers.
     const auto = handleHookEvent(
       { db, tracker },
       {
@@ -210,11 +213,30 @@ describe("cross-session messaging integration", () => {
         payload: { file_path: "/some/other/file.ts" },
       }
     );
-    expect(auto.additionalContext).toBeUndefined();
+    expect(auto.additionalContext).toContain("skill text fix shipped");
+    // Scope label still renders inline for sender-intent context.
+    expect(auto.additionalContext).toContain("plugins/orchestrator/skills/triage.md");
 
-    // Explicit read: must surface the scoped message.
+    // Explicit read after the auto-drain consumed it: inbox empty.
     const result = handleReadMessages(db, { session_id: "Bot" });
-    expect(result).toContain("skill text fix shipped");
+    expect(result).toBe("Inbox empty.");
+  });
+
+  test("R7.9: explicit read surfaces scoped messages when auto-drain hasn't fired", () => {
+    const { db, tracker } = freshSetup();
+    tracker.registerSession("Sender");
+    tracker.registerSession("Bot");
+
+    sendMessage(db, {
+      from_session: "Sender",
+      to_session: "Bot",
+      body: "scoped without auto-drain",
+      scope: { code_ref: "plugins/orchestrator/skills/triage.md" },
+    });
+
+    // No auto-drain happened. Explicit read should surface the scoped message.
+    const result = handleReadMessages(db, { session_id: "Bot" });
+    expect(result).toContain("scoped without auto-drain");
     expect(result).not.toBe("Inbox empty.");
   });
 });

@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { peekInbox, drainInbox, type DrainContext } from "../engine/messaging";
+import { peekInbox, drainInbox } from "../engine/messaging";
 import type { SessionTracker } from "../engine/session_tracker";
 import { now } from "../utils";
 
@@ -167,15 +167,10 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
 
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
   const userPrompt = (args.payload?.user_prompt as string | undefined) ?? "";
-  // R7.5: scope-filtering drain context. UserPromptSubmit doesn't know which
-  // file the agent will edit next, so currentFilePath is omitted. We do
-  // pass current_task so task_contains-scoped messages route to the right
-  // session at turn boundary.
-  const sessionRow = ctx.tracker.getSession(args.session_id);
-  const drainCtx: DrainContext = {
-    currentTask: sessionRow?.current_task ?? undefined,
-  };
-  const messages = drainIfPending(ctx, args.session_id, drainCtx);
+  // R7.9: drain delivers everything queued. Scope is a display label, not a
+  // delivery filter. Context object kept around for forward-compat in case a
+  // future feature wants context-aware ordering or rendering.
+  const messages = drainIfPending(ctx, args.session_id);
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
 
@@ -262,14 +257,9 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
 
   // Densest delivery surface. O(1) fast path via in-memory counter.
-  // R7.5: pass file_path + current_task so scoped messages route correctly.
-  const filePath = args.payload?.file_path as string | undefined;
-  const sessionRow = ctx.tracker.getSession(args.session_id);
-  const drainCtx: DrainContext = {
-    currentFilePath: filePath,
-    currentTask: sessionRow?.current_task ?? undefined,
-  };
-  const messages = drainIfPending(ctx, args.session_id, drainCtx);
+  // R7.9: every queued message delivers regardless of file path or task -
+  // single-path delivery contract. Scope is a display label, not a filter.
+  const messages = drainIfPending(ctx, args.session_id);
 
   const parts: string[] = [];
   if (driftNudge) parts.push(driftNudge);
@@ -536,14 +526,10 @@ function handleTaskCompleted(_ctx: HookCtx, args: HookEventArgs): HookEventRespo
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function drainIfPending(
-  ctx: HookCtx,
-  sessionId: string,
-  drainContext?: DrainContext
-): string {
+function drainIfPending(ctx: HookCtx, sessionId: string): string {
   const peek = peekInbox(ctx.db, sessionId);
   if (peek.count === 0) return "";
-  const msgs = drainInbox(ctx.db, sessionId, drainContext);
+  const msgs = drainInbox(ctx.db, sessionId);
   if (msgs.length === 0) return "";
   const lines = msgs.map((m) => {
     const tag = m.priority === "high" ? "[HIGH]" : m.priority === "low" ? "[low]" : "•";
