@@ -8,6 +8,7 @@ import {
   loadInboxCounters,
   _resetMessagingForTest,
 } from "../../mcp/engine/messaging";
+import { handleReadMessages } from "../../mcp/tools/messaging";
 
 beforeEach(() => _resetMessagingForTest());
 
@@ -180,5 +181,40 @@ describe("cross-session messaging integration", () => {
 
     expect(result.additionalContext).toContain("ping");
     expect(result.additionalContext).toContain("HIGH");
+  });
+
+  test("R7.8: handleReadMessages surfaces scoped messages even with no context", () => {
+    // The exact field bug from work_item be30d33d. Sender sets scope_code_ref;
+    // recipient never touches that path. Pre-R7.8 the auto-drain path
+    // deferred them (correct), but the recipient's explicit `read_messages`
+    // call ALSO deferred them via the same scope filter (wrong - explicit
+    // read should bypass). Result: "Inbox empty" while messages are queued.
+    const { db, tracker } = freshSetup();
+    tracker.registerSession("Sender");
+    tracker.registerSession("Bot");
+
+    sendMessage(db, {
+      from_session: "Sender",
+      to_session: "Bot",
+      body: "skill text fix shipped",
+      scope: { code_ref: "plugins/orchestrator/skills/triage.md" },
+    });
+
+    // Auto-drain on a turn that doesn't touch the scoped path: deferred.
+    const auto = handleHookEvent(
+      { db, tracker },
+      {
+        event: "PostToolUse",
+        session_id: "Bot",
+        tool_name: "Edit",
+        payload: { file_path: "/some/other/file.ts" },
+      }
+    );
+    expect(auto.additionalContext).toBeUndefined();
+
+    // Explicit read: must surface the scoped message.
+    const result = handleReadMessages(db, { session_id: "Bot" });
+    expect(result).toContain("skill text fix shipped");
+    expect(result).not.toBe("Inbox empty.");
   });
 });

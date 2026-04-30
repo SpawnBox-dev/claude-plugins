@@ -45,7 +45,13 @@ export interface ReadMessagesArgs {
 }
 
 export function handleReadMessages(db: Database, args: ReadMessagesArgs): string {
-  const msgs = engineDrain(db, args.session_id);
+  // R7.8: explicit read = "show me everything queued". Bypass scope filtering.
+  // The R7.5 scope filter is correct on the auto-drain path (PostToolUse /
+  // UserPromptSubmit) where context-aware opportunistic delivery is the whole
+  // point - but on a user-driven read with no available context, it would
+  // silently hide every scoped message and return "Inbox empty." Field-observed
+  // bug: see work_item be30d33d.
+  const msgs = engineDrain(db, args.session_id, { bypassScope: true });
   if (msgs.length === 0) return "Inbox empty.";
 
   const lines = msgs.map((m) => {

@@ -217,3 +217,88 @@ describe("R7.5 scope filtering", () => {
     // We don't expose it directly, but peekInbox returns it.
   });
 });
+
+describe("R7.8 bypassScope flag", () => {
+  test("bypassScope:true delivers scoped messages even with no matching context", () => {
+    // Field-observed bug: explicit `read_messages` from the bot called
+    // engineDrain with no context, R7.5's matchesScope returned false for
+    // every scoped message (no context can't match anything), inbox came
+    // back empty even though messages were queued. Explicit reads are
+    // user-driven "show me everything queued" - should bypass scope filter.
+    const db = freshDb();
+    sendMessage(db, {
+      from_session: "A",
+      to_session: "B",
+      body: "scoped",
+      scope: { code_ref: "src/foo.ts" },
+    });
+    sendMessage(db, { from_session: "A", to_session: "B", body: "unscoped" });
+
+    // Without bypass + without context: only unscoped delivers (R7.5 behavior).
+    const filtered = drainInbox(db, "B");
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].body).toBe("unscoped");
+
+    // bypassScope: scoped messages also deliver, even with no context.
+    const all = drainInbox(db, "B", { bypassScope: true });
+    expect(all).toHaveLength(1); // only the scoped one remains; unscoped already drained
+    expect(all[0].body).toBe("scoped");
+  });
+
+  test("bypassScope:true delivers scoped messages on a fresh inbox", () => {
+    const db = freshDb();
+    sendMessage(db, {
+      from_session: "A",
+      to_session: "B",
+      body: "code-scoped",
+      scope: { code_ref: "src/foo.ts" },
+    });
+    sendMessage(db, {
+      from_session: "A",
+      to_session: "B",
+      body: "task-scoped",
+      scope: { task_contains: "refactor" },
+    });
+    sendMessage(db, { from_session: "A", to_session: "B", body: "plain" });
+
+    // All three deliver via bypass, regardless of context.
+    const msgs = drainInbox(db, "B", { bypassScope: true });
+    expect(msgs).toHaveLength(3);
+    const bodies = msgs.map((m) => m.body).sort();
+    expect(bodies).toEqual(["code-scoped", "plain", "task-scoped"]);
+  });
+
+  test("bypassScope:true marks all delivered messages read (idempotent)", () => {
+    const db = freshDb();
+    sendMessage(db, {
+      from_session: "A",
+      to_session: "B",
+      body: "scoped",
+      scope: { code_ref: "src/foo.ts" },
+    });
+
+    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(1);
+    // Second bypass call: already marked read.
+    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(0);
+  });
+
+  test("bypassScope:false (default) preserves R7.5 deferral behavior", () => {
+    // Regression guard: opting out of bypass should leave the auto-drain path
+    // exactly as R7.5 documented it.
+    const db = freshDb();
+    sendMessage(db, {
+      from_session: "A",
+      to_session: "B",
+      body: "scoped",
+      scope: { code_ref: "src/foo.ts" },
+    });
+
+    // Auto-drain path: no bypass, no matching context => deferred.
+    expect(drainInbox(db, "B")).toHaveLength(0);
+    expect(drainInbox(db, "B", {})).toHaveLength(0);
+    expect(drainInbox(db, "B", { bypassScope: false })).toHaveLength(0);
+
+    // Now an explicit read with bypass surfaces it.
+    expect(drainInbox(db, "B", { bypassScope: true })).toHaveLength(1);
+  });
+});

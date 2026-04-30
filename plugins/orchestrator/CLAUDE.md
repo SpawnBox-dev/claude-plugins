@@ -75,6 +75,7 @@ When multiple Claude sessions run against the same project, you can see what sib
   - Unscoped messages always deliver.
   - Scoped messages without matching context stay queued; they deliver later when the recipient's context matches. They never expire (unless `ttl_seconds` is also set).
 - **Inbox is auto-drained**: PostToolUse hook delivers messages on every tool call (passing the touched file_path as scope context). UserPromptSubmit drains at turn boundary (passing recipient's current_task). Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
+- **Explicit `read_messages` bypasses scope filtering** (R7.8): when you call the `read_messages` tool directly (vs. waiting for auto-drain), every queued message delivers regardless of scope. Use this if you suspect a scoped message is queued but auto-drain hasn't surfaced it because your context never matched. Auto-drain on hook boundaries continues to honor scope filtering as the opportunistic context-aware path.
 
 Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6/R7/R7.5 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
 

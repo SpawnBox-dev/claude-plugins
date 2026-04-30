@@ -149,7 +149,7 @@ Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal
 | Tool | Purpose |
 |---|---|
 | `send_message` | Leave a direct message for another active session, or broadcast to all active siblings. Optional `scope_code_ref` / `scope_task_contains` for delivery filtering. Optional `priority` and `ttl_seconds`. |
-| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. Hooks call this automatically; agents rarely need to. |
+| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. Bypasses scope filtering (R7.8) - explicit user-driven reads return everything queued, unlike the auto-drain path which is context-aware. Hooks call the auto-drain path automatically; agents call this when they want to manually flush their inbox. |
 | `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task`). Sibling sessions see this in cross-session briefing AND in lightweight hook-time injections. |
 
 ### Admin

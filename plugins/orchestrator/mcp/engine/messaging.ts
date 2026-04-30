@@ -196,6 +196,14 @@ export interface DrainContext {
   currentFilePath?: string;
   /** Recipient's current_task string, if any. Used to substring-match scope.task_contains. */
   currentTask?: string;
+  /**
+   * R7.8: when true, scope filtering is skipped and ALL pending messages
+   * deliver. Use only for explicit user-driven reads (`read_messages` tool)
+   * where the intent is "show me everything queued" - not for the auto-drain
+   * path on PostToolUse/UserPromptSubmit, where opportunistic context-aware
+   * delivery is the whole point.
+   */
+  bypassScope?: boolean;
 }
 
 /**
@@ -268,7 +276,11 @@ export function drainInbox(
         parsedScope = null;
       }
     }
-    if (parsedScope === null || matchesScope(parsedScope, context)) {
+    if (
+      parsedScope === null ||
+      context?.bypassScope ||
+      matchesScope(parsedScope, context)
+    ) {
       eligible.push({ ...r, parsedScope });
     } else {
       deferred++;

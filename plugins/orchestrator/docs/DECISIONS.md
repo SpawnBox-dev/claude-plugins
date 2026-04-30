@@ -6,6 +6,30 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-04-30 - R7.8 Explicit read_messages bypasses scope filter
+
+**Change.** `handleReadMessages` (`mcp/tools/messaging.ts`) now calls `engineDrain` with `{ bypassScope: true }`. New flag added to `DrainContext` in `mcp/engine/messaging.ts`; when set, messages with non-matching scopes are still delivered. Default `bypassScope: false` preserves R7.5 auto-drain semantics on the PostToolUse / UserPromptSubmit path.
+
+**Why.** Field bug from work_item `be30d33d` (sessions 38efb838 -> 46673070, 2026-04-30): sender called `send_message` with `scope_code_ref` set; recipient never edited that path. R7.5's auto-drain correctly deferred them. But when the recipient called `read_messages` directly to manually inspect its inbox, that tool ALSO called `drainInbox` with no context - and R7.5's `matchesScope` returns false when context is undefined. Result: every scoped message was deferred AGAIN on explicit read, the tool returned "Inbox empty.", and the bot had no path to ever see scoped messages without somehow editing the matching file path first.
+
+That's a contract violation. Auto-drain on hook boundaries is opportunistic and context-aware (correct). Explicit user-driven `read_messages` is "show me everything queued" (was broken). The fix lets the two paths diverge cleanly without compromising either.
+
+**Rejected.**
+- Removing scope filtering entirely (revert R7.5) - the auto-drain context-aware path is genuinely useful and was implemented intentionally per docs that always promised it. Removing it loses real signal.
+- Threading `tracker` into `handleReadMessages` so it can pass the recipient's `current_task` as context - solves task_contains-scoped messages but not code_ref-scoped ones (no current file_path on an explicit read), and makes the tool surface more complex for no benefit. Bypass is the cleaner contract.
+- Promoting bypass to a sender-side `force_deliver` flag - puts the lever on the wrong side of the conversation. The recipient knows when they're doing a manual inbox sweep; the sender can't predict it.
+- New separate `flush_inbox` tool - splits a coherent capability across two tools. One tool with a documented behavior is simpler than two tools with overlapping behavior.
+
+**Doc updates.** `CLAUDE.md` line about auto-drain extended with an R7.8 paragraph clarifying the explicit-read bypass. `ARCHITECTURE.md` `read_messages` row updated to mention bypass and the auto-drain vs. explicit-read distinction.
+
+**Test additions:** 4 new unit tests in `tests/engine/messaging.test.ts` (R7.8 bypassScope flag: bypass delivers without context, bypass delivers all scoped types on a fresh inbox, bypass marks read idempotently, bypass:false preserves R7.5 deferral). 1 integration test in `tests/integration/cross_session_messaging.test.ts` reproducing the exact field scenario (auto-drain defers, explicit read surfaces). Total: 449 tests, 0 fail (was 444 + 5).
+
+**Stale notes flagged for closure** (separate maintenance pass): `e4675e9c` (open_thread, "scope filters are display labels only") - was correct pre-R7.5, now stale post-R7.5+R7.8. `61deff24` (anti_pattern, "scope_code_ref silently drops messages") - root cause now fixed; the silent-drop is no longer the explicit-read path. Both should be `close_thread`/`update_note`'d to point at this entry.
+
+**Shipped:** v0.28.3.
+
+---
+
 ## 2026-04-30 - R7.7 Suppress Stop block during /compact
 
 **Change.** A real spawnbox session (46673070) ran `/compact` and saw both the PreCompact `systemMessage` ("capture knowledge NOW...") AND the Stop hook fire and BLOCK with the full housekeeping prompt ("Before ending: complete orchestrator housekeeping... 27 fresh notes surfaced...") on the same boundary. Jarid pasted it as a field error. Two problems: (a) redundant capture prompts back-to-back at exactly the moment context is most fragile, (b) `decision: "block"` from Stop derails the compact flow with a "Stop hook error" surface.
