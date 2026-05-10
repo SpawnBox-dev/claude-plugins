@@ -267,7 +267,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.2",
+    version: "0.29.3",
   },
   {
     capabilities: {
@@ -388,6 +388,8 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
+    lines.push(`- **Version**: orchestrator MCP server **0.29.3** (pid ${process.pid})`);
+    lines.push(`- **Agent-channel**: ${agentChannel ? "ACTIVE - filewatcher running" : "INACTIVE - check stderr for 'agent-channel:' startup line"}`);
     lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
 
     if (sidecarStatus === "ready") {
@@ -1843,26 +1845,37 @@ function startAgentChannel(): void {
 
   const stateDir = join(projectDir, ".orchestrator-state", "agent-channel");
 
-  agentChannel = new AgentChannel(
-    stateDir,
-    projectsHashDir,
-    self,
-    (notif) => {
-      // The MCP SDK's high-level McpServer wraps a low-level Server at
-      // server.server. notification() goes via the underlying transport.
-      void server.server.notification({
-        method: "notifications/claude/channel",
-        params: {
-          content: notif.content,
-          meta: notif.meta,
-        },
-      });
-    },
-  );
-  agentChannel.start();
-  process.stderr.write(
-    `agent-channel: started as ${role} (${self.id8}, name=${name})\n`,
-  );
+  try {
+    agentChannel = new AgentChannel(
+      stateDir,
+      projectsHashDir,
+      self,
+      (notif) => {
+        // The MCP SDK's high-level McpServer wraps a low-level Server at
+        // server.server. notification() goes via the underlying transport.
+        void server.server.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: notif.content,
+            meta: notif.meta,
+          },
+        });
+      },
+    );
+    agentChannel.start();
+    process.stderr.write(
+      `agent-channel: started as ${role} session_id=${sessionId} ` +
+        `id8=${self.id8} name=${name} state_dir=${stateDir} ` +
+        `projects_hash_dir=${projectsHashDir}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `agent-channel: FAILED TO START - ${err instanceof Error ? err.message : String(err)}\n` +
+        `  state_dir=${stateDir}\n` +
+        `  projects_hash_dir=${projectsHashDir}\n` +
+        `  session_id=${sessionId}\n`,
+    );
+  }
 }
 
 // Stop agent-channel cleanly on stdin close (Claude Code closes the MCP
@@ -1877,6 +1890,17 @@ process.stdin.on("close", () => {
 
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
+  // Startup version banner. Goes to stderr (which Claude Code captures into
+  // the plugin log). Makes "is the new version actually running?" trivially
+  // answerable without inferring from rendering changes.
+  process.stderr.write(
+    `[orchestrator] MCP server starting - version=0.29.3 ` +
+      `pid=${process.pid} ` +
+      `session_id=${resolveSessionId() ?? "<none>"} ` +
+      `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
+      `role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}\n`,
+  );
+
   // Initialize session tracker and clean up stale sessions
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
