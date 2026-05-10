@@ -1,12 +1,9 @@
-import { describe, expect, test, beforeEach } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { SessionTracker } from "../../mcp/engine/session_tracker";
 import { handleHookEvent } from "../../mcp/tools/hook_event";
-import { _resetMessagingForTest } from "../../mcp/engine/messaging";
 import { now } from "../../mcp/utils";
-
-beforeEach(() => _resetMessagingForTest());
 
 function freshSetup(): { db: Database; tracker: SessionTracker } {
   const db = new Database(":memory:");
@@ -602,7 +599,8 @@ describe("hook_event dispatcher", () => {
         }
       );
       expect(r.additionalContext).toContain("POTENTIAL OVERLAP");
-      expect(r.additionalContext).toContain("send_message");
+      // 0.29.0: send_message removed; coordinate via @SA-<id8> in terminal output.
+      expect(r.additionalContext).toContain("@SA-<id8>");
     });
 
     test("no keyword overlap -> sibling listed without overlap marker", () => {

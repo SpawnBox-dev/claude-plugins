@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
-import { peekInbox, drainInbox } from "../engine/messaging";
 import type { SessionTracker } from "../engine/session_tracker";
 import { now } from "../utils";
+
+// R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
+// Cross-session communication is now via agent-channel notifications -
+// recipients see <channel ...> tags inline, no hook drain required.
 
 // R7.5: defense-in-depth sanitization on session_id values used as
 // plugin_state key suffixes. The bash session-start regex-validates the
@@ -167,10 +170,6 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
 
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
   const userPrompt = (args.payload?.user_prompt as string | undefined) ?? "";
-  // R7.9: drain delivers everything queued. Scope is a display label, not a
-  // delivery filter. Context object kept around for forward-compat in case a
-  // future feature wants context-aware ordering or rendering.
-  const messages = drainIfPending(ctx, args.session_id);
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
 
@@ -181,7 +180,6 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   if (bridge) parts.push(`Last turn bridge: ${bridge}`);
   if (siblingLine) parts.push(siblingLine);
   if (loopClose) parts.push(loopClose);
-  if (messages) parts.push(messages);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -256,14 +254,8 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   // can update its content/status if scope shifted. Once per session+work_item.
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
 
-  // Densest delivery surface. O(1) fast path via in-memory counter.
-  // R7.9: every queued message delivers regardless of file path or task -
-  // single-path delivery contract. Scope is a display label, not a filter.
-  const messages = drainIfPending(ctx, args.session_id);
-
   const parts: string[] = [];
   if (driftNudge) parts.push(driftNudge);
-  if (messages) parts.push(messages);
 
   if (parts.length === 0) return {};
   return { additionalContext: parts.join("\n\n") };
@@ -526,36 +518,18 @@ function handleTaskCompleted(_ctx: HookCtx, args: HookEventArgs): HookEventRespo
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function drainIfPending(ctx: HookCtx, sessionId: string): string {
-  const peek = peekInbox(ctx.db, sessionId);
-  if (peek.count === 0) return "";
-  const msgs = drainInbox(ctx.db, sessionId);
-  if (msgs.length === 0) return "";
-  const lines = msgs.map((m) => {
-    const tag = m.priority === "high" ? "[HIGH]" : m.priority === "low" ? "[low]" : "•";
-    const where = m.to_session ? "direct" : "broadcast";
-    const scopeStr = m.scope?.code_ref
-      ? ` {scoped to ${m.scope.code_ref}}`
-      : m.scope?.task_contains
-        ? ` {scoped to task~${m.scope.task_contains}}`
-        : "";
-    return `${tag} [${where} from ${m.from_session.slice(0, 8)}]${scopeStr}: ${m.body}`;
-  });
-  return `### Inter-session messages (${msgs.length})\n${lines.join("\n")}`;
-}
-
 function renderSiblingActivity(
   ctx: HookCtx,
   sessionId: string,
-  userPrompt: string
+  userPrompt: string,
 ): string {
   const sibs = ctx.tracker.getActiveSiblings(sessionId);
   if (sibs.length === 0) return "";
 
   // R7 overlap detection: if the user's prompt and any sibling's current_task
   // share meaningful keywords, flag potential overlap so the agent
-  // proactively coordinates via send_message instead of stomping on parallel
-  // work. "When it matters" - shown only when the signal is actually present.
+  // proactively coordinates via the agent-channel (@SA-<id8>) instead of
+  // stomping on parallel work.
   const promptKeywords = extractMeaningfulKeywords(userPrompt);
   const overlapping: typeof sibs = [];
   for (const s of sibs) {
@@ -565,18 +539,24 @@ function renderSiblingActivity(
     if (shared.length >= 2) overlapping.push(s);
   }
 
+  // 0.29.0: show FULL session_id (not 8-char prefix). Prior behavior
+  // truncated to slice(0, 8) which made the displayed id useless for any
+  // tooling that needed the canonical session_id (e.g. addressing peers via
+  // @SA-<id8>, looking up in sessions.json). Show the full UUID; agent can
+  // visually pick out the prefix for readability.
   const lines = sibs.map((s) => {
-    const id = s.session_id.slice(0, 8);
     const isOverlap = overlapping.some((o) => o.session_id === s.session_id);
     const marker = isOverlap ? " *POTENTIAL OVERLAP*" : "";
-    const task = s.current_task ? `: ${s.current_task.slice(0, 80)}` : ": (no task set)";
-    return `  - ${id}${marker}${task}`;
+    const task = s.current_task
+      ? `: ${s.current_task.slice(0, 80)}`
+      : ": (no task set)";
+    return `  - ${s.session_id}${marker}${task}`;
   });
 
   let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:\n${lines.join("\n")}`;
   if (overlapping.length > 0) {
-    const ids = overlapping.map((o) => o.session_id.slice(0, 8)).join(", ");
-    block += `\n  -> Coordinate with ${ids} via send_message BEFORE starting work in their area. Shared scope is the most common cause of merge conflicts and contradictory decisions across sessions.`;
+    const ids = overlapping.map((o) => o.session_id).join(", ");
+    block += `\n  -> Coordinate with ${ids} via @SA-<id8> in your terminal output BEFORE starting work in their area. Shared scope is the most common cause of merge conflicts and contradictory decisions across sessions.`;
   }
   return block;
 }

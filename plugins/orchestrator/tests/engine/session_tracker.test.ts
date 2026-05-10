@@ -71,12 +71,6 @@ describe("SessionTracker", () => {
     expect(logs.length).toBe(0);
   });
 
-  test("setConciergeAgentId and getConciergeAgentId", () => {
-    tracker.registerSession("sess-1");
-    tracker.setConciergeAgentId("sess-1", "agent-abc123");
-    expect(tracker.getConciergeAgentId("sess-1")).toBe("agent-abc123");
-  });
-
   test("getCrossSessionUpdates surfaces notes from other active sessions", () => {
     const ts = new Date().toISOString();
 

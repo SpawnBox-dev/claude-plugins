@@ -449,24 +449,11 @@ export class SessionTracker {
     };
   }
 
-  /** Set the concierge agent ID for a session. */
-  setConciergeAgentId(sessionId: string, agentId: string): void {
-    this.db.run(
-      `UPDATE session_registry SET concierge_agent_id = ? WHERE session_id = ?`,
-      [agentId, sessionId]
-    );
-  }
-
-  /** Get the concierge agent ID for a session, or null if not set. */
-  getConciergeAgentId(sessionId: string): string | null {
-    const row = this.db
-      .query(
-        `SELECT concierge_agent_id FROM session_registry WHERE session_id = ?`
-      )
-      .get(sessionId) as { concierge_agent_id: string | null } | null;
-
-    return row?.concierge_agent_id ?? null;
-  }
+  // 0.29.0: setConciergeAgentId / getConciergeAgentId removed.
+  // The Sonnet concierge subagent pattern is gone, replaced by the
+  // PrimeAgent (PA) model. The concierge_agent_id column on session_registry
+  // is kept for now (not dropped) to avoid a migration; future cleanup can
+  // remove it once we're sure no project's DB needs the column.
 
   /**
    * Time-based cleanup:
