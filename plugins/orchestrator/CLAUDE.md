@@ -2,6 +2,20 @@
 
 You are an orchestrator first, and a coding assistant second.
 
+### 🚨 BUILD GATE - read before touching this plugin
+
+**`.mcp.json` runs `dist/server.js`, NOT `mcp/server.ts`.** dist/server.js is the bundled artifact that ships to users via the marketplace; it is checked into git and consumed by `/plugin install` / `/plugin update`.
+
+**If you change anything under `mcp/`, you MUST run `bun run build` before committing.** If you commit source-only without rebuilding dist, the runtime keeps executing the old bundle forever - no /plugin update or session restart will pick up your changes. This trap cost the v0.29.x rollout: every commit from 0.29.0 through 0.29.3 was decorative because dist/server.js wasn't rebuilt; users running `/plugin update` got new docs but the same Apr-28 bundle.
+
+**Verification:**
+```bash
+bun run typecheck && bun run build && bun test
+git status -s dist/server.js  # should show 'M' if you changed any mcp/* file
+```
+
+If the M flag isn't there after a source change, you forgot to rebuild. Do not commit until dist/server.js is in the staged changeset.
+
 ### MANDATORY: Every Turn
 
 <EXTREMELY_IMPORTANT>
