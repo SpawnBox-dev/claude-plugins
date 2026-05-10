@@ -34,6 +34,9 @@ import {
   handleUpdateSessionTask,
 } from "./tools/messaging";
 import { handleHookEvent, buildHookEnvelope, type HookEvent } from "./tools/hook_event";
+import { AgentChannel } from "./engine/agent_channel";
+import type { SessionEntry } from "./engine/agent_channel_state";
+import { homedir } from "node:os";
 
 // ── Session ID fallback ─────────────────────────────────────────────────
 //
@@ -266,10 +269,41 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
 
-const server = new McpServer({
-  name: "orchestrator",
-  version: "0.21.1",
-});
+const server = new McpServer(
+  {
+    name: "orchestrator",
+    version: "0.21.1",
+  },
+  {
+    capabilities: {
+      tools: {},
+      experimental: {
+        // Real-time channel notifications. Used by the agent-channel
+        // subsystem (mcp/engine/agent_channel.ts) to deliver inline
+        // <channel ...>content</channel> events for cross-session chat.
+        // Same primitive the official Discord plugin uses.
+        "claude/channel": {},
+      },
+    },
+    instructions: [
+      "Cross-session events arrive as <channel source=\"agent-channel\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed.",
+      "",
+      "Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form \"PA, ...\" or \"PrimeAgent, ...\" also addresses PA.",
+      "",
+      "If you are a subordinate (role=subordinate), treat PA-addressed messages as if Jarid said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
+      "",
+      "If you are PA (role=prime), you observe every event in the project by default. Address SAs to coordinate them. Use note() and create_work_item() to record orchestrator-plugin improvements you discover - tag with `agent-channel-improvement, area:orchestrator-plugin`.",
+      "",
+      "Override controls:",
+      "- /pa-pause in an SA terminal: that SA stops obeying PA until /pa-resume.",
+      "- /pa-pause in PA terminal: PA stands down across all SAs (global pause).",
+      "- /pa-takeover in a new PA window: forcibly claims primacy from a previous PA.",
+      "- Natural-language equivalents recognized: \"PA, back off / stand down / take five / pause\" and \"PA, come back in / resume\".",
+      "",
+      "During pause, PA still receives all events (so it stays informed) but does not respond, address SAs, or write directives. Events arriving during pause are tagged `pa_global_pause=\"true\"` or `sa_paused=\"true\"`.",
+    ].join("\n"),
+  },
+);
 
 // ── briefing ────────────────────────────────────────────────────────────
 server.tool(
@@ -1832,6 +1866,81 @@ function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, ti
   return results;
 }
 
+// ── Agent-channel filewatcher ────────────────────────────────────────────
+let agentChannel: AgentChannel | null = null;
+
+function startAgentChannel(): void {
+  const sessionId = resolveSessionId();
+  if (!sessionId) {
+    process.stderr.write(
+      "agent-channel: no session_id resolvable; channel disabled\n",
+    );
+    return;
+  }
+
+  const projectDir = process.env.CLAUDE_PROJECT_DIR;
+  if (!projectDir) {
+    process.stderr.write(
+      "agent-channel: CLAUDE_PROJECT_DIR unset; channel disabled\n",
+    );
+    return;
+  }
+
+  // Project hash dir under ~/.claude/projects/. Hash mirrors how Claude Code
+  // names the per-project directory: replace path separators + drive colons
+  // with hyphens, leading hyphens trimmed.
+  const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+  const projectsHashDir = join(homedir(), ".claude", "projects", projectHash);
+
+  const role: "prime" | "subordinate" =
+    process.env.SPAWNBOX_AGENT_ROLE === "prime" ? "prime" : "subordinate";
+  const name =
+    process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
+
+  const self: SessionEntry = {
+    session_id: sessionId,
+    id8: sessionId.slice(0, 8),
+    role,
+    name,
+    started_at: new Date().toISOString(),
+    last_heartbeat_at: new Date().toISOString(),
+    current_task: null,
+  };
+
+  const stateDir = join(projectDir, ".orchestrator-state", "agent-channel");
+
+  agentChannel = new AgentChannel(
+    stateDir,
+    projectsHashDir,
+    self,
+    (notif) => {
+      // The MCP SDK's high-level McpServer wraps a low-level Server at
+      // server.server. notification() goes via the underlying transport.
+      void server.server.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: notif.content,
+          meta: notif.meta,
+        },
+      });
+    },
+  );
+  agentChannel.start();
+  process.stderr.write(
+    `agent-channel: started as ${role} (${self.id8}, name=${name})\n`,
+  );
+}
+
+// Stop agent-channel cleanly on stdin close (Claude Code closes the MCP
+// connection by closing stdin). Without this, sessions.json would retain a
+// dangling entry until stale-cleanup reaped it after 90s.
+process.stdin.on("end", () => {
+  if (agentChannel) agentChannel.stop();
+});
+process.stdin.on("close", () => {
+  if (agentChannel) agentChannel.stop();
+});
+
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
   // Initialize session tracker and clean up stale sessions
@@ -1841,6 +1950,9 @@ async function main() {
   // R6: prime the in-memory inbox counter map so peekInbox in the hook
   // dispatcher can answer in O(1) without touching the DB on idle turns.
   loadInboxCounters(getProjectDb());
+
+  // Start agent-channel filewatcher (no-ops if env not set)
+  startAgentChannel();
 
   // Connect transport FIRST so MCP tools are available immediately
   const transport = new StdioServerTransport();
