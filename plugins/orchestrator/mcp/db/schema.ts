@@ -341,6 +341,19 @@ DROP TABLE _signal_migration_check;
       `);
     },
   },
+  {
+    version: 20,
+    name: "drop_session_messages",
+    // Replaced by agent-channel notifications. The R6/R7 cross-session
+    // messaging system (session_messages + session_message_reads, added in
+    // version 19) is being removed in favor of real-time MCP channel
+    // notifications. The durable inbox is no longer needed - chat is
+    // ephemeral; knowledge worth keeping goes into orchestrator notes.
+    sql: `
+DROP TABLE IF EXISTS session_message_reads;
+DROP TABLE IF EXISTS session_messages;
+`,
+  },
 ];
 
 /**
