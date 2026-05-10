@@ -23667,6 +23667,9 @@ function getFallbackSessionId() {
   return;
 }
 function resolveSessionId(explicit) {
+  if (explicit && /^[a-zA-Z0-9_-]+$/.test(explicit)) {
+    cachedFallbackSessionId = explicit;
+  }
   return explicit ?? getFallbackSessionId();
 }
 var embeddingClient = null;
@@ -23796,7 +23799,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.29.5"
+  version: "0.29.6"
 }, {
   capabilities: {
     tools: {},
@@ -23876,20 +23879,25 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.29.5** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.29.6** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
     const envSid = process.env.CLAUDE_SESSION_ID ? "set" : "unset";
-    const projectDir = process.env.CLAUDE_PROJECT_DIR;
-    const projectDirStatus = projectDir ? `set (${projectDir})` : "unset";
-    const fallbackFile = projectDir ? join4(projectDir, ".orchestrator-state", "active-session") : null;
-    const fallbackExists = fallbackFile && existsSync5(fallbackFile);
+    const orchProjectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT;
+    const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const cwd = process.cwd();
+    const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
+    const fallbackFile = join4(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync5(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
-    lines.push(`    - CLAUDE_PROJECT_DIR env: ${projectDirStatus}`);
-    lines.push(`    - active-session fallback file: ${fallbackExists ? "exists" : fallbackFile ? "missing at " + fallbackFile : "unknown (no project dir)"}`);
-    lines.push(`    - resolveSessionId() returns: ${resolveSessionId() ?? "undefined"}`);
+    lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
+    lines.push(`    - CLAUDE_PROJECT_DIR env: ${claudeProjectDir ?? "unset"}`);
+    lines.push(`    - process.cwd(): ${cwd}`);
+    lines.push(`    - **Resolved project dir**: ${resolvedProjectDir}`);
+    lines.push(`    - active-session fallback file: ${fallbackExists ? "exists" : "missing at " + fallbackFile}`);
+    lines.push(`    - cachedFallbackSessionId: ${resolveSessionId() ?? "undefined"}`);
   }
   lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
   if (sidecarStatus === "ready") {
@@ -25038,9 +25046,9 @@ function startAgentChannel() {
 `);
     return;
   }
-  const projectDir = process.env.CLAUDE_PROJECT_DIR;
-  if (!projectDir) {
-    process.stderr.write(`agent-channel: CLAUDE_PROJECT_DIR unset; channel disabled
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  if (projectDir.includes(".claude/plugins/cache") || projectDir.includes(".claude\\plugins\\cache")) {
+    process.stderr.write(`agent-channel: refusing to start - resolved project dir is in plugin cache (${projectDir}). Set ORCHESTRATOR_PROJECT_ROOT or run from a real project directory.
 `);
     return;
   }
@@ -25088,7 +25096,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.5 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.6 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

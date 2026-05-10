@@ -81,6 +81,13 @@ function getFallbackSessionId(): string | undefined {
 }
 
 function resolveSessionId(explicit?: string): string | undefined {
+  // Cache explicit session_ids passed by tool calls so startAgentChannel's
+  // retry loop can pick them up even when CLAUDE_SESSION_ID env is unset.
+  // Claude Code routes session_id through tool args, not env vars, so this
+  // is the only reliable signal during MCP server lifetime.
+  if (explicit && /^[a-zA-Z0-9_-]+$/.test(explicit)) {
+    cachedFallbackSessionId = explicit;
+  }
   return explicit ?? getFallbackSessionId();
 }
 
@@ -267,7 +274,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.5",
+    version: "0.29.6",
   },
   {
     capabilities: {
@@ -388,22 +395,25 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.5** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.29.6** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
       const envSid = process.env.CLAUDE_SESSION_ID ? "set" : "unset";
-      const projectDir = process.env.CLAUDE_PROJECT_DIR;
-      const projectDirStatus = projectDir ? `set (${projectDir})` : "unset";
-      const fallbackFile = projectDir
-        ? join(projectDir, ".orchestrator-state", "active-session")
-        : null;
-      const fallbackExists = fallbackFile && existsSync(fallbackFile);
+      const orchProjectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT;
+      const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
+      const cwd = process.cwd();
+      const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
+      const fallbackFile = join(resolvedProjectDir, ".orchestrator-state", "active-session");
+      const fallbackExists = existsSync(fallbackFile);
       lines.push(`- **Agent-channel**: INACTIVE`);
       lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
-      lines.push(`    - CLAUDE_PROJECT_DIR env: ${projectDirStatus}`);
-      lines.push(`    - active-session fallback file: ${fallbackExists ? "exists" : (fallbackFile ? "missing at " + fallbackFile : "unknown (no project dir)")}`);
-      lines.push(`    - resolveSessionId() returns: ${resolveSessionId() ?? "undefined"}`);
+      lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
+      lines.push(`    - CLAUDE_PROJECT_DIR env: ${claudeProjectDir ?? "unset"}`);
+      lines.push(`    - process.cwd(): ${cwd}`);
+      lines.push(`    - **Resolved project dir**: ${resolvedProjectDir}`);
+      lines.push(`    - active-session fallback file: ${fallbackExists ? "exists" : "missing at " + fallbackFile}`);
+      lines.push(`    - cachedFallbackSessionId: ${resolveSessionId() ?? "undefined"}`);
     }
     lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
 
@@ -1829,10 +1839,23 @@ function startAgentChannel(): void {
     return;
   }
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR;
-  if (!projectDir) {
+  // Use the same project-root resolution as getProjectDbPath in
+  // mcp/db/connection.ts. Claude Code doesn't set CLAUDE_PROJECT_DIR in MCP
+  // server env reliably; the working directory or ORCHESTRATOR_PROJECT_ROOT
+  // is the load-bearing signal. Refuse to start if we end up in a plugin
+  // cache directory (would create state in a place that gets wiped on
+  // /plugin update).
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+
+  if (
+    projectDir.includes(".claude/plugins/cache") ||
+    projectDir.includes(".claude\\plugins\\cache")
+  ) {
     process.stderr.write(
-      "agent-channel: CLAUDE_PROJECT_DIR unset; channel disabled\n",
+      `agent-channel: refusing to start - resolved project dir is in plugin cache (${projectDir}). Set ORCHESTRATOR_PROJECT_ROOT or run from a real project directory.\n`,
     );
     return;
   }
@@ -1909,7 +1932,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.5 ` +
+    `[orchestrator] MCP server starting - version=0.29.6 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
