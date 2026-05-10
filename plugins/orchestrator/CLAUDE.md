@@ -54,7 +54,7 @@ Without breadcrumbs, a note is only findable via keyword/semantic search. With b
 
 ### Struggle Detection
 
-If you've been stuck on the same issue for 2+ turns, the `every-turn` skill will direct you to invoke `orchestrator:consult-concierge`. The concierge searches for gotchas, anti-patterns, and past solutions. Don't keep hammering - ask for help.
+If you've been stuck on the same issue for 2+ turns, the `every-turn` skill will direct you to invoke `lookup` for prior gotchas, anti-patterns, and past solutions. Don't keep hammering - search for prior art. If a PA is active in the project, address `PA, ...` in your terminal output - PA's tailing will surface the address and PA can intervene.
 
 ### Turn Bridge
 
@@ -62,18 +62,33 @@ The UserPromptSubmit hook injects the turn bridge automatically at the start of 
 
 Just use the tools. The bridge takes care of itself.
 
-### Cross-Session Coordination (R6 + R7.9)
+### Cross-Session Coordination (PrimeAgent + agent-channel, 0.29.0+)
 
-When multiple Claude sessions run against the same project, you can see what siblings are doing AND exchange messages with them in near-realtime.
+When multiple Claude Code sessions run against the same project, the orchestrator plugin's agent-channel MCP capability delivers cross-session events as `<channel source="agent-channel" ...>content</channel>` tags injected inline at every model turn - same primitive the official Discord plugin uses for real-time message delivery.
 
-- **Broadcast your task**: when you start major work, call `update_session_task("...")` so siblings see your `current_task` in their hook-time activity injection AND in their next briefing's Cross-Session Activity section.
-- **Message a sibling**: `send_message({body, to_session?, scope_code_ref?, scope_task_contains?, priority?, ttl_seconds?})`. Omit `to_session` to broadcast.
-- **Single-path delivery (R7.9)**: every queued message delivers on the recipient's next drain - whether that's the auto-drain on a hook boundary (PostToolUse / UserPromptSubmit) or an explicit `read_messages` call. There are no contexts under which a queued message can be hidden from the recipient. "Message sent" means "will deliver."
-- **`scope_code_ref` and `scope_task_contains` are display labels, not filters**: they render inline as `{scoped to src/foo.ts}` so the recipient understands the context the sender had in mind, but they DO NOT gate delivery. R7.5 originally implemented these as a filter; R7.9 rolled it back because conditional delivery the sender can't observe is a footgun (see DECISIONS.md R7.9 for the field bug history).
-- **Inbox auto-drain**: PostToolUse hook delivers messages on every tool call. UserPromptSubmit drains at turn boundary. Empty inbox = zero token cost (in-memory counter short-circuits the DB). Pending messages render inline in your additionalContext.
-- **Noise control**: use `priority: "low"` for non-urgent FYI; `ttl_seconds` to expire messages the recipient doesn't need after a deadline. Don't try to use scope to suppress delivery.
+**Roles:**
+- **PrimeAgent (PA)**: persistent orchestrator session, role=prime, runs Opus at max effort. Singleton per project. Launched via `pa-start.bat`.
+- **Subordinate Agent (SA)**: any other Claude Code session in the project, role=subordinate. Launched via `sa-start.bat` (or any `claude --channels plugin:orchestrator@...` invocation with `SPAWNBOX_AGENT_ROLE=subordinate`).
 
-Treat inter-session messages as Slack DMs - the sender invested in routing them to you. Acknowledge and act before continuing your own work. R6/R7/R7.9 architecture and rationale: see `docs/DECISIONS.md` and `docs/ARCHITECTURE.md`.
+**Communication is via terminal output, not a tool:**
+- Type `@PA` / `@PrimeAgent` to address the prime.
+- Type `@SA-<id8>` to address a specific subordinate (id8 = first 8 chars of session_id).
+- Type `@SA-<id8>,@SA-<id8>` for multiple.
+- Type `@all` to broadcast to every active session except yourself.
+- The conversational form `PA, ...` or `PrimeAgent, ...` also addresses PA.
+- Free-form text without an `@` prefix is private dialogue with Jarid (you and him). PA still observes it (PA observes everything by default), but no SA receives it.
+
+**Authority model:**
+- PA's directives addressed to an SA are treated as if Jarid said them - SAs execute, then continue their own work.
+- SA-to-SA messages are peer-level, not authoritative. Use judgment.
+- Override: `/pa-pause` in an SA terminal pauses PA's posture toward that SA only. `/pa-pause` in PA's terminal sets a global pause across all SAs. Resume with `/pa-resume`. Natural language ("PA, back off") also recognized.
+- Singleton conflict: if `pa-start.bat` refuses to launch a new PA because another is fresh, run `/pa-takeover` in the new PA's window to forcibly claim primacy.
+
+**Broadcast your task**: when you start major work, call `update_session_task("...")` so peers see your `current_task` in the agent-channel notification metadata (`from_task` field) AND in their briefing's Cross-Session Activity section.
+
+**No `send_message` / `read_messages` tools.** Those were the R6/R7 messaging system, removed in 0.29.0. Cross-session communication is entirely via terminal output + agent-channel filewatcher routing. The 60s wakeup-chain pattern is also gone (channel notifications are real-time; no polling).
+
+Architecture and rationale: see `docs/superpowers/specs/2026-05-09-prime-agent-channel-architecture-design.md` (in any project that consumes this plugin).
 
 ### Hook Substrate (R6)
 
