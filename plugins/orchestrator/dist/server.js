@@ -23796,7 +23796,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.29.4"
+  version: "0.29.5"
 }, {
   capabilities: {
     tools: {},
@@ -23876,8 +23876,21 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.29.4** (pid ${process.pid})`);
-  lines.push(`- **Agent-channel**: ${agentChannel ? "ACTIVE - filewatcher running" : "INACTIVE - check stderr for 'agent-channel:' startup line"}`);
+  lines.push(`- **Version**: orchestrator MCP server **0.29.5** (pid ${process.pid})`);
+  if (agentChannel) {
+    lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
+  } else {
+    const envSid = process.env.CLAUDE_SESSION_ID ? "set" : "unset";
+    const projectDir = process.env.CLAUDE_PROJECT_DIR;
+    const projectDirStatus = projectDir ? `set (${projectDir})` : "unset";
+    const fallbackFile = projectDir ? join4(projectDir, ".orchestrator-state", "active-session") : null;
+    const fallbackExists = fallbackFile && existsSync5(fallbackFile);
+    lines.push(`- **Agent-channel**: INACTIVE`);
+    lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
+    lines.push(`    - CLAUDE_PROJECT_DIR env: ${projectDirStatus}`);
+    lines.push(`    - active-session fallback file: ${fallbackExists ? "exists" : fallbackFile ? "missing at " + fallbackFile : "unknown (no project dir)"}`);
+    lines.push(`    - resolveSessionId() returns: ${resolveSessionId() ?? "undefined"}`);
+  }
   lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
   if (sidecarStatus === "ready") {
     lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)`);
@@ -25075,11 +25088,27 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.4 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.5 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
   startAgentChannel();
+  if (!agentChannel) {
+    let attempts = 0;
+    const retryTimer = setInterval(() => {
+      if (agentChannel) {
+        clearInterval(retryTimer);
+        return;
+      }
+      if (++attempts > 20) {
+        process.stderr.write(`agent-channel: gave up after 20 retries (60s); session_id never became resolvable. Channel disabled for this MCP server lifetime.
+`);
+        clearInterval(retryTimer);
+        return;
+      }
+      startAgentChannel();
+    }, 3000);
+  }
   const transport = new StdioServerTransport;
   await server.connect(transport);
   startSidecar().then((client) => {
