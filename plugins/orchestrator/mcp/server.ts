@@ -60,21 +60,26 @@ function getFallbackSessionId(): string | undefined {
     return envId;
   }
 
-  const projectDir = process.env.CLAUDE_PROJECT_DIR;
-  if (projectDir) {
-    const file = join(projectDir, ".orchestrator-state", "active-session");
-    try {
-      if (existsSync(file)) {
-        const raw = readFileSync(file, "utf8").trim();
-        // Sanitize: same rule as the bash helper. Defence in depth.
-        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
-          cachedFallbackSessionId = raw;
-          return raw;
-        }
+  // Same 3-step fallback as getProjectDbPath in mcp/db/connection.ts.
+  // Claude Code doesn't reliably set CLAUDE_PROJECT_DIR in MCP server env;
+  // process.cwd() typically resolves to the user's project root.
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+
+  const file = join(projectDir, ".orchestrator-state", "active-session");
+  try {
+    if (existsSync(file)) {
+      const raw = readFileSync(file, "utf8").trim();
+      // Sanitize: same rule as the bash helper. Defence in depth.
+      if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+        cachedFallbackSessionId = raw;
+        return raw;
       }
-    } catch {
-      // Non-fatal - fallback is best-effort
     }
+  } catch {
+    // Non-fatal - fallback is best-effort
   }
 
   return undefined;
@@ -274,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.6",
+    version: "0.29.7",
   },
   {
     capabilities: {
@@ -395,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.6** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.29.7** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1932,7 +1937,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.6 ` +
+    `[orchestrator] MCP server starting - version=0.29.7 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

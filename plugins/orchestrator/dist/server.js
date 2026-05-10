@@ -23651,19 +23651,17 @@ function getFallbackSessionId() {
     cachedFallbackSessionId = envId;
     return envId;
   }
-  const projectDir = process.env.CLAUDE_PROJECT_DIR;
-  if (projectDir) {
-    const file = join4(projectDir, ".orchestrator-state", "active-session");
-    try {
-      if (existsSync5(file)) {
-        const raw = readFileSync3(file, "utf8").trim();
-        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
-          cachedFallbackSessionId = raw;
-          return raw;
-        }
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const file = join4(projectDir, ".orchestrator-state", "active-session");
+  try {
+    if (existsSync5(file)) {
+      const raw = readFileSync3(file, "utf8").trim();
+      if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+        cachedFallbackSessionId = raw;
+        return raw;
       }
-    } catch {}
-  }
+    }
+  } catch {}
   return;
 }
 function resolveSessionId(explicit) {
@@ -23799,7 +23797,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.29.6"
+  version: "0.29.7"
 }, {
   capabilities: {
     tools: {},
@@ -23879,7 +23877,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.29.6** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.29.7** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25096,7 +25094,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.6 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.7 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
