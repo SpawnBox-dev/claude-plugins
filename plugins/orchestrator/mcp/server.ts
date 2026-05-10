@@ -792,7 +792,7 @@ server.tool(
       }
     }
     if (text.length > 15000) {
-      text += "\n\n---\nLarge result set (" + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+      text += "\n\n---\nLarge result set (" + Math.round(text.length / 1000) + "K chars). Consider narrowing your query (more specific keywords, `code_ref` filter, type filter) instead of reading all of this directly. If a PrimeAgent is active in this project, addressing `PA, can you triage this lookup?` in your terminal output also lets PA do the curation.";
     }
 
     return {

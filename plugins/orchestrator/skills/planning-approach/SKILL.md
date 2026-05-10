@@ -20,6 +20,6 @@ You're about to tackle something complex. Gather context first:
 
 5. If spawning subagents, pass the context package to them so they work with full knowledge
 
-6. **Cross-session check (R6)**: if your briefing surfaced active sibling sessions, scan their `current_task` lines. Are any of them touching code your plan needs? If yes, `send_message({to_session, body})` to coordinate before you both invest in conflicting work. Then `update_session_task("planning <area>")` so your siblings see what you're about to start.
+6. **Cross-session check (agent-channel, 0.29.0+)**: if your briefing surfaced active sibling sessions, scan their `current_task` lines (visible in `sessions.json` and your channel feed). Are any of them touching code your plan needs? If yes, type `@SA-<peer-id8> <coordination message>` in your terminal output to coordinate before you both invest in conflicting work - the agent-channel filewatcher routes via `notifications/claude/channel`. Then `update_session_task("planning <area>")` so your peers see what you're about to start as the `from_task` field on your channel events.
 
-This prevents re-learning solved problems, contradicting established patterns, and stomping sibling work.
+This prevents re-learning solved problems, contradicting established patterns, and stomping peer work.

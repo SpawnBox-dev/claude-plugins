@@ -17,57 +17,54 @@ you think nothing noteworthy happened.
 
 Run this evaluation every turn. It takes seconds and prevents you from missing context, losing knowledge, or contradicting past work.
 
-## Concierge-first, direct-for-precision
+## Direct MCP calls + agent-channel addressing
 
-You have two ways to talk to the orchestrator:
+The orchestrator plugin (0.29.0+) gives you two operational surfaces:
 
-1. **The concierge** (persistent thinking partner, spawned once per session via `getting-started`, resumed with SendMessage). Handles judgment-heavy work: curated retrieval, batch captures, work triage, decision validation, deep exploration.
-2. **Direct MCP calls** (`lookup`, `note`, `check_similar`, etc). Handles precision: exact-key retrieval, single fast captures, deterministic state changes.
+1. **Direct MCP calls** (`lookup`, `note`, `check_similar`, etc.) - retrieval, capture, work triage, lifecycle.
+2. **Agent-channel addressing** (typing `@PA` / `@SA-<id8>` / `@all` in your terminal output) - cross-session communication routed via real-time `notifications/claude/channel`.
 
-**Default to the concierge for anything judgmental.** It already knows what you've done this session and won't repeat itself. Direct calls are the fast path for things that don't need judgment.
+The Sonnet memory-concierge subagent pattern is **gone in 0.29.0**. Persistent thinking is now the PrimeAgent (PA) - if a PA is running for the project, address it with `@PA, ...` in your terminal output for judgment-heavy work that benefits from a session-wide thinking partner. Otherwise, use direct MCP calls and lean on `lookup({code_ref: ...})` for file-scoped retrieval.
 
 ## Operation Routing Table
 
 | Need | Route | Why |
 |---|---|---|
-| "What should I know about X?" | **Concierge** | Broad, judgment-heavy, wants curation |
-| "What conventions apply in this area?" | **Concierge** | Multi-angle search + synthesis |
-| "Complete inventory of Y" | **Concierge** | Direct lookup misses items with different vocabulary |
-| "Find note with ID abc123" | **Direct `lookup`** | Exact-key retrieval, no judgment |
-| "Find the broker convention" | **Direct `lookup`** | Specific known keyword |
-| "Is there prior art for approach X?" | **Concierge** | Uses `check_similar` + synthesis |
-| Quick fact-check ("was X decided?") | **Direct `lookup`** | Single-note answer |
-| Save 1 note about 1 thing | **Direct `note`** | Fast, no batching needed |
-| Save 3+ things at end of turn | **Concierge** | Type-picking, dedup, consolidation |
-| Update a note's content | **Direct `update_note`** | Specific action. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh |
-| Replace outdated note with new version | **Direct `supersede_note`** | Preserves history, graph-links old->new, hides old from default lookup |
-| Delete a note (genuinely wrong/harmful - last resort) | **Direct `delete_note`** | Destructive, main-agent judgment. Prefer `supersede_note` or `close_thread` when the note was right-at-the-time or now settled |
-| Create a new work item | **Concierge** | Dup check + parent linkage + priority advice |
-| Bump work item status to done | **Direct `update_work_item`** | Trivial state machine |
-| Break down complex work | **Concierge** | Judgment-heavy decomposition |
-| Validate "should I pick X over Y?" | **Concierge** | Conflict + anti-pattern scan |
-| Close a resolved thread | **Direct `close_thread`** | Specific action |
-| Session checkpoint | **Concierge (end-of-session) or direct `save_progress`** | Concierge can summarize state it already tracked |
-| Set/update user profile observation | **Direct `user_profile`** | You observe the user, not concierge |
-| Run maintenance | **Direct `retro`** | Deterministic. Also auto-fires from briefing on a 7-day cadence - no need to call manually unless forcing a refresh |
-| Check health | **Direct `system_status`** | Deterministic |
-| Capture knowledge about specific code | **Direct `note` with `code_refs: [paths]`** | Breadcrumbs at file/module granularity make the note findable later via `lookup({code_ref: 'path'})` |
-| "What do we know about this file?" before editing | **Direct `lookup({code_ref: 'path/to/file'})`** | Reverse-index query - exact path match against the breadcrumb array |
-| Starting a major task that sibling sessions might overlap with | **Direct `update_session_task`** | Broadcasts your `current_task` so sibling sessions see it in their hook-time activity injection |
-| Discovered something a sibling session needs to know | **Direct `send_message`** | Targeted (`to_session`) or broadcast (omit). Optional `scope_code_ref` for file-scoped delivery, `priority` for urgency, `ttl_seconds` for expiring nudges |
-| Pending inbox messages from siblings | **Auto-drained by hook** | PostToolUse drains every tool call; UserPromptSubmit drains every turn. Manual `read_messages` only needed to flush mid-task |
+| Find note by ID | `lookup({id: "abc123"})` | Exact-key retrieval |
+| Find by keyword | `lookup({query: "..."})` | Semantic + FTS5 search |
+| What do we know about a specific file? | `lookup({code_ref: "path/to/file"})` | Reverse-index breadcrumb match |
+| Has anything similar been decided? | `check_similar({content: "..."})` | Embedding similarity |
+| Complete inventory of work matching a tag | `list_work_items({tag: "..."})` | Returns everything; lookup might miss vocabulary mismatches |
+| Open threads in an area | `list_open_threads({tag: "..."})` | Returns everything |
+| Save 1 note about 1 thing | `note({type, content, tags, code_refs})` | Fast capture |
+| Update a note's content | `update_note({id, append_content: "..."})` | Prefer append_content - no read-before-write, keywords auto-refresh, revision snapshotted |
+| Replace outdated note with new canonical | `supersede_note({old_id, ...})` | Preserves history, graph-links old->new, hides old |
+| Delete genuinely wrong/harmful note | `delete_note({id})` | Last resort - prefer supersede_note or close_thread |
+| Create work item | `create_work_item({...})` | Pass `tags` for findability and `code_refs` if file-scoped |
+| Bump status | `update_work_item({id, status})` | Trivial state change |
+| Break down complex work | `breakdown({...})` | Decompose into parent + children |
+| Validate "should I pick X over Y?" | `check_similar` first, then `lookup` | Surface conflicts + anti-patterns |
+| Close a resolved thread | `close_thread({id, resolution})` | Cascades through the graph |
+| Session checkpoint | `save_progress({summary, open_questions, next_steps})` | One call, end of session |
+| User observation | `user_profile({...})` | You observe the user, not any subagent |
+| Maintenance | Auto-fires from briefing 7-day cadence | Manual `retro` only when forcing |
+| Capture knowledge about specific code | `note({..., code_refs: ["path"]})` | Breadcrumbs make it findable later via `lookup({code_ref})` |
+| Starting a major task | `update_session_task("...")` | Broadcasts your `current_task` to peers via agent-channel |
+| Discovered something a peer needs to know | Type `@SA-<id8> <message>` in your terminal output | Filewatcher routes to that session via `notifications/claude/channel` |
+| Need PA's help (PA active) | Type `PA, <question>` in your terminal output | PA-addressed events tag `pa_addressed=true` in PA's channel feed |
+| Cross-session events from peers | Arrive inline as `<channel source="agent-channel" ...>content</channel>` | Auto-injected at every model turn |
 
 ## BEFORE you act this turn
 
 **Starting a session or lost context?**
-- Invoke `orchestrator:getting-started` - it calls `briefing` AND spawns the concierge in one shot
+- Invoke `orchestrator:getting-started` - it handles `briefing`, role detection, and task broadcasting.
 
 **About to implement something?**
-- Send the concierge a pre-implementation query: "I'm about to touch X. Any conventions, anti-patterns, or prior decisions I should know?" Resume the existing concierge with SendMessage, don't spawn a new one.
-- For exact-key precision lookups, use direct `lookup`.
+- Run `lookup({code_ref: "path/to/file"})` against any file you're about to edit. File-scoped breadcrumbs surface notes keyword search would miss.
+- Run `check_similar({content: "<your approach>"})` to surface prior art and conflicts before committing.
 
 **Building a list, audit, or inventory?**
-- Always use the concierge. Direct lookup will miss items with different vocabulary - you won't know they're missing.
+- Use `list_work_items` / `list_open_threads` with appropriate filters. They return everything; `lookup` may miss items with different vocabulary.
 
 ## AFTER you act this turn
 
@@ -75,29 +72,29 @@ Scan what just happened. Did any of these occur?
 
 | What happened | Action |
 |--------------|--------|
-| You completed a task or step | → `update_work_item` status=done (direct, fast) |
-| You started working on something trackable | → Ask concierge: "Should this be a new work item? Any overlaps with in-flight work?" + `update_session_task` to broadcast it to siblings |
-| You discovered something a sibling session needs to know | → `send_message` (targeted via `to_session`, or broadcast). Add `scope_code_ref` if it's about a specific file. Use `priority: "high"` only when actionable urgency, otherwise default `normal`. |
-| Inter-session message arrived in your additionalContext | → Acknowledge and act before continuing. The sender invested in routing it to you; treat the inbox as you would a Slack DM, not a notification you can ignore. |
-| You're blocked on something | → `update_work_item` status=blocked, blocked_by=ID (direct) |
-| You identified new work | → Concierge dup-check, then create (concierge does both) |
-| Complex task needs breakdown | → Concierge `breakdown` with existing-item context |
-| Knowledge evolved or needs correction | → `update_note` direct (use `append_content` mode for lightweight timestamped additions) OR `supersede_note` if the correction is substantial enough that the new content should be the canonical one going forward |
-| A note is wrong or harmful | → Prefer `supersede_note` (replace with corrected version, preserves history) or `close_thread` (question was right-at-the-time, now settled). `delete_note` only as last resort |
-| You made an architectural or design choice | → Concierge: "I just decided X. Check for contradictions and save it with the right type." |
-| You discovered a pattern, convention, or gotcha | → Single item: direct `note`. Multiple: concierge batch capture. |
-| Something failed or you pivoted | → Concierge: "Here's what failed and what worked. Save the lessons." |
-| The user corrected you or stated a preference | → Direct `user_profile` + direct `note` (user_pattern scope=global) |
-| Open thread resolved | → Direct `close_thread` |
-| Hit a milestone or natural stopping point | → Concierge: "Checkpoint time. Summarize what we've done and what's open." |
-| Significant systems changed | → `docs-manager:docs` |
+| You completed a task or step | → `update_work_item({id, status: "done"})` |
+| You started working on something trackable | → `lookup` for prior art / overlapping in-flight work; `create_work_item` if novel; `update_session_task` to broadcast |
+| You discovered something a peer session needs to know | → Type `@SA-<id8> <message>` (or `@all` for broadcast) in your terminal output |
+| Cross-session event arrived in your context | → Acknowledge and act on it. Sender invested in routing it to you; treat it as a directive (from PA) or a heads-up (from peer SA), not a notification you can ignore. |
+| You're blocked on something | → `update_work_item({id, status: "blocked", blocked_by: "<other_id>"})` |
+| You identified new work | → `check_similar` for dup-check; if novel, `create_work_item` |
+| Complex task needs breakdown | → `breakdown({...})` with existing-item context |
+| Knowledge evolved or needs correction | → `update_note({id, append_content: "..."})` for additive; `supersede_note` for substantive replacement |
+| A note is wrong or harmful | → `supersede_note` (preserve history) or `close_thread` (was right-at-the-time, now settled). `delete_note` only as last resort |
+| You made an architectural or design choice | → `note({type: "decision", content: "...", tags: "...", code_refs: ["..."]})` |
+| You discovered a pattern, convention, or gotcha | → `note({type: "convention" | "anti_pattern" | "insight", ...})` |
+| Something failed or you pivoted | → `note({type: "anti_pattern" | "insight", content: "what failed and what worked", ...})` |
+| The user corrected you or stated a preference | → `user_profile({...})` + `note({type: "user_pattern", scope: "global", ...})` |
+| Open thread resolved | → `close_thread({id, resolution: "..."})` |
+| Hit a milestone or natural stopping point | → `save_progress({summary, open_questions, next_steps})` |
+| Significant systems changed | → Use `docs-manager:docs` skill |
 
-**Multiple can apply in one turn.** If you made a decision AND learned a pattern AND the user stated a preference, route all three - decision and pattern go to concierge as a batch, user preference direct.
+**Multiple can apply in one turn.** If you made a decision AND learned a pattern AND the user stated a preference, all three captures should fire. Don't batch them mentally and forget.
 
-## Struggle Detection - STOP AND ASK THE CONCIERGE
+## Struggle Detection - STOP, LOOK UP, MAYBE ASK PA
 
 <EXTREMELY_IMPORTANT>
-If you notice ANY of these patterns, SendMessage the concierge IMMEDIATELY with a detailed description of what you're trying to do, what keeps failing, and what approaches you've tried:
+If you notice ANY of these patterns, STOP and run `lookup` against the failure description + key error keywords. The knowledge base may have a documented gotcha. If a PA is active in the project, also address `PA, <description of struggle>` in your terminal output - PA's tailing will surface the address and PA can intervene with broader context.
 
 **Signals you are struggling:**
 - You've tried the same approach 2+ times with different variations and it keeps failing
@@ -108,7 +105,7 @@ If you notice ANY of these patterns, SendMessage the concierge IMMEDIATELY with 
 - You keep hitting unexpected behavior that doesn't match your assumptions
 - You're tempted to "try one more thing" without understanding why the last thing failed
 
-**What to tell the concierge:**
+**What to surface (in `lookup` or your `PA, ...` address):**
 1. What you're trying to accomplish (the goal, not the approach)
 2. What you've tried so far and what happened
 3. What error/behavior you're seeing
@@ -116,7 +113,7 @@ If you notice ANY of these patterns, SendMessage the concierge IMMEDIATELY with 
 
 The PostToolUseFailure hook will also nudge you here automatically after 2+ consecutive tool failures. Listen to it.
 
-**You are NOT "almost there." You are stuck.** Agents that keep hammering away without consulting the concierge waste enormous time rediscovering gotchas that are already documented. STOP. ASK. THEN proceed with the right approach.
+**You are NOT "almost there." You are stuck.** Agents that keep hammering away waste enormous time rediscovering gotchas that are already documented. STOP. LOOKUP. THEN proceed with the right approach.
 </EXTREMELY_IMPORTANT>
 
 ## Red Flags
@@ -125,16 +122,14 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 
 | Thought | Reality |
 |---------|---------|
-| "This is just a quick fix" | Quick fixes create decisions. Concierge first. |
-| "I already know this codebase" | You know THIS context window. Concierge has the whole KB. |
-| "I'll note it later" | Later never comes. Send the concierge a capture request NOW. |
+| "This is just a quick fix" | Quick fixes create decisions. Lookup first. |
+| "I already know this codebase" | You know THIS context window. The KB has the whole. |
+| "I'll note it later" | Later never comes. Capture NOW. |
 | "Nothing noteworthy happened" | A turn with zero knowledge capture is rarely zero-signal. Re-evaluate. |
-| "The user just wants speed" | Speed without context causes rework. 2 seconds of concierge saves 20 minutes. |
-| "Direct lookup is faster" | True only for exact-key retrieval. For judgment, concierge is faster because it doesn't miss. |
-| "I don't need to spawn the concierge for this" | If you spawn it at `getting-started` as prescribed, you don't "spawn" - you resume. |
-| "The concierge is expensive" | Not resumed, yes. Spawned-once-per-session, no. Cost amortizes. |
+| "The user just wants speed" | Speed without context causes rework. 2 seconds of lookup saves 20 minutes. |
+| "I don't need to lookup for this" | If you've ever been wrong about your recall before, you might be again. Cheap to verify. |
 | "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. |
-| "Let me try one more thing" | If you've tried 2+ things already, STOP and ask the concierge. |
+| "Let me try one more thing" | If you've tried 2+ things already, STOP and lookup. |
 | "I'm almost there" | If you said this last turn too, you're not almost there. You're looping. |
 
 ## Turn Bridge (now automatic)
@@ -145,28 +140,29 @@ Just use the tools. The bridge takes care of itself.
 
 ## Self-Audit
 
-After responding, ask yourself: **Did I skip the concierge when judgment was needed?** If so, send it a message NOW for the thing you skipped. Don't wait for "a better time." The longer you defer, the more the context rots.
+After responding, ask yourself: **Did I skip a capture or lookup that the table says I should have run?** If so, run it NOW. Don't wait for "a better time." The longer you defer, the more the context rots.
 
 ## Primitives (direct MCP, use for precision)
 
 | Primitive | When to call directly |
 |-----------|----------------------|
-| `briefing` | Session start only (getting-started handles it). The `curation_candidates` section surfaces stale notes worth revisiting - scan it early so you know what to maintain this session. Other sections include open threads, recent decisions, work items, user profile, drift warnings, cross-session activity. On the first startup of a week, a `## Auto-Retro` section is prepended - that's automatic maintenance (retro ran inline on a 7-day cadence), no action needed from you |
-| `note` | Single fast capture. Pass `code_refs: [paths]` when the knowledge is about specific files so it's findable by file later |
-| `lookup` | Exact-key retrieval. Params worth knowing: `code_ref: 'path/to/file.ts'` (reverse-index filter - returns notes referencing this exact file or module path in their code_refs array; use for "what do we know about this file?" before editing), `link_limit` (default 20, cap on rendered linked notes with tail message; raise to 500 for full umbrella-note neighborhoods, lower to 0 to skip links entirely), `include_superseded: true` (opt-in flag to surface replaced notes - off by default so lookup stays clean), `include_history: true` (opt-in flag to walk the revision chain R2 captured before each edit - off by default; use when you need to see how a note evolved) |
-| `check_similar` | Quick similarity check |
-| `update_note` | Correction/enrichment. Prefer `append_content` mode for additive updates - no read-before-write, keywords auto-refresh, each change snapshots a prior revision. Pass `code_refs: [paths]` to replace the breadcrumb array, or `[]` to clear |
-| `supersede_note` | Replace an outdated note with a new canonical version - preserves history, graph-links old->new, hides old from default lookup. When creating the replacement inline (new_content + new_type), pass `code_refs: [paths]` so breadcrumbs carry forward |
-| `delete_note` | Remove genuinely wrong/harmful knowledge. Last resort - prefer `supersede_note` or `close_thread` |
-| `update_work_item` | Status/priority change |
-| `close_thread` | Resolve specific thread |
-| `user_profile` | User observation (you do this, not concierge) |
-| `retro` | Maintenance |
-| `system_status` | Health check |
-| `list_work_items` | Filtered enumeration |
-| `list_open_threads` | Filtered enumeration |
-| `send_message` | Leave a note for a sibling session. `to_session` for direct, omit for broadcast. Optional `scope_code_ref` / `scope_task_contains`, `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary (PostToolUse / UserPromptSubmit / Stop). |
-| `read_messages` | Drain your inbox manually. Hooks call this automatically; you rarely need to. |
-| `update_session_task` | Broadcast your `current_task`. Siblings see it in their hook-time activity injection AND in their next briefing's Cross-Session Activity. Call when starting a major task. |
+| `briefing` | Session start (getting-started handles it). Surfaces `curation_candidates` worth revisiting. On the first startup of a week, an `## Auto-Retro` section is prepended - automatic maintenance ran on a 7-day cadence |
+| `note` | Single fast capture. Pass `code_refs: [paths]` when knowledge is about specific files |
+| `lookup` | Exact-key retrieval. Params: `code_ref: 'path'` (reverse-index file query), `link_limit` (default 20, cap on linked notes; raise to 500 for full neighborhoods, 0 to skip), `include_superseded: true`, `include_history: true` |
+| `check_similar` | Quick similarity check before implementing |
+| `update_note` | Correction/enrichment. `append_content` mode preferred for additive updates |
+| `supersede_note` | Replace outdated note with new canonical. Preserves history |
+| `delete_note` | Last resort - genuinely wrong/harmful only |
+| `create_work_item` | Pass `code_refs` for file-scoped work items so they surface via `lookup({code_ref})` |
+| `update_work_item` | Status/priority change. Also covers `tags`, `context`, `confidence` |
+| `breakdown` | Decompose complex work into parent + children |
+| `close_thread` | Resolve specific thread; cascades through graph |
+| `user_profile` | User observation (you do this) |
+| `retro` | Manual maintenance (auto-fires on 7-day cadence from briefing) |
+| `system_status` | Embedding sidecar + DB health |
+| `list_work_items` | Exhaustive filtered enumeration |
+| `list_open_threads` | Exhaustive filtered enumeration |
+| `update_session_task` | Broadcast your `current_task` for peer visibility |
+| `save_progress` | End-of-session checkpoint |
 
-For everything else, talk to the concierge.
+For cross-session communication, **type `@PA` / `@SA-<id8>` / `@all` in your terminal output** - the agent-channel filewatcher routes the addressing automatically.

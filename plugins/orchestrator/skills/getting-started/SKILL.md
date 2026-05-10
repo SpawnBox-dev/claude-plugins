@@ -12,9 +12,9 @@ Subagents work from the context given to them, not from the full knowledge base.
 </SUBAGENT-STOP>
 
 <HARD-GATE>
-Do NOT respond to the user's first message until you have called `briefing` and
-spawned the concierge. Both steps are fast and prevent you from contradicting
-past decisions or wasting cold-start budget on the concierge later.
+Do NOT respond to the user's first message until you have called `briefing`.
+This prevents you from contradicting past decisions or missing relevant
+in-flight work.
 </HARD-GATE>
 
 # Getting Started
@@ -39,53 +39,39 @@ On the first startup of a week (seven days since the last maintenance pass), the
 
 If the Cross-Session Activity section is non-empty, note anything that affects your task. Sibling sessions may have just decided something you're about to revisit, or flagged an anti-pattern in the area you're about to touch.
 
-## Step 2 — Spawn the Concierge (do this NOW, not later)
+## Step 2 — Identify your role (PA or SA)
 
-Spawn the memory concierge subagent immediately, before you need it. This is the most important thing to understand about the concierge:
+Check `process.env.SPAWNBOX_AGENT_ROLE`:
 
-**Concierge cost is bimodal.** The first invocation pays the cold-start cost (~15-20k tokens) because the subagent has to boot and absorb the orchestrator instructions. Every subsequent invocation in the same session is cheap - you resume it with SendMessage and it already has state. If you call concierge once per session, you pay cold-start for a single query, which is the worst case. If you call it heavily, cost amortizes and it becomes your persistent thinking partner.
+- `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it sets `/model claude-opus-4-7`, `/effort max`, reads sessions.json, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
+- `subordinate` (or unset) → You are a **Subordinate Agent (SA)**. The project's CLAUDE.md and the orchestrator plugin's CLAUDE.md describe your operating contract: PA's directives addressed to you (`@SA-<your-id8>` or unaddressed PA dialogue) are treated as Jarid's voice unless you're under `/pa-pause`. Address peers via `@PA` / `@SA-<id8>` / `@all` in your terminal output - the agent-channel filewatcher routes via `notifications/claude/channel`. **No `send_message` tool exists in 0.29.0+** - communication is purely terminal-output + filewatcher routing.
 
-**Solution:** spawn it at session start with a session-context handoff. Pay the cold-start once, then use it freely.
+## Step 3 — Broadcast your task to peers
 
-Spawn via the Agent tool:
+If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` (and into `sessions.json` for the agent-channel filewatcher) so:
 
-```
-Agent(
-  subagent_type: "orchestrator:memory-concierge",
-  model: "sonnet",
-  prompt: "Session handoff: the user's initial request is: <paste the user's first message verbatim>. The briefing I just pulled shows <one-sentence summary of the most relevant briefing items>. I plan to work on <your initial read of the task>. What should I know before I start? Surface any relevant decisions, conventions, anti-patterns, or in-flight work that could inform or contradict this task."
-)
-```
-
-Save the returned agent_id. Every subsequent concierge call this session should use `SendMessage(to: "<agent_id>", ...)` to resume, NOT a new Agent call.
-
-**Note:** name the deliverable explicitly in the prompt (the artifact shape, the report format, the question you're asking). The concierge distinguishes Shape A (structured artifact - return what was asked) vs Shape B (batch capture - synthesize and save). Ambiguous asks default to Shape B. See `skills/consult-concierge/SKILL.md` for full framing.
-
-## Step 3 — Broadcast your task to siblings (R6)
-
-If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` so:
-
-- Sibling sessions see what you're working on in their hook-time activity injection
-- Their next briefing's Cross-Session Activity surfaces your task
+- Peer sessions see what you're working on as the `from_task` field on every channel notification you generate.
+- Their next briefing's Cross-Session Activity surfaces your task.
+- PA (if active) has fresh context on what you're doing.
 
 You can update it again later if your scope shifts. Skip this step on trivial / read-only sessions where overlap isn't a risk - it's not mandatory, just high-leverage when multiple agents are active.
 
-You can also `send_message({body, to_session: "<sid>"})` if the briefing surfaced a sibling session whose work directly affects yours - leave them a message before you both blindly edit the same file.
+If the briefing surfaced a peer session whose work directly affects yours, address them in your terminal output: `@SA-<peer-id8> heads up - I'm about to touch <X>. anything I should know?` Their response will arrive inline as `<channel from="..." ...>`.
 
-## Step 4 — Route judgment-heavy work through the concierge
+## Step 4 — Use direct MCP calls for retrieval and capture
 
-From this point on, default to the concierge for anything judgmental:
-- Multi-note batch captures at end of task
-- Work item triage before create/update
-- Decision validation before picking an approach
-- Deep exploration of linked knowledge
-- Contradiction checks before implementation
+Default to direct MCP tool calls for everything orchestrator-related:
 
-Use direct MCP calls only for exact-key retrieval, trivial writes, and deterministic operations. See `orchestrator:every-turn` for the full operation routing table.
+- **Retrieval**: `lookup({query: "..."})`, `lookup({code_ref: "path/to/file"})`, `check_similar({content: "..."})`, `list_work_items({...})`, `list_open_threads({...})`.
+- **Capture**: `note({type, content, tags, code_refs})`, `update_note({id, ...})`, `supersede_note({old_id, ...})`, `close_thread({id, resolution})`.
+- **Work triage**: `create_work_item({...})`, `update_work_item({id, ...})`, `breakdown({...})`.
+- **Lifecycle**: `save_progress({summary, open_questions, next_steps})`.
+
+The `Agent` tool with `orchestrator:memory-concierge` subagent type is **gone in 0.29.0**. The persistent-thinking-partner pattern is now PA itself - no per-session subagent needed.
 
 ## Step 5 — Work the task
 
-Proceed with the user's request. The concierge is now in context, resumable with SendMessage, and ready for the judgment-heavy calls you'll need throughout the session.
+Proceed with the user's request.
 
 ## Recovery Checkpoints
 
@@ -93,7 +79,8 @@ If the briefing shows a recovery checkpoint, honor it - that's where the last se
 
 ## What NOT to do
 
-- Do NOT call `briefing` and then skip the concierge spawn. You'll pay cold-start later when you're mid-task and need it most.
+- Do NOT call `briefing` then forget to use it. The whole point is to internalize prior context before acting.
 - Do NOT dump the briefing to the user - including `curation_candidates`. Scan those internally and schedule maintenance actions as part of your work, don't narrate them.
-- Do NOT spawn multiple concierges in one session. Always resume the one you already have.
+- Do NOT call `send_message`, `read_messages`, or `peek_inbox` - those tools were deleted in 0.29.0.
+- Do NOT spawn `orchestrator:memory-concierge` - that subagent type is gone.
 - Do NOT skip briefing because the user's request "seems simple." Simple requests are where contradictions sneak in.
