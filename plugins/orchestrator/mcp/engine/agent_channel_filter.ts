@@ -58,20 +58,31 @@ export function filterEvent(raw: any): FilteredEvent | null {
   if (raw.type === "assistant") {
     const blocks = raw.message?.content;
     if (!Array.isArray(blocks)) return null;
+
+    // Prefer a text block (most informative for cross-session awareness).
+    // Walk all blocks; only fall back to a mutating tool_use if no text.
+    // CRITICAL: the original implementation `return null`-ed on a non-mutating
+    // tool_use block, which silently dropped any assistant message whose first
+    // block was a Read/Grep/etc. (very common - tool-call-then-text pattern).
+    let toolUseFallback: FilteredEvent | null = null;
     for (const b of blocks) {
       if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
         return { event_type: "assistant_text", content: b.text };
       }
-      if (b?.type === "tool_use" && typeof b.name === "string") {
-        if (!isMutatingTool(b.name)) return null;
-        return {
+      if (
+        !toolUseFallback &&
+        b?.type === "tool_use" &&
+        typeof b.name === "string" &&
+        isMutatingTool(b.name)
+      ) {
+        toolUseFallback = {
           event_type: "tool_use",
           tool_name: b.name,
           content: summarizeToolUse(b.name, b.input),
         };
       }
     }
-    return null;
+    return toolUseFallback;
   }
 
   if (raw.type === "summary" && typeof raw.summary === "string") {

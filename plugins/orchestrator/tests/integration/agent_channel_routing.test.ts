@@ -117,6 +117,46 @@ describe("agent-channel routing E2E", () => {
     );
   });
 
+  // Regression: a multibyte UTF-8 char straddling lastOffset would
+  // produce invalid JSON when sliced by character index. Fix uses Buffer
+  // subarray (byte-based) before utf8 decode.
+  test("multibyte UTF-8 content (emoji / non-ASCII) doesn't corrupt across reads", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const sa = makeSession("subordinate", "abc12345", "SA-A");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, sa);
+
+    const saJsonl = join(projectsHashDir, `${sa.session_id}.jsonl`);
+    writeFileSync(saJsonl, "");
+
+    const paReceived: ChannelNotification[] = [];
+    const paChan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => paReceived.push(n));
+
+    // First batch: short ASCII line. Filewatcher reads, advances offset.
+    appendAssistantEvent(saJsonl, "first short line");
+    paChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Second batch: a line containing emoji + accented chars. Each multibyte
+    // char takes 2-4 bytes. The string-index slice bug would mistake byte
+    // offset for char offset and split a char.
+    appendAssistantEvent(saJsonl, "emoji 🚀 and accents éàü - all preserved");
+
+    await new Promise((r) => setTimeout(r, 1700));
+    paChan.stop();
+
+    const contents = paReceived
+      .filter((n) => n.meta.event_type !== "session_joined" && n.meta.event_type !== "session_departed")
+      .map((n) => n.content);
+
+    expect(contents).toEqual(
+      expect.arrayContaining([expect.stringContaining("🚀")]),
+    );
+    expect(contents).toEqual(
+      expect.arrayContaining([expect.stringContaining("éàü")]),
+    );
+  });
+
   test("session_joined event fires when new session appears mid-flight", async () => {
     const pa = makeSession("prime", "f5b8708d", "PA");
     writeSession(stateDir, pa);

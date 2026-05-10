@@ -27,7 +27,7 @@ import {
   removeSession,
   readOverrideState,
   readOffsets,
-  writeOffset,
+  writeAllOffsets,
   type SessionEntry,
 } from "./agent_channel_state";
 
@@ -175,40 +175,61 @@ export class AgentChannel {
       const sessions = Array.from(this.knownSessions.values());
       const overrideState = readOverrideState(this.projectStateDir);
 
+      // Read offsets ONCE at tick start; mutate in memory; write ONCE at end.
+      // Avoids the N-reads-N-writes-per-tick storm when many JSONLs are
+      // tracked. Only one disk write per instance per tick.
+      const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
+      let mutated = false;
+
       for (const file of this.listJsonlFiles()) {
-        this.processFile(file, sessions, overrideState);
+        if (this.processFile(file, sessions, overrideState, offsets)) {
+          mutated = true;
+        }
+      }
+
+      if (mutated) {
+        writeAllOffsets(this.projectStateDir, this.selfSession.id8, offsets);
       }
     } catch (err) {
       process.stderr.write(`agent-channel tick error: ${err}\n`);
     }
   }
 
+  /**
+   * Process new content in one JSONL file. Mutates `offsets` in place.
+   * Returns true if the offset for this file changed (caller will batch-write).
+   */
   private processFile(
     file: string,
     sessions: SessionEntry[],
     overrideState: ReturnType<typeof readOverrideState>,
-  ): void {
-    const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
+    offsets: Record<string, number>,
+  ): boolean {
     const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
       stat = statSync(file);
     } catch {
-      return;
+      return false;
     }
-    if (stat.size === lastOffset) return;
+    if (stat.size === lastOffset) return false;
     if (stat.size < lastOffset) {
       // File truncated - reset offset
-      writeOffset(this.projectStateDir, this.selfSession.id8, file, 0);
-      return;
+      offsets[file] = 0;
+      return true;
     }
 
+    // Slice by BYTE offset, then decode UTF-8. Doing readFileSync(file, "utf8")
+    // followed by string.slice(lastOffset) is a UTF-8 corruption hazard:
+    // lastOffset is a byte count (Buffer.byteLength was used to advance it),
+    // but String.slice is index-based - any multibyte char (emoji, non-ASCII
+    // user text) that straddles the offset would produce invalid JSON.
     let buf: string;
     try {
-      const fd = readFileSync(file, "utf8");
-      buf = fd.slice(lastOffset);
+      const raw = readFileSync(file);
+      buf = raw.subarray(lastOffset).toString("utf8");
     } catch {
-      return;
+      return false;
     }
 
     const lines = buf.split("\n");
@@ -235,12 +256,8 @@ export class AgentChannel {
 
       this.processEvent(raw, sender, sessions, overrideState);
     }
-    writeOffset(
-      this.projectStateDir,
-      this.selfSession.id8,
-      file,
-      lastOffset + consumed,
-    );
+    offsets[file] = lastOffset + consumed;
+    return consumed > 0;
   }
 
   private processEvent(

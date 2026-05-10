@@ -148,6 +148,28 @@ export function readOffsets(
   );
 }
 
+/**
+ * Replace the entire offsets map for this receiver. Atomic temp+rename.
+ *
+ * The filewatcher accumulates per-file offset advances during a tick and
+ * calls this once at the end with the merged map - one disk write per tick
+ * per instance instead of one per processed file. (Old per-file writeOffset
+ * caused N+1 writes per tick at scale; see agent_channel.ts processFile.)
+ */
+export function writeAllOffsets(
+  stateDir: string,
+  receiverId8: string,
+  offsets: Record<string, number>,
+): void {
+  atomicWrite(
+    stateDir,
+    offsetsFileName(receiverId8),
+    JSON.stringify(offsets, null, 2),
+  );
+}
+
+/** @deprecated Use writeAllOffsets to batch per-tick. Kept for callers
+ *  outside the filewatcher hot loop. */
 export function writeOffset(
   stateDir: string,
   receiverId8: string,
@@ -156,9 +178,5 @@ export function writeOffset(
 ): void {
   const offsets = readOffsets(stateDir, receiverId8);
   offsets[jsonlPath] = offset;
-  atomicWrite(
-    stateDir,
-    offsetsFileName(receiverId8),
-    JSON.stringify(offsets, null, 2),
-  );
+  writeAllOffsets(stateDir, receiverId8, offsets);
 }

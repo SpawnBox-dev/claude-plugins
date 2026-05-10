@@ -101,4 +101,62 @@ describe("agent-channel filter", () => {
     expect(filterEvent(null)).toBeNull();
     expect(filterEvent({ type: "weird" })).toBeNull();
   });
+
+  // Regression: previously a non-mutating tool_use as the FIRST block of an
+  // assistant message caused the whole event to be dropped, even if a
+  // following text block contained content. Code-review caught this.
+  test("assistant with non-mutating tool_use FIRST then text - text wins", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "x" } },
+          { type: "text", text: "Done. Here is what I found: ..." },
+        ],
+      },
+    });
+    expect(ev?.event_type).toBe("assistant_text");
+    expect(ev?.content).toBe("Done. Here is what I found: ...");
+  });
+
+  test("assistant with mutating tool_use FIRST and text after - prefers text", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Edit", input: { file_path: "src/foo.ts" } },
+          { type: "text", text: "Edited foo.ts to handle null" },
+        ],
+      },
+    });
+    expect(ev?.event_type).toBe("assistant_text");
+    expect(ev?.content).toBe("Edited foo.ts to handle null");
+  });
+
+  test("assistant with only mutating tool_use (no text) - falls back to tool summary", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "x" } },
+          { type: "tool_use", name: "Edit", input: { file_path: "src/foo.ts" } },
+        ],
+      },
+    });
+    expect(ev?.event_type).toBe("tool_use");
+    expect(ev?.tool_name).toBe("Edit");
+  });
+
+  test("assistant with only non-mutating tool_use (no text) - dropped", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "Read", input: { file_path: "x" } },
+          { type: "tool_use", name: "Grep", input: { pattern: "y" } },
+        ],
+      },
+    });
+    expect(ev).toBeNull();
+  });
 });
