@@ -105,19 +105,26 @@ describe("state.json (overrides)", () => {
   });
 });
 
-describe("offsets.json", () => {
+describe("offsets-<receiver>.json (per-instance)", () => {
   test("readOffsets empty initially", () => {
-    expect(readOffsets(stateDir)).toEqual({});
+    expect(readOffsets(stateDir, "abc12345")).toEqual({});
   });
 
   test("writeOffset + readOffsets round-trip", () => {
-    writeOffset(stateDir, "/path/to/file.jsonl", 1024);
-    expect(readOffsets(stateDir)).toEqual({ "/path/to/file.jsonl": 1024 });
+    writeOffset(stateDir, "abc12345", "/path/to/file.jsonl", 1024);
+    expect(readOffsets(stateDir, "abc12345")).toEqual({ "/path/to/file.jsonl": 1024 });
   });
 
-  test("writeOffset overwrites previous value", () => {
-    writeOffset(stateDir, "/path/to/file.jsonl", 1024);
-    writeOffset(stateDir, "/path/to/file.jsonl", 2048);
-    expect(readOffsets(stateDir)).toEqual({ "/path/to/file.jsonl": 2048 });
+  test("writeOffset overwrites previous value for same receiver", () => {
+    writeOffset(stateDir, "abc12345", "/path/to/file.jsonl", 1024);
+    writeOffset(stateDir, "abc12345", "/path/to/file.jsonl", 2048);
+    expect(readOffsets(stateDir, "abc12345")).toEqual({ "/path/to/file.jsonl": 2048 });
+  });
+
+  test("offsets are isolated per receiver", () => {
+    writeOffset(stateDir, "abc12345", "/path/to/file.jsonl", 1024);
+    writeOffset(stateDir, "d4e5f6a7", "/path/to/file.jsonl", 9999);
+    expect(readOffsets(stateDir, "abc12345")).toEqual({ "/path/to/file.jsonl": 1024 });
+    expect(readOffsets(stateDir, "d4e5f6a7")).toEqual({ "/path/to/file.jsonl": 9999 });
   });
 });

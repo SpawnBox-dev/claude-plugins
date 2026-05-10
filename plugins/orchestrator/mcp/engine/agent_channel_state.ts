@@ -127,18 +127,38 @@ export function clearGlobalPause(stateDir: string): void {
   atomicWrite(stateDir, STATE_FILE, JSON.stringify(st, null, 2));
 }
 
-// --- offsets.json ---
+// --- offsets-<receiver_id8>.json ---
+//
+// Per-instance file rather than a shared offsets.json, because each instance
+// processes ALL JSONLs independently to decide whether to fire to its own
+// session. A shared file would cause whichever instance ticks first to
+// advance the offset for everyone else, masking events from peers.
 
-export function readOffsets(stateDir: string): Record<string, number> {
-  return safeRead<Record<string, number>>(join(stateDir, OFFSETS_FILE), {});
+function offsetsFileName(receiverId8: string): string {
+  return `offsets-${receiverId8}.json`;
+}
+
+export function readOffsets(
+  stateDir: string,
+  receiverId8: string,
+): Record<string, number> {
+  return safeRead<Record<string, number>>(
+    join(stateDir, offsetsFileName(receiverId8)),
+    {},
+  );
 }
 
 export function writeOffset(
   stateDir: string,
+  receiverId8: string,
   jsonlPath: string,
   offset: number,
 ): void {
-  const offsets = readOffsets(stateDir);
+  const offsets = readOffsets(stateDir, receiverId8);
   offsets[jsonlPath] = offset;
-  atomicWrite(stateDir, OFFSETS_FILE, JSON.stringify(offsets, null, 2));
+  atomicWrite(
+    stateDir,
+    offsetsFileName(receiverId8),
+    JSON.stringify(offsets, null, 2),
+  );
 }

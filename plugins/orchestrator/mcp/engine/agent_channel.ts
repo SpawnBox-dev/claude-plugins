@@ -188,7 +188,7 @@ export class AgentChannel {
     sessions: SessionEntry[],
     overrideState: ReturnType<typeof readOverrideState>,
   ): void {
-    const offsets = readOffsets(this.projectStateDir);
+    const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
     const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
@@ -199,7 +199,7 @@ export class AgentChannel {
     if (stat.size === lastOffset) return;
     if (stat.size < lastOffset) {
       // File truncated - reset offset
-      writeOffset(this.projectStateDir, file, 0);
+      writeOffset(this.projectStateDir, this.selfSession.id8, file, 0);
       return;
     }
 
@@ -235,7 +235,12 @@ export class AgentChannel {
 
       this.processEvent(raw, sender, sessions, overrideState);
     }
-    writeOffset(this.projectStateDir, file, lastOffset + consumed);
+    writeOffset(
+      this.projectStateDir,
+      this.selfSession.id8,
+      file,
+      lastOffset + consumed,
+    );
   }
 
   private processEvent(
