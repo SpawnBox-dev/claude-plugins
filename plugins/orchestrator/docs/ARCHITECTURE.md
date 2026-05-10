@@ -24,7 +24,10 @@ plugins/orchestrator/
       scorer.ts                  # confidence promotion
       session_tracker.ts         # session_log / session_registry, cross-session
       signal.ts                  # pheromone deposit / decay / boost (ANTS)
-      messaging.ts               # R6 inter-session inbox + in-memory counter fast path
+      agent_channel.ts           # R8 (0.29.0): filewatcher polling JSONLs, fires notifications/claude/channel
+      agent_channel_filter.ts    # R8: pure filter for which JSONL events warrant cross-session forwarding
+      agent_channel_state.ts     # R8: atomic-write helpers for sessions.json / state.json / per-receiver offset files
+      addressing.ts              # R8: pure parser for @PA / @SA-<id8> / @all + slash + NL overrides
     tools/
       remember.ts                # note() handler + R4 gate
       recall.ts                  # lookup() handler
@@ -34,10 +37,10 @@ plugins/orchestrator/
       reflect.ts                 # retro() handler
       check_similar.ts           # check_similar() handler
       update_note_helpers.ts     # snapshotRevision, appendToNoteContent
-      messaging.ts               # R6 send_message / read_messages / update_session_task handlers
-      hook_event.ts              # R6 _hook_event dispatcher (per-event hook logic)
-  skills/                        # 13 proactive skill prompts
-  agents/                        # memory-concierge, orchestrator-reflect
+      session_task.ts            # update_session_task handler
+      hook_event.ts              # _hook_event dispatcher (per-event hook logic)
+  skills/                        # proactive skill prompts (incl. pa-bootstrap, pa-pause, pa-resume, pa-takeover from R8)
+  agents/                        # prime-agent (R8, replaces memory-concierge), orchestrator-reflect
   hooks/                         # bash scripts for 8 Claude Code hook points
   sidecar/                       # Python bge-m3 ONNX embedding server
   dist/server.js                 # bun-bundled server (for plugin install)
@@ -61,7 +64,7 @@ Routing constants in `mcp/types.ts`:
 
 ### Schema
 
-Migrations live in `mcp/db/schema.ts`, versioned 1-19 (project) and 100-101 (global-only).
+Migrations live in `mcp/db/schema.ts`, versioned 1-20 (project) and 100-101 (global-only). Migration 20 (R8, 0.29.0) drops `session_messages` and `session_message_reads` after the cross-session messaging system was replaced by agent-channel notifications.
 
 The `notes` table holds everything. Work items, decisions, checkpoints, open threads - they are all the same row shape, differentiated by the `type` column. Status, priority, and due date fields are populated only for `type = 'work_item'` but the columns exist on every row.
 
@@ -85,11 +88,16 @@ Related tables:
 - `note_revisions` - pre-mutation snapshots for R2. Added in v15. Holds content, context, tags, keywords, confidence, `revised_at`, `revised_by_session`.
 - `embeddings` - bge-m3 vectors as BLOB, one row per note, CASCADE-deleted with the note.
 - `session_log` - per-surfacing log: which note was shown to which session at which turn, `delivery_type` in {fresh, refresh}.
-- `session_registry` - one row per session: `started_at`, `last_active_at`, `last_briefing_at` (v13), concierge handoff state.
+- `session_registry` - one row per session: `started_at`, `last_active_at`, `last_briefing_at` (v13), `concierge_agent_id` (vestigial, no longer read/written as of R8).
 - `migrations` - applied-version tracker.
-- `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). Consumers: `last_retro_run_at` (R4.4 auto-retro gate), R6 hook-state keys (`bridge_<sid>_<turn>`, `orch_active_<sid>_<turn>`, `preuse_warned_<sid>_<turn>`, `struggle_<sid>`, `stop_<sid>`, `subagent_stop_<sid>`). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
-- `session_messages` - R6 inter-session messaging payloads (migration 19). Direct or broadcast. Optional JSON `scope` rendered as a display label inline (R7.9: was a delivery filter in R7.5-R7.8, rolled back to label-only). Optional `expires_at` TTL.
-- `session_message_reads` - R6 per-recipient read tracking. Composite PK `(msg_id, session_id)`; CASCADE-deleted with the message.
+- `plugin_state` - generic key/value scratch table for ephemeral plugin state (migration 16). Consumers: `last_retro_run_at` (R4.4 auto-retro gate), hook-state keys (`bridge_<sid>_<turn>`, `orch_active_<sid>_<turn>`, `preuse_warned_<sid>_<turn>`, `struggle_<sid>`, `stop_<sid>`, `subagent_stop_<sid>`). Structure: `key TEXT PRIMARY KEY, value TEXT, updated_at TEXT`.
+- ~~`session_messages`~~ - **dropped in migration 20 (R8, 0.29.0)**. Was R6 inter-session messaging payloads; replaced by agent-channel real-time notifications.
+- ~~`session_message_reads`~~ - **dropped in migration 20 (R8, 0.29.0)**. Was R6 per-recipient read tracking.
+
+**Agent-channel state (R8, 0.29.0)** - lives in the filesystem, not the DB, because it's per-instance and per-session-lifetime:
+- `<project>/.orchestrator-state/agent-channel/sessions.json` - registry of currently-active sessions (PA + SAs) with role, name, heartbeat. Each MCP instance writes its own entry on startup, touches it on a 30s heartbeat, removes it on clean shutdown.
+- `<project>/.orchestrator-state/agent-channel/state.json` - override state: `pa_global_pause` + per-SA pauses set by `/pa-pause` skills.
+- `<project>/.orchestrator-state/agent-channel/offsets-<receiver_id8>.json` - per-instance JSONL byte offsets so the filewatcher can resume reads without replaying.
 
 Global-only tables:
 
@@ -144,13 +152,15 @@ Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal
 | `delete_note` | Hard delete (cascades links). Used sparingly - prefer supersede or close_thread. |
 | `update_work_item` | Status / priority / due / content / tags / context / confidence / blocked_by. Accepts `code_refs: string[]` with same semantics as update_note. Cascades on `status = done`. |
 
-### Inter-session messaging (R6)
+### Cross-session communication (R8, 0.29.0+)
+
+The orchestrator MCP server declares the `experimental: { 'claude/channel': {} }` capability. Cross-session events are routed in real-time via `notifications/claude/channel` - the same primitive the official Discord channels plugin uses.
+
+There is **no `send_message` / `read_messages` tool** (deleted in R8). Communication happens by typing `@PA` / `@SA-<id8>` / `@all` in your terminal output. The `agent_channel.ts` filewatcher in each session's MCP instance watches every active JSONL transcript, parses the addressing, and fires channel notifications targeted at the session that should receive each event.
 
 | Tool | Purpose |
 |---|---|
-| `send_message` | Leave a direct message for another active session, or broadcast to all active siblings. Optional `scope_code_ref` / `scope_task_contains` are rendered inline as display labels (R7.9) so the recipient understands sender intent - they do NOT gate delivery. Use `priority` and `ttl_seconds` for noise/expiry control. |
-| `read_messages` | Drain the caller's inbox; marks each surfaced message as read in `session_message_reads`. R7.9: single-path delivery - returns every queued message regardless of context. Hooks auto-drain on every tool call and turn boundary; agents call this for explicit manual flush. |
-| `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task`). Sibling sessions see this in cross-session briefing AND in lightweight hook-time injections. |
+| `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task` AND `sessions.json` entry). Peers see this as the `from_task` field on every channel notification you generate, in their briefing's Cross-Session Activity section, and in hook-time activity injections. |
 
 ### Admin
 
@@ -232,62 +242,80 @@ The ANTS (Adaptive Note Temperature System) pheromone model:
 
 `promoteConfidence` - bumps a note's confidence (low->medium, medium->high) on auto-dedup, repeat surfacing, or re-validation.
 
-### messaging.ts (R6 + R7.5)
+### agent_channel.ts + addressing.ts + agent_channel_filter.ts + agent_channel_state.ts (R8, 0.29.0+)
 
-Cross-session inter-agent messaging engine. Four primitives:
+Cross-session real-time communication via `notifications/claude/channel`. Replaces the deleted R6/R7 messaging engine. Four cooperating modules:
 
-- `sendMessage(db, input)` - inserts a row into `session_messages`. Direct (`to_session` set) or broadcast (`to_session` null). On send, increments the in-memory `inboxCounters` map for affected recipients (target session for direct; all sibling sessions active in the last 24h for broadcasts).
-- `peekInbox(db, sessionId)` - O(1) check via `inboxCounters` map. Auto-refreshes from DB at most once per `COUNTER_REFRESH_INTERVAL_MS` (R7.5: 5s, was 30s) to recover from sibling-process writes the local counter missed. **R7.5 opportunistic re-check**: when the Map has a 0-entry for this session (polled before, saw empty), peek does a single indexed `LIMIT 1` SELECT to confirm before returning 0. Truly idle sessions (no Map entry) skip the check; the truly-empty zero-cost path is preserved for the common case. Cross-process drift window: `next peek call` instead of 30s.
-- `drainInbox(db, sessionId, context?)` - SQL pull of all unread messages addressed to the session, then **R7.5 scope filter**: each message's `scope.code_ref` is substring-matched against `context.currentFilePath`, and `scope.task_contains` is case-insensitive substring-matched against `context.currentTask`. Either field matching delivers (any-match OR). Unscoped messages always deliver. Scoped messages without matching context stay unread (deferred) and remain eligible for delivery on a future call where the context matches. Marks only eligible messages as read via `session_message_reads`. The counter is set to the deferred count after each drain so future polls in matching contexts trigger drain.
-- `loadInboxCounters(db)` - called once at MCP server boot to prime the counter map from the DB. After that, the map is maintained incrementally.
+**`agent_channel.ts` - the AgentChannel class.** One instance per Claude Code session (spawned at MCP server startup in `server.ts:startAgentChannel`). Each instance:
 
-The counter map is per-process. A sibling MCP server's writes go to the DB; this process won't see the counter bump until the next refresh. The drain path always trusts the DB, so missed counter bumps cause delayed delivery (bounded by the opportunistic re-check), never lost messages.
+- Watches `~/.claude/projects/<project_hash>/*.jsonl` (every active session's transcript) on a 1.5s poll cadence.
+- Reads new bytes from each file using a per-instance offset persisted to `offsets-<receiver_id8>.json` (per-receiver, NOT shared - shared offsets would cause whichever instance ticks first to advance the offset for everyone else, masking events from peers).
+- Reads bytes via `Buffer.subarray(lastOffset).toString("utf8")` - byte-based slicing, not character-based, to avoid UTF-8 corruption when a multibyte character straddles the offset.
+- For each new event line, calls `filterEvent` (drop tool_results / system / read-only tools), then `parseAddressing` (resolve `@PA` / `@SA-<id8>` / `@all` / conversational prefix / overrides), then `shouldReceive` (PA observes everything; SA receives only events explicitly addressed to it).
+- Fires `mcp.notification({ method: "notifications/claude/channel", params: { content, meta } })` for each event that should reach this instance's session. Claude Code injects the notification inline as a `<channel source="agent-channel" ...>content</channel>` tag.
+- Maintains a 30s heartbeat in `sessions.json`; reaps stale sessions (>90s without heartbeat) and emits `session_departed`. Detects newly-joined sessions and emits `session_joined`.
+
+**`addressing.ts`** - pure parser. Given event content + sender entry + sessions registry, returns `{targets, pa_addressed, override_command, unresolved_addresses}`. Recognizes `@PA`, `@SA-<id8>`, `@all`, conversational `PA, ...` prefix, slash commands (`/pa-pause`, `/pa-resume`), and natural-language equivalents ("PA, back off", "PA, come back in"). Sender always excluded from own targets. Unresolved `@SA-<id8>` references dropped silently with a warning flag.
+
+**`agent_channel_filter.ts`** - pure filter. Decides which JSONL events warrant cross-session forwarding. Forwards: user input, assistant text, mutating tool calls (Edit/Write/Bash/MultiEdit/git_*), summaries. Drops: tool_result bodies (too noisy; PA can read JSONL ad-hoc if it cares), system messages, read-only tool calls. Walks all blocks of a multi-block assistant message and prefers text over tool-use for forwarding, so a Read-then-text pattern doesn't lose the text.
+
+**`agent_channel_state.ts`** - atomic-write helpers for the three filesystem state files (`sessions.json`, `state.json`, `offsets-<receiver_id8>.json`). Uses temp-file + rename pattern so concurrent reads from sibling instances see either the old or new state, never a torn write. Tolerant readers - parse failure returns empty/default rather than throwing.
+
+The shared filesystem state replaces the per-process `inboxCounters` Map and the SQLite `session_messages` table that the R6/R7 architecture relied on. No counter drift, no per-session inbox, no polling - notifications fire in real-time as soon as the filewatcher sees the JSONL line written.
 
 ## Skills and agents
 
-### Skills (13)
+### Skills
 
 Located in `skills/`. Each is a proactive prompt with activation criteria that Claude Code evaluates against the turn context.
 
-- `every-turn` - dispatcher. MANDATORY every turn per its header. Evaluates which other orchestrator skills apply.
-- `orchestrating` - always active. Positions the memory concierge as the default first-line thinking partner.
-- `getting-started` - session onboarding / post-compact re-orientation.
+Operational skills:
+- `every-turn` - dispatcher. MANDATORY every turn per its header. Evaluates which other orchestrator skills apply. (R8: scrubbed of consult-concierge / send_message references.)
+- `orchestrating` - always active. Frames direct MCP calls + agent-channel addressing as the two operational surfaces. (R8: rewritten away from the concierge-first model.)
+- `getting-started` - session onboarding / post-compact re-orientation. (R8: detects role from `SPAWNBOX_AGENT_ROLE` env, no longer spawns a concierge subagent.)
 - `wrapping-up` - end-of-task / session-end progress save.
+- `planning-approach` - pre-work context gather for complex tasks.
+
+Capture skills (single-purpose nudges):
 - `made-a-decision` - fires after an architectural decision. Uses `note(type:"decision")`.
 - `learned-something` - fires on discovery of a pattern / convention / gotcha.
 - `closing-a-thread` - fires when an open question is resolved. Uses `close_thread`.
-- `consult-concierge` - first-line routing for judgment-heavy work.
 - `found-a-problem` - bug / footgun / security / limitation capture.
-- `planning-approach` - pre-work context gather for complex tasks.
 - `something-went-wrong` - post-debug capture of root cause + pivot.
 - `user-preference` - workflow / style / tooling preference capture (global-scoped).
 - `what-was-decided` - pre-change lookup for prior decisions.
 
-### Agents (2)
+PrimeAgent skills (R8, 0.29.0+):
+- `pa-bootstrap` - first-action skill PA runs after `pa-start.bat` launches. Sets `/model claude-opus-4-7` + `/effort max`, confirms role=prime, reads sessions.json, loads `agents/prime-agent.md`, outputs readiness status. Idempotent.
+- `pa-pause` - override. In an SA terminal: pauses PA's posture toward THIS SA only. In PA's terminal: global pause across all SAs. Atomic-writes `state.json`.
+- `pa-resume` - inverse of pa-pause. Clears the appropriate scope.
+- `pa-takeover` - force-claim PA primacy from an orphaned previous PA. Updates sessions.json roles atomically; expects `/pa-bootstrap` to follow.
+
+### Agents
 
 Located in `agents/`.
 
-- `memory-concierge` - the persistent session thinking partner. Rewritten in R3.6 with Shape A (structured artifact request) / Shape B (batch capture request) framing. Prior prompt biased toward save_progress-shaped handoffs and would return "nothing else to capture" after large batches of work.
+- `prime-agent` (R8, 0.29.0+) - the PrimeAgent operating contract. Replaces the deleted `memory-concierge`. Defines authority (always-driveable SAs by default, with override), communication model (terminal output → agent-channel filewatcher routes, no send_message), typical patterns (coordination, driving, three-way, override discipline, self-improvement), and explicit don'ts. Read by `/pa-bootstrap` step 5.
 - `orchestrator-reflect` - maintenance agent. Invoked manually or via `/orchestrator:reflect`. Wraps `retro()` and a structured analysis pass.
 
 ## Hook flow
 
-Eight hooks registered in `hooks/hooks.json`. Seven use `type: "mcp_tool"` and dispatch through the `_hook_event` MCP tool (R6). One — `SessionStart` — stays bash because the MCP server may not be connected yet at first session boot. Hook state is in `plugin_state` (per-session keys), not in a state-dir.
+Hooks registered in `hooks/hooks.json`. Most use `type: "mcp_tool"` and dispatch through the `_hook_event` MCP tool (R6 dispatcher pattern; survives R8). One — `SessionStart` — stays bash because the MCP server may not be connected yet at first session boot. Hook state is in `plugin_state` (per-session keys), not in a state-dir.
 
 | Hook point | Type | Purpose |
 |---|---|---|
 | `SessionStart` | `command` (bash) | Writes `active-session` file (read by `server.ts:getFallbackSessionId` when the agent forgets to pass session_id). Emits MANDATORY FIRST ACTIONS system-reminder text. |
-| `UserPromptSubmit` | `mcp_tool` -> `_hook_event` | Increments per-session turn counter, resets per-turn struggle/orch-active markers, picks rotating reminder, surfaces last-turn bridge from `plugin_state`, injects sibling activity (with R7 keyword-overlap *POTENTIAL OVERLAP* markers), drains pending inter-session messages, AND R7: emits loop-closure nudge listing in-flight work_items in scope, escalating to "Close loops NOW" when the user prompt regex-matches approval phrases (≤300 chars). |
+| `UserPromptSubmit` | `mcp_tool` -> `_hook_event` | Increments per-session turn counter, resets per-turn struggle/orch-active markers, picks rotating reminder, surfaces last-turn bridge from `plugin_state`, injects sibling activity (with R7 keyword-overlap *POTENTIAL OVERLAP* markers; R8 update: full session UUIDs instead of 8-char prefixes; coordinate via `@SA-<id8>` instead of `send_message`). R7: emits loop-closure nudge listing in-flight work_items in scope, escalating to "Close loops NOW" when the user prompt regex-matches approval phrases (≤300 chars). (R8: removed inter-session-message drain - cross-session events arrive via separate `notifications/claude/channel` injection from agent-channel filewatcher, not the hook envelope.) |
 | `PreToolUse` on Write/Edit/MultiEdit/NotebookEdit | `mcp_tool` -> `_hook_event` | (1) R7: code_refs hint when the file has tagged notes the session hasn't surfaced (once per session+file). (2) Option-B escalation: soft nudge on turn 2-3 when no orchestrator tool fired this turn; `permissionDecision: "ask"` on turn 4+. |
-| `PostToolUse` matcher `.*` | `mcp_tool` -> `_hook_event` | Densest delivery surface. O(1) fast path via `inboxCounters` map. Drains pending direct + broadcast messages. R7: on Edit/Write/MultiEdit/NotebookEdit, also surfaces in-flight work_items whose `code_refs` contain the edited file_path (once per session+work_item). On orchestrator-tool calls, marks orch-active for the turn and appends to the next turn's bridge in `plugin_state`. |
-| `PostToolUseFailure` | `mcp_tool` -> `_hook_event` | Bumps `struggle_<sid>` counter; soft nudge at 2 consecutive, hard escalation at 3+. Reset by `UserPromptSubmit` (new turn) or any successful `PostToolUse`. |
+| `PostToolUse` matcher `.*` | `mcp_tool` -> `_hook_event` | R7: on Edit/Write/MultiEdit/NotebookEdit, surfaces in-flight work_items whose `code_refs` contain the edited file_path (once per session+work_item). On orchestrator-tool calls, marks orch-active for the turn and appends to the next turn's bridge in `plugin_state`. (R8: removed inboxCounters fast path + message drain.) |
+| `PostToolUseFailure` | `mcp_tool` -> `_hook_event` | Bumps `struggle_<sid>` counter; soft nudge at 2 consecutive, hard escalation at 3+ (R8 update: nudges at `lookup` first, then `PA, ...` addressing if a PA is active, instead of `consult-concierge`). Reset by `UserPromptSubmit` (new turn) or any successful `PostToolUse`. |
 | `PreCompact` | `mcp_tool` -> `_hook_event` | Emits `systemMessage` reminding the model to flush uncaptured knowledge before the window shrinks. |
 | `Stop` | `mcp_tool` -> `_hook_event` | Once-per-session block. R7: surgical prompt - Curate (always), Capture (always), Loop-closure (only when in-flight work_items exist), Save progress (always), R3.4 fresh-notes nudge (only when ≥3 fresh surfacings). |
 | `StopFailure` | `mcp_tool` -> `_hook_event` | R7: turn ended due to API error. Emits a `systemMessage` suggesting strategy change if errors persist. Non-blocking. |
-| `SubagentStop` | `mcp_tool` -> `_hook_event` | R7: separated from Stop (R6 bug). Subagent-specific text that explicitly tells the subagent NOT to call `save_progress` (parent's job). Focuses on capture: note, update_note, close_thread. |
+| `SubagentStop` | `mcp_tool` -> `_hook_event` | R7: separated from Stop. Subagent-specific text that explicitly tells the subagent NOT to call `save_progress` (parent's job). Focuses on capture: note, update_note, close_thread. |
 | `TaskCompleted` | `mcp_tool` -> `_hook_event` | R7: subagent task finished. Injects capture nudge with the subagent id - "did you capture what it discovered?" so patterns don't evaporate with the subagent's context. |
 
-The dispatcher pattern keeps all hook logic in `mcp/tools/hook_event.ts` with shared DB access, replaces fragile bash JSON escaping with TypeScript, and lets the in-memory counter answer 99% of `PostToolUse` calls without a SQL round-trip.
+The dispatcher pattern keeps all hook logic in `mcp/tools/hook_event.ts` with shared DB access and replaces fragile bash JSON escaping with TypeScript. Cross-session events flow via a separate channel: the `notifications/claude/channel` MCP capability declared at `server.ts:280` and emitted by `agent_channel.ts` independently of any hook. Hooks and channel notifications coexist in the agent's context window without colliding.
 
 ## Retrieval pipeline composition
 

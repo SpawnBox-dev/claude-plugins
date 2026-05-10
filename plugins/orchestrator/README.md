@@ -33,43 +33,60 @@ A Python HTTP server (`sidecar/embed_server.py`) runs the ONNX bge-m3 model loca
 - Health check: `GET /health` - Embed: `POST /embed`
 - Graceful degradation: if sidecar doesn't start, all features work via FTS5
 
-### Session Tracking & Inter-Agent Messaging
+### Cross-Session Orchestration: PrimeAgent + agent-channel (0.29.0+)
 
-Cross-session awareness via `session_log`, `session_registry`, `session_messages`, and `session_message_reads` tables:
+The plugin's MCP server declares the `claude/channel` capability (the same primitive the official Discord channels plugin uses). When multiple Claude Code sessions run against the same project, cross-session events are routed in real-time via `notifications/claude/channel` - no polling, no hook drain, no `send_message` tool.
 
-- Tracks which notes were surfaced in each session
-- Annotates search results: `[already sent N turn(s) ago]`, `[sent to N other session(s)]`
-- In-memory per-session turn counters for progressive disclosure
-- 7-day cleanup for stale sessions
-- **R6 inter-agent messaging**: agents can `send_message` to a specific sibling session or broadcast to all active siblings. Optional scope filters (`code_ref`, `task_contains`), priority, and TTL. Delivered via hooks at every model-think boundary (PostToolUse, UserPromptSubmit, Stop, etc). An in-memory unread-counter map keeps the hook fast path O(1) - empty inbox = zero token cost on idle turns.
-- **Active task broadcast**: `update_session_task` sets `session_registry.current_task` so siblings see what each session is working on in real time, both via the briefing's Cross-Session Activity section and via lightweight hook-time injections.
+**Roles:**
+- **PrimeAgent (PA)** - persistent orchestrator session, role=prime, runs Opus at max effort. Singleton per project. Authoritative observer of all events.
+- **Subordinate Agent (SA)** - any other Claude Code session in the project, role=subordinate. Sees events addressed to it; treats PA's directives as the user's voice unless overridden.
+
+**How sessions communicate:**
+- Type `@PA` / `@PrimeAgent` in your terminal output to address the prime.
+- Type `@SA-<id8>` (8-char prefix) to address a specific subordinate.
+- Type `@SA-<id8>,@SA-<id8>` for multiple, or `@all` to broadcast.
+- The conversational form `PA, ...` also addresses PA.
+- Free-form text without an `@` prefix is private dialogue with the user; PA still observes by default; no SA receives it.
+
+**Filewatcher routing:**
+Each session's MCP server instance runs a filewatcher that polls `~/.claude/projects/<hash>/*.jsonl` every 1.5s, parses new events, applies the addressing parser, and emits `notifications/claude/channel` for events that should reach its session. PA receives all events by default; SAs receive only what's explicitly addressed to them.
+
+**Override controls:**
+- `/pa-pause` in an SA terminal pauses PA's posture toward that SA only.
+- `/pa-pause` in PA's terminal sets a global pause across all SAs.
+- `/pa-resume` clears the corresponding pause.
+- `/pa-takeover` (in a new PA window) forcibly claims primacy from an orphaned previous PA.
+- Natural-language equivalents are recognized: "PA, back off / stand down / take five / pause" and "PA, come back in / resume".
+
+**Launchers:**
+The orchestrator plugin doesn't ship the launchers - they're per-project conventions. In SpawnBox the convention is `pa-start.bat` (gold tab, Opus, max effort, singleton check) and `sa-start.bat` (default tab, optional `--name`). Both pass `--channels plugin:orchestrator@<marketplace>` so the channel capability is attached.
 
 ### MCP Tools
 
 | Tool | Purpose |
 |------|---------|
-| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings, plus a `curation_candidates` section surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles so the agent can schedule update/supersede/close alongside its task. R4.4 auto-retro gate: on the first `event=startup` of a week (7-day cadence based on `plugin_state.last_retro_run_at`), inline-invokes `retro` and prepends the summary as an `## Auto-Retro` section |
-| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks. R1 fields: `updated_at`, `source_session`, `superseded_by`. R5 field: `code_refs: string[]` - file/module path breadcrumbs (not line numbers, not symbols) so notes about specific code are findable via reverse-index lookup |
-| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports session_id for dedup tracking, `include_superseded` to surface replaced notes, `include_history` to walk revision chains, `link_limit` (default 20) to cap rendered linked-notes with a tail message for umbrella notes, and `code_ref: string` (R5 reverse-index - returns notes that reference this exact file or module path in their code_refs array). Surfaces `updated_at`, `source_session`, `superseded_by`, and `code_refs` inline on every result |
+| `briefing` | Session startup briefing - open threads, recent decisions, work items, user profile, drift warnings, plus a `curation_candidates` section surfacing stale-but-hot and low-confidence-but-hot notes with maintenance handles. R4.4 auto-retro gate: on the first `event=startup` of a week (7-day cadence), inline-invokes `retro` and prepends the summary as `## Auto-Retro` |
+| `note` | Persist knowledge - decisions, patterns, anti-patterns, conventions. Auto-embeds, auto-links, dedup-checks. Accepts `code_refs: string[]` for file/module breadcrumbs |
+| `lookup` | Query the knowledge graph with hybrid search (FTS5 + vector). Supports `id`, `query`, `code_ref` (reverse-index), `include_superseded`, `include_history`, `link_limit` |
 | `plan` | Curated context package for tasks and subagent hydration |
 | `check_similar` | Find prior art before implementing - semantic similarity against decisions/conventions/anti-patterns |
 | `system_status` | Health check - note counts, embedding coverage, sidecar status, active sessions |
 | `install_embeddings` | First-run setup - detect/install Python and uv dependencies for embedding support |
 | `save_progress` | Checkpoint for next session - what was done, open questions, next steps |
 | `close_thread` | Resolve an open thread with cascade |
-| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change. Supports `append_content` mode for lightweight timestamped additions (no read-before-write). Auto-snapshots a revision (R2) before any content/context/tags/confidence change. Accepts `code_refs: string[]` to replace breadcrumbs ([] clears to null) |
-| `supersede_note` | Replace an old note with a new one (pass `old_id` plus either `new_id` or `new_content`+`new_type`); preserves history. Hidden from default lookup; graph-linked for traceability. Accepts `code_refs: string[]` on inline-replacement path so breadcrumbs carry forward |
-| `delete_note` | Remove wrong/outdated knowledge |
+| `update_note` | Modify note content/tags/confidence in place. Re-embeds on content change. Supports `append_content` mode for lightweight timestamped additions |
+| `supersede_note` | Replace an old note with a new one; preserves history. Hidden from default lookup; graph-linked for traceability |
+| `delete_note` | Remove wrong/outdated knowledge (last resort - prefer `supersede_note` or `close_thread`) |
 | `user_profile` | View/set/remove structured user observations by dimension |
-| `create_work_item` | Track a concrete task with priority and optional due date. Accepts `code_refs: string[]` for work scoped to specific files |
-| `update_work_item` | Change status/priority/content/due date/tags/context/confidence/code_refs (cascades on status=done) |
+| `create_work_item` | Track a concrete task with priority and optional due date |
+| `update_work_item` | Change status/priority/content/due date/tags/context/confidence/code_refs |
 | `breakdown` | Split complex work into parent + children work items |
-| `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup. R5 verification pass: when `CLAUDE_PROJECT_DIR` is set, checks file-existence for every path in every note's code_refs and reports `code_refs verified: N checked, M broken`. Also auto-fires weekly from briefing (R4.4 gate) |
+| `retro` | Knowledge maintenance - consolidation, signal decay (ANTS), gap analysis, dedup, code_refs verification |
 | `list_open_threads` | List all open threads with status and signal |
 | `list_work_items` | List work items filtered by status/priority |
-| `send_message` | R6: leave a message for another active session, or broadcast to all active siblings. Optional `scope_code_ref`/`scope_task_contains` (R7.5: actual filters - delivered only when recipient's edit path or current_task matches), `priority`, `ttl_seconds`. Delivered at the recipient's next hook boundary. |
-| `read_messages` | R6: drain the caller's inbox. Hooks call this automatically; agents rarely need to. |
-| `update_session_task` | R6: broadcast `current_task` so sibling sessions see what you're working on - both in hook-time activity injection and in their next briefing |
+| `update_session_task` | Broadcast `current_task` so peer sessions see what you're working on as the `from_task` field on every channel notification you generate |
+
+**Cross-session communication is via terminal output, not a tool.** The `send_message` / `read_messages` / `peek_inbox` tools that existed in 0.28.x and earlier (R6/R7 messaging) were deleted in 0.29.0 in favor of agent-channel notifications. Type `@PA` / `@SA-<id8>` / `@all` in your terminal output and the filewatcher routes the addressing automatically.
 
 ### Engine
 
@@ -79,33 +96,34 @@ The engine layer handles the intelligence behind the tools:
 - **ANTS Signal** (`signal.ts`) - Adaptive Note Temperature System: pheromone-inspired signal deposit/decay, vacation-safe (14-day cap)
 - **Embeddings** (`embeddings.ts`) - Sidecar client, embed on insert/update, batch backfill, graceful fallback
 - **Session Tracker** (`session_tracker.ts`) - Session registration, surfacing log, cross-session annotations, cleanup
-- **Scorer** - Ranks notes by relevance (recency, access frequency, keyword overlap, confidence)
-- **Linker** - FTS5 search + hybrid search path, auto-links notes by keyword overlap
-- **Deduplicator** - Jaccard similarity (0.6 threshold AND minimum 3 shared keywords - `MIN_SHARED_KEYWORDS` guard prevents false positives from incidental 1-2 token overlaps) at insert time, batch merge in retro
+- **Agent Channel** (`agent_channel.ts`) - Filewatcher polling JSONLs, addressing parser, channel notification emission. Per-instance: each Claude Code session's MCP server spawns its own AgentChannel
+- **Addressing Parser** (`addressing.ts`) - Pure function: parses event content for `@PA` / `@SA-<id8>` / `@all`, conversational PA prefix, slash commands, natural-language overrides
+- **Channel Filter** (`agent_channel_filter.ts`) - Decides which JSONL events warrant forwarding (user input + assistant text + mutating tools; drops tool_result, system, read-only tools)
+- **Channel State** (`agent_channel_state.ts`) - Atomic-write helpers for sessions.json, state.json, per-receiver offset files
 - **Composer** - Assembles briefings with context budgeting
+- **Linker** - FTS5 search + hybrid search path, auto-links notes by keyword overlap
+- **Deduplicator** - Jaccard similarity (0.6 threshold + min 3 shared keywords) at insert time, batch merge in retro
+- **Scorer** - Ranks notes by relevance (recency, access frequency, keyword overlap, confidence)
 
-### Memory Concierge
+### PrimeAgent (replaces the per-session memory concierge)
 
-An Opus/Sonnet subagent (`agents/memory-concierge.md`) that curates knowledge retrieval:
+`agents/prime-agent.md` defines PA's operating contract: when to act, when to observe, override etiquette, how to use `note()` and `create_work_item()` for self-improvement of the orchestrator plugin itself. PA is launched per-project via the project's `pa-start.bat` (or equivalent), primed by `/pa-bootstrap`, and runs continuously until the user closes its window.
 
-- Invoked via `orchestrator:consult-concierge` skill for complex/broad queries
-- Resumed across turns to maintain knowledge state (knows what it already told you)
-- Progressive disclosure: top 3 on first query, deeper cuts on follow-ups
-- Detects context compaction and proactively refreshes critical knowledge
-- Cross-session awareness: highlights discoveries from other active sessions
-- Sonnet for routine queries, Opus for complex judgment (contradiction detection, cross-domain synthesis)
+The Sonnet `memory-concierge` subagent that existed in 0.28.x is gone. The persistent-thinking-partner pattern is now PA itself - a full Claude Code session with full tool access, not a subagent.
 
 ## How It Works
 
-1. **Session start** - A hook fires automatically, calling `briefing` to produce a briefing. If embeddings are inactive, the briefing includes setup guidance.
+1. **Session start** - The session-start hook fires, calling `briefing` for orientation. The MCP server's `agent_channel.ts` registers the session in `<project>/.orchestrator-state/agent-channel/sessions.json` with role from `SPAWNBOX_AGENT_ROLE` env (or default `subordinate`).
 
-2. **During work** - The `orchestrating` skill guides agents to `lookup` (simple queries) or `consult-concierge` (complex queries) before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. `check_similar` catches prior art before implementing. Lookup ranks linked notes by a composite of link strength, signal, and recency, capped at `link_limit` (default 20). **R5 reverse-index:** notes about specific code carry `code_refs` breadcrumbs (file/module paths); `lookup({code_ref: 'path/to/file'})` filters to notes referencing that exact path - complements keyword search when the question is "what do we know about this file?" rather than "what do we know about this topic?".
+2. **Cross-session awareness** - The filewatcher in each MCP instance watches every active session's JSONL. Events arrive in your context as inline `<channel source="agent-channel" ...>content</channel>` injections. PA observes everything; SAs see only addressed events plus their own dialogue.
 
-3. **Session tracking** - Every `lookup` with a `session_id` logs which notes were surfaced, enabling dedup annotations (`[already sent N turn(s) ago]`) and cross-session awareness.
+3. **During work** - The `orchestrating` and `every-turn` skills guide agents to `lookup` and `check_similar` before acting. `note` captures decisions, patterns, and commitments with auto-embedding and similarity alerting. **Reverse-index by file:** notes about specific code carry `code_refs` breadcrumbs; `lookup({code_ref: 'path/to/file'})` filters to notes referencing that exact path.
 
-4. **Session end** - The Stop hook pushes maintenance verbs (`update_note`, `close_thread`, `supersede_note`) with equal priority to capture - not just `save_progress` and new notes, but correction and curation of notes the session actually relied on. Notes are classified by type with specific guidance (decisions, conventions, anti-patterns, user preferences). **Retro is no longer an end-of-session action**: R4.4 auto-fires it from briefing on a 7-day cadence. Agents only call retro manually when they want to force an immediate maintenance pass.
+4. **Cross-session coordination** - When you need to talk to a peer session, type `@SA-<id8>` (or `@PA` / `@all`) in your terminal output. The filewatcher routes it via channel notification. No tool call required.
 
-5. **Maintenance** - `retro` runs automatically (weekly gate from briefing) to consolidate duplicates, decay stale confidence, identify gaps, and verify code_refs point at files that still exist in the project tree. Broken code_refs are surfaced in the retro summary as a count; R5.2 will surface individual broken-ref notes in `curation_candidates`.
+5. **Session end** - The Stop hook pushes maintenance verbs (`update_note`, `close_thread`, `supersede_note`) with equal priority to capture. Notes are classified by type with specific guidance. **Retro is automatic** (R4.4 auto-fires from briefing on a 7-day cadence).
+
+6. **Maintenance** - `retro` runs automatically (weekly gate) to consolidate duplicates, decay stale confidence, identify gaps, and verify `code_refs` point at files that still exist.
 
 ## Quick Start
 
@@ -122,7 +140,11 @@ Run the `/orchestrator-init` command to bootstrap the knowledge graph from your 
 
 ### Start working
 
-The plugin activates automatically. The session-start hook orients Claude on every new conversation. The orchestrating skill ensures knowledge is captured and surfaced throughout your work.
+The plugin activates automatically on every session. The session-start hook orients Claude. The orchestrating + every-turn skills ensure knowledge is captured and surfaced throughout your work.
+
+### PA + SA orchestration (optional)
+
+If your project has `pa-start.bat` and `sa-start.bat` launchers (per-project convention), running `pa-start.bat` spawns the PrimeAgent in a dedicated window. From PA, run `/pa-bootstrap` to set Opus + max effort and verify agent-channel is wired. Then launch SAs via `sa-start.bat [--name SA-<label>]` for any participating session. PA observes all SAs and can drive them via `@SA-<id8>` addressing.
 
 ### Slash Commands
 
@@ -132,6 +154,10 @@ The plugin activates automatically. The session-start hook orients Claude on eve
 | `/status` | Show knowledge graph stats and health |
 | `/knowledge` | Browse and search stored knowledge |
 | `/reflect` | Trigger maintenance - consolidation, decay, gap analysis |
+| `/pa-bootstrap` | Prime a fresh PA session (in PA window only) |
+| `/pa-pause` | Override - pause PA on this SA (or globally if run from PA terminal) |
+| `/pa-resume` | Clear the corresponding pause |
+| `/pa-takeover` | Force-claim PA primacy when an orphaned PA already holds it |
 
 ### Embedding Setup
 
@@ -150,7 +176,7 @@ Requirements: Python 3.10+ and uv (auto-installed via `pip install uv` if Python
 # Type check
 bun run typecheck
 
-# Run tests (333 tests)
+# Run tests
 bun test
 
 # Build (bundles to dist/server.js)
@@ -164,24 +190,27 @@ bun run dev
 
 ```
 orchestrator-plugin/
-  .claude-plugin/plugin.json    # Plugin metadata + version
+  .claude-plugin/plugin.json    # Plugin metadata + version (CANONICAL version source for /plugin update)
   .mcp.json                     # MCP server config
   mcp/
-    server.ts                   # MCP tool registrations, sidecar lifecycle
+    server.ts                   # MCP tool registrations, sidecar lifecycle, claude/channel capability + AgentChannel startup
     types.ts                    # Note types, dimensions, interfaces
     utils.ts                    # Keyword extraction, formatting, IDs
     db/
       connection.ts             # Project + global DB connections
-      schema.ts                 # 19 migrations (notes, FTS5, embeddings, sessions, messaging)
+      schema.ts                 # 20 migrations (notes, FTS5, embeddings, sessions; messaging dropped in v20)
     engine/
       embeddings.ts             # Sidecar client (EmbeddingClient, blobToVector)
       hybrid_search.ts          # Cosine, RRF, MMR, activation boost
       session_tracker.ts        # Session log, registry, annotations, getActiveSiblings
-      messaging.ts              # R6 cross-session inbox + in-memory counter fast path
+      agent_channel.ts          # Filewatcher subsystem - polls JSONLs, fires notifications/claude/channel
+      agent_channel_filter.ts   # Pure filter: which JSONL events warrant forwarding
+      agent_channel_state.ts    # sessions.json / state.json / per-receiver offsets - atomic temp+rename
+      addressing.ts             # Pure parser: @PA / @SA-<id8> / @all, slash commands, NL overrides
       composer.ts               # Briefing assembly
       deduplicator.ts           # Jaccard similarity, merge duplicates
       linker.ts                 # FTS5 search, hybrid search, auto-linking
-      signal.ts                 # ANTS: Adaptive Note Temperature System - deposit, decay, vacation protection
+      signal.ts                 # ANTS: deposit, decay, vacation protection
       scorer.ts                 # Confidence decay, promotion
     tools/
       orient.ts                 # Briefing handler
@@ -190,18 +219,18 @@ orchestrator-plugin/
       prepare.ts                # Context package for subagent hydration
       reflect.ts                # Maintenance handler
       check_similar.ts          # Similarity check handler
-      messaging.ts              # R6 send_message / read_messages / update_session_task handlers
-      hook_event.ts             # R6 _hook_event dispatcher (per-event hook logic)
+      session_task.ts           # update_session_task handler
+      hook_event.ts             # _hook_event dispatcher (per-event hook logic)
   sidecar/
     embed_server.py             # Python ONNX embedding server
     requirements.txt            # Python deps
   agents/
-    memory-concierge.md         # Concierge agent definition
+    prime-agent.md              # PA operating contract (replaces deleted memory-concierge.md)
     orchestrator-reflect.md     # Reflect agent definition
-  skills/                       # 13 skills for orchestrated workflow
-  hooks/                        # 1 bash hook (session-start) + 7 mcp_tool dispatches in hooks.json
+  skills/                       # Skills for orchestrated workflow + PA bootstrap/override
+  hooks/                        # 1 bash hook (session-start) + mcp_tool dispatches in hooks.json
   commands/                     # Slash commands
-  tests/                        # 333 tests across 31 files
+  tests/                        # 459 tests across 34 files
   dist/
-    server.js                   # Bundled MCP server (~0.86 MB)
+    server.js                   # Bundled MCP server
 ```

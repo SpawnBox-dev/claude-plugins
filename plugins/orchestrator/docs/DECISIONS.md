@@ -8,6 +8,8 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ## 2026-04-30 - R7.9 Roll back scope-as-filter; messaging is single-path
 
+> **Superseded by R8 (0.29.0, 2026-05-09).** The entire messaging system - `send_message`, `read_messages`, `peek_inbox`, the `session_messages` table, `MessageScope`, `drainInbox`, `DrainContext`, all of it - was deleted. This entry is preserved as historical record of the contract that existed pre-R8; do not treat any of its claims as currently active.
+
 **Change.** Scope filtering on `drainInbox` (introduced R7.5, patched R7.8 with a `bypassScope` flag) is removed entirely. `MessageScope.code_ref` and `MessageScope.task_contains` survive as display labels rendered inline (`{scoped to src/foo.ts}`) so the recipient understands the sender's intent, but they DO NOT gate delivery. Every queued message delivers on the recipient's next drain - whether that's the auto-drain at a hook boundary or an explicit `read_messages` call.
 
 `DrainContext.bypassScope`, `currentFilePath`, `currentTask`, and the `matchesScope` helper are gone. `DrainContext` is kept as a placeholder for forward-compat. Hook callsites in `hook_event.ts` (`handleUserPromptSubmit`, `handlePostToolUse`) no longer build a context object before calling `drainInbox`. `handleReadMessages` no longer passes a `bypassScope` flag.
@@ -42,6 +44,8 @@ A messaging system where the sender can't know whether their message will be del
 ---
 
 ## 2026-04-30 - R7.8 Explicit read_messages bypasses scope filter
+
+> **Superseded by R8 (0.29.0, 2026-05-09).** `read_messages`, `drainInbox`, the `bypassScope` flag, and the entire scope-filter mechanism were deleted along with the rest of the messaging system. Historical record only.
 
 **Change.** `handleReadMessages` (`mcp/tools/messaging.ts`) now calls `engineDrain` with `{ bypassScope: true }`. New flag added to `DrainContext` in `mcp/engine/messaging.ts`; when set, messages with non-matching scopes are still delivered. Default `bypassScope: false` preserves R7.5 auto-drain semantics on the PostToolUse / UserPromptSubmit path.
 
@@ -110,6 +114,8 @@ Fix: `handlePreCompact` writes a `compacting_<sid>` plugin_state marker with the
 ---
 
 ## 2026-04-28 - R7.5 code-review-driven hardening pass
+
+> **Partially superseded by R8 (0.29.0, 2026-05-09).** Items #2 (scope filtering in `drainInbox`) and #4 (`inboxCounter` refresh) are dead - the messaging engine they hardened was deleted. Items #1 (APPROVAL_REGEX), #3 (plugin_state cleanup), #5 (STOPWORDS), and #6 (sanitizeSessionId) survive in the dispatcher. Read with that filter.
 
 **Change.** Six independent fixes addressing findings from a code-review subagent pass over R6 → R7.4 (commit range `bb75f5f..b91dc21`). Plus expanded test coverage for each. Bumped to `0.28.0` since scope-filtering changes message delivery semantics (now matches what docs always claimed).
 
@@ -253,6 +259,8 @@ The bash-merged Stop/SubagentStop bug from R6 was a real regression: subagents g
 
 ## 2026-04-28 - R6.1 agent-facing text alignment for R6
 
+> **Superseded by R8 (0.29.0, 2026-05-09).** All agent-facing prose about `send_message`, `read_messages`, `update_session_task` as a messaging primitive, and the cross-session messaging VARIANTS was either deleted or rewritten to point at the agent-channel model. Historical record only.
+
 **Change.** Text-only pass across `CLAUDE.md`, `README.md`, `agents/memory-concierge.md`, and skills `every-turn`, `orchestrating`, `getting-started`, `wrapping-up`, `planning-approach` to surface R6 (cross-session messaging + active-task broadcast) behaviors to the agent. Two new VARIANTS added to the rotating UserPromptSubmit reminders in `mcp/tools/hook_event.ts` so agents see messaging cues organically. README's tool table, file-structure tree, test count, hook count, and dist size updated to match v0.26.0 reality. No schema, no engine, no tool changes.
 
 **Rationale.** R6 shipped capable-but-unprompted: `send_message`, `read_messages`, and `update_session_task` were registered and tested but no skill, hook reminder, or top-level CLAUDE.md instruction told agents when to use them. Same failure mode as R3.7-pre-R3.8 and R5-pre-R5.1 - if the prose doesn't catch up, the feature is stranded. The pattern this repo has settled on: ship code, then immediately ship the text. R6.1 closes the loop.
@@ -270,6 +278,8 @@ The user (Jarid) flagged the gap directly after R6 commit, so this is also a rea
 ---
 
 ## 2026-04-28 - R6 cross-session inter-agent messaging
+
+> **Superseded by R8 (0.29.0, 2026-05-09).** This entire architecture - `session_messages` + `session_message_reads` tables (migration 19), `send_message` / `read_messages` / `_hook_event` tools, the `inboxCounters` fast path, the bash-to-mcp_tool hook migration's messaging-delivery pieces - was ripped out and replaced with the agent-channel filewatcher + `notifications/claude/channel` MCP capability. The `session_messages` and `session_message_reads` tables are dropped in migration 20. The PostToolUse `.*` matcher widening survives (other R7 dispatcher logic still uses it). Historical record only for the messaging primitive itself.
 
 **Change.** Two new tables (migration 19): `session_messages` (one row per send, with optional `to_session`, `scope` JSON, `priority`, `expires_at`) and `session_message_reads` (per-recipient read tracking so broadcasts work uniformly). Three new agent-callable MCP tools: `send_message`, `read_messages`, `update_session_task`. One internal dispatcher tool: `_hook_event`. Seven of eight bash hooks migrate to `type: "mcp_tool"` and route through `_hook_event`; `session-start` stays bash for cold-start safety. The hook fast path uses an in-memory `inboxCounters` map (Map<sessionId, number>) so `peekInbox` answers in O(1) and the dispatcher returns no `additionalContext` on idle turns - zero token cost when nothing is pending. The `PostToolUse` matcher widens to `.*` so messages are delivered after every tool call, not just orchestrator MCP calls.
 
@@ -386,6 +396,8 @@ The bash-to-mcp_tool migration is bundled into R6 because (a) the new dispatcher
 ---
 
 ## 2026-04-23 - R3.6 memory-concierge Shape A / Shape B
+
+> **Superseded by R8 (0.29.0, 2026-05-09).** The `memory-concierge` subagent and the entire concierge-spawn pattern were removed. The Shape A vs Shape B framing no longer applies to any active code path. Historical record only.
 
 **Change.** The `memory-concierge` agent prompt was rewritten to distinguish two request shapes: Shape A (structured artifact request - "write me a decision note about X") vs Shape B (batch capture request - "save everything we just did"). The concierge now recognizes which shape it is in and adjusts its capture strategy accordingly.
 
@@ -525,6 +537,53 @@ The bash-to-mcp_tool migration is bundled into R6 because (a) the new dispatcher
 - Describing the work as "knowledge-base hygiene features" - does not capture the architectural shift; hygiene features can be text nudges, and the whole point is that they cannot be.
 
 **Shipped:** the framing itself went into the orchestrator as a decision note; the concrete R1 implementation landed a day later in v0.22.0.
+
+---
+
+## 2026-05-09 - R8 Cross-session messaging supersedes R6/R7 (0.29.0)
+
+**Change.** Kill R6/R7's cross-session messaging system entirely. Replace with a real-time **agent-channel** architecture: a persistent **PrimeAgent (PA)** Claude Code session, plus a `notifications/claude/channel` MCP capability that delivers cross-session events inline as `<channel source="agent-channel" ...>` injections. No tools to call, no inbox to drain, no polling - the filewatcher reads each session's JSONL transcript, parses addressing (`@PA` / `@SA-<id8>` / `@all`), and fires channel notifications directly into the recipient's prompt stream within ~1-2s.
+
+Reference design: `docs/superpowers/specs/2026-05-09-prime-agent-channel-architecture-design.md` (in the spawnbox repo - the project where R8 was brainstormed and dogfooded).
+
+**Deleted.**
+- Tools: `send_message`, `read_messages`, `peek_inbox`.
+- Engine: `mcp/engine/messaging.ts` (entire file), `mcp/tools/messaging.ts` (entire file).
+- Subagent: `agents/memory-concierge.md` and the per-session Sonnet concierge spawn pattern.
+- Skill: `consult-concierge` (the "talk to your memory concierge" entry point).
+- Tables: `session_messages` and `session_message_reads` (migration 20 drops both). `inboxCounters` map and `loadInboxCounters` priming code gone with the engine.
+- Dispatcher pieces: `_hook_event`'s message-injection paths, the `MessageScope` type, `DrainContext`, `bypassScope`, `matchesScope`, the R7.5 scope-filter logic, the R7.8 bypass flag, the R7.9 single-path drain - all gone with messaging.ts.
+- Tests: `tests/integration/cross_session_messaging.test.ts` and the messaging-engine unit tests.
+
+**Added.**
+- MCP capability declaration: `experimental: { 'claude/channel': {} }` on the orchestrator plugin's MCP server (alongside `tools: {}`).
+- Empty `setNotificationHandler` for `notifications/claude/channel/permission_request` (refuses to opt into the discord-style permission-DM-fanout - tool-permission prompts stay in their owning terminal).
+- `mcp/engine/agent_channel.ts` - filewatcher subsystem. Watches `~/.claude/projects/<project_hash>/*.jsonl`, maintains per-file offsets, polls every 1-2s, reads new events, applies filter rules, parses addressing, emits `mcp.notification(...)` to its owning session.
+- `mcp/engine/addressing.ts` - pure addressing parser. Rules: slash-command override (`/pa-pause`, `/pa-resume`), natural-language override (`PA, back off` / `PA, come back`), explicit `@PA` / `@SA-<id8>` / `@all`, conversational `PA,` prefix, default fanout (PA observes everything).
+- State files under `<project>/.orchestrator-state/agent-channel/`: `offsets.json` (per-file last-read), `sessions.json` (session registry with id8, role, name, heartbeats), `state.json` (override flags - `pa_global_pause` and per-SA `sa_pauses`).
+- Skills: `pa-bootstrap` (sets `/model claude-opus-4-7` and `/effort max`, prints active SA roster, verifies filewatcher), `pa-pause`, `pa-resume`, `pa-takeover`.
+- `agents/prime-agent.md` - PA's operating contract (when to act vs observe, how to address SAs, override etiquette, how to use `note()` and `create_work_item()` for self-improvement tagged `area:orchestrator-plugin` + `agent-channel-improvement`).
+- Bootstrap launchers (live in the consuming project): `pa-start.bat` (gold/amber tab, singleton-enforced, refuses with takeover hint if PA already running), `sa-start.bat` (default tab, auto-generates `SA-YYYY-MM-DD-HH-MM-SS` name if `--name` not supplied, both pass `--channels plugin:orchestrator@spawnbox-dev-claude-plugins`).
+- Project-level CLAUDE.md addendum describing the SA contract (treat PA-addressed messages as if Jarid said them, observe-don't-execute during pause, `@`-syntax for addressing peers).
+
+**Rationale.** Real-time delivery via channel notifications eliminates the entire pacing/polling problem the messaging system tried to solve with hooks. No more inbox-drain on every PostToolUse, no more `inboxCounters` fast-path-when-idle gymnastics, no more "hook fired but the model didn't see the message because the session_id mismatched". One mechanism (channel notifications) covers every cross-session communication shape: PA-to-SA directives, SA-to-PA reports, SA-to-SA peer coordination, three-way (Jarid in SA addressing PA), broadcasts (`@all`), per-SA pauses, global pauses. The R6/R7 system tried to do all this through SQLite + hooks and accreted bug classes the whole way - the prefix-bug work item (`ecbea9ac`), the R7.5/R7.8/R7.9 scope-filter saga, the R7.1/R7.2 hooks.json `server` field misadventure. Channel notifications sidestep all of it because they ride the same primitive the official Discord plugin uses for real-time message delivery, and Claude Code already validates that primitive end-to-end.
+
+Chat is also genuinely ephemeral - knowledge worth keeping goes into orchestrator notes (durable). That justifies dropping the persistent inbox: there was never a real durability requirement, just an inferred one because we'd built a database table.
+
+**Historical R-entries now superseded.** Each has an inline `> **Superseded by R8**` marker:
+- **R6** (cross-session messaging primitive itself) - the table, tools, hook dispatcher messaging paths, all gone.
+- **R6.1** (agent-facing prose for R6) - all messaging-related prose deleted or rewritten.
+- **R7.5** (partial - the scope-filter and inboxCounter parts; APPROVAL_REGEX, STOPWORDS, plugin_state cleanup, sanitizeSessionId all survive).
+- **R7.8** (`bypassScope` flag) - mechanism deleted with messaging.
+- **R7.9** (scope-as-display-label, single-path drain) - mechanism deleted with messaging.
+
+R7 itself (loop-closure, work-item drift, sibling overlap, expanded hook surface) mostly survives - those are dispatcher behaviors that don't depend on messaging delivery. The `_hook_event` dispatcher is still the entry point; its message-injection branches are gone but its loop-closure / drift / overlap / TaskCompleted / StopFailure logic stays.
+
+R7.1 / R7.2 (hooks.json `server` field, namespaced MCP names) are still load-bearing - they apply to ANY MCP-tool hook in the orchestrator plugin, not just the deleted messaging ones.
+
+**Discovery captured 2026-05-10.** When attempting to ship 0.29.0 via `/plugin update`, found that **`plugin.json` is the canonical version source** that Claude Code's plugin updater reads. `plugin.json` + `package.json` + `marketplace.json` all need to agree on the version string, or `/plugin update` reports a mismatch and refuses to update cleanly. Earlier R-shipments only bumped `package.json` and got away with it because the marketplace cache was rebuilt manually; for R8 we hit the failure mode in the field. Codified in the orchestrator plugin's release checklist: bump all three together, verify with `/plugin update <plugin>`.
+
+**Shipped:** v0.29.0.
 
 ---
 

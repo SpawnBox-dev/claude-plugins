@@ -1,5 +1,7 @@
 # R6 — Cross-Session Inter-Agent Messaging Implementation Plan
 
+> **⚠️ HISTORICAL / SUPERSEDED (2026-05-09).** R6 shipped in 0.27.0 as a database-backed cross-session messaging system (send_message / read_messages / peek_inbox tools, session_messages + session_message_reads tables, hook auto-drain). It was iterated through R7.5 / R7.7 / R7.8 / R7.9, then **deleted entirely in R8 / 0.29.0** in favor of real-time `notifications/claude/channel` routing via `agent_channel.ts`. See `docs/DECISIONS.md` R8 entry and `docs/superpowers/specs/2026-05-09-prime-agent-channel-architecture-design.md` (in any project consuming this plugin) for the replacement architecture. This plan is preserved as historical record only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add cross-session inter-agent messaging to the orchestrator plugin (broadcast + targeted + scoped) plus active-task awareness, delivered via the densest possible hook surface (`PostToolUse`, `UserPromptSubmit`, `PreToolUse`, `Stop`, etc.) using Claude Code's `type: "mcp_tool"` hook mechanism. Migrate 7 of 8 existing bash hooks to `mcp_tool` in the same shipment so all hook logic lives in TypeScript with shared DB access. The fast path (no messages, no sibling activity) returns empty `additionalContext` so it's near-zero token cost on idle turns.
