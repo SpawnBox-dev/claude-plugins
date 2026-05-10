@@ -267,7 +267,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.3",
+    version: "0.29.4",
   },
   {
     capabilities: {
@@ -388,7 +388,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.3** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.29.4** (pid ${process.pid})`);
     lines.push(`- **Agent-channel**: ${agentChannel ? "ACTIVE - filewatcher running" : "INACTIVE - check stderr for 'agent-channel:' startup line"}`);
     lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
 
@@ -1894,7 +1894,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.3 ` +
+    `[orchestrator] MCP server starting - version=0.29.4 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join2 } from "path";
-import { existsSync as existsSync3, readFileSync } from "fs";
+import { resolve, join as join4 } from "path";
+import { existsSync as existsSync5, readFileSync as readFileSync3 } from "fs";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -19843,6 +19843,14 @@ DROP TABLE _signal_migration_check;
         CREATE INDEX IF NOT EXISTS idx_msg_reads_session ON session_message_reads(session_id);
       `);
     }
+  },
+  {
+    version: 20,
+    name: "drop_session_messages",
+    sql: `
+DROP TABLE IF EXISTS session_message_reads;
+DROP TABLE IF EXISTS session_messages;
+`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -22552,13 +22560,6 @@ class SessionTracker {
       since
     };
   }
-  setConciergeAgentId(sessionId, agentId) {
-    this.db.run(`UPDATE session_registry SET concierge_agent_id = ? WHERE session_id = ?`, [agentId, sessionId]);
-  }
-  getConciergeAgentId(sessionId) {
-    const row = this.db.query(`SELECT concierge_agent_id FROM session_registry WHERE session_id = ?`).get(sessionId);
-    return row?.concierge_agent_id ?? null;
-  }
   cleanup() {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     this.db.run(`DELETE FROM session_log WHERE surfaced_at < ?`, [
@@ -22577,224 +22578,15 @@ class SessionTracker {
               OR key LIKE 'bridge_%'
               OR key LIKE 'orch_active_%'
               OR key LIKE 'preuse_warned_%'
-              OR key LIKE 'struggle_%')`, [sevenDaysAgo]);
+              OR key LIKE 'struggle_%'
+              OR key LIKE 'compacting_%')`, [sevenDaysAgo]);
   }
 }
 
-// mcp/engine/messaging.ts
-var inboxCounters = new Map;
-var lastCounterRefreshAt = 0;
-var COUNTER_REFRESH_INTERVAL_MS = 5000;
-function loadInboxCounters(db) {
-  const ts = now();
-  const directRows = db.query(`SELECT m.to_session AS recipient, COUNT(*) AS cnt
-       FROM session_messages m
-       WHERE m.to_session IS NOT NULL
-         AND (m.expires_at IS NULL OR m.expires_at > ?)
-         AND NOT EXISTS (
-           SELECT 1 FROM session_message_reads r
-           WHERE r.msg_id = m.id AND r.session_id = m.to_session
-         )
-       GROUP BY m.to_session`).all(ts);
-  const broadcastRows = db.query(`SELECT sr.session_id AS recipient, COUNT(*) AS cnt
-       FROM session_registry sr
-       JOIN session_messages m ON m.to_session IS NULL
-       WHERE m.from_session != sr.session_id
-         AND (m.expires_at IS NULL OR m.expires_at > ?)
-         AND NOT EXISTS (
-           SELECT 1 FROM session_message_reads r
-           WHERE r.msg_id = m.id AND r.session_id = sr.session_id
-         )
-       GROUP BY sr.session_id`).all(ts);
-  inboxCounters.clear();
-  for (const r of directRows)
-    inboxCounters.set(r.recipient, r.cnt);
-  for (const r of broadcastRows) {
-    inboxCounters.set(r.recipient, (inboxCounters.get(r.recipient) ?? 0) + r.cnt);
-  }
-  lastCounterRefreshAt = Date.now();
-}
-function maybeRefreshCounters(db) {
-  if (Date.now() - lastCounterRefreshAt > COUNTER_REFRESH_INTERVAL_MS) {
-    loadInboxCounters(db);
-  }
-}
-function sendMessage(db, input) {
-  const id = generateId();
-  const created_at = now();
-  const expires_at = input.ttl_seconds ? new Date(Date.now() + input.ttl_seconds * 1000).toISOString() : null;
-  const scope = input.scope ? JSON.stringify(input.scope) : null;
-  const priority = input.priority ?? "normal";
-  db.run(`INSERT INTO session_messages
-     (id, from_session, to_session, scope, body, priority, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [id, input.from_session, input.to_session ?? null, scope, input.body, priority, created_at, expires_at]);
-  if (input.to_session) {
-    inboxCounters.set(input.to_session, (inboxCounters.get(input.to_session) ?? 0) + 1);
-  } else {
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const siblings = db.query(`SELECT session_id FROM session_registry
-         WHERE session_id != ? AND last_active_at > ?`).all(input.from_session, twentyFourHoursAgo);
-    for (const s of siblings) {
-      inboxCounters.set(s.session_id, (inboxCounters.get(s.session_id) ?? 0) + 1);
-    }
-  }
-  return {
-    id,
-    from_session: input.from_session,
-    to_session: input.to_session ?? null,
-    scope: input.scope ?? null,
-    body: input.body,
-    priority,
-    created_at,
-    expires_at
-  };
-}
-function peekInbox(db, sessionId) {
-  maybeRefreshCounters(db);
-  const cached2 = inboxCounters.get(sessionId);
-  if (cached2 === undefined || cached2 > 0) {
-    return { count: cached2 ?? 0 };
-  }
-  const ts = now();
-  const row = db.query(`SELECT m.id FROM session_messages m
-       WHERE (m.to_session = ? OR m.to_session IS NULL)
-         AND m.from_session != ?
-         AND (m.expires_at IS NULL OR m.expires_at > ?)
-         AND NOT EXISTS (
-           SELECT 1 FROM session_message_reads r
-           WHERE r.msg_id = m.id AND r.session_id = ?
-         )
-       LIMIT 1`).get(sessionId, sessionId, ts, sessionId);
-  if (row) {
-    inboxCounters.set(sessionId, 1);
-    return { count: 1 };
-  }
-  return { count: 0 };
-}
-function drainInbox(db, sessionId, context) {
-  const ts = now();
-  const rows = db.query(`SELECT id, from_session, to_session, scope, body, priority, created_at, expires_at
-       FROM session_messages m
-       WHERE (m.to_session = ? OR m.to_session IS NULL)
-         AND m.from_session != ?
-         AND (m.expires_at IS NULL OR m.expires_at > ?)
-         AND NOT EXISTS (
-           SELECT 1 FROM session_message_reads r
-           WHERE r.msg_id = m.id AND r.session_id = ?
-         )
-       ORDER BY
-         CASE priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-         created_at`).all(sessionId, sessionId, ts, sessionId);
-  if (rows.length === 0) {
-    inboxCounters.set(sessionId, 0);
-    return [];
-  }
-  const eligible = [];
-  let deferred = 0;
-  for (const r of rows) {
-    let parsedScope = null;
-    if (r.scope) {
-      try {
-        parsedScope = JSON.parse(r.scope);
-      } catch {
-        parsedScope = null;
-      }
-    }
-    if (parsedScope === null || matchesScope(parsedScope, context)) {
-      eligible.push({ ...r, parsedScope });
-    } else {
-      deferred++;
-    }
-  }
-  if (eligible.length === 0) {
-    inboxCounters.set(sessionId, deferred);
-    return [];
-  }
-  const insertRead = db.prepare(`INSERT OR IGNORE INTO session_message_reads (msg_id, session_id, read_at) VALUES (?, ?, ?)`);
-  db.run("BEGIN");
-  try {
-    for (const row of eligible)
-      insertRead.run(row.id, sessionId, ts);
-    db.run("COMMIT");
-  } catch (err) {
-    db.run("ROLLBACK");
-    throw err;
-  }
-  inboxCounters.set(sessionId, deferred);
-  return eligible.map((r) => ({
-    id: r.id,
-    from_session: r.from_session,
-    to_session: r.to_session,
-    scope: r.parsedScope,
-    body: r.body,
-    priority: r.priority,
-    created_at: r.created_at,
-    expires_at: r.expires_at
-  }));
-}
-function matchesScope(scope, context) {
-  if (!scope.code_ref && !scope.task_contains)
-    return true;
-  if (!context)
-    return false;
-  if (scope.code_ref && context.currentFilePath) {
-    if (context.currentFilePath.includes(scope.code_ref))
-      return true;
-  }
-  if (scope.task_contains && context.currentTask) {
-    if (context.currentTask.toLowerCase().includes(scope.task_contains.toLowerCase())) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// mcp/tools/messaging.ts
-function handleSendMessage(db, args) {
-  const scope = args.scope_code_ref || args.scope_task_contains ? {
-    code_ref: args.scope_code_ref,
-    task_contains: args.scope_task_contains
-  } : undefined;
-  const input = {
-    from_session: args.from_session,
-    to_session: args.to_session,
-    body: args.body,
-    scope,
-    priority: args.priority,
-    ttl_seconds: args.ttl_seconds
-  };
-  const msg = sendMessage(db, input);
-  const target = msg.to_session ?? "broadcast";
-  return `Message ${msg.id.slice(0, 8)} sent (-> ${target}, priority: ${msg.priority}).`;
-}
-function handleReadMessages(db, args) {
-  const msgs = drainInbox(db, args.session_id);
-  if (msgs.length === 0)
-    return "Inbox empty.";
-  const lines = msgs.map((m) => {
-    const target = m.to_session ? `direct` : `broadcast`;
-    const age = ageOf(m.created_at);
-    const scopeStr = m.scope ? ` (scope: ${[
-      m.scope.code_ref ? `code_ref=${m.scope.code_ref}` : null,
-      m.scope.task_contains ? `task~${m.scope.task_contains}` : null
-    ].filter(Boolean).join(", ")})` : "";
-    return `- **${m.priority.toUpperCase()}** [${target}]${scopeStr} from ${m.from_session.slice(0, 8)} ${age} ago: ${m.body}`;
-  });
-  return `Drained ${msgs.length} message(s):
-${lines.join(`
-`)}`;
-}
-function ageOf(ts) {
-  const ms = Date.now() - new Date(ts).getTime();
-  if (ms < 60000)
-    return `${Math.round(ms / 1000)}s`;
-  if (ms < 3600000)
-    return `${Math.round(ms / 60000)}m`;
-  return `${Math.round(ms / 3600000)}h`;
-}
+// mcp/tools/session_task.ts
 function handleUpdateSessionTask(tracker, args) {
   tracker.updateCurrentTask(args.session_id, args.task);
-  return `Current task updated.`;
+  return "Current task updated.";
 }
 
 // mcp/tools/hook_event.ts
@@ -22840,18 +22632,18 @@ var VARIANTS = [
   "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table.",
   "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
   "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now.",
-  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, send_message, update_session_task. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
-  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and invoke orchestrator:consult-concierge. Do not hammer.",
+  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
+  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
   "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
   "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
-  "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items or orchestrator:consult-concierge. Direct lookup misses items with different vocabulary.",
+  "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items. Direct lookup misses items with different vocabulary.",
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
-  "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they know what you're touching. Discovered something they need? send_message - direct or broadcast.",
-  "[orch] R6 inbox: messages from sibling sessions surface inline at every PostToolUse boundary. Empty inbox = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
+  "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
+  '[orch] Agent-channel: cross-session events arrive as <channel source="agent-channel" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
-  "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? send_message FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
+  "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
   "[orch] Check siblings when it matters. You don't need to scan their state every turn - but at a task boundary, when starting something that might overlap, take 5s to check the sibling activity in your hook context."
 ];
 function handleHookEvent(ctx, args) {
@@ -22884,11 +22676,6 @@ function handleUserPromptSubmit(ctx, args) {
   resetTurnState(ctx.db, args.session_id);
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
   const userPrompt = args.payload?.user_prompt ?? "";
-  const sessionRow = ctx.tracker.getSession(args.session_id);
-  const drainCtx = {
-    currentTask: sessionRow?.current_task ?? undefined
-  };
-  const messages = drainIfPending(ctx, args.session_id, drainCtx);
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
@@ -22899,8 +22686,6 @@ function handleUserPromptSubmit(ctx, args) {
     parts.push(siblingLine);
   if (loopClose)
     parts.push(loopClose);
-  if (messages)
-    parts.push(messages);
   return { additionalContext: parts.join(`
 
 `) };
@@ -22932,7 +22717,7 @@ function handlePreToolUse(ctx, args) {
   }
   markWarnedThisTurn(ctx.db, args.session_id, turn);
   if (turn >= 4) {
-    const reason = codeRefsHint ? `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. ${codeRefsHint} Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup({code_ref:'<path>'}) first.` : `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. Approve to proceed (explicit choice to skip orch this turn) or deny and run orchestrator:consult-concierge / lookup / briefing first to check for relevant decisions, conventions, or anti-patterns.`;
+    const reason = codeRefsHint ? `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. ${codeRefsHint} Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup({code_ref:'<path>'}) first.` : `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup / briefing first to check for relevant decisions, conventions, or anti-patterns.`;
     return { permissionDecision: "ask", permissionDecisionReason: reason };
   }
   const ctx_msg = codeRefsHint ? `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. ${codeRefsHint}` : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup can save 20 minutes of rework. From turn 4 this becomes an interactive approval prompt.`;
@@ -22950,18 +22735,9 @@ function handlePostToolUse(ctx, args) {
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
-  const filePath = args.payload?.file_path;
-  const sessionRow = ctx.tracker.getSession(args.session_id);
-  const drainCtx = {
-    currentFilePath: filePath,
-    currentTask: sessionRow?.current_task ?? undefined
-  };
-  const messages = drainIfPending(ctx, args.session_id, drainCtx);
   const parts = [];
   if (driftNudge)
     parts.push(driftNudge);
-  if (messages)
-    parts.push(messages);
   if (parts.length === 0)
     return {};
   return { additionalContext: parts.join(`
@@ -23007,19 +22783,35 @@ function handlePostToolUseFailure(ctx, args) {
     return {};
   if (next >= 3) {
     return {
-      additionalContext: `[orch] STOP. ${next} consecutive tool failures. You are stuck. Invoke orchestrator:consult-concierge NOW with: (1) what you are trying to accomplish, (2) what you have tried, (3) what errors you are seeing. Do not retry until you have consulted the knowledge base.`
+      additionalContext: `[orch] STOP. ${next} consecutive tool failures. You are stuck. Run lookup NOW with keywords from the error + context. If a PA is active, address \`PA, ...\` in your terminal output for orchestration help. Do not retry until you have consulted the knowledge base.`
     };
   }
   return {
-    additionalContext: `[orch] Two tool calls failed in a row. Before trying a third approach, consider invoking orchestrator:consult-concierge. The knowledge base may have a documented gotcha for this exact situation.`
+    additionalContext: `[orch] Two tool calls failed in a row. Before trying a third approach, lookup against the failure - the knowledge base may have a documented gotcha for this exact situation. If a PA is active, addressing \`PA, ...\` in your terminal output also surfaces the situation to the orchestrator.`
   };
 }
-function handlePreCompact(_ctx, _args) {
+var COMPACT_STOP_SUPPRESS_WINDOW_MS = 60000;
+function handlePreCompact(ctx, args) {
+  const sid = sanitizeSessionId(args.session_id);
+  if (sid) {
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`compacting_${sid}`, String(Date.now()), now()]);
+  }
   return {
     systemMessage: "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost."
   };
 }
 function handleStop(ctx, args) {
+  const sid = sanitizeSessionId(args.session_id);
+  if (sid) {
+    const compactRow = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(`compacting_${sid}`);
+    if (compactRow?.value) {
+      const compactedAt = parseInt(compactRow.value, 10);
+      if (Number.isFinite(compactedAt) && Date.now() - compactedAt < COMPACT_STOP_SUPPRESS_WINDOW_MS) {
+        ctx.db.run(`DELETE FROM plugin_state WHERE key = ?`, [`compacting_${sid}`]);
+        return {};
+      }
+    }
+  }
   const key = `stop_${args.session_id}`;
   const exists = ctx.db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(key);
   if (exists)
@@ -23097,7 +22889,7 @@ If nothing applies, exit. But most subagent work produces at least one decision,
 }
 function handleStopFailure(_ctx, _args) {
   return {
-    systemMessage: "Turn ended due to API error (rate limit, auth, or transient). If you retry and the same approach fails again, consider whether: (1) context size is the issue (compact or save_progress + continue lean), (2) a different tool path avoids the failing call, (3) consult-concierge can surface a documented workaround. Don't loop on the same approach."
+    systemMessage: "Turn ended due to API error (rate limit, auth, or transient). If you retry and the same approach fails again, consider whether: (1) context size is the issue (compact or save_progress + continue lean), (2) a different tool path avoids the failing call, (3) lookup might surface a documented workaround. Don't loop on the same approach."
   };
 }
 function handleTaskCompleted(_ctx, args) {
@@ -23105,23 +22897,6 @@ function handleTaskCompleted(_ctx, args) {
   return {
     additionalContext: `[orch] Subagent ${aid} just completed. Did it surface anything worth keeping? Capture decisions, patterns, anti-patterns, or gotchas it discovered before its context evaporates. Single item: \`note\`. Multiple: send the concierge a batch-capture request. Do NOT just take the subagent's result and move on.`
   };
-}
-function drainIfPending(ctx, sessionId, drainContext) {
-  const peek = peekInbox(ctx.db, sessionId);
-  if (peek.count === 0)
-    return "";
-  const msgs = drainInbox(ctx.db, sessionId, drainContext);
-  if (msgs.length === 0)
-    return "";
-  const lines = msgs.map((m) => {
-    const tag = m.priority === "high" ? "[HIGH]" : m.priority === "low" ? "[low]" : "\u2022";
-    const where = m.to_session ? "direct" : "broadcast";
-    const scopeStr = m.scope?.code_ref ? ` {scoped to ${m.scope.code_ref}}` : m.scope?.task_contains ? ` {scoped to task~${m.scope.task_contains}}` : "";
-    return `${tag} [${where} from ${m.from_session.slice(0, 8)}]${scopeStr}: ${m.body}`;
-  });
-  return `### Inter-session messages (${msgs.length})
-${lines.join(`
-`)}`;
 }
 function renderSiblingActivity(ctx, sessionId, userPrompt) {
   const sibs = ctx.tracker.getActiveSiblings(sessionId);
@@ -23138,19 +22913,18 @@ function renderSiblingActivity(ctx, sessionId, userPrompt) {
       overlapping.push(s);
   }
   const lines = sibs.map((s) => {
-    const id = s.session_id.slice(0, 8);
     const isOverlap = overlapping.some((o) => o.session_id === s.session_id);
     const marker = isOverlap ? " *POTENTIAL OVERLAP*" : "";
     const task = s.current_task ? `: ${s.current_task.slice(0, 80)}` : ": (no task set)";
-    return `  - ${id}${marker}${task}`;
+    return `  - ${s.session_id}${marker}${task}`;
   });
   let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:
 ${lines.join(`
 `)}`;
   if (overlapping.length > 0) {
-    const ids = overlapping.map((o) => o.session_id.slice(0, 8)).join(", ");
+    const ids = overlapping.map((o) => o.session_id).join(", ");
     block += `
-  -> Coordinate with ${ids} via send_message BEFORE starting work in their area. Shared scope is the most common cause of merge conflicts and contradictory decisions across sessions.`;
+  -> Coordinate with ${ids} via @SA-<id8> in your terminal output BEFORE starting work in their area. Shared scope is the most common cause of merge conflicts and contradictory decisions across sessions.`;
   }
   return block;
 }
@@ -23498,7 +23272,376 @@ function composeCodeRefsHint(db, sessionId, filePath) {
   return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${filePath}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
 }
 
+// mcp/engine/agent_channel.ts
+import { readFileSync as readFileSync2, existsSync as existsSync4, statSync, readdirSync } from "fs";
+import { join as join3 } from "path";
+
+// mcp/engine/addressing.ts
+var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
+var PAUSE_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(back\s*off|stand\s*down|take\s*five|pause)\b/i;
+var RESUME_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(come\s*back|resume|you\s*can\s*(come\s*back|resume|return))\b/i;
+var SLASH_PAUSE_RE = /^\s*\/pa-pause\b/i;
+var SLASH_RESUME_RE = /^\s*\/pa-resume\b/i;
+var ADDRESS_RE = /@(PA|PrimeAgent|all|SA-[a-f0-9]{8})/gi;
+function parseAddressing(content, sender, sessions) {
+  let override_command = null;
+  if (SLASH_PAUSE_RE.test(content) || PAUSE_NL_RE.test(content)) {
+    override_command = "pause";
+  } else if (SLASH_RESUME_RE.test(content) || RESUME_NL_RE.test(content)) {
+    override_command = "resume";
+  }
+  const targets = new Set;
+  const unresolved = [];
+  let pa_addressed = false;
+  if (PA_PREFIX_RE.test(content)) {
+    const pa = sessions.find((s) => s.role === "prime");
+    if (pa && pa.session_id !== sender.session_id) {
+      targets.add(pa.session_id);
+      pa_addressed = true;
+    }
+  }
+  for (const match of content.matchAll(ADDRESS_RE)) {
+    const tag = match[1].toLowerCase();
+    if (tag === "pa" || tag === "primeagent") {
+      const pa = sessions.find((s) => s.role === "prime");
+      if (pa && pa.session_id !== sender.session_id) {
+        targets.add(pa.session_id);
+        pa_addressed = true;
+      }
+    } else if (tag === "all") {
+      for (const s of sessions) {
+        if (s.session_id !== sender.session_id)
+          targets.add(s.session_id);
+      }
+    } else if (tag.startsWith("sa-")) {
+      const id8 = tag.slice(3);
+      const target = sessions.find((s) => s.id8 === id8);
+      if (target && target.session_id !== sender.session_id) {
+        targets.add(target.session_id);
+      } else if (!target) {
+        unresolved.push(id8);
+      }
+    }
+  }
+  return {
+    targets: Array.from(targets),
+    pa_addressed,
+    override_command,
+    unresolved_addresses: unresolved
+  };
+}
+
+// mcp/engine/agent_channel_filter.ts
+var MUTATING_TOOLS = new Set(["Edit", "Write", "Bash", "MultiEdit"]);
+function isMutatingTool(name) {
+  return MUTATING_TOOLS.has(name) || name.startsWith("git_");
+}
+function summarizeToolUse(name, input) {
+  if (name === "Edit" || name === "Write" || name === "MultiEdit") {
+    const path2 = input?.file_path ?? "<unknown>";
+    return `[tool: ${name} ${path2}]`;
+  }
+  if (name === "Bash") {
+    const cmd = String(input?.command ?? "").slice(0, 80);
+    return `[tool: Bash $ ${cmd}${cmd.length === 80 ? "..." : ""}]`;
+  }
+  return `[tool: ${name}]`;
+}
+function filterEvent(raw) {
+  if (!raw || typeof raw !== "object" || !("type" in raw))
+    return null;
+  if (raw.type === "user") {
+    const msg = raw.message;
+    if (Array.isArray(msg?.content) && msg.content.some((c) => c?.type === "tool_result")) {
+      return null;
+    }
+    const text = typeof msg?.content === "string" ? msg.content : null;
+    if (!text)
+      return null;
+    return { event_type: "user_input", content: text };
+  }
+  if (raw.type === "assistant") {
+    const blocks = raw.message?.content;
+    if (!Array.isArray(blocks))
+      return null;
+    let toolUseFallback = null;
+    for (const b of blocks) {
+      if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
+        return { event_type: "assistant_text", content: b.text };
+      }
+      if (!toolUseFallback && b?.type === "tool_use" && typeof b.name === "string" && isMutatingTool(b.name)) {
+        toolUseFallback = {
+          event_type: "tool_use",
+          tool_name: b.name,
+          content: summarizeToolUse(b.name, b.input)
+        };
+      }
+    }
+    return toolUseFallback;
+  }
+  if (raw.type === "summary" && typeof raw.summary === "string") {
+    return { event_type: "summary", content: raw.summary };
+  }
+  return null;
+}
+
+// mcp/engine/agent_channel_state.ts
+import { readFileSync, writeFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, renameSync } from "fs";
+import { join as join2 } from "path";
+var SESSIONS_FILE = "sessions.json";
+var STATE_FILE = "state.json";
+function ensureDir(dir) {
+  if (!existsSync3(dir))
+    mkdirSync2(dir, { recursive: true });
+}
+function atomicWrite(dir, name, content) {
+  ensureDir(dir);
+  const tmp = join2(dir, `${name}.tmp.${process.pid}.${Date.now()}`);
+  writeFileSync(tmp, content);
+  renameSync(tmp, join2(dir, name));
+}
+function safeRead(path2, fallback) {
+  try {
+    if (!existsSync3(path2))
+      return fallback;
+    return JSON.parse(readFileSync(path2, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+function readSessions(stateDir) {
+  const data = safeRead(join2(stateDir, SESSIONS_FILE), []);
+  if (Array.isArray(data))
+    return data;
+  return data.sessions ?? [];
+}
+function writeSession(stateDir, entry) {
+  const sessions = readSessions(stateDir);
+  const idx = sessions.findIndex((s) => s.session_id === entry.session_id);
+  if (idx >= 0)
+    sessions[idx] = entry;
+  else
+    sessions.push(entry);
+  atomicWrite(stateDir, SESSIONS_FILE, JSON.stringify({ sessions }, null, 2));
+}
+function removeSession(stateDir, session_id) {
+  const sessions = readSessions(stateDir).filter((s) => s.session_id !== session_id);
+  atomicWrite(stateDir, SESSIONS_FILE, JSON.stringify({ sessions }, null, 2));
+}
+var DEFAULT_STATE = {
+  pa_global_pause: { active: false, since: null, set_by_session: null },
+  sa_pauses: {}
+};
+function readOverrideState(stateDir) {
+  return safeRead(join2(stateDir, STATE_FILE), DEFAULT_STATE);
+}
+function offsetsFileName(receiverId8) {
+  return `offsets-${receiverId8}.json`;
+}
+function readOffsets(stateDir, receiverId8) {
+  return safeRead(join2(stateDir, offsetsFileName(receiverId8)), {});
+}
+function writeAllOffsets(stateDir, receiverId8, offsets) {
+  atomicWrite(stateDir, offsetsFileName(receiverId8), JSON.stringify(offsets, null, 2));
+}
+
+// mcp/engine/agent_channel.ts
+var POLL_INTERVAL_MS = 1500;
+var HEARTBEAT_INTERVAL_MS = 30000;
+var STALE_THRESHOLD_MS = 90000;
+
+class AgentChannel {
+  projectStateDir;
+  projectsHashDir;
+  selfSession;
+  emit;
+  timer = null;
+  heartbeatTimer = null;
+  knownSessions = new Map;
+  constructor(projectStateDir, projectsHashDir, selfSession, emit) {
+    this.projectStateDir = projectStateDir;
+    this.projectsHashDir = projectsHashDir;
+    this.selfSession = selfSession;
+    this.emit = emit;
+  }
+  start() {
+    writeSession(this.projectStateDir, {
+      ...this.selfSession,
+      last_heartbeat_at: new Date().toISOString()
+    });
+    this.knownSessions = new Map(readSessions(this.projectStateDir).map((s) => [s.session_id, s]));
+    this.tick();
+    this.timer = setInterval(() => this.tick(), POLL_INTERVAL_MS);
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+  }
+  stop() {
+    if (this.timer)
+      clearInterval(this.timer);
+    if (this.heartbeatTimer)
+      clearInterval(this.heartbeatTimer);
+    removeSession(this.projectStateDir, this.selfSession.session_id);
+  }
+  heartbeat() {
+    const updated = {
+      ...this.selfSession,
+      last_heartbeat_at: new Date().toISOString()
+    };
+    writeSession(this.projectStateDir, updated);
+  }
+  detectSessionChanges() {
+    const current = new Map(readSessions(this.projectStateDir).map((s) => [s.session_id, s]));
+    const now3 = Date.now();
+    for (const [sid, entry] of current) {
+      const last = new Date(entry.last_heartbeat_at).getTime();
+      if (now3 - last > STALE_THRESHOLD_MS) {
+        current.delete(sid);
+        removeSession(this.projectStateDir, sid);
+      }
+    }
+    for (const [sid, entry] of current) {
+      if (!this.knownSessions.has(sid) && sid !== this.selfSession.session_id) {
+        this.emit({
+          content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
+          meta: {
+            source: "agent-channel",
+            from_session: entry.session_id,
+            from_id8: entry.id8,
+            from_role: entry.role,
+            from_name: entry.name,
+            from_task: entry.current_task ?? null,
+            event_type: "session_joined",
+            ts: new Date().toISOString()
+          }
+        });
+      }
+    }
+    for (const [sid, entry] of this.knownSessions) {
+      if (!current.has(sid) && sid !== this.selfSession.session_id) {
+        this.emit({
+          content: `[session_departed] ${entry.name} (${entry.id8})`,
+          meta: {
+            source: "agent-channel",
+            from_session: entry.session_id,
+            from_id8: entry.id8,
+            from_role: entry.role,
+            from_name: entry.name,
+            from_task: entry.current_task ?? null,
+            event_type: "session_departed",
+            ts: new Date().toISOString()
+          }
+        });
+      }
+    }
+    this.knownSessions = current;
+  }
+  listJsonlFiles() {
+    if (!existsSync4(this.projectsHashDir))
+      return [];
+    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join3(this.projectsHashDir, f));
+  }
+  tick() {
+    try {
+      this.detectSessionChanges();
+      const sessions = Array.from(this.knownSessions.values());
+      const overrideState = readOverrideState(this.projectStateDir);
+      const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
+      let mutated = false;
+      for (const file of this.listJsonlFiles()) {
+        if (this.processFile(file, sessions, overrideState, offsets)) {
+          mutated = true;
+        }
+      }
+      if (mutated) {
+        writeAllOffsets(this.projectStateDir, this.selfSession.id8, offsets);
+      }
+    } catch (err) {
+      process.stderr.write(`agent-channel tick error: ${err}
+`);
+    }
+  }
+  processFile(file, sessions, overrideState, offsets) {
+    const lastOffset = offsets[file] ?? 0;
+    let stat;
+    try {
+      stat = statSync(file);
+    } catch {
+      return false;
+    }
+    if (stat.size === lastOffset)
+      return false;
+    if (stat.size < lastOffset) {
+      offsets[file] = 0;
+      return true;
+    }
+    let buf;
+    try {
+      const raw = readFileSync2(file);
+      buf = raw.subarray(lastOffset).toString("utf8");
+    } catch {
+      return false;
+    }
+    const lines = buf.split(`
+`);
+    let consumed = 0;
+    for (let i = 0;i < lines.length - 1; i++) {
+      consumed += Buffer.byteLength(lines[i], "utf8") + 1;
+      const line = lines[i].trim();
+      if (!line)
+        continue;
+      let raw;
+      try {
+        raw = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
+      const sender = sessions.find((s) => s.session_id === senderId);
+      if (!sender)
+        continue;
+      this.processEvent(raw, sender, sessions, overrideState);
+    }
+    offsets[file] = lastOffset + consumed;
+    return consumed > 0;
+  }
+  processEvent(raw, sender, sessions, overrideState) {
+    const ev = filterEvent(raw);
+    if (!ev)
+      return;
+    const addr = parseAddressing(ev.content, sender, sessions);
+    if (!this.shouldReceive(addr, sender))
+      return;
+    const isPaused = !!overrideState.sa_pauses[sender.session_id];
+    const isGlobalPaused = overrideState.pa_global_pause.active;
+    this.emit({
+      content: ev.content,
+      meta: {
+        source: "agent-channel",
+        from_session: sender.session_id,
+        from_id8: sender.id8,
+        from_role: sender.role,
+        from_name: sender.name,
+        from_task: sender.current_task ?? null,
+        event_type: ev.event_type,
+        tool_name: ev.tool_name,
+        pa_addressed: addr.pa_addressed,
+        addressed_to: addr.targets.length > 0 ? addr.targets : undefined,
+        pa_global_pause: isGlobalPaused || undefined,
+        sa_paused: isPaused || undefined,
+        ts: new Date().toISOString()
+      }
+    });
+  }
+  shouldReceive(addr, sender) {
+    if (sender.session_id === this.selfSession.session_id)
+      return false;
+    if (this.selfSession.role === "prime")
+      return true;
+    return addr.targets.includes(this.selfSession.session_id);
+  }
+}
+
 // mcp/server.ts
+import { homedir as homedir2 } from "os";
 var cachedFallbackSessionId = null;
 function getFallbackSessionId() {
   if (cachedFallbackSessionId)
@@ -23510,10 +23653,10 @@ function getFallbackSessionId() {
   }
   const projectDir = process.env.CLAUDE_PROJECT_DIR;
   if (projectDir) {
-    const file = join2(projectDir, ".orchestrator-state", "active-session");
+    const file = join4(projectDir, ".orchestrator-state", "active-session");
     try {
-      if (existsSync3(file)) {
-        const raw = readFileSync(file, "utf8").trim();
+      if (existsSync5(file)) {
+        const raw = readFileSync3(file, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           return raw;
@@ -23653,7 +23796,32 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.21.1"
+  version: "0.29.4"
+}, {
+  capabilities: {
+    tools: {},
+    experimental: {
+      "claude/channel": {}
+    }
+  },
+  instructions: [
+    'Cross-session events arrive as <channel source="agent-channel" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed.',
+    "",
+    'Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form "PA, ..." or "PrimeAgent, ..." also addresses PA.',
+    "",
+    "If you are a subordinate (role=subordinate), treat PA-addressed messages as if Jarid said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
+    "",
+    "If you are PA (role=prime), you observe every event in the project by default. Address SAs to coordinate them. Use note() and create_work_item() to record orchestrator-plugin improvements you discover - tag with `agent-channel-improvement, area:orchestrator-plugin`.",
+    "",
+    "Override controls:",
+    "- /pa-pause in an SA terminal: that SA stops obeying PA until /pa-resume.",
+    "- /pa-pause in PA terminal: PA stands down across all SAs (global pause).",
+    "- /pa-takeover in a new PA window: forcibly claims primacy from a previous PA.",
+    '- Natural-language equivalents recognized: "PA, back off / stand down / take five / pause" and "PA, come back in / resume".',
+    "",
+    'During pause, PA still receives all events (so it stays informed) but does not respond, address SAs, or write directives. Events arriving during pause are tagged `pa_global_pause="true"` or `sa_paused="true"`.'
+  ].join(`
+`)
 });
 server.tool("briefing", "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.", {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
@@ -23708,6 +23876,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
+  lines.push(`- **Version**: orchestrator MCP server **0.29.4** (pid ${process.pid})`);
+  lines.push(`- **Agent-channel**: ${agentChannel ? "ACTIVE - filewatcher running" : "INACTIVE - check stderr for 'agent-channel:' startup line"}`);
   lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
   if (sidecarStatus === "ready") {
     lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)`);
@@ -24055,7 +24225,7 @@ ${hidden} more linked note(s) not shown. Call lookup({id:"${result.detail.id}", 
     text += `
 
 ---
-Large result set (` + Math.round(text.length / 1000) + "K chars). For curated analysis of these results, invoke orchestrator:consult-concierge instead of reading all of this directly.";
+Large result set (` + Math.round(text.length / 1000) + "K chars). Consider narrowing your query (more specific keywords, `code_ref` filter, type filter) instead of reading all of this directly. If a PrimeAgent is active in this project, addressing `PA, can you triage this lookup?` in your terminal output also lets PA do the curation.";
   }
   return {
     content: [{ type: "text", text }]
@@ -24748,41 +24918,7 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("send_message", "Leave a message for another active Claude session, or broadcast to all active sessions. Messages are delivered via hooks at every model-think boundary (PostToolUse, UserPromptSubmit, Stop, etc.) so the recipient sees them with minimal delay. Use this when you've discovered something a sibling session needs to know, or when you need to coordinate work that's actively happening in another window.", {
-  body: exports_external.string().min(1).max(4000),
-  to_session: exports_external.string().optional().describe("Recipient session_id. Omit for broadcast to all active siblings."),
-  scope_code_ref: exports_external.string().optional().describe("Optional file/module path. The recipient hook may filter delivery to sessions that touch this path."),
-  scope_task_contains: exports_external.string().optional().describe("Optional substring; only sessions whose current_task contains it should treat the message as relevant."),
-  priority: exports_external.enum(["low", "normal", "high"]).optional(),
-  ttl_seconds: exports_external.coerce.number().int().positive().optional().describe("Optional time-to-live; expired messages are silently dropped."),
-  session_id: exports_external.string().optional().describe("Sender session_id. Defaults to fallback.")
-}, async (args) => {
-  const from = resolveSessionId(args.session_id);
-  if (!from) {
-    return { content: [{ type: "text", text: "send_message requires a session_id." }] };
-  }
-  const db = getProjectDb();
-  const text = handleSendMessage(db, {
-    from_session: from,
-    to_session: args.to_session,
-    body: args.body,
-    scope_code_ref: args.scope_code_ref,
-    scope_task_contains: args.scope_task_contains,
-    priority: args.priority,
-    ttl_seconds: args.ttl_seconds
-  });
-  return { content: [{ type: "text", text }] };
-});
-server.tool("read_messages", "Drain your inbox of pending inter-session messages. Marks each as read for your session_id. Hooks call this automatically when peekInbox shows pending messages; you rarely need to call it directly, but you can to flush the queue mid-task.", { session_id: exports_external.string().optional() }, async (args) => {
-  const sid = resolveSessionId(args.session_id);
-  if (!sid) {
-    return { content: [{ type: "text", text: "read_messages requires a session_id." }] };
-  }
-  const db = getProjectDb();
-  const text = handleReadMessages(db, { session_id: sid });
-  return { content: [{ type: "text", text }] };
-});
-server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in lightweight hook-time injections. Call when you start a major task; the activity awareness is what lets sibling agents know they're not alone in the codebase.", { task: exports_external.string().min(1).max(500), session_id: exports_external.string().optional() }, async (args) => {
+server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching.", { task: exports_external.string().min(1).max(500), session_id: exports_external.string().optional() }, async (args) => {
   const sid = resolveSessionId(args.session_id);
   if (!sid || !sessionTracker) {
     return {
@@ -24881,10 +25017,69 @@ function cascadeResolution(db, noteId, timestamp) {
   }
   return results;
 }
+var agentChannel = null;
+function startAgentChannel() {
+  const sessionId = resolveSessionId();
+  if (!sessionId) {
+    process.stderr.write(`agent-channel: no session_id resolvable; channel disabled
+`);
+    return;
+  }
+  const projectDir = process.env.CLAUDE_PROJECT_DIR;
+  if (!projectDir) {
+    process.stderr.write(`agent-channel: CLAUDE_PROJECT_DIR unset; channel disabled
+`);
+    return;
+  }
+  const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+  const projectsHashDir = join4(homedir2(), ".claude", "projects", projectHash);
+  const role = process.env.SPAWNBOX_AGENT_ROLE === "prime" ? "prime" : "subordinate";
+  const name = process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
+  const self = {
+    session_id: sessionId,
+    id8: sessionId.slice(0, 8),
+    role,
+    name,
+    started_at: new Date().toISOString(),
+    last_heartbeat_at: new Date().toISOString(),
+    current_task: null
+  };
+  const stateDir = join4(projectDir, ".orchestrator-state", "agent-channel");
+  try {
+    agentChannel = new AgentChannel(stateDir, projectsHashDir, self, (notif) => {
+      server.server.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: notif.content,
+          meta: notif.meta
+        }
+      });
+    });
+    agentChannel.start();
+    process.stderr.write(`agent-channel: started as ${role} session_id=${sessionId} id8=${self.id8} name=${name} state_dir=${stateDir} projects_hash_dir=${projectsHashDir}
+`);
+  } catch (err) {
+    process.stderr.write(`agent-channel: FAILED TO START - ${err instanceof Error ? err.message : String(err)}
+  state_dir=${stateDir}
+  projects_hash_dir=${projectsHashDir}
+  session_id=${sessionId}
+`);
+  }
+}
+process.stdin.on("end", () => {
+  if (agentChannel)
+    agentChannel.stop();
+});
+process.stdin.on("close", () => {
+  if (agentChannel)
+    agentChannel.stop();
+});
 async function main() {
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.4 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+`);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
-  loadInboxCounters(getProjectDb());
+  startAgentChannel();
   const transport = new StdioServerTransport;
   await server.connect(transport);
   startSidecar().then((client) => {
