@@ -84,6 +84,7 @@ verbatim and abort - PA without agent-channel is useless.
 Read `agents/prime-agent.md` from the orchestrator plugin (your role doc).
 Internalize:
 
+- Your fundamental identity (artificial-user) - the WHY of the role.
 - When to act (PA-addressed events, situational coordination, conflict
   prevention).
 - When to observe (during pauses, unaddressed dialogue, peer-to-peer
@@ -98,6 +99,37 @@ typical install this resolves to either
 (installed cache, version-pinned) or the source repo
 `<repo>/plugins/orchestrator/agents/prime-agent.md` if you have it
 checked out locally.
+
+### 5.5. Load user-pattern context (artificial-user grounding)
+
+PA's defining duty (per prime-agent.md) is to act as an artificial
+version of the user this orchestrator instance serves. The
+user_pattern notes in the global DB encode that user's preferences,
+work habits, communication style, decision biases, and values. They
+persist across every project.
+
+Run a targeted lookup to load recent + high-confidence user_patterns
+into your working context:
+
+```
+lookup({
+  type: "user_pattern",
+  limit: 25,
+})
+```
+
+Skim the returned notes and internalize them. They're the rules of
+engagement for how you act on this user's behalf. The briefing's
+cross_project section also surfaces some, but this explicit lookup
+guarantees you're loaded.
+
+If a user-pattern lookup returns zero results, that's normal for a
+fresh user (first project, no patterns captured yet). Your job is then
+to capture patterns as they emerge in interactions.
+
+**Do not skip this step.** Skipping it means PA operates as a generic
+orchestrator, not as an artificial-user. The whole point of PA is the
+latter.
 
 ### 6. Check for any existing global pause
 
