@@ -182,4 +182,131 @@ describe("agent-channel routing E2E", () => {
       ),
     ).toBe(true);
   });
+
+  // Per-paragraph routing (0.30.22, work_item b4c37849):
+  // A mixed-audience message (private-to-user paragraphs + @SA-<id8> directive
+  // paragraphs in one assistant_text event) must NOT deliver the private
+  // paragraphs to the named SA. Only the addressed paragraphs reach the SA.
+  //
+  // Test setup: a SOURCE SA writes the mixed message. The receiving SAs and
+  // PA observe via the filewatcher. PA's own session always suppresses
+  // self-events (each AgentChannel skips events from its own session_id),
+  // which is why the source must be a different session than any receiver
+  // we want to verify.
+  test("SA receives only the @SA-addressed paragraphs of a mixed-audience message", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const sourceSa = makeSession("subordinate", "50ce0bba", "SA-source");
+    const targetA = makeSession("subordinate", "abc12345", "SA-target");
+    const targetB = makeSession("subordinate", "deadbe11", "SA-other");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, sourceSa);
+    writeSession(stateDir, targetA);
+    writeSession(stateDir, targetB);
+
+    const sourceJsonl = join(projectsHashDir, `${sourceSa.session_id}.jsonl`);
+    writeFileSync(sourceJsonl, "");
+
+    // Mixed message: paragraph 1 is private to the user, paragraph 2 addresses
+    // SA-abc12345, paragraph 3 is again private to the user, paragraph 4
+    // addresses a DIFFERENT SA.
+    const mixed = [
+      "Hey Jarid, here's a private read on the orchestrator situation. The relay is misbehaving.",
+      "@SA-abc12345 Please re-run the migration and verify the schema version.",
+      "Back to you Jarid - I think the larger architectural pivot is needed.",
+      "@SA-deadbe11 Standby for next assignment.",
+    ].join("\n\n");
+    appendAssistantEvent(sourceJsonl, mixed);
+
+    const paReceived: ChannelNotification[] = [];
+    const targetAReceived: ChannelNotification[] = [];
+    const targetBReceived: ChannelNotification[] = [];
+
+    const paChan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => paReceived.push(n));
+    const targetAChan = new AgentChannel(stateDir, projectsHashDir, targetA, (n) => targetAReceived.push(n));
+    const targetBChan = new AgentChannel(stateDir, projectsHashDir, targetB, (n) => targetBReceived.push(n));
+
+    paChan.start();
+    targetAChan.start();
+    targetBChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    paChan.stop();
+    targetAChan.stop();
+    targetBChan.stop();
+
+    // PA observes the FULL content (PA is the project observer).
+    const paAssistantContents = paReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(paAssistantContents.length).toBeGreaterThanOrEqual(1);
+    const paFullContent = paAssistantContents.join("\n---\n");
+    expect(paFullContent).toContain("private read on the orchestrator");
+    expect(paFullContent).toContain("re-run the migration");
+    expect(paFullContent).toContain("larger architectural pivot");
+    expect(paFullContent).toContain("Standby for next assignment");
+
+    // SA-target receives ONLY paragraph 2 (its addressed paragraph). The two
+    // private paragraphs MUST be filtered out. The other SA's paragraph
+    // is also not for SA-target.
+    const targetAContents = targetAReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(targetAContents.length).toBe(1);
+    const targetAContent = targetAContents[0];
+    expect(targetAContent).toContain("re-run the migration");
+    expect(targetAContent).not.toContain("private read on the orchestrator");
+    expect(targetAContent).not.toContain("larger architectural pivot");
+    expect(targetAContent).not.toContain("Standby for next assignment");
+
+    // SA-other receives ONLY paragraph 4 (its addressed paragraph).
+    const targetBContents = targetBReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(targetBContents.length).toBe(1);
+    const targetBContent = targetBContents[0];
+    expect(targetBContent).toContain("Standby for next assignment");
+    expect(targetBContent).not.toContain("private read on the orchestrator");
+    expect(targetBContent).not.toContain("re-run the migration");
+    expect(targetBContent).not.toContain("larger architectural pivot");
+  });
+
+  // Per-paragraph routing edge case: unaddressed message gets no SA delivery
+  // but PA still observes it. Source must be a non-PA, non-receiver session
+  // to avoid self-event suppression on either end.
+  test("unaddressed message reaches PA but no SA", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const sourceSa = makeSession("subordinate", "50ce0bba", "SA-source");
+    const otherSa = makeSession("subordinate", "abc12345", "SA-other");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, sourceSa);
+    writeSession(stateDir, otherSa);
+
+    const sourceJsonl = join(projectsHashDir, `${sourceSa.session_id}.jsonl`);
+    writeFileSync(sourceJsonl, "");
+
+    const unaddressed = "Just thinking out loud about how the API should evolve.";
+    appendAssistantEvent(sourceJsonl, unaddressed);
+
+    const paReceived: ChannelNotification[] = [];
+    const otherReceived: ChannelNotification[] = [];
+    const paChan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => paReceived.push(n));
+    const otherChan = new AgentChannel(stateDir, projectsHashDir, otherSa, (n) => otherReceived.push(n));
+    paChan.start();
+    otherChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    paChan.stop();
+    otherChan.stop();
+
+    // PA observes
+    expect(
+      paReceived.some(
+        (n) => n.meta.event_type === "assistant_text" && n.content.includes("thinking out loud"),
+      ),
+    ).toBe(true);
+    // Other SA does NOT receive
+    expect(
+      otherReceived.some(
+        (n) => n.meta.event_type === "assistant_text" && n.content.includes("thinking out loud"),
+      ),
+    ).toBe(false);
+  });
 });

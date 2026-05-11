@@ -213,4 +213,70 @@ describe("R2.4: supersede_note hardening", () => {
     const countAfter = (projectDb.query(`SELECT COUNT(*) AS c FROM notes`).get() as any).c;
     expect(countAfter).toBe(countBefore);
   });
+
+  describe("id8 prefix resolution (0.30.22)", () => {
+    test("supersede accepts id8 prefix for both old_id and new_id", async () => {
+      const old = await handleRemember(projectDb, globalDb, { content: "decision old A id8 test", type: "decision" });
+      const fresh = await handleRemember(projectDb, globalDb, { content: "decision new A id8 test", type: "decision" });
+      const oldId8 = old.note_id!.slice(0, 8);
+      const newId8 = fresh.note_id!.slice(0, 8);
+
+      const result = await handleSupersede(projectDb, globalDb, { old_id: oldId8, new_id: newId8 });
+
+      expect(result.superseded).toBe(true);
+      expect(result.old_id).toBe(old.note_id!);
+      expect(result.new_id).toBe(fresh.note_id!);
+    });
+
+    test("idempotent supersede with id8 prefixes on retry returns no-op (not chain-fork error)", async () => {
+      // The bug the reviewer caught: the idempotent check compared the
+      // unresolved id8 prefix against the full UUID stored in superseded_by,
+      // so a legitimate retry with id8 prefixes would falsely hit the
+      // chain-fork rejection path. This test pins the fixed behavior.
+      const old = await handleRemember(projectDb, globalDb, { content: "decision idem A", type: "decision" });
+      const fresh = await handleRemember(projectDb, globalDb, { content: "decision idem B", type: "decision" });
+
+      const first = await handleSupersede(projectDb, globalDb, {
+        old_id: old.note_id!,
+        new_id: fresh.note_id!,
+      });
+      expect(first.superseded).toBe(true);
+
+      const retry = await handleSupersede(projectDb, globalDb, {
+        old_id: old.note_id!.slice(0, 8),
+        new_id: fresh.note_id!.slice(0, 8),
+      });
+
+      expect(retry.superseded).toBe(true);
+      expect(retry.new_id).toBe(fresh.note_id!);
+      expect(retry.message).toMatch(/already superseded/i);
+      expect(retry.message).toMatch(/no change/i);
+      expect(retry.error).toBeUndefined();
+    });
+
+    test("supersede returns ambiguous error when old_id prefix matches multiple", async () => {
+      const ts = new Date().toISOString();
+      const a = "feedf00d-1111-1111-1111-111111111111";
+      const b = "feedf00d-2222-2222-2222-222222222222";
+      const c = "deadbeef-0000-0000-0000-000000000000";
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at, confidence) VALUES (?, 'decision', 'a', ?, ?, 'medium')`,
+        [a, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at, confidence) VALUES (?, 'decision', 'b', ?, ?, 'medium')`,
+        [b, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at, confidence) VALUES (?, 'decision', 'c', ?, ?, 'medium')`,
+        [c, ts, ts]
+      );
+
+      const result = await handleSupersede(projectDb, globalDb, { old_id: "feedf00d", new_id: c });
+      expect(result.superseded).toBe(false);
+      expect(result.message).toMatch(/ambiguous/i);
+      expect(result.message).toContain(a);
+      expect(result.message).toContain(b);
+    });
+  });
 });

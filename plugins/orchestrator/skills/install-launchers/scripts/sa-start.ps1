@@ -100,6 +100,12 @@ $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 # Canonical role env. SPAWNBOX_ prefix kept for backwards compatibility.
 $env:ORCHESTRATOR_AGENT_ROLE = 'subordinate'
 $env:SPAWNBOX_AGENT_ROLE = 'subordinate'
+
+# Opt into the PA-gated permission relay (0.30.17+). When set, this SA's MCP
+# declares the `claude/channel/permission` capability so tool permission
+# requests route through agent-channel to PA for authorization instead of
+# falling back to in-terminal prompts.
+$env:ORCHESTRATOR_PA_PERMISSION_RELAY = '1'
 # Only set the NAME env when we have an explicit name. On --resume without an
 # explicit name, leave NAME unset so the existing session's name is preserved.
 if ($sessionName) {

@@ -23,6 +23,7 @@ import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
 import { resolveNoteId } from "./tools/id_resolver";
+import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs } from "./utils";
 import { createAutoLinks } from "./engine/linker";
@@ -386,7 +387,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.21",
+    version: "0.30.22",
   },
   {
     capabilities: {
@@ -416,19 +417,20 @@ const server = new McpServer(
 // ── briefing ────────────────────────────────────────────────────────────
 server.tool(
   "briefing",
-  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost.",
+  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
   {
     event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
     sections: z
       .array(z.enum(BRIEFING_SECTIONS))
       .optional()
       .describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint, curation_candidates"),
+    output_mode: z.enum(["full", "summary"]).optional().describe("'full' (default): current rendering. 'summary': per-item content truncated to 60 chars (was 120), recovery checkpoint and auto-retro bodies truncated to 240 chars. Use when you just need the shape of in-flight work without full content."),
     session_id: z
       .string()
       .optional()
       .describe("Session ID. Required for cross_session updates (what other active sessions have discovered since your last briefing). Strongly recommended - pass your session identifier."),
   },
-  async ({ event, sections, session_id }) => {
+  async ({ event, sections, output_mode, session_id }) => {
     // Register the session before running the briefing so cross-session
     // tracking has a row to compare against next time.
     session_id = resolveSessionId(session_id);
@@ -457,8 +459,18 @@ server.tool(
       depositSignalBatch(getProjectDb(), briefingNoteIds, WEAK_DEPOSIT);
     }
 
-    // Append system status when embeddings need attention
     let text = result.formatted;
+
+    // 0.30.22 summary mode: post-process the formatted briefing to compress
+    // verbose sections. The composer already truncates per-item content to
+    // 120 chars; summary mode tightens that further to 60 and trims long
+    // checkpoint / auto-retro bodies to 240. Done as a post-process here
+    // rather than threaded through composer.ts to keep the change surgical.
+    if (output_mode === "summary") {
+      text = compactBriefingText(text);
+    }
+
+    // Append system status when embeddings need attention
     if (sidecarStatus !== "ready" && event === "startup") {
       text += "\n## Setup Available\n";
       text += "Semantic search (embeddings) is not active. Call `install_embeddings` to check dependencies and enable it.\n";
@@ -469,6 +481,71 @@ server.tool(
     };
   }
 );
+
+/**
+ * Post-process a briefing's formatted text for summary mode (0.30.22).
+ *
+ * Strategy: walk lines, detect work-item / open-thread / decision list lines
+ * (start with `- ` and contain `**<id>**` markup), trim the content portion
+ * after the id+metadata to ~60 chars. Section headers and short metadata
+ * lines are preserved verbatim.
+ *
+ * Also trims the bodies of long auto-retro and recovery-checkpoint sections,
+ * which can dominate briefing length when present.
+ */
+function compactBriefingText(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inCheckpoint = false;
+  let inAutoRetro = false;
+  let bodyBudget = 240;
+  const truncateSnippet = (s: string, n: number) =>
+    s.length > n ? s.slice(0, n).trimEnd() + "..." : s;
+
+  for (const raw of lines) {
+    // Section boundaries reset the budget for verbose bodies.
+    if (raw.startsWith("## ")) {
+      inCheckpoint = raw.includes("Recovery Checkpoint");
+      inAutoRetro = raw.includes("Auto-Retro");
+      bodyBudget = 240;
+      out.push(raw);
+      continue;
+    }
+    if (raw.startsWith("# ")) {
+      inCheckpoint = false;
+      inAutoRetro = false;
+      out.push(raw);
+      continue;
+    }
+
+    // List items: `- ... **<id>** rest...` → trim rest to ~60 chars.
+    const listMatch = raw.match(/^(\s*-\s+(?:[^*]*?\*\*[\w-]+\*\*\s+))(.*)$/);
+    if (listMatch) {
+      const prefix = listMatch[1];
+      const body = listMatch[2];
+      out.push(prefix + truncateSnippet(body, 60));
+      continue;
+    }
+
+    // Verbose body sections (Recovery Checkpoint, Auto-Retro): apply a
+    // section-wide character budget. Once exhausted, append a marker and
+    // skip remaining body lines until the next section header.
+    if (inCheckpoint || inAutoRetro) {
+      if (bodyBudget > 0) {
+        const trimmed = raw.length > bodyBudget ? raw.slice(0, bodyBudget) + "..." : raw;
+        out.push(trimmed);
+        bodyBudget -= trimmed.length;
+      } else if (out[out.length - 1] !== "[...trimmed for summary mode]") {
+        out.push("[...trimmed for summary mode]");
+      }
+      continue;
+    }
+
+    out.push(raw);
+  }
+
+  return out.join("\n");
+}
 
 // ── system_status ────────────────────────────────────────────────────────
 server.tool(
@@ -501,7 +578,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.21** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.22** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -758,7 +835,7 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates.",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).",
   {
     query: z.string().optional(),
     id: z.string().optional(),
@@ -770,9 +847,10 @@ server.tool(
     include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
     link_limit: z.coerce.number().min(0).max(500).optional().describe("Cap on number of linked notes returned in detail-mode lookup. Default 20. Set to 0 to skip linked notes entirely (useful for heavily-connected umbrella notes). Set higher (up to 500) to get the full neighborhood. Superseded-chain links are always shown separately and don't count against this limit."),
     code_ref: z.string().optional().describe("Filter results to notes that reference this exact file or module path in their code_refs array. Exact string match; no wildcards. Useful for 'what do we know about mcp/server.ts?' queries."),
+    output_mode: z.enum(["full", "summary"]).optional().describe("'full' (default): rich rendering with content, code_refs, maintain hints, annotations. 'summary': one-liner per result (id8 + type + truncated content), no code_refs / hints / annotations. Detail-mode (`id`-by-id) summary: type + truncated content, no linked notes, no supersede chain, no maintain hints. Use summary mode when enumerating candidates without needing full bodies."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, session_id }) => {
+  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, output_mode, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -845,6 +923,9 @@ server.tool(
       return parts.length > 0 ? ` [${parts.join("; ")}]` : "";
     }
 
+    const summaryMode = output_mode === "summary";
+    const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n).trimEnd() + "..." : s);
+
     let text = result.message;
     if (result.detail) {
       const age = formatAge(result.detail.updated_at);
@@ -853,30 +934,31 @@ server.tool(
         ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
         : "";
       text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
-      if (result.detail.code_refs && result.detail.code_refs.length > 0) {
+      if (!summaryMode && result.detail.code_refs && result.detail.code_refs.length > 0) {
         text += `\ncode_refs: [${result.detail.code_refs.join(", ")}]`;
       }
-      text += `\n${result.detail.content}${annotationMarker(result.detail.id)}`;
+      const detailBody = summaryMode ? truncate(result.detail.content, 120) : result.detail.content;
+      text += `\n${detailBody}${summaryMode ? "" : annotationMarker(result.detail.id)}`;
 
-      // R2: supersede chain (always render when non-empty)
+      // R2: supersede chain (always render when non-empty, even in summary)
       if (result.detail.supersede_chain) {
         const sc = result.detail.supersede_chain;
         if (sc.supersedes.length > 0) {
           text += "\n\nSupersedes:";
           for (const n of sc.supersedes) {
-            text += `\n  - **${n.id}** [${n.type}] ${n.content}`;
+            text += `\n  - **${n.id}** [${n.type}] ${summaryMode ? truncate(n.content, 80) : n.content}`;
           }
         }
         if (sc.superseded_by.length > 0) {
           text += "\n\nSuperseded by:";
           for (const n of sc.superseded_by) {
-            text += `\n  - **${n.id}** [${n.type}] ${n.content}`;
+            text += `\n  - **${n.id}** [${n.type}] ${summaryMode ? truncate(n.content, 80) : n.content}`;
           }
         }
       }
 
-      // R2: revision history (only when include_history: true)
-      if (result.detail.revisions && result.detail.revisions.length > 0) {
+      // R2: revision history (only when include_history: true; suppressed in summary)
+      if (!summaryMode && result.detail.revisions && result.detail.revisions.length > 0) {
         text += `\n\nRevision history (${result.detail.revisions.length} revisions, oldest first):`;
         for (const rev of result.detail.revisions) {
           const revAge = formatAge(rev.revised_at);
@@ -886,12 +968,16 @@ server.tool(
         }
       }
 
-      if (result.detail.superseded_by) {
-        text += `\n\n[go to current: lookup({id:"${result.detail.superseded_by}"})]`;
-      } else {
-        text += `\n\n[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
+      if (!summaryMode) {
+        if (result.detail.superseded_by) {
+          text += `\n\n[go to current: lookup({id:"${result.detail.superseded_by}"})]`;
+        } else {
+          text += `\n\n[maintain: update_note({id:"${result.detail.id}"}) | close_thread({id:"${result.detail.id}"}) | supersede_note({old_id:"${result.detail.id}"})]`;
+        }
       }
-      if (result.detail.links.length > 0) {
+
+      // Linked notes: suppressed entirely in summary mode (caller can re-request with output_mode: "full")
+      if (!summaryMode && result.detail.links.length > 0) {
         text += "\n\nLinked notes:";
         for (const link of result.detail.links) {
           const indent = "  ".repeat(link.depth - 1);
@@ -909,19 +995,30 @@ server.tool(
     } else if (result.results.length > 0) {
       text += "\n";
       for (const r of result.results) {
-        const tagStr = r.tags ? ` {${r.tags}}` : "";
-        const age = formatAge(r.updated_at);
-        const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
-        const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
-        text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
-        if (r.code_refs && r.code_refs.length > 0) {
-          text += `\n    code_refs: [${r.code_refs.join(", ")}]`;
-        }
-        if (r.superseded_by) {
-          text += `\n  [go to current: lookup({id:"${r.superseded_by}"})]`;
+        if (summaryMode) {
+          // Compact one-liner: id8 + type + truncated content. No tags, no age,
+          // no code_refs, no maintain hints, no annotations.
+          const id8 = r.id.slice(0, 8);
+          const supSuffix = r.superseded_by ? ` [SUPERSEDED]` : "";
+          text += `\n- **${id8}** [${r.type}]${supSuffix} ${truncate(r.content, 80)}`;
         } else {
-          text += `\n  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+          const tagStr = r.tags ? ` {${r.tags}}` : "";
+          const age = formatAge(r.updated_at);
+          const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
+          const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
+          text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+          if (r.code_refs && r.code_refs.length > 0) {
+            text += `\n    code_refs: [${r.code_refs.join(", ")}]`;
+          }
+          if (r.superseded_by) {
+            text += `\n  [go to current: lookup({id:"${r.superseded_by}"})]`;
+          } else {
+            text += `\n  [maintain: update_note({id:"${r.id}"}) | close_thread({id:"${r.id}"}) | supersede_note({old_id:"${r.id}"})]`;
+          }
         }
+      }
+      if (summaryMode) {
+        text += `\n\n(Summary mode. Re-call with \`output_mode: "full"\` or specific \`id\` for full content of any result.)`;
       }
     }
     if (text.length > 15000) {
@@ -1097,14 +1194,23 @@ server.tool(
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
 
+    // id8-prefix resolution: try project first, fall back to global.
+    let resolved = resolveNoteId(projectDb, id);
     let db = projectDb;
+    if (!resolved.id && !resolved.ambiguous) {
+      resolved = resolveNoteId(globalDb, id);
+      db = globalDb;
+    }
+    if (resolved.ambiguous) {
+      return { content: [{ type: "text" as const, text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }] };
+    }
+    if (!resolved.id) {
+      return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
+    }
+    id = resolved.id;
+
     let row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
       .get(id) as any | null;
-    if (!row) {
-      db = globalDb;
-      row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
-        .get(id) as any | null;
-    }
     if (!row) {
       return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
     }
@@ -1214,15 +1320,23 @@ server.tool(
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
 
+    // id8-prefix resolution: try project first, fall back to global.
+    let resolved = resolveNoteId(projectDb, id);
     let db = projectDb;
-    let row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`)
-      .get(id) as { id: string; type: string; content: string } | null;
-
-    if (!row) {
+    if (!resolved.id && !resolved.ambiguous) {
+      resolved = resolveNoteId(globalDb, id);
       db = globalDb;
-      row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`)
-        .get(id) as { id: string; type: string; content: string } | null;
     }
+    if (resolved.ambiguous) {
+      return { content: [{ type: "text" as const, text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }] };
+    }
+    if (!resolved.id) {
+      return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
+    }
+    id = resolved.id;
+
+    const row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`)
+      .get(id) as { id: string; type: string; content: string } | null;
 
     if (!row) {
       return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
@@ -1461,46 +1575,60 @@ server.tool(
     }
 
     const timestamp = now();
-    const updates: string[] = [];
+    // Parameterized UPDATE composition: each field appends to BOTH the SET
+    // fragment list (with `?` placeholders) AND the bind-values list. No
+    // string interpolation of user input into SQL.
+    const setFragments: string[] = [];
+    const bindValues: (string | number | null)[] = [];
     const changes: string[] = [];
 
     if (status) {
-      updates.push(`status = '${status}'`);
+      setFragments.push("status = ?");
+      bindValues.push(status);
       changes.push(`status: ${row.status} -> ${status}`);
     }
     if (priority) {
-      updates.push(`priority = '${priority}'`);
+      setFragments.push("priority = ?");
+      bindValues.push(priority);
       changes.push(`priority: ${row.priority} -> ${priority}`);
     }
     if (due_date !== undefined) {
       const newDue = due_date === "" ? null : due_date;
-      updates.push(`due_date = ${newDue ? `'${newDue}'` : "NULL"}`);
+      setFragments.push("due_date = ?");
+      bindValues.push(newDue);
       changes.push(`due_date: ${row.due_date ?? "none"} -> ${newDue ?? "cleared"}`);
     }
     if (content) {
-      updates.push(`content = '${content.replace(/'/g, "''")}'`);
+      setFragments.push("content = ?");
+      bindValues.push(content);
       const newKeywords = extractKeywords(content);
-      updates.push(`keywords = '${newKeywords.join(",")}'`);
+      setFragments.push("keywords = ?");
+      bindValues.push(newKeywords.join(","));
       changes.push("content updated");
     }
     if (tags !== undefined) {
-      updates.push(`tags = '${tags.replace(/'/g, "''")}'`);
+      setFragments.push("tags = ?");
+      bindValues.push(tags);
       changes.push(`tags: ${row.tags ?? "none"} -> ${tags || "cleared"}`);
     }
     if (context !== undefined) {
       const newCtx = context === "" ? null : context;
-      updates.push(`context = ${newCtx ? `'${newCtx.replace(/'/g, "''")}'` : "NULL"}`);
+      setFragments.push("context = ?");
+      bindValues.push(newCtx);
       changes.push("context updated");
     }
     if (confidence) {
-      updates.push(`confidence = '${confidence}'`);
+      setFragments.push("confidence = ?");
+      bindValues.push(confidence);
       changes.push(`confidence: ${confidence}`);
     }
 
-    if (updates.length > 0) {
-      updates.push(`updated_at = '${timestamp}'`);
-      if (status === "done") updates.push("resolved = 1");
-      projectDb.run(`UPDATE notes SET ${updates.join(", ")} WHERE id = ?`, [id]);
+    if (setFragments.length > 0) {
+      setFragments.push("updated_at = ?");
+      bindValues.push(timestamp);
+      if (status === "done") setFragments.push("resolved = 1");
+      bindValues.push(id);
+      projectDb.run(`UPDATE notes SET ${setFragments.join(", ")} WHERE id = ?`, bindValues);
     }
 
     // R5: code_refs replacement. Separate parameterized UPDATE so we don't
@@ -1878,87 +2006,8 @@ server.tool(
   }
 );
 
-// ── Cascade resolution helper ───────────────────────────────────────────
-function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, timestamp: string): string[] {
-  const results: string[] = [];
-
-  // 1. Unblock items that this note was blocking
-  const blockedItems = db
-    .query(
-      `SELECT DISTINCT n.id, n.type, n.status FROM links l
-       JOIN notes n ON (
-         (l.from_note_id = ? AND l.to_note_id = n.id) OR
-         (l.to_note_id = ? AND l.from_note_id = n.id)
-       )
-       WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`
-    )
-    .all(noteId, noteId, noteId) as Array<{ id: string; type: string; status: string | null }>;
-
-  for (const blocked of blockedItems) {
-    // Check for other unresolved blockers
-    const otherBlockers = db
-      .query(
-        `SELECT COUNT(*) as cnt FROM links l
-         JOIN notes n ON (
-           (l.from_note_id = n.id AND l.to_note_id = ?) OR
-           (l.to_note_id = n.id AND l.from_note_id = ?)
-         )
-         WHERE l.relationship = 'blocks' AND n.id != ? AND n.resolved = 0`
-      )
-      .get(blocked.id, blocked.id, noteId) as { cnt: number };
-
-    if (otherBlockers.cnt === 0 && blocked.type === "work_item" && blocked.status === "blocked") {
-      db.run(`UPDATE notes SET status = 'planned', updated_at = ? WHERE id = ?`, [timestamp, blocked.id]);
-      results.push(`Unblocked "${blocked.id}"`);
-    }
-  }
-
-  // 2. Auto-complete parent if all children done
-  const parentLinks = db
-    .query(`SELECT l.to_note_id FROM links l WHERE l.from_note_id = ? AND l.relationship = 'part_of'`)
-    .all(noteId) as Array<{ to_note_id: string }>;
-
-  for (const parentLink of parentLinks) {
-    const unresolvedSiblings = db
-      .query(
-        `SELECT COUNT(*) as cnt FROM links l
-         JOIN notes n ON l.from_note_id = n.id
-         WHERE l.to_note_id = ? AND l.relationship = 'part_of'
-         AND n.id != ? AND (n.resolved = 0 OR (n.type = 'work_item' AND n.status != 'done'))`
-      )
-      .get(parentLink.to_note_id, noteId) as { cnt: number };
-
-    if (unresolvedSiblings.cnt === 0) {
-      const parent = db.query(`SELECT id, type, status FROM notes WHERE id = ?`)
-        .get(parentLink.to_note_id) as { id: string; type: string; status: string | null } | null;
-
-      if (parent && parent.status !== "done") {
-        if (parent.type === "work_item") {
-          db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
-        } else {
-          db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, parent.id]);
-        }
-        results.push(`Auto-completed parent "${parent.id}" (all children done)`);
-      }
-    }
-  }
-
-  // 3. Auto-resolve superseded notes
-  const superseded = db
-    .query(
-      `SELECT n.id FROM links l
-       JOIN notes n ON l.to_note_id = n.id
-       WHERE l.from_note_id = ? AND l.relationship = 'supersedes' AND n.resolved = 0`
-    )
-    .all(noteId) as Array<{ id: string }>;
-
-  for (const sup of superseded) {
-    db.run(`UPDATE notes SET resolved = 1, updated_at = ? WHERE id = ?`, [timestamp, sup.id]);
-    results.push(`Auto-resolved superseded "${sup.id}"`);
-  }
-
-  return results;
-}
+// Cascade resolution helper now lives in `tools/cascade.ts` (shared with the
+// `resolution: close_existing` path in remember.ts). Imported above.
 
 // ── Agent-channel filewatcher ────────────────────────────────────────────
 let agentChannel: AgentChannel | null = null;
@@ -2422,7 +2471,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.21 ` +
+    `[orchestrator] MCP server starting - version=0.30.22 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

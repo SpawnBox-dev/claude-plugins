@@ -59,6 +59,12 @@ $env:SPAWNBOX_AGENT_ROLE = 'subordinate'
 $env:ORCHESTRATOR_AGENT_NAME = $sessionName
 $env:SPAWNBOX_AGENT_NAME = $sessionName
 
+# Opt into the PA-gated permission relay (0.30.17+). When set, this SA's MCP
+# declares the `claude/channel/permission` capability so tool permission
+# requests route through agent-channel to PA for authorization instead of
+# falling back to in-terminal prompts.
+$env:ORCHESTRATOR_PA_PERMISSION_RELAY = '1'
+
 # ---------------------------------------------------------------------------
 # Build claude args
 #

@@ -142,6 +142,12 @@ $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 # with older orchestrator MCPs that haven't been updated yet.
 $env:ORCHESTRATOR_AGENT_ROLE = 'prime'
 $env:SPAWNBOX_AGENT_ROLE = 'prime'
+
+# Opt into the PA-gated permission relay (0.30.17+). When set, SA permission
+# requests for unallowlisted tools route through agent-channel to PA for
+# authorization instead of falling back to in-terminal prompts. PA needs the
+# `respond_to_permission` tool registered, which is gated on this env var.
+$env:ORCHESTRATOR_PA_PERMISSION_RELAY = '1'
 # Only set the NAME env when we have an explicit name. On --resume without an
 # explicit name, leave NAME unset: the MCP will register the session under its
 # existing /rename-set name. Setting NAME=$Resume here would clobber the

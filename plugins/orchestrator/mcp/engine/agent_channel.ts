@@ -430,20 +430,52 @@ export class AgentChannel {
     const ev = filterEvent(raw);
     if (!ev) return;
 
-    const addr = parseAddressing(ev.content, sender, sessions);
+    // Self-event suppression: an instance never re-fires its own session's events
+    if (sender.session_id === this.selfSession.session_id) return;
 
-    if (!this.shouldReceive(addr, sender)) return;
+    const fullAddr = parseAddressing(ev.content, sender, sessions);
+
+    // Per-paragraph routing (0.30.22, work_item b4c37849):
+    //
+    // The sender's content can mix audiences within one message - e.g. PA
+    // writing a status update to Jarid that also contains an `@SA-<id8>`
+    // directive paragraph. Whole-message routing would deliver the entire
+    // mixed message (including the Jarid-private prose) to the addressed SA.
+    //
+    // We split on blank-line paragraphs and parse addressing per paragraph.
+    // PA still observes the full content (PA is the project observer by
+    // design). SAs receive only the paragraphs whose addressing includes
+    // them - everything else is filtered out before emit.
+    let emitContent: string;
+    let emitTargets: string[];
+    if (this.selfSession.role === "prime") {
+      // PA observes everything unchanged.
+      emitContent = ev.content;
+      emitTargets = fullAddr.targets;
+    } else {
+      const myId = this.selfSession.session_id;
+      if (!fullAddr.targets.includes(myId)) return;
+      const filtered = filterParagraphsForReceiver(
+        ev.content,
+        myId,
+        sender,
+        sessions,
+      );
+      if (!filtered) return;
+      emitContent = filtered;
+      emitTargets = [myId];
+    }
 
     const isPaused = !!overrideState.sa_pauses[sender.session_id];
     const isGlobalPaused = overrideState.pa_global_pause.active;
 
     this.emit({
       content: decorateChannelContent(
-        ev.content,
+        emitContent,
         sender,
         ev.event_type,
-        addr.targets,
-        addr.pa_addressed,
+        emitTargets,
+        fullAddr.pa_addressed,
         sessions,
       ),
       meta: {
@@ -454,26 +486,38 @@ export class AgentChannel {
         from_task: sender.current_task ?? null,
         event_type: ev.event_type,
         tool_name: ev.tool_name,
-        pa_addressed: addr.pa_addressed,
-        addressed_to: addr.targets.length > 0 ? addr.targets : undefined,
+        pa_addressed: fullAddr.pa_addressed,
+        addressed_to: emitTargets.length > 0 ? emitTargets : undefined,
         pa_global_pause: isGlobalPaused || undefined,
         sa_paused: isPaused || undefined,
         ts: new Date().toISOString(),
       },
     });
   }
+}
 
-  private shouldReceive(
-    addr: ReturnType<typeof parseAddressing>,
-    sender: SessionEntry,
-  ): boolean {
-    // Self-event suppression: an instance never re-fires its own session's events
-    if (sender.session_id === this.selfSession.session_id) return false;
-
-    // PA observes everything
-    if (this.selfSession.role === "prime") return true;
-
-    // Subordinate: only events where it's a target
-    return addr.targets.includes(this.selfSession.session_id);
+/**
+ * Filter content paragraphs to only those that address `receiverId`. Returns
+ * null when no paragraph addresses this receiver (caller should suppress
+ * the emit entirely). Paragraphs are separated by one or more blank lines.
+ *
+ * Used by SA receivers to extract only the parts of a sender's message
+ * that were addressed to them - prevents PA-Jarid prose in a mixed message
+ * from leaking to an SA that was named in a different paragraph.
+ */
+function filterParagraphsForReceiver(
+  content: string,
+  receiverId: string,
+  sender: SessionEntry,
+  sessions: SessionEntry[],
+): string | null {
+  const paragraphs = content.split(/\n{2,}/);
+  const kept: string[] = [];
+  for (const para of paragraphs) {
+    const paraAddr = parseAddressing(para, sender, sessions);
+    if (paraAddr.targets.includes(receiverId)) {
+      kept.push(para);
+    }
   }
+  return kept.length > 0 ? kept.join("\n\n") : null;
 }

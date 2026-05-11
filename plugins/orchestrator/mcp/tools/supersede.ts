@@ -3,6 +3,7 @@ import type { NoteType } from "../types";
 import { GLOBAL_TYPES } from "../types";
 import { generateId, now } from "../utils";
 import { handleRemember } from "./remember";
+import { resolveNoteId } from "./id_resolver";
 import type { EmbeddingClient } from "../engine/embeddings";
 
 export interface SupersedeInput {
@@ -41,13 +42,23 @@ export async function handleSupersede(
     };
   }
 
+  // id8-prefix resolution for old_id: try project first, fall back to global.
+  let oldResolved = resolveNoteId(projectDb, input.old_id);
   let db = projectDb;
-  let oldRow = db.query("SELECT id, type FROM notes WHERE id = ?").get(input.old_id) as { id: string; type: string } | null;
-  if (!oldRow) {
+  if (!oldResolved.id && !oldResolved.ambiguous) {
+    oldResolved = resolveNoteId(globalDb, input.old_id);
     db = globalDb;
-    oldRow = db.query("SELECT id, type FROM notes WHERE id = ?").get(input.old_id) as { id: string; type: string } | null;
   }
-  if (!oldRow) {
+  if (oldResolved.ambiguous) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: `old_id prefix "${input.old_id}" is ambiguous - matches ${oldResolved.ambiguous.length} notes`,
+      message: `ID prefix "${input.old_id}" is ambiguous - matches ${oldResolved.ambiguous.length} notes: ${oldResolved.ambiguous.join(", ")}. Use the full UUID.`,
+    };
+  }
+  if (!oldResolved.id) {
     return {
       superseded: false,
       old_id: input.old_id,
@@ -56,14 +67,39 @@ export async function handleSupersede(
       message: `No note found with id "${input.old_id}".`,
     };
   }
+  const oldId = oldResolved.id;
+  // Update input.old_id so error messages downstream cite the resolved UUID.
+  input = { ...input, old_id: oldId };
+
+  const oldRow = db.query("SELECT id, type FROM notes WHERE id = ?").get(oldId) as { id: string; type: string } | null;
+  if (!oldRow) {
+    return {
+      superseded: false,
+      old_id: oldId,
+      new_id: null,
+      error: `old note "${oldId}" not found`,
+      message: `No note found with id "${oldId}".`,
+    };
+  }
 
   // Check current state of old note - reject chain-fork, allow true idempotent no-op.
   // This runs BEFORE any new_id validation or inline creation to prevent orphan notes.
-  const currentSupersededBy = (db.query(`SELECT superseded_by FROM notes WHERE id = ?`).get(input.old_id) as { superseded_by: string | null }).superseded_by;
+  const currentSupersededBy = (db.query(`SELECT superseded_by FROM notes WHERE id = ?`).get(oldId) as { superseded_by: string | null }).superseded_by;
 
   if (currentSupersededBy !== null) {
+    // Resolve caller's new_id (potentially an id8 prefix) BEFORE comparing
+    // against currentSupersededBy (full UUID from DB). Without this, an
+    // idempotent retry like `supersede({old_id: "ab12cd34", new_id: "ef56ab78"})`
+    // would compare the prefix against the full UUID and silently fall through
+    // to the chain-fork rejection.
+    let resolvedNewIdForIdempotent: string | null = null;
+    if (input.new_id) {
+      const r = resolveNoteId(db, input.new_id);
+      resolvedNewIdForIdempotent = r.id;
+    }
+
     // Old note is already superseded. Two sub-cases:
-    if (input.new_id && input.new_id === currentSupersededBy) {
+    if (input.new_id && (resolvedNewIdForIdempotent ?? input.new_id) === currentSupersededBy) {
       // True idempotent no-op for same (old_id, new_id) pair. Preserve original superseded_at.
       return {
         superseded: true,
@@ -82,15 +118,24 @@ export async function handleSupersede(
     };
   }
 
-  let newId = input.new_id ?? null;
+  let newId: string | null = null;
 
-  // If new_id was provided directly, validate it lives in the same db
+  // If new_id was provided directly, validate (with id8-prefix resolution) it lives in the same db
   if (input.new_id) {
-    const sameDbRow = db.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id) as { id: string } | null;
-    if (!sameDbRow) {
+    const newInSameDb = resolveNoteId(db, input.new_id);
+    if (newInSameDb.ambiguous) {
+      return {
+        superseded: false,
+        old_id: input.old_id,
+        new_id: null,
+        error: `new_id prefix "${input.new_id}" is ambiguous - matches ${newInSameDb.ambiguous.length} notes`,
+        message: `new_id prefix "${input.new_id}" is ambiguous - matches ${newInSameDb.ambiguous.length} notes: ${newInSameDb.ambiguous.join(", ")}. Use the full UUID.`,
+      };
+    }
+    if (!newInSameDb.id) {
       const otherDb = db === projectDb ? globalDb : projectDb;
-      const crossRow = otherDb.query(`SELECT id FROM notes WHERE id = ?`).get(input.new_id) as { id: string } | null;
-      if (crossRow) {
+      const newInOtherDb = resolveNoteId(otherDb, input.new_id);
+      if (newInOtherDb.id) {
         return {
           superseded: false,
           old_id: input.old_id,
@@ -107,7 +152,7 @@ export async function handleSupersede(
         message: `No note found with new_id "${input.new_id}".`,
       };
     }
-    newId = input.new_id;
+    newId = newInSameDb.id;
   }
 
   if (!newId && input.new_content && input.new_type) {
