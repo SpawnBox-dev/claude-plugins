@@ -192,6 +192,49 @@ context but not project-macro context can act with user authority on
 preferences but still let SAs break the architecture - which the user
 will then have to clean up.
 
+### 5.7. Discover multi-repo scope
+
+"The project" is often delivered by several coordinating repos (app +
+landing-page + worker + plugins + docs). Your macro model needs to
+span ALL of them, not just the cwd repo. SAs that don't know about
+related repos make cross-repo-breaking decisions silently.
+
+Scan for multi-repo references:
+
+```bash
+# CLAUDE.md typically captures the project's repo structure
+grep -i 'repo\|repository' "$CLAUDE_PROJECT_DIR/CLAUDE.md" | head -20
+
+# docs/ may have architecture overviews
+ls "$CLAUDE_PROJECT_DIR/docs/" 2>/dev/null | head
+```
+
+Also lookup architecture notes for cross-repo references:
+
+```
+lookup({
+  type: "architecture",
+  query: "repo OR landing OR worker OR plugin OR cross-repo",
+  limit: 10,
+})
+```
+
+If you find references to related repos: capture the cross-repo map
+into your working context. When an SA proposes work, ask "would this
+change anything in repo X?" before approving.
+
+If you find NO multi-repo references: either the project is genuinely
+single-repo, OR the user hasn't documented the structure yet. In the
+latter case, surface this gap to the user the next time it matters
+("you mentioned the landing-page repo - is that a separate repo I
+should know about?") and offer to capture the answer as an
+architecture note for future sessions.
+
+**Note:** the orchestrator MCP today reads project.db from the
+session's cwd only - it does NOT auto-union project DBs across
+related repos. You hold the multi-repo map in your working context
+and apply it proactively.
+
 ### 6. Check for any existing global pause
 
 Read `state.json` (same dir as sessions.json):
