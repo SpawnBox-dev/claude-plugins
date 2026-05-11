@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join6 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync5 } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "fs";
 import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
@@ -24232,6 +24232,16 @@ function getFallbackSessionId() {
       const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
+        if (claudePid) {
+          const perPidFile = join6(stateDir, `active-session-${claudePid}`);
+          if (!existsSync7(perPidFile)) {
+            try {
+              writeFileSync3(perPidFile, raw, "utf8");
+              process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
+`);
+            } catch {}
+          }
+        }
         process.stderr.write(`[orchestrator] resolved session_id from LEGACY active-session file ` + `(claude_pid=${claudePid ?? "<none>"} but per-PID file missing): ` + `${raw.slice(0, 8)}... (impostor-race possible if siblings are racing; ` + `watchdog will reap orphans within ~60s)
 `);
         return raw;
@@ -24380,7 +24390,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.27"
+  version: "0.30.28"
 }, {
   capabilities: {
     tools: {},
@@ -24506,7 +24516,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.27** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.28** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24705,13 +24715,13 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.27+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.", {
+server.tool("lookup", "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.28+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
   tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
   limit: exports_external.coerce.number().optional(),
-  offset: exports_external.coerce.number().min(0).optional().describe("Pagination offset (0.30.27+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
+  offset: exports_external.coerce.number().min(0).optional().describe("Pagination offset (0.30.28+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
   depth: exports_external.coerce.number().min(1).max(5).optional(),
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
@@ -25947,7 +25957,7 @@ if (initialParentClaudePid) {
   setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
 }
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.27 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.28 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

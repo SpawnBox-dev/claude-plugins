@@ -20,6 +20,12 @@ Optional. The project root. Defaults to current working directory ($PWD).
 .PARAMETER NoWindowsTerminal
 Optional. Skip wt.exe and launch claude directly in the current console.
 
+.PARAMETER Effort
+Optional. Reasoning effort level: low | medium | high | xhigh | max.
+Omit to leave Claude Code on its session default. Set this when an SA
+is doing complex/judgment-heavy work that benefits from deeper reasoning
+(at higher token cost).
+
 .EXAMPLE
 .\sa-start.ps1
   Fresh session in current dir, auto-named SA-YYYY-MM-DD-HH-MM-SS
@@ -31,12 +37,18 @@ Optional. Skip wt.exe and launch claude directly in the current console.
 .EXAMPLE
 .\sa-start.ps1 -Resume "abc12345-1234-5678-9abc-def012345678"
   Resume by UUID
+
+.EXAMPLE
+.\sa-start.ps1 -Name "SA-architecture" -Effort max
+  Fresh session at max effort for a heavy reasoning task
 #>
 
 param(
   [string]$Resume = '',
   [string]$Name = '',
   [string]$ProjectDir = '',
+  [ValidateSet('', 'low', 'medium', 'high', 'xhigh', 'max')]
+  [string]$Effort = '',
   [switch]$NoWindowsTerminal
 )
 
@@ -126,6 +138,12 @@ $claudeArgs = @(
 if ($sessionName) {
   $claudeArgs += '--name'
   $claudeArgs += $sessionName
+}
+# 0.30.28+: optional reasoning-effort override. Only emitted when -Effort
+# is explicitly set; otherwise Claude Code uses its session default.
+if ($Effort) {
+  $claudeArgs += '--effort'
+  $claudeArgs += $Effort
 }
 if ($Resume) {
   $claudeArgs += '--resume'

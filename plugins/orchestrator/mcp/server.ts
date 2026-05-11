@@ -1,5 +1,5 @@
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -135,7 +135,7 @@ function getFallbackSessionId(): string | undefined {
   // for the bun's actual claude ancestor never exists. Without the
   // legacy fallback, session_id resolves to undefined and agent-channel
   // never starts. 0.30.24 restored the legacy fallback as defense-in-depth;
-  // 0.30.27 then fixed the hook to write the correct claude.exe PID so
+  // 0.30.28 then fixed the hook to write the correct claude.exe PID so
   // the per-PID path is the primary source going forward.
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
@@ -168,6 +168,32 @@ function getFallbackSessionId(): string | undefined {
       const raw = readFileSync(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
+
+        // 0.30.28+ per-PID write-back: when the legacy fallback succeeds AND
+        // we have a real claude.exe ancestor PID, write our own per-PID file
+        // with the resolved session_id. This is the "self-healing" path for
+        // sessions that started BEFORE the 0.30.25 hook fix landed - the
+        // hook wrote an incorrect file name (active-session-1 on Git Bash
+        // for Windows), so the per-PID lookup above missed, and we fell
+        // through to legacy. On a future MCP restart (plugin reload, etc.)
+        // we'd race the legacy file again unless we leave a correct breadcrumb.
+        // Writing the per-PID file here means the next restart finds it
+        // immediately and skips the racy legacy fallback.
+        if (claudePid) {
+          const perPidFile = join(stateDir, `active-session-${claudePid}`);
+          if (!existsSync(perPidFile)) {
+            try {
+              writeFileSync(perPidFile, raw, "utf8");
+              process.stderr.write(
+                `[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` +
+                  `(future restarts will use this instead of racing legacy)\n`,
+              );
+            } catch {
+              // Non-fatal - write-back is best-effort
+            }
+          }
+        }
+
         process.stderr.write(
           `[orchestrator] resolved session_id from LEGACY active-session file ` +
             `(claude_pid=${claudePid ?? "<none>"} but per-PID file missing): ` +
@@ -398,7 +424,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.27",
+    version: "0.30.28",
   },
   {
     capabilities: {
@@ -589,7 +615,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.27** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.28** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -846,14 +872,14 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.27+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.",
+  "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.28+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
     type: z.enum(NOTE_TYPES).optional(),
     tag: z.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
     limit: z.coerce.number().optional(),
-    offset: z.coerce.number().min(0).optional().describe("Pagination offset (0.30.27+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
+    offset: z.coerce.number().min(0).optional().describe("Pagination offset (0.30.28+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
     depth: z.coerce.number().min(1).max(5).optional(),
     include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
     include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
@@ -1232,7 +1258,7 @@ server.tool(
       return { content: [{ type: "text" as const, text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
     }
 
-    // 0.30.27+ hard size limit (matches handleRemember). For content
+    // 0.30.28+ hard size limit (matches handleRemember). For content
     // rewrites: check the new content directly. For append_content:
     // check what the final content WILL be (current + appended) so
     // appends can't sneak past by being individually small.
@@ -2541,7 +2567,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.27 ` +
+    `[orchestrator] MCP server starting - version=0.30.28 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

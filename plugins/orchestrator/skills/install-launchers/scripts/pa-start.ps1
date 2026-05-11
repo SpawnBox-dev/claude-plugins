@@ -167,7 +167,11 @@ if ($sessionName) {
 # skipped.
 $claudeArgs = @(
   '--dangerously-load-development-channels',
-  'plugin:orchestrator@__ORCH_MARKETPLACE__'
+  'plugin:orchestrator@__ORCH_MARKETPLACE__',
+  # 0.30.28+: PA always launches at max effort. PA is the singleton
+  # orchestration session - judgment calls, cross-cutting coordination,
+  # holding the macro view. Token cost is the right tradeoff for the role.
+  '--effort', 'max'
 )
 if ($sessionName) {
   $claudeArgs += '--name'
