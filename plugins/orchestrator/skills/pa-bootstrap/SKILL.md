@@ -28,10 +28,31 @@ cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/sessions.json"
 ```
 
 Find your own session entry (matches `$CLAUDE_SESSION_ID` env var, or the
-session_id you can see in your environment). Verify `role` is `prime`. If
-not, error and abort - means the env was wrong (the .bat sets
-`SPAWNBOX_AGENT_ROLE=prime`; if your entry has `role=subordinate`, the env
-didn't propagate).
+session_id you can see in your environment). Verify `role` is `prime`.
+
+**If role is `subordinate` despite env being correct**, you're likely
+fighting an impostor MCP — another orphaned bun process from a prior
+session that's heartbeating your entry with the wrong role. Diagnose:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" |
+  Where-Object { $_.CommandLine -like '*orchestrator*server.js*' } |
+  Select-Object ProcessId, ParentProcessId, CreationDate, CommandLine
+```
+
+For each `bun`, walk the parent chain to find the host `claude.exe`. If a
+bun's `started_at` in sessions.json matches your session_id but its
+ancestor `claude.exe` is launching a DIFFERENT session (e.g., the wrong
+`--resume <uuid>`), kill that bun — it's an impostor. Your legitimate
+MCP's next heartbeat (~30s) restores the correct entry.
+
+Reference: anti-pattern note `120b8e59-fbef-4847-8c04-6bc7aa3ad378`
+(orchestrator KB) documents the race in detail.
+
+If no impostor exists and role is still wrong, abort and surface the
+env-propagation failure (something between `pa-start.ps1` setting
+`SPAWNBOX_AGENT_ROLE=prime` and the bun process actually reading it is
+broken).
 
 ### 3. Read active subordinates
 
@@ -71,11 +92,12 @@ Internalize:
 - How to use `note()` and `create_work_item()` for self-improvement
   (tags: `agent-channel-improvement, area:orchestrator-plugin`).
 
-The path is `<orchestrator-plugin-source>/agents/prime-agent.md`. From the
-spawnbox project this typically resolves to
-`C:/Users/Jarid/.claude/plugins/cache/spawnbox-dev-claude-plugins/orchestrator/0.29.0/agents/prime-agent.md`
-(installed cache) or `C:/Users/Jarid/OneDrive/AppDev/claude-plugins/plugins/orchestrator/agents/prime-agent.md`
-(source repo).
+The path is `<orchestrator-plugin-source>/agents/prime-agent.md`. From a
+typical install this resolves to either
+`~/.claude/plugins/cache/<marketplace>/orchestrator/<version>/agents/prime-agent.md`
+(installed cache, version-pinned) or the source repo
+`<repo>/plugins/orchestrator/agents/prime-agent.md` if you have it
+checked out locally.
 
 ### 6. Check for any existing global pause
 
