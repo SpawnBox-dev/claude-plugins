@@ -52,9 +52,12 @@ $ProjectDir = (Resolve-Path $ProjectDir).Path
 if ($Resume) {
   $uuidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
   if ($Resume -notmatch $uuidRegex) {
-    # Match Claude Code's project-dir → hash transform: replace path separators
-    # and drive colons with `-`, collapse runs of dashes, trim ends.
-    $projectHash = $ProjectDir -replace '[\\/:]', '-' -replace '-{2,}', '-' -replace '^-+', '' -replace '-+$', ''
+    # Match Claude Code's project-dir → hash transform: literal char-for-char
+    # substitution of path separators (`\` `/`) and drive colon (`:`) with `-`.
+    # CC does NOT collapse consecutive dashes - the `C:\` prefix produces `C--`
+    # in the hash, and that's what CC's actual `~/.claude/projects/<hash>/`
+    # directory uses.
+    $projectHash = $ProjectDir -replace '[\\/:]', '-' -replace '^-+', '' -replace '-+$', ''
     $jsonlDir = Join-Path $env:USERPROFILE ".claude\projects\$projectHash"
     if (-not (Test-Path $jsonlDir)) {
       Write-Host "ERROR: Projects dir not found: $jsonlDir" -ForegroundColor Red

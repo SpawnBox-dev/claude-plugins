@@ -23818,7 +23818,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.6"
+  version: "0.30.7"
 }, {
   capabilities: {
     tools: {},
@@ -23898,7 +23898,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.6** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.7** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25136,7 +25136,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.6 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.7 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
