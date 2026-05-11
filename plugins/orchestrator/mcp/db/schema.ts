@@ -354,6 +354,33 @@ DROP TABLE IF EXISTS session_message_reads;
 DROP TABLE IF EXISTS session_messages;
 `,
   },
+  {
+    version: 21,
+    name: "create_permission_audit",
+    // 0.30.15+: PA-gated tool-permission routing. When the orchestrator MCP
+    // declares the claude/channel/permission capability, every permission
+    // request that flows through PA (verdict allow/deny/defer/timeout)
+    // gets a row here for post-hoc audit. Project-scoped: each project's
+    // permission decisions stay with that project's DB.
+    sql: `
+CREATE TABLE IF NOT EXISTS permission_audit (
+    request_id TEXT PRIMARY KEY,
+    source_session TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    description TEXT,
+    input_preview TEXT,
+    verdict TEXT,
+    pa_session TEXT,
+    pa_reason TEXT,
+    resolved_at TEXT,
+    resolved_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_source ON permission_audit(source_session);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_requested_at ON permission_audit(requested_at);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_verdict ON permission_audit(verdict);
+`,
+  },
 ];
 
 /**

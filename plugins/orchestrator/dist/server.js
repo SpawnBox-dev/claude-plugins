@@ -19851,6 +19851,28 @@ DROP TABLE _signal_migration_check;
 DROP TABLE IF EXISTS session_message_reads;
 DROP TABLE IF EXISTS session_messages;
 `
+  },
+  {
+    version: 21,
+    name: "create_permission_audit",
+    sql: `
+CREATE TABLE IF NOT EXISTS permission_audit (
+    request_id TEXT PRIMARY KEY,
+    source_session TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    description TEXT,
+    input_preview TEXT,
+    verdict TEXT,
+    pa_session TEXT,
+    pa_reason TEXT,
+    resolved_at TEXT,
+    resolved_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_source ON permission_audit(source_session);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_requested_at ON permission_audit(requested_at);
+CREATE INDEX IF NOT EXISTS idx_permission_audit_verdict ON permission_audit(verdict);
+`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -23876,7 +23898,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.14"
+  version: "0.30.15"
 }, {
   capabilities: {
     tools: {},
@@ -23956,7 +23978,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.14** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.15** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25221,7 +25243,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.14 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.15 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
