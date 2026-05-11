@@ -65,7 +65,7 @@ Each session's MCP server instance runs a filewatcher that polls `~/.claude/proj
 - Natural-language equivalents are recognized: "PA, back off / stand down / take five / pause" and "PA, come back in / resume".
 
 **Launchers:**
-The orchestrator plugin doesn't ship the launchers - they're per-project conventions. In SpawnBox the convention is `pa-start.bat` (gold tab, Opus, max effort, singleton check) and `sa-start.bat` (default tab, optional `--name`). Both pass `--channels plugin:orchestrator@<marketplace>` so the channel capability is attached.
+The orchestrator plugin ships canonical launchers (`pa-start.bat`/`sa-start.bat`/`discord-start.bat`) installable per-project via the `orchestrator:install-launchers` skill. `pa-start.bat` launches a PrimeAgent tab (gold colored, Opus, max effort, singleton check); `sa-start.bat` launches a Subordinate Agent (default tab, optional `--name`); `discord-start.bat` is for Discord-ops sessions. All three pass the channel flags so the agent-channel capability is attached, plus the `ORCHESTRATOR_PA_PERMISSION_RELAY=1` env to opt into the PA-gated tool-permission relay.
 
 ### PrimeAgent's Two Missions (0.30.12 - 0.30.14)
 

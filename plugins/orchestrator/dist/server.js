@@ -22864,24 +22864,26 @@ function buildHookEnvelope(event, result) {
   return envelope;
 }
 var VARIANTS = [
-  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table.",
-  "[orch] What prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears.",
-  "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table.",
+  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup adds historical context to layer onto your own code reading - it doesn't replace it.",
+  "[orch] What prior decisions or anti-patterns apply here? lookup surfaces team-level context you'd otherwise miss; pair it with reading the actual code you're about to touch. Capture new knowledge the moment it appears.",
+  "[orch] Discipline check: knowledge captured this session so far? When you're about to touch unfamiliar code, check_similar gives you adjacent prior thinking - additive to (not a substitute for) reading the current source.",
   "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
-  "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now.",
-  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
-  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
+  "[orch] Lookups as you go alongside your normal investigation. The KB tells you what was learned/decided in the past; the current code is still ground truth. Capture new findings the moment they appear - 'I will capture it later' is the top cause of knowledge loss.",
+  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. These ADD context-engineering primitives on top of your normal workflow - they don't replace the careful reading/web-checking you'd do anyway. code_refs: [paths] on note/update_note when the knowledge is about specific files.",
+  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas - then re-read the actual source with that context in hand. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
   "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
   "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
-  "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items. Direct lookup misses items with different vocabulary.",
+  "[orch] Completeness check: if this turn is a list, inventory, or audit, list_work_items gives a complete filtered view (FTS5 keyword search may miss vocabulary variants).",
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
-  "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
+  "[orch] Editing a non-trivial file? While reading it, also try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path - past decisions/gotchas/conventions about this specific code, additive to what you'll learn from reading it now.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
   '[orch] Agent-channel: cross-session events arrive as <channel source="plugin:orchestrator:core" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
-  "[orch] Check siblings when it matters. You don't need to scan their state every turn - but at a task boundary, when starting something that might overlap, take 5s to check the sibling activity in your hook context."
+  "[orch] Check siblings when it matters. You don't need to scan their state every turn - but at a task boundary, when starting something that might overlap, take 5s to check the sibling activity in your hook context.",
+  "[orch] Orchestrator notes are starting hypotheses, not final answers. After a couple of lookups, you may feel you have the picture - in practice the KB knows what WAS, current code/docs/web are what IS. Use both.",
+  "[orch] The orchestrator adds historical + cross-session context to your normal investigation. It never replaces reading the current source, checking docs, or fetching upstream behavior. If a lookup tempted you to skip a step you'd otherwise take, take the step."
 ];
 function handleHookEvent(ctx, args) {
   switch (args.event) {
@@ -24378,7 +24380,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.26"
+  version: "0.30.27"
 }, {
   capabilities: {
     tools: {},
@@ -24389,7 +24391,7 @@ var server = new McpServer({
     "",
     'Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form "PA, ..." or "PrimeAgent, ..." also addresses PA.',
     "",
-    "If you are a subordinate (role=subordinate), treat PA-addressed messages as if Jarid said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
+    "If you are a subordinate (role=subordinate), treat PA-addressed messages as if the user said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
     "",
     "If you are PA (role=prime), you observe every event in the project by default. Address SAs to coordinate them. Use note() and create_work_item() to record orchestrator-plugin improvements you discover - tag with `agent-channel-improvement, area:orchestrator-plugin`.",
     "",
@@ -24504,7 +24506,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.26** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.27** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24703,13 +24705,13 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.26+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.", {
+server.tool("lookup", "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.27+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
   tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
   limit: exports_external.coerce.number().optional(),
-  offset: exports_external.coerce.number().min(0).optional().describe("Pagination offset (0.30.26+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
+  offset: exports_external.coerce.number().min(0).optional().describe("Pagination offset (0.30.27+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
   depth: exports_external.coerce.number().min(1).max(5).optional(),
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
@@ -24897,7 +24899,7 @@ Large result set (` + Math.round(text.length / 1000) + "K chars). Consider narro
     content: [{ type: "text", text }]
   };
 });
-server.tool("plan", "Gather domain-specific context before starting a complex task. Returns relevant conventions, anti-patterns, quality gates, architecture notes, and recent decisions so you don't contradict past work or re-learn solved problems. Use when facing multi-step work or entering an unfamiliar domain.", {
+server.tool("plan", "Gather domain-specific context to layer onto your own planning. Returns relevant conventions, anti-patterns, quality gates, architecture notes, and recent decisions so you don't contradict past work or re-learn solved problems. Use alongside (not instead of) your normal investigation when facing multi-step work or entering an unfamiliar domain - the orchestrator surfaces team-level history; the current source remains ground truth (decision 3b962e67).", {
   task: exports_external.string(),
   domain: exports_external.string().optional()
 }, async ({ task, domain }) => {
@@ -25478,7 +25480,7 @@ ${created.map((c) => `- ${c}`).join(`
     }]
   };
 });
-server.tool("check_similar", "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use before implementing to catch prior art.", {
+server.tool("check_similar", "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use alongside (not instead of) your normal investigation when planning a non-trivial change - catches team-level prior art that your own code reading might not surface.", {
   proposed_action: exports_external.string(),
   types: exports_external.array(exports_external.enum(NOTE_TYPES)).optional(),
   threshold: exports_external.coerce.number().min(0).max(1).optional()
@@ -25945,7 +25947,7 @@ if (initialParentClaudePid) {
   setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
 }
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.26 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.27 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

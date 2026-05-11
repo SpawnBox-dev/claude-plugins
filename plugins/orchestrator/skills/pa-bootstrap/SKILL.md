@@ -244,8 +244,8 @@ cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/state.json"
 ```
 
 If `pa_global_pause.active` is true, mention it explicitly in the
-readiness output and ask Jarid if you should clear it. Typically yes (he
-just spawned a fresh PA), but his call.
+readiness output and ask the user if you should clear it. Typically yes
+(they just spawned a fresh PA), but their call.
 
 ### 7. Output readiness
 
@@ -265,8 +265,8 @@ Override state: <none|paused-on-X|global-pause>.
   `peek_inbox` were deleted in 0.29.0. Cross-session communication is via
   terminal output + agent-channel notifications.
 - Do NOT silently recover from a missing/malformed sessions.json. If the
-  state isn't sane at startup, surface the problem to Jarid and ask. PA's
-  job depends on accurate visibility into the project's session graph.
+  state isn't sane at startup, surface the problem to the user and ask.
+  PA's job depends on accurate visibility into the project's session graph.
 
 ## On idempotency
 
@@ -274,4 +274,4 @@ Re-running `/pa-bootstrap` mid-session is safe:
 - `/model` and `/effort` calls are no-ops if already at the target.
 - sessions.json read is read-only at this stage.
 - state.json is only modified if you choose to clear an existing global
-  pause (Jarid's call).
+  pause (the user's call).

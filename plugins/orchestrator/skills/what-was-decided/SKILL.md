@@ -9,7 +9,9 @@ description: >
 
 # What Was Decided
 
-You're wondering about a prior decision or convention. Do this:
+You're wondering about a prior decision or convention. The orchestrator's job here is **additive** (decision `3b962e67`): it surfaces team-level history that you'd otherwise lack. It does NOT replace reading the current source to confirm the decision is still in force - decisions can be silently superseded by code drift even when the original note hasn't been updated.
+
+Do this:
 
 1. Call `lookup` with keywords describing what you're curious about
 2. **If the question is scoped to a specific file or module**, also call `lookup({code_ref: 'path/to/file'})` - this filters to notes that explicitly pointed at that file via their code_refs breadcrumb at capture time. It's complementary to keyword search: decisions about a file aren't always indexed by the vocabulary you'd guess.
@@ -19,4 +21,4 @@ You're wondering about a prior decision or convention. Do this:
    - If overriding, call `supersede_note(old_id, new_content, new_type='decision', reason='...')`. This atomically creates the new decision note and marks the old as superseded - agents reading the old one will see `[SUPERSEDED by X]` and `[go to current: lookup(id:X)]` hints instead of treating it as current. A plain `note` without supersede leaves the old at equal rank and will mislead future sessions.
 5. If nothing is found, that's useful information too - proceed and record your decision with `note` (pass `code_refs: [paths]` if the decision is scoped to specific files, so the next file-level lookup surfaces it)
 
-This prevents contradicting past decisions and re-learning solved problems.
+This prevents contradicting past decisions and re-learning solved problems. None of it replaces reading the current code to confirm the decision is still in force - if you find a decision note and then see the code does something different, that's evidence the decision is stale, not that the code is wrong.

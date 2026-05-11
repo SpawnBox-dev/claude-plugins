@@ -54,7 +54,7 @@ const SLASH_RESUME_RE = /^\s*\/pa-resume\b/i;
 // This prevents descriptive mentions in the middle of prose - e.g. "my warm
 // tick addresses @SA-95e6890e every 50min" or '"@PA warm" reply' - from being
 // misinterpreted as actual addressing, which previously caused PA's thread
-// questions to Jarid to leak into SAs' contexts via the channel router.
+// questions to the user to leak into SAs' contexts via the channel router.
 // (work_item b4c37849)
 const ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:[-*][ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
 

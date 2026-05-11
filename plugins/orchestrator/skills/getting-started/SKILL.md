@@ -19,7 +19,9 @@ in-flight work.
 
 # Getting Started
 
-You're entering a task and need context. Do this quickly and silently:
+You're entering a task and need context. The orchestrator's job here is **additive**: it primes you with historical/cross-session context that you'd otherwise lack. It does NOT substitute for the careful reading, doc-checking, web research, and source investigation you'd do anyway when entering an unfamiliar area. Treat what you learn from the briefing as starting hypotheses to verify against current code, not as final truth.
+
+Do this quickly and silently:
 
 ## Step 0 — Capture your session_id
 
@@ -41,10 +43,10 @@ If the Cross-Session Activity section is non-empty, note anything that affects y
 
 ## Step 2 — Identify your role (PA or SA)
 
-Check `process.env.SPAWNBOX_AGENT_ROLE`:
+Check `process.env.ORCHESTRATOR_AGENT_ROLE` (or the legacy `SPAWNBOX_AGENT_ROLE`):
 
 - `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it sets `/model claude-opus-4-7`, `/effort max`, reads sessions.json, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
-- `subordinate` (or unset) → You are a **Subordinate Agent (SA)**. The project's CLAUDE.md and the orchestrator plugin's CLAUDE.md describe your operating contract: PA's directives addressed to you (`@SA-<your-id8>` or unaddressed PA dialogue) are treated as Jarid's voice unless you're under `/pa-pause`. Address peers via `@PA` / `@SA-<id8>` / `@all` in your terminal output - the agent-channel filewatcher routes via `notifications/claude/channel`. **No `send_message` tool exists in 0.29.0+** - communication is purely terminal-output + filewatcher routing.
+- `subordinate` (or unset) → You are a **Subordinate Agent (SA)**. The project's CLAUDE.md and the orchestrator plugin's CLAUDE.md describe your operating contract: PA's directives addressed to you (`@SA-<your-id8>` or unaddressed PA dialogue) are treated as the user's voice unless you're under `/pa-pause`. Address peers via `@PA` / `@SA-<id8>` / `@all` in your terminal output - the agent-channel filewatcher routes via `notifications/claude/channel`. **No `send_message` tool exists in 0.29.0+** - communication is purely terminal-output + filewatcher routing.
 
 ## Step 3 — Broadcast your task to peers
 
@@ -71,7 +73,7 @@ The `Agent` tool with `orchestrator:memory-concierge` subagent type is **gone in
 
 ## Step 5 — Work the task
 
-Proceed with the user's request.
+Proceed with the user's request. As you work, treat what the briefing told you as priming context, not as ground truth - your reading of current source files, current docs, and current upstream behavior (web research for upstream tooling, libraries, and APIs the project depends on) remains primary. The orchestrator adds team-level history and cross-session awareness on top of that, never in place of it.
 
 ## Recovery Checkpoints
 

@@ -107,25 +107,34 @@ export function buildHookEnvelope(
   return envelope;
 }
 
+// Per-turn nudges, rotated. Framing principle (decision 3b962e67):
+// the orchestrator is ADDITIVE to your normal practice, never a substitute.
+// Nudges should help you layer historical/cross-session context onto the
+// careful code reading, doc-checking, and web research you'd do anyway -
+// not encourage shortcuts based on what the KB happens to know. If a
+// phrasing implies "lookup = enough context" or "skip the source read,"
+// rewrite it before adding.
 const VARIANTS = [
-  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup needed? Scan the every-turn action table.",
-  "[orch] What prior decisions or anti-patterns apply here? Call lookup before editing unfamiliar code. Capture new knowledge the moment it appears.",
-  "[orch] Discipline check: knowledge captured this session so far? If you are about to touch new code, check_similar first. Do not rationalize skipping the action table.",
+  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup adds historical context to layer onto your own code reading - it doesn't replace it.",
+  "[orch] What prior decisions or anti-patterns apply here? lookup surfaces team-level context you'd otherwise miss; pair it with reading the actual code you're about to touch. Capture new knowledge the moment it appears.",
+  "[orch] Discipline check: knowledge captured this session so far? When you're about to touch unfamiliar code, check_similar gives you adjacent prior thinking - additive to (not a substitute for) reading the current source.",
   "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
-  "[orch] Lookups before writes, notes as you go. 'I will capture it later' is the top cause of knowledge loss. Later is now.",
-  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. Which one fits this turn before acting? code_refs: [paths] on note/update_note when the knowledge is about specific files.",
-  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
+  "[orch] Lookups as you go alongside your normal investigation. The KB tells you what was learned/decided in the past; the current code is still ground truth. Capture new findings the moment they appear - 'I will capture it later' is the top cause of knowledge loss.",
+  "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. These ADD context-engineering primitives on top of your normal workflow - they don't replace the careful reading/web-checking you'd do anyway. code_refs: [paths] on note/update_note when the knowledge is about specific files.",
+  "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas - then re-read the actual source with that context in hand. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
   "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
   "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
-  "[orch] Completeness check: if this turn is a list, inventory, or audit, use list_work_items. Direct lookup misses items with different vocabulary.",
+  "[orch] Completeness check: if this turn is a list, inventory, or audit, list_work_items gives a complete filtered view (FTS5 keyword search may miss vocabulary variants).",
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
-  "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
+  "[orch] Editing a non-trivial file? While reading it, also try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path - past decisions/gotchas/conventions about this specific code, additive to what you'll learn from reading it now.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
   "[orch] Agent-channel: cross-session events arrive as <channel source=\"plugin:orchestrator:core\" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
   "[orch] Check siblings when it matters. You don't need to scan their state every turn - but at a task boundary, when starting something that might overlap, take 5s to check the sibling activity in your hook context.",
+  "[orch] Orchestrator notes are starting hypotheses, not final answers. After a couple of lookups, you may feel you have the picture - in practice the KB knows what WAS, current code/docs/web are what IS. Use both.",
+  "[orch] The orchestrator adds historical + cross-session context to your normal investigation. It never replaces reading the current source, checking docs, or fetching upstream behavior. If a lookup tempted you to skip a step you'd otherwise take, take the step.",
 ];
 
 interface HookCtx {

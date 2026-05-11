@@ -17,6 +17,8 @@ you think nothing noteworthy happened.
 
 Run this evaluation every turn. It takes seconds and prevents you from missing context, losing knowledge, or contradicting past work.
 
+**Framing - critical to internalize**: the orchestrator is **additive** to your normal Claude Code practice (decision `3b962e67`). It surfaces team-level history + cross-session awareness that you'd otherwise lack. It does NOT replace your own code reading, doc-checking, web research, or careful investigation. If a nudge below tempts you to skip a step you'd take anyway without this plugin, take the step - then layer the orchestrator's context on top.
+
 ## Direct MCP calls + agent-channel addressing
 
 The orchestrator plugin (0.29.0+) gives you two operational surfaces:
@@ -122,15 +124,17 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 
 | Thought | Reality |
 |---------|---------|
-| "This is just a quick fix" | Quick fixes create decisions. Lookup first. |
-| "I already know this codebase" | You know THIS context window. The KB has the whole. |
+| "This is just a quick fix" | Quick fixes create decisions. Lookup adds historical context to layer onto your own code reading. |
+| "I already know this codebase" | You know THIS context window. The KB holds team history you may not. Use both. |
 | "I'll note it later" | Later never comes. Capture NOW. |
 | "Nothing noteworthy happened" | A turn with zero knowledge capture is rarely zero-signal. Re-evaluate. |
-| "The user just wants speed" | Speed without context causes rework. 2 seconds of lookup saves 20 minutes. |
-| "I don't need to lookup for this" | If you've ever been wrong about your recall before, you might be again. Cheap to verify. |
+| "The user just wants speed" | Speed without context causes rework. 2 seconds of lookup saves 20 minutes - alongside your normal investigation, not in place of it. |
+| "I don't need to lookup for this" | Cheap to verify. The lookup adds; it doesn't subtract from what you'd otherwise do. |
 | "This turn is just a follow-up" | Follow-up turns produce decisions, discoveries, and completions. |
 | "Let me try one more thing" | If you've tried 2+ things already, STOP and lookup. |
 | "I'm almost there" | If you said this last turn too, you're not almost there. You're looping. |
+| "The orchestrator told me what to do" | The orchestrator surfaced context. The current source/docs/upstream remain ground truth. If a note tempted you to skip reading the actual code, read the code. |
+| "Lookup found the answer, I can skip reading the file" | Lookup tells you what was decided/learned in the past. The code may have moved on. Read the file. |
 
 ## Turn Bridge (now automatic)
 

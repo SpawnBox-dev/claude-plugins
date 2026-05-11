@@ -162,13 +162,13 @@ The plugin is most valuable when you query it BEFORE writing new code or making 
 
 ```
 // Search mode (semantic + keyword)
-lookup({query: "wsl distro registration", limit: 10})
+lookup({query: "auth token refresh flow", limit: 10})
 
 // Detail mode (single note + links + supersede chain)
 lookup({id: "<note_id>"})
 
 // Reverse-index mode (notes about a specific file/module)
-lookup({code_ref: "src-tauri/src/core/wsl/registration.rs"})
+lookup({code_ref: "src/auth/token-refresh.ts"})
 ```
 
 `lookup` augments each result with maintenance handles inline (`[maintain: update_note | close_thread | supersede_note]`) and "hot across sessions" annotations when peers have touched the note recently. Use `include_superseded: true` / `include_history: true` to unhide archived data.

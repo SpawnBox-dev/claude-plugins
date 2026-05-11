@@ -438,9 +438,9 @@ export class AgentChannel {
     // Per-paragraph routing (0.30.22, work_item b4c37849):
     //
     // The sender's content can mix audiences within one message - e.g. PA
-    // writing a status update to Jarid that also contains an `@SA-<id8>`
+    // writing a status update to the user that also contains an `@SA-<id8>`
     // directive paragraph. Whole-message routing would deliver the entire
-    // mixed message (including the Jarid-private prose) to the addressed SA.
+    // mixed message (including the user-private prose) to the addressed SA.
     //
     // We split on blank-line paragraphs and parse addressing per paragraph.
     // PA still observes the full content (PA is the project observer by
@@ -502,7 +502,7 @@ export class AgentChannel {
  * the emit entirely). Paragraphs are separated by one or more blank lines.
  *
  * Used by SA receivers to extract only the parts of a sender's message
- * that were addressed to them - prevents PA-Jarid prose in a mixed message
+ * that were addressed to them - prevents PA-to-user prose in a mixed message
  * from leaking to an SA that was named in a different paragraph.
  */
 function filterParagraphsForReceiver(

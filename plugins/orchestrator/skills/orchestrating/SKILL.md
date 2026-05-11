@@ -11,6 +11,8 @@ description: >
 
 Whatever task you're doing is secondary to how you do it. You maintain living knowledge across sessions by proactively using your toolkit every turn.
 
+**Framing - critical (decision `3b962e67`)**: the orchestrator is **additive** to your normal Claude Code practice. It surfaces historical and cross-session context you'd otherwise miss. It does NOT replace the careful code reading, doc-checking, and upstream/web research you'd do anyway when working on something non-trivial. If a tool's nudge or output tempts you to skip a step you'd take without this plugin, take the step - then layer the orchestrator's context on top.
+
 ## Your Two Operational Surfaces (0.29.0+)
 
 You operate the orchestrator through two paths:
@@ -49,7 +51,7 @@ The orchestrator plugin's MCP server declares the `claude/channel` capability. C
 | `@SA-<id8>` | A specific subordinate by 8-char prefix |
 | `@SA-<id8>,@SA-<id8>` | Multiple subordinates |
 | `@all` | Every active session except yourself |
-| Free-form (no `@` prefix) | Private dialogue with Jarid; PA observes by default; no SA receives |
+| Free-form (no `@` prefix) | Private dialogue with the user; PA observes by default; no SA receives |
 
 **No `send_message` / `read_messages` tools.** Those were the R6/R7 messaging system, deleted in 0.29.0.
 
@@ -87,7 +89,7 @@ Multiple Claude Code sessions can run against the same project simultaneously - 
 
 **Roles**:
 - **PrimeAgent (PA)**: persistent orchestrator session, role=prime. Singleton per project. Authoritative observer of all events.
-- **Subordinate Agent (SA)**: any other session, role=subordinate. Sees events addressed to it; treats PA's directives as Jarid's voice.
+- **Subordinate Agent (SA)**: any other session, role=subordinate. Sees events addressed to it; treats PA's directives as the user's voice.
 
 **Mechanics**:
 - `update_session_task("...")` writes your `current_task` into `session_registry` (and `sessions.json`). Peers see it as the `from_task` field on every channel notification you generate.

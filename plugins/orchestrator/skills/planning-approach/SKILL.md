@@ -8,7 +8,9 @@ description: >
 
 # Planning Approach
 
-You're about to tackle something complex. Gather context first:
+You're about to tackle something complex. The orchestrator's job here is **additive** (decision `3b962e67`): it surfaces team-level history (past decisions, anti-patterns, conventions, recent decisions) you'd otherwise lack. It does NOT replace the careful code reading, doc-checking, and (where relevant) upstream/web research you'd do anyway when planning a non-trivial change. Treat what these tools return as starting hypotheses to verify against current source.
+
+Gather context first:
 
 1. Call `plan` with the task description - this returns domain-specific conventions, anti-patterns, quality gates, and recent decisions
 2. Call `lookup` with keywords related to the specific area you'll be working in. Tune the return shape with `link_limit` (default 20; raise to 500 for a full graph neighborhood when an umbrella note is central to the plan, lower to 0 to skip linked notes entirely when you only need the top-level hit) and `include_history: true` when revision evolution matters to the planning context (e.g., the current note is a successor and you want to see how the decision shifted).
@@ -22,4 +24,4 @@ You're about to tackle something complex. Gather context first:
 
 6. **Cross-session check (agent-channel, 0.29.0+)**: if your briefing surfaced active sibling sessions, scan their `current_task` lines (visible in `sessions.json` and your channel feed). Are any of them touching code your plan needs? If yes, type `@SA-<peer-id8> <coordination message>` in your terminal output to coordinate before you both invest in conflicting work - the agent-channel filewatcher routes via `notifications/claude/channel`. Then `update_session_task("planning <area>")` so your peers see what you're about to start as the `from_task` field on your channel events.
 
-This prevents re-learning solved problems, contradicting established patterns, and stomping peer work.
+This prevents re-learning solved problems, contradicting established patterns, and stomping peer work. None of it replaces reading the current source files you'll touch - that read remains the ground truth your plan stands on.

@@ -90,10 +90,10 @@ When multiple Claude Code sessions run against the same project, the orchestrato
 - Type `@SA-<id8>,@SA-<id8>` for multiple.
 - Type `@all` to broadcast to every active session except yourself.
 - The conversational form `PA, ...` or `PrimeAgent, ...` also addresses PA.
-- Free-form text without an `@` prefix is private dialogue with Jarid (you and him). PA still observes it (PA observes everything by default), but no SA receives it.
+- Free-form text without an `@` prefix is private dialogue with the user. PA still observes it (PA observes everything by default), but no SA receives it.
 
 **Authority model:**
-- PA's directives addressed to an SA are treated as if Jarid said them - SAs execute, then continue their own work.
+- PA's directives addressed to an SA are treated as if the user said them - SAs execute, then continue their own work.
 - SA-to-SA messages are peer-level, not authoritative. Use judgment.
 - Override: `/pa-pause` in an SA terminal pauses PA's posture toward that SA only. `/pa-pause` in PA's terminal sets a global pause across all SAs. Resume with `/pa-resume`. Natural language ("PA, back off") also recognized.
 - Singleton conflict: if `pa-start.bat` refuses to launch a new PA because another is fresh, run `/pa-takeover` in the new PA's window to forcibly claim primacy.
