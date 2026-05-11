@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.8",
+    version: "0.29.9",
   },
   {
     capabilities: {
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.8** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.29.9** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1935,7 +1935,7 @@ function startAgentChannel(): void {
         // whose meta contains non-string values (null, undefined, boolean,
         // array). The SDK does NOT catch this on the send side. Without
         // sanitization, the entire channel architecture is invisible to
-        // receivers despite the MCP server appearing healthy. Pre-0.29.8 the
+        // receivers despite the MCP server appearing healthy. Pre-0.29.9 the
         // orchestrator emitted booleans (pa_addressed), nulls (from_task), and
         // undefineds (tool_name, addressed_to, ...) and silently lost every
         // notification.
@@ -1980,7 +1980,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.8 ` +
+    `[orchestrator] MCP server starting - version=0.29.9 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

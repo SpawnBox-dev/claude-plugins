@@ -52,6 +52,17 @@ export function filterEvent(raw: any): FilteredEvent | null {
     }
     const text = typeof msg?.content === "string" ? msg.content : null;
     if (!text) return null;
+
+    // Skip channel-injected content (echo prevention). When Claude Code
+    // delivers a notifications/claude/channel event to a session, it injects
+    // the <channel ...>...</channel> tag inline AND records that injection in
+    // the receiving session's JSONL as a `user`-typed entry. If we forward
+    // those, every original event causes N echoes (one per channel-attached
+    // sibling). The receiving session never typed `<channel ...>` as user
+    // input themselves, so dropping these is safe. Match leading whitespace
+    // to handle any indenting CC might add.
+    if (/^\s*<channel\b/.test(text)) return null;
+
     return { event_type: "user_input", content: text };
   }
 
