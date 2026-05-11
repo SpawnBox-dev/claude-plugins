@@ -42,7 +42,7 @@ describe("hook_event dispatcher", () => {
         {
           event: "PostToolUse",
           session_id: "B",
-          tool_name: "mcp__plugin_orchestrator_memory__lookup",
+          tool_name: "mcp__plugin_orchestrator_core__lookup",
         }
       );
       handleHookEvent(
@@ -50,7 +50,7 @@ describe("hook_event dispatcher", () => {
         {
           event: "PostToolUse",
           session_id: "B",
-          tool_name: "mcp__plugin_orchestrator_memory__note",
+          tool_name: "mcp__plugin_orchestrator_core__note",
         }
       );
 
@@ -125,7 +125,7 @@ describe("hook_event dispatcher", () => {
         {
           event: "PostToolUse",
           session_id: "P4ok",
-          tool_name: "mcp__plugin_orchestrator_memory__lookup",
+          tool_name: "mcp__plugin_orchestrator_core__lookup",
         }
       );
       const r = handleHookEvent(
@@ -163,7 +163,7 @@ describe("hook_event dispatcher", () => {
         {
           event: "PostToolUse",
           session_id: "OA",
-          tool_name: "mcp__plugin_orchestrator_memory__briefing",
+          tool_name: "mcp__plugin_orchestrator_core__briefing",
         }
       );
       const turn = tracker.getCurrentTurn("OA");

@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.9",
+    version: "0.30.0",
   },
   {
     capabilities: {
@@ -293,7 +293,7 @@ const server = new McpServer(
       },
     },
     instructions: [
-      "Cross-session events arrive as <channel source=\"orchestrator\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's name and will always be \"orchestrator\".)",
+      "Cross-session events arrive as <channel source=\"plugin:orchestrator:core\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)",
       "",
       "Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form \"PA, ...\" or \"PrimeAgent, ...\" also addresses PA.",
       "",
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.9** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.0** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1935,7 +1935,7 @@ function startAgentChannel(): void {
         // whose meta contains non-string values (null, undefined, boolean,
         // array). The SDK does NOT catch this on the send side. Without
         // sanitization, the entire channel architecture is invisible to
-        // receivers despite the MCP server appearing healthy. Pre-0.29.9 the
+        // receivers despite the MCP server appearing healthy. Pre-0.30.0 the
         // orchestrator emitted booleans (pa_addressed), nulls (from_task), and
         // undefineds (tool_name, addressed_to, ...) and silently lost every
         // notification.
@@ -1980,7 +1980,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.9 ` +
+    `[orchestrator] MCP server starting - version=0.30.0 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

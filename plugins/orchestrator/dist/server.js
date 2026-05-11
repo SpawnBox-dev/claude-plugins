@@ -22640,7 +22640,7 @@ var VARIANTS = [
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
-  '[orch] Agent-channel: cross-session events arrive as <channel source="orchestrator" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
+  '[orch] Agent-channel: cross-session events arrive as <channel source="plugin:orchestrator:core" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
@@ -22724,10 +22724,10 @@ function handlePreToolUse(ctx, args) {
   return { permissionDecision: "allow", additionalContext: ctx_msg };
 }
 function handlePostToolUse(ctx, args) {
-  if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_memory__")) {
+  if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
-    if (args.tool_name === "mcp__plugin_orchestrator_memory__update_work_item") {
+    if (args.tool_name === "mcp__plugin_orchestrator_core__update_work_item") {
       const id = args.payload?.tool_input_id;
       if (id)
         markWorkItemTouched(ctx.db, args.session_id, id);
@@ -23171,7 +23171,7 @@ function composeBridgeFromLog(ctx, sessionId, turn) {
   return row.value;
 }
 function appendBridgeAction(db, sessionId, turn, toolName) {
-  const action = toolName.replace("mcp__plugin_orchestrator_memory__", "");
+  const action = toolName.replace("mcp__plugin_orchestrator_core__", "");
   const key = `bridge_${sessionId}_${turn}`;
   const existing = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
   const next = existing?.value ? `${existing.value}, ${action}` : action;
@@ -23796,7 +23796,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.29.9"
+  version: "0.30.0"
 }, {
   capabilities: {
     tools: {},
@@ -23805,7 +23805,7 @@ var server = new McpServer({
     }
   },
   instructions: [
-    `Cross-session events arrive as <channel source="orchestrator" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's name and will always be "orchestrator".)`,
+    `Cross-session events arrive as <channel source="plugin:orchestrator:core" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)`,
     "",
     'Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form "PA, ..." or "PrimeAgent, ..." also addresses PA.',
     "",
@@ -23876,7 +23876,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.29.9** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.0** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25110,7 +25110,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.9 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.0 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

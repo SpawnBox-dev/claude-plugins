@@ -121,7 +121,7 @@ const VARIANTS = [
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
-  "[orch] Agent-channel: cross-session events arrive as <channel source=\"orchestrator\" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
+  "[orch] Agent-channel: cross-session events arrive as <channel source=\"plugin:orchestrator:core\" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
@@ -234,14 +234,14 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
 
 function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   // Mark orch activity for the turn so PreToolUse Option B doesn't nag.
-  if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_memory__")) {
+  if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
 
     // R7.6: log work_item touches so loop-close can scope to "I actually
     // updated this work_item this session," not just "I happened to see it
     // in a briefing." Cleanly tightens the false-positive amplifier.
-    if (args.tool_name === "mcp__plugin_orchestrator_memory__update_work_item") {
+    if (args.tool_name === "mcp__plugin_orchestrator_core__update_work_item") {
       const id = args.payload?.tool_input_id as string | undefined;
       if (id) markWorkItemTouched(ctx.db, args.session_id, id);
     }
@@ -626,7 +626,7 @@ function composeBridgeFromLog(ctx: HookCtx, sessionId: string, turn: number): st
 }
 
 function appendBridgeAction(db: Database, sessionId: string, turn: number, toolName: string): void {
-  const action = toolName.replace("mcp__plugin_orchestrator_memory__", "");
+  const action = toolName.replace("mcp__plugin_orchestrator_core__", "");
   const key = `bridge_${sessionId}_${turn}`;
   const existing = db
     .query(`SELECT value FROM plugin_state WHERE key = ?`)

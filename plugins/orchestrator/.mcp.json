@@ -1,5 +1,5 @@
 {
-  "memory": {
+  "core": {
     "command": "npx",
     "args": ["-y", "bun", "run", "${CLAUDE_PLUGIN_ROOT}/dist/server.js"]
   }

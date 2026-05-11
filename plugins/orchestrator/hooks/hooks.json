@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "UserPromptSubmit",
@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "PreToolUse",
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "PostToolUse",
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "PostToolUseFailure",
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "PreCompact",
@@ -101,7 +101,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "Stop",
@@ -116,7 +116,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "StopFailure",
@@ -131,7 +131,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "SubagentStop",
@@ -147,7 +147,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:orchestrator:memory",
+            "server": "plugin:orchestrator:core",
             "tool": "_hook_event",
             "input": {
               "event": "TaskCompleted",
