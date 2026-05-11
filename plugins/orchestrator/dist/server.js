@@ -23804,7 +23804,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.2"
+  version: "0.30.3"
 }, {
   capabilities: {
     tools: {},
@@ -23884,7 +23884,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.2** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.3** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25076,8 +25076,9 @@ function startAgentChannel() {
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
   const projectsHashDir = join4(homedir2(), ".claude", "projects", projectHash);
-  const role = process.env.SPAWNBOX_AGENT_ROLE === "prime" ? "prime" : "subordinate";
-  const name = process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
+  const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
+  const role = roleEnv === "prime" ? "prime" : "subordinate";
+  const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
   const self = {
     session_id: sessionId,
     id8: sessionId.slice(0, 8),
@@ -25118,7 +25119,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.2 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.3 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

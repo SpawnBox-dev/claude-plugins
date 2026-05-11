@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.2",
+    version: "0.30.3",
   },
   {
     capabilities: {
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.2** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.3** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1903,10 +1903,19 @@ function startAgentChannel(): void {
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
   const projectsHashDir = join(homedir(), ".claude", "projects", projectHash);
 
+  // Role/name env vars: ORCHESTRATOR_AGENT_* is the canonical form (set by
+  // the project-agnostic launchers in skills/install-launchers/scripts/).
+  // SPAWNBOX_AGENT_* is the legacy form kept as a fallback during the
+  // transition - older launchers in user projects that haven't been
+  // refreshed via /orchestrator:install-launchers still set those.
+  const roleEnv =
+    process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role: "prime" | "subordinate" =
-    process.env.SPAWNBOX_AGENT_ROLE === "prime" ? "prime" : "subordinate";
+    roleEnv === "prime" ? "prime" : "subordinate";
   const name =
-    process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
+    process.env.ORCHESTRATOR_AGENT_NAME ??
+    process.env.SPAWNBOX_AGENT_NAME ??
+    `auto-${sessionId.slice(0, 8)}`;
 
   const self: SessionEntry = {
     session_id: sessionId,
@@ -1935,7 +1944,7 @@ function startAgentChannel(): void {
         // whose meta contains non-string values (null, undefined, boolean,
         // array). The SDK does NOT catch this on the send side. Without
         // sanitization, the entire channel architecture is invisible to
-        // receivers despite the MCP server appearing healthy. Pre-0.30.2 the
+        // receivers despite the MCP server appearing healthy. Pre-0.30.3 the
         // orchestrator emitted booleans (pa_addressed), nulls (from_task), and
         // undefineds (tool_name, addressed_to, ...) and silently lost every
         // notification.
@@ -1980,11 +1989,11 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.2 ` +
+    `[orchestrator] MCP server starting - version=0.30.3 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
-      `role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}\n`,
+      `role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}\n`,
   );
 
   // Initialize session tracker and clean up stale sessions
