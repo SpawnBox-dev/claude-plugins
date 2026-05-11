@@ -8,7 +8,7 @@ import { now } from "../../mcp/utils";
 function freshSetup(): { db: Database; tracker: SessionTracker } {
   const db = new Database(":memory:");
   applyMigrations(db, "project");
-  const tracker = new SessionTracker(db);
+  const tracker = new SessionTracker(db, () => null);
   return { db, tracker };
 }
 

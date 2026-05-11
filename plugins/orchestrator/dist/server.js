@@ -22389,12 +22389,53 @@ function handlePrepare(projectDb2, globalDb2, input) {
   return { package: pkg, autonomy: autonomyResult.score, formatted };
 }
 
+// mcp/engine/live_sessions.ts
+import { existsSync as existsSync3, readFileSync } from "fs";
+import { join as join2 } from "path";
+function getLiveSessionIds() {
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const sessionsFile = join2(projectDir, ".orchestrator-state", "agent-channel", "sessions.json");
+  if (!existsSync3(sessionsFile))
+    return null;
+  try {
+    const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
+    const entries = Array.isArray(data) ? data : data?.sessions ?? [];
+    const nowMs = Date.now();
+    const STALE_MS = 90000;
+    const liveIds = new Set;
+    for (const entry of entries) {
+      if (!entry?.session_id || !entry?.last_heartbeat_at)
+        continue;
+      const lastHbMs = new Date(entry.last_heartbeat_at).getTime();
+      if (Number.isFinite(lastHbMs) && nowMs - lastHbMs <= STALE_MS) {
+        liveIds.add(entry.session_id);
+      }
+    }
+    return liveIds;
+  } catch {
+    return null;
+  }
+}
+function getLiveOtherSessionIds(sessionId) {
+  const live = getLiveSessionIds();
+  if (live === null)
+    return null;
+  const others = [];
+  for (const id of live) {
+    if (id !== sessionId)
+      others.push(id);
+  }
+  return others;
+}
+
 // mcp/engine/session_tracker.ts
 class SessionTracker {
   db;
+  liveOthersResolver;
   turnCounters = new Map;
-  constructor(db) {
+  constructor(db, liveOthersResolver = getLiveOtherSessionIds) {
     this.db = db;
+    this.liveOthersResolver = liveOthersResolver;
   }
   nextTurn(sessionId) {
     const current = this.turnCounters.get(sessionId) ?? 0;
@@ -22471,10 +22512,15 @@ class SessionTracker {
   }
   getActiveSiblings(sessionId) {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    return this.db.query(`SELECT session_id, current_task, last_active_at FROM session_registry
+    const rows = this.db.query(`SELECT session_id, current_task, last_active_at FROM session_registry
          WHERE session_id != ? AND last_active_at > ?
          ORDER BY last_active_at DESC
          LIMIT 5`).all(sessionId, twentyFourHoursAgo);
+    const liveOthers = this.liveOthersResolver(sessionId);
+    if (liveOthers === null)
+      return rows;
+    const liveSet = new Set(liveOthers);
+    return rows.filter((r) => liveSet.has(r.session_id));
   }
   updateLastBriefing(sessionId, at) {
     const ts = at ?? now();
@@ -22484,21 +22530,37 @@ class SessionTracker {
     const me = this.getSession(sessionId);
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const since = me?.last_briefing_at ?? twentyFourHoursAgo;
-    const activeCount = this.db.query(`SELECT COUNT(*) as cnt FROM session_registry
-           WHERE session_id != ? AND last_active_at > ?`).get(sessionId, twentyFourHoursAgo).cnt;
+    const liveOthers = this.liveOthersResolver(sessionId);
+    let activeSiblingClause;
+    let activeSiblingParams;
+    if (liveOthers !== null) {
+      if (liveOthers.length === 0) {
+        activeSiblingClause = "AND 0";
+        activeSiblingParams = [];
+      } else {
+        const placeholders = liveOthers.map(() => "?").join(",");
+        activeSiblingClause = `AND n.source_session IN (${placeholders})`;
+        activeSiblingParams = liveOthers;
+      }
+    } else {
+      activeSiblingClause = `AND EXISTS (
+        SELECT 1 FROM session_registry sr
+        WHERE sr.session_id = n.source_session
+          AND sr.last_active_at > ?
+      )`;
+      activeSiblingParams = [twentyFourHoursAgo];
+    }
+    const activeCount = liveOthers !== null ? liveOthers.length : this.db.query(`SELECT COUNT(*) as cnt FROM session_registry
+                 WHERE session_id != ? AND last_active_at > ?`).get(sessionId, twentyFourHoursAgo).cnt;
     const upperClause = upperBound ? "AND n.created_at <= ?" : "";
-    const newNotesParams = upperBound ? [sessionId, since, upperBound, twentyFourHoursAgo, sessionId] : [sessionId, since, twentyFourHoursAgo, sessionId];
+    const newNotesParams = upperBound ? [sessionId, since, upperBound, ...activeSiblingParams, sessionId] : [sessionId, since, ...activeSiblingParams, sessionId];
     const newNotesRows = this.db.query(`SELECT n.id, n.type, n.content, n.tags, n.created_at, n.source_session
          FROM notes n
          WHERE n.source_session IS NOT NULL
            AND n.source_session != ?
            AND n.created_at > ?
            ${upperClause}
-           AND EXISTS (
-             SELECT 1 FROM session_registry sr
-             WHERE sr.session_id = n.source_session
-               AND sr.last_active_at > ?
-           )
+           ${activeSiblingClause}
            AND n.id NOT IN (
              SELECT note_id FROM session_log WHERE session_id = ?
            )
@@ -22521,16 +22583,12 @@ class SessionTracker {
          WHERE n.source_session IS NOT NULL
            AND n.source_session != ?
            AND n.created_at > ?
-           AND EXISTS (
-             SELECT 1 FROM session_registry sr
-             WHERE sr.session_id = n.source_session
-               AND sr.last_active_at > ?
-           )
+           ${activeSiblingClause}
            AND n.id NOT IN (
              SELECT note_id FROM session_log WHERE session_id = ?
            )
          ORDER BY n.created_at DESC
-         LIMIT 8`).all(sessionId, twoHoursAgo, twentyFourHoursAgo, sessionId);
+         LIMIT 8`).all(sessionId, twoHoursAgo, ...activeSiblingParams, sessionId);
     const seen = new Set;
     const hotNotesRows = [];
     for (const r of readHotRows) {
@@ -22590,8 +22648,6 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { existsSync as existsSync3, readFileSync } from "fs";
-import { join as join2 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -22900,36 +22956,8 @@ function handleTaskCompleted(_ctx, args) {
     additionalContext: `[orch] Subagent ${aid} just completed. Did it surface anything worth keeping? Capture decisions, patterns, anti-patterns, or gotchas it discovered before its context evaporates. Single item: \`note\`. Multiple: send the concierge a batch-capture request. Do NOT just take the subagent's result and move on.`
   };
 }
-function getLiveSessionIds() {
-  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const sessionsFile = join2(projectDir, ".orchestrator-state", "agent-channel", "sessions.json");
-  if (!existsSync3(sessionsFile))
-    return null;
-  try {
-    const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
-    const entries = Array.isArray(data) ? data : data?.sessions ?? [];
-    const nowMs = Date.now();
-    const STALE_MS = 90000;
-    const liveIds = new Set;
-    for (const entry of entries) {
-      if (!entry?.session_id || !entry?.last_heartbeat_at)
-        continue;
-      const lastHbMs = new Date(entry.last_heartbeat_at).getTime();
-      if (Number.isFinite(lastHbMs) && nowMs - lastHbMs <= STALE_MS) {
-        liveIds.add(entry.session_id);
-      }
-    }
-    return liveIds;
-  } catch {
-    return null;
-  }
-}
 function renderSiblingActivity(ctx, sessionId, userPrompt) {
-  let sibs = ctx.tracker.getActiveSiblings(sessionId);
-  const liveSet = getLiveSessionIds();
-  if (liveSet !== null) {
-    sibs = sibs.filter((s) => liveSet.has(s.session_id));
-  }
+  const sibs = ctx.tracker.getActiveSiblings(sessionId);
   if (sibs.length === 0)
     return "";
   const promptKeywords = extractMeaningfulKeywords(userPrompt);
@@ -23848,7 +23876,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.8"
+  version: "0.30.9"
 }, {
   capabilities: {
     tools: {},
@@ -23928,7 +23956,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.8** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.9** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25166,7 +25194,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.8 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.9 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

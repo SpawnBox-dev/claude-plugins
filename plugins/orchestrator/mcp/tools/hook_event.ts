@@ -1,8 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { SessionTracker } from "../engine/session_tracker";
 import { now } from "../utils";
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
 // Cross-session communication is now via agent-channel notifications -
@@ -520,68 +518,15 @@ function handleTaskCompleted(_ctx: HookCtx, args: HookEventArgs): HookEventRespo
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/**
- * Read agent-channel `sessions.json` and return the set of session_ids whose
- * `last_heartbeat_at` is within the 90s stale threshold. This is the
- * authoritative real-time signal for "this MCP is currently alive" - much
- * tighter than session_tracker's 24h hook-event window, and it correctly
- * drops Ctrl+C'd / force-closed sessions whose MCP died before it could call
- * removeSession() cleanly.
- *
- * Returns `null` when sessions.json doesn't exist (e.g., a project that
- * isn't using agent-channel). Callers should fall back to the DB-only
- * 24h logic in that case rather than show an empty sibling list.
- */
-function getLiveSessionIds(): Set<string> | null {
-  const projectDir =
-    process.env.ORCHESTRATOR_PROJECT_ROOT ||
-    process.env.CLAUDE_PROJECT_DIR ||
-    process.cwd();
-  const sessionsFile = join(
-    projectDir,
-    ".orchestrator-state",
-    "agent-channel",
-    "sessions.json",
-  );
-  if (!existsSync(sessionsFile)) return null;
-  try {
-    const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
-    // sessions.json shape can be either {sessions: [...]} or a bare array
-    // (legacy). Handle both for read-side defensiveness.
-    const entries: Array<{ session_id?: string; last_heartbeat_at?: string }> =
-      Array.isArray(data) ? data : data?.sessions ?? [];
-    const nowMs = Date.now();
-    const STALE_MS = 90_000;
-    const liveIds = new Set<string>();
-    for (const entry of entries) {
-      if (!entry?.session_id || !entry?.last_heartbeat_at) continue;
-      const lastHbMs = new Date(entry.last_heartbeat_at).getTime();
-      if (Number.isFinite(lastHbMs) && nowMs - lastHbMs <= STALE_MS) {
-        liveIds.add(entry.session_id);
-      }
-    }
-    return liveIds;
-  } catch {
-    return null;
-  }
-}
-
 function renderSiblingActivity(
   ctx: HookCtx,
   sessionId: string,
   userPrompt: string,
 ): string {
-  let sibs = ctx.tracker.getActiveSiblings(sessionId);
-
-  // If sessions.json is available, intersect with the heartbeat-fresh set so
-  // we don't render ghost siblings (sessions that fired hook events recently
-  // but whose MCPs have since died via Ctrl+C / force-close). Without this
-  // filter, the session_tracker's 24h window keeps reporting dead sessions
-  // as active for up to a day after they're gone.
-  const liveSet = getLiveSessionIds();
-  if (liveSet !== null) {
-    sibs = sibs.filter((s) => liveSet.has(s.session_id));
-  }
+  // getActiveSiblings intersects with agent-channel sessions.json
+  // heartbeat-fresh set internally (when sessions.json exists), so the
+  // returned list is already free of ghost siblings.
+  const sibs = ctx.tracker.getActiveSiblings(sessionId);
 
   if (sibs.length === 0) return "";
 

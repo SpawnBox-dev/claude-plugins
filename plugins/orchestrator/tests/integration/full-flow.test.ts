@@ -348,7 +348,7 @@ describe("hybrid search + session tracking integration", () => {
   });
 
   test("session tracker annotates already-sent notes correctly", () => {
-    const tracker = new SessionTracker(db);
+    const tracker = new SessionTracker(db, () => null);
     tracker.registerSession("test-session");
 
     const vec = new Float32Array(768).fill(0.5);
@@ -378,7 +378,7 @@ describe("hybrid search + session tracking integration", () => {
   });
 
   test("cross-session annotation shows other sessions", () => {
-    const tracker = new SessionTracker(db);
+    const tracker = new SessionTracker(db, () => null);
     tracker.registerSession("session-a");
     tracker.registerSession("session-b");
 

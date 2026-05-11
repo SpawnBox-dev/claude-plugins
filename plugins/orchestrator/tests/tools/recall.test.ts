@@ -177,7 +177,7 @@ describe("recall tool", () => {
     expect(noteId).toBeTruthy();
 
     // Simulate what server.ts does: create a tracker, register session, query, log
-    const tracker = new SessionTracker(projectDb);
+    const tracker = new SessionTracker(projectDb, () => null);
     const sessionId = "test-session-1";
 
     tracker.registerSession(sessionId);

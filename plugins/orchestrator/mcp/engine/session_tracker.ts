@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { generateId, now } from "../utils";
+import { getLiveOtherSessionIds } from "./live_sessions";
 
 export interface SessionRegistryRow {
   session_id: string;
@@ -54,7 +55,19 @@ export interface CrossSessionUpdates {
 export class SessionTracker {
   private turnCounters = new Map<string, number>();
 
-  constructor(private db: Database) {}
+  /**
+   * @param db - the project SQLite database
+   * @param liveOthersResolver - returns the heartbeat-fresh OTHER session_ids
+   *   (excluding `sessionId`), or `null` to disable the live filter and fall
+   *   back to the 24h DB-only window. Tests should pass `() => null` so they
+   *   don't accidentally pick up a real agent-channel `sessions.json` from
+   *   `process.env.CLAUDE_PROJECT_DIR` / `cwd`. Production defaults to the
+   *   `getLiveOtherSessionIds` helper.
+   */
+  constructor(
+    private db: Database,
+    private liveOthersResolver: (sessionId: string) => string[] | null = getLiveOtherSessionIds,
+  ) {}
 
   /** Get and increment per-session turn counter (in-memory). */
   nextTurn(sessionId: string): number {
@@ -234,6 +247,13 @@ export class SessionTracker {
    * Returns sibling sessions active within the last 24 hours, with their
    * current_task. Used by the hook surface to inject one-line activity
    * awareness when present. Capped at 5 to keep additionalContext tight.
+   *
+   * When agent-channel `sessions.json` is available, intersects the 24h DB
+   * result with the heartbeat-fresh (<=90s) live set so we don't surface
+   * ghost siblings - sessions whose MCP died via Ctrl+C / force-close and
+   * never got a chance to call removeSession() cleanly. If sessions.json is
+   * absent (project not using agent-channel), falls back to the 24h-only
+   * window.
    */
   getActiveSiblings(sessionId: string): Array<{
     session_id: string;
@@ -243,7 +263,7 @@ export class SessionTracker {
     const twentyFourHoursAgo = new Date(
       Date.now() - 24 * 60 * 60 * 1000
     ).toISOString();
-    return this.db
+    const rows = this.db
       .query(
         `SELECT session_id, current_task, last_active_at FROM session_registry
          WHERE session_id != ? AND last_active_at > ?
@@ -255,6 +275,11 @@ export class SessionTracker {
         current_task: string | null;
         last_active_at: string;
       }>;
+
+    const liveOthers = this.liveOthersResolver(sessionId);
+    if (liveOthers === null) return rows;
+    const liveSet = new Set(liveOthers);
+    return rows.filter((r) => liveSet.has(r.session_id));
   }
 
   /**
@@ -308,15 +333,54 @@ export class SessionTracker {
     // briefings use the persisted cursor from the previous call.
     const since = me?.last_briefing_at ?? twentyFourHoursAgo;
 
-    // Count other active sessions (excluding self) for context
-    const activeCount = (
-      this.db
-        .query(
-          `SELECT COUNT(*) as cnt FROM session_registry
-           WHERE session_id != ? AND last_active_at > ?`
-        )
-        .get(sessionId, twentyFourHoursAgo) as { cnt: number }
-    ).cnt;
+    // Authoritative "is this sibling actually alive right now?" signal from
+    // agent-channel sessions.json (90s heartbeat). When available, this
+    // replaces the 24h-window EXISTS subquery against session_registry so we
+    // don't surface notes/counts from ghost siblings - sessions that fired
+    // hook events recently but whose MCPs have since died via Ctrl+C /
+    // force-close. When sessions.json is absent (project not using
+    // agent-channel), we fall back to the 24h DB-only behavior.
+    const liveOthers = this.liveOthersResolver(sessionId);
+
+    // Build SQL fragment + params for "n.source_session must be an active
+    // sibling". Two modes: IN (liveOthers...) when live filter available,
+    // else EXISTS subquery on session_registry.last_active_at.
+    let activeSiblingClause: string;
+    let activeSiblingParams: string[];
+    if (liveOthers !== null) {
+      if (liveOthers.length === 0) {
+        // Live filter is authoritative AND empty - short-circuit to no matches.
+        // Using `AND 0` keeps the SQL valid and well-formed with the param list.
+        activeSiblingClause = "AND 0";
+        activeSiblingParams = [];
+      } else {
+        const placeholders = liveOthers.map(() => "?").join(",");
+        activeSiblingClause = `AND n.source_session IN (${placeholders})`;
+        activeSiblingParams = liveOthers;
+      }
+    } else {
+      activeSiblingClause = `AND EXISTS (
+        SELECT 1 FROM session_registry sr
+        WHERE sr.session_id = n.source_session
+          AND sr.last_active_at > ?
+      )`;
+      activeSiblingParams = [twentyFourHoursAgo];
+    }
+
+    // Count other active sessions (excluding self) for context. With live
+    // filter available, the count is just liveOthers.length. Otherwise fall
+    // back to the 24h DB count.
+    const activeCount =
+      liveOthers !== null
+        ? liveOthers.length
+        : (
+            this.db
+              .query(
+                `SELECT COUNT(*) as cnt FROM session_registry
+                 WHERE session_id != ? AND last_active_at > ?`
+              )
+              .get(sessionId, twentyFourHoursAgo) as { cnt: number }
+          ).cnt;
 
     // Notes created by other active sessions since the caller's last briefing.
     // Exclude notes the caller has already surfaced this session (via
@@ -326,8 +390,8 @@ export class SessionTracker {
     // in the gap between read and write.
     const upperClause = upperBound ? "AND n.created_at <= ?" : "";
     const newNotesParams = upperBound
-      ? [sessionId, since, upperBound, twentyFourHoursAgo, sessionId]
-      : [sessionId, since, twentyFourHoursAgo, sessionId];
+      ? [sessionId, since, upperBound, ...activeSiblingParams, sessionId]
+      : [sessionId, since, ...activeSiblingParams, sessionId];
 
     const newNotesRows = this.db
       .query(
@@ -337,11 +401,7 @@ export class SessionTracker {
            AND n.source_session != ?
            AND n.created_at > ?
            ${upperClause}
-           AND EXISTS (
-             SELECT 1 FROM session_registry sr
-             WHERE sr.session_id = n.source_session
-               AND sr.last_active_at > ?
-           )
+           ${activeSiblingClause}
            AND n.id NOT IN (
              SELECT note_id FROM session_log WHERE session_id = ?
            )
@@ -366,6 +426,12 @@ export class SessionTracker {
       Date.now() - 2 * 60 * 60 * 1000
     ).toISOString();
 
+    // readHotRows looks at WHO SURFACED notes recently. We intentionally do
+    // NOT apply the live filter here - a now-dead session that surfaced a
+    // note an hour ago is still a real signal that the note was relevant
+    // recently. The ghost-session problem is about who we treat as an
+    // "active sibling source"; that's a separate concept from surfacing
+    // history.
     const readHotRows = this.db
       .query(
         `SELECT n.id, n.type, n.content, n.tags,
@@ -396,18 +462,14 @@ export class SessionTracker {
          WHERE n.source_session IS NOT NULL
            AND n.source_session != ?
            AND n.created_at > ?
-           AND EXISTS (
-             SELECT 1 FROM session_registry sr
-             WHERE sr.session_id = n.source_session
-               AND sr.last_active_at > ?
-           )
+           ${activeSiblingClause}
            AND n.id NOT IN (
              SELECT note_id FROM session_log WHERE session_id = ?
            )
          ORDER BY n.created_at DESC
          LIMIT 8`
       )
-      .all(sessionId, twoHoursAgo, twentyFourHoursAgo, sessionId) as Array<{
+      .all(sessionId, twoHoursAgo, ...activeSiblingParams, sessionId) as Array<{
       id: string;
       type: string;
       content: string;

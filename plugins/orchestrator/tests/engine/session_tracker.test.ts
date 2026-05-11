@@ -10,7 +10,7 @@ describe("SessionTracker", () => {
   beforeEach(() => {
     db = new Database(":memory:");
     applyMigrations(db, "project");
-    tracker = new SessionTracker(db);
+    tracker = new SessionTracker(db, () => null);
   });
 
   test("registerSession creates a new session", () => {
@@ -103,6 +103,71 @@ describe("SessionTracker", () => {
     expect(updates.new_notes.length).toBe(2);
     const ids = updates.new_notes.map((n) => n.id).sort();
     expect(ids).toEqual(["note-a", "note-b"]);
+  });
+
+  test("getCrossSessionUpdates excludes ghost siblings when live-set resolver is provided", () => {
+    // Reproduces the 0.30.9 fix: session_tracker's 24h DB window can keep
+    // listing sessions whose MCPs have died via Ctrl+C / force-close.
+    // Injecting a live-set resolver lets briefing() filter those out using
+    // the agent-channel sessions.json 90s heartbeat (real-time truth).
+    const ts = new Date().toISOString();
+    const liveTracker = new SessionTracker(db, () => ["live-sibling"]);
+    liveTracker.registerSession("caller");
+    liveTracker.registerSession("live-sibling");
+    liveTracker.registerSession("ghost-sibling"); // in DB, NOT in live set
+
+    db.run(
+      `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, '', 'medium', 0, ?, ?, ?)`,
+      ["note-live", "decision", "from a real session", ts, ts, "live-sibling"]
+    );
+    db.run(
+      `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, '', 'medium', 0, ?, ?, ?)`,
+      ["note-ghost", "decision", "from a dead session", ts, ts, "ghost-sibling"]
+    );
+
+    const updates = liveTracker.getCrossSessionUpdates("caller");
+    expect(updates.active_session_count).toBe(1); // live-sibling only
+    const ids = updates.new_notes.map((n) => n.id);
+    expect(ids).toContain("note-live");
+    expect(ids).not.toContain("note-ghost");
+  });
+
+  test("getCrossSessionUpdates short-circuits when live-set resolver returns empty", () => {
+    // No live siblings at all: caller should see zero cross-session notes
+    // regardless of what's in the 24h DB window.
+    const ts = new Date().toISOString();
+    const liveTracker = new SessionTracker(db, () => []);
+    liveTracker.registerSession("caller");
+    liveTracker.registerSession("ghost-1");
+    liveTracker.registerSession("ghost-2");
+    db.run(
+      `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, '', 'medium', 0, ?, ?, ?)`,
+      ["g1", "decision", "x", ts, ts, "ghost-1"]
+    );
+    db.run(
+      `INSERT INTO notes (id, type, content, keywords, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, '', 'medium', 0, ?, ?, ?)`,
+      ["g2", "decision", "y", ts, ts, "ghost-2"]
+    );
+
+    const updates = liveTracker.getCrossSessionUpdates("caller");
+    expect(updates.active_session_count).toBe(0);
+    expect(updates.new_notes.length).toBe(0);
+  });
+
+  test("getActiveSiblings intersects DB result with live-set resolver", () => {
+    const ts = new Date().toISOString();
+    const liveTracker = new SessionTracker(db, () => ["live-1"]);
+    liveTracker.registerSession("caller");
+    liveTracker.registerSession("live-1");
+    liveTracker.registerSession("ghost-1");
+
+    const sibs = liveTracker.getActiveSiblings("caller");
+    expect(sibs.length).toBe(1);
+    expect(sibs[0]?.session_id).toBe("live-1");
   });
 
   test("getCrossSessionUpdates respects last_briefing_at cursor", () => {
