@@ -368,6 +368,83 @@ describe("R2.5: lookup include_history + supersede chain", () => {
     const supersededByIds = result.detail!.supersede_chain!.superseded_by.map((n) => n.id);
     expect(supersededByIds).toContain(current.note_id!);
   });
+
+  // 0.30.20+: type-only / tag-only enumeration mode
+  describe("type-only enumeration", () => {
+    test("type filter without query lists most-recent notes of that type", async () => {
+      await handleRemember(projectDb, globalDb, {
+        content: "Decision: use Postgres",
+        type: "decision",
+      });
+      await handleRemember(projectDb, globalDb, {
+        content: "Decision: use Redis for cache",
+        type: "decision",
+      });
+      await handleRemember(projectDb, globalDb, {
+        content: "Avoid mocking the DB in tests",
+        type: "anti_pattern",
+      });
+
+      const result = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 10,
+      });
+      expect(result.results.length).toBe(2);
+      expect(result.results.every((r) => r.type === "decision")).toBe(true);
+      expect(result.message).toMatch(/Listed 2 most-recent/);
+    });
+
+    test("type + tag combined narrows further", async () => {
+      await handleRemember(projectDb, globalDb, {
+        content: "Architecture: backup pipeline",
+        type: "architecture",
+        tags: "backup,critical",
+      });
+      await handleRemember(projectDb, globalDb, {
+        content: "Architecture: telemetry pipeline",
+        type: "architecture",
+        tags: "telemetry",
+      });
+
+      const result = await handleRecall(projectDb, globalDb, {
+        type: "architecture",
+        tag: "backup",
+        limit: 10,
+      });
+      expect(result.results.length).toBe(1);
+      expect(result.results[0].content).toMatch(/backup/);
+    });
+
+    test("limit caps result count", async () => {
+      for (let i = 0; i < 5; i++) {
+        await handleRemember(projectDb, globalDb, {
+          content: `Pattern ${i}`,
+          type: "user_pattern",
+        });
+      }
+      const result = await handleRecall(projectDb, globalDb, {
+        type: "user_pattern",
+        limit: 3,
+      });
+      expect(result.results.length).toBe(3);
+    });
+
+    test("empty type/tag with no query/id still returns clear error", async () => {
+      const result = await handleRecall(projectDb, globalDb, {});
+      expect(result.results).toEqual([]);
+      expect(result.detail).toBeNull();
+      expect(result.message).toMatch(/Provide either a query, an id, or a type\/tag filter/);
+    });
+
+    test("type filter with zero matching notes returns empty + helpful message", async () => {
+      const result = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 10,
+      });
+      expect(result.results).toEqual([]);
+      expect(result.message).toMatch(/No notes match/);
+    });
+  });
 });
 
 describe("R3.1: ranked link expansion", () => {

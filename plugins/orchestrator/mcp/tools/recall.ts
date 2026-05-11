@@ -425,9 +425,91 @@ export async function handleRecall(
     };
   }
 
+  // 0.30.20+: type-only / tag-only enumeration mode. When neither id nor
+  // query is provided but type or tag is, return the N most-recent notes
+  // matching the filters. Lets callers like /pa-bootstrap do
+  // `lookup({type: "user_pattern", limit: 25})` to surface recent
+  // user-knowledge without inventing a meaningful query string.
+  if (input.type || input.tag) {
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    if (input.type) {
+      conditions.push("type = ?");
+      params.push(input.type);
+    }
+    if (input.tag) {
+      // Tags column is a comma-delimited list; substring match with
+      // word-boundary protection via SQL LIKE on the surrounding commas.
+      conditions.push("(',' || COALESCE(tags, '') || ',') LIKE ?");
+      params.push(`%,${input.tag},%`);
+    }
+    if (!(input.include_superseded ?? false)) {
+      conditions.push("superseded_by IS NULL");
+    }
+    if (input.code_ref) {
+      conditions.push("code_refs LIKE ?");
+      params.push(`%${input.code_ref}%`);
+    }
+    const whereClause = conditions.join(" AND ");
+    const sql = `
+      SELECT id, type, content, keywords, confidence, created_at, updated_at,
+             source_session, code_refs, tags, superseded_by, status, priority, due_date
+      FROM notes
+      WHERE ${whereClause}
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `;
+    params.push(limit);
+
+    const projectRows = projectDb.query(sql).all(...params) as any[];
+    const globalRows = globalDb.query(sql).all(...params) as any[];
+    const merged = [...projectRows, ...globalRows]
+      .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
+      .slice(0, limit);
+
+    const results: NoteSummary[] = merged.map((row) => ({
+      id: row.id,
+      type: row.type,
+      content: row.content,
+      keywords: row.keywords
+        ? row.keywords
+            .split(",")
+            .map((k: string) => k.trim())
+            .filter((k: string) => k.length > 0)
+        : [],
+      confidence: row.confidence,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      tags: row.tags ?? null,
+      code_refs: parseCodeRefs(row.code_refs ?? null),
+      source_session: row.source_session ?? null,
+      superseded_by: row.superseded_by ?? null,
+      status: row.status ?? null,
+      priority: row.priority ?? null,
+      due_date: row.due_date ?? null,
+    }));
+
+    const filterLabel = [
+      input.type ? `type="${input.type}"` : null,
+      input.tag ? `tag="${input.tag}"` : null,
+      input.code_ref ? `code_ref="${input.code_ref}"` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    return {
+      results,
+      detail: null,
+      message:
+        results.length > 0
+          ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}.`
+          : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`,
+    };
+  }
+
   return {
     results: [],
     detail: null,
-    message: "Provide either a query or an id to recall notes.",
+    message: "Provide either a query, an id, or a type/tag filter to recall notes.",
   };
 }

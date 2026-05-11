@@ -14,7 +14,7 @@ plugins/orchestrator/
     utils.ts                     # generateId, now, extractKeywords, formatAge
     db/
       connection.ts              # getProjectDb, getGlobalDb, WAL + busy_timeout
-      schema.ts                  # 19 project migrations + 2 global
+      schema.ts                  # 20 project migrations + 2 global, +1 (v21) for permission_audit (0.30.15+)
     engine/
       composer.ts                # briefing assembly, user profile composition
       linker.ts                  # FTS5 search, hybrid RRF+MMR, auto-linker
@@ -22,12 +22,15 @@ plugins/orchestrator/
       embeddings.ts              # ONNX sidecar client, backfill, embed-on-demand
       hybrid_search.ts           # pure-math RRF, MMR, cosine similarity
       scorer.ts                  # confidence promotion
-      session_tracker.ts         # session_log / session_registry, cross-session
+      session_tracker.ts         # session_log / session_registry, cross-session, ghost-session aware (0.30.8+)
       signal.ts                  # pheromone deposit / decay / boost (ANTS)
-      agent_channel.ts           # R8 (0.29.0): filewatcher polling JSONLs, fires notifications/claude/channel
+      agent_channel.ts           # R8 (0.29.0): filewatcher polling JSONLs, fires notifications/claude/channel; 0.30.16+: also drains system_events.jsonl
       agent_channel_filter.ts    # R8: pure filter for which JSONL events warrant cross-session forwarding
       agent_channel_state.ts     # R8: atomic-write helpers for sessions.json / state.json / per-receiver offset files
-      addressing.ts              # R8: pure parser for @PA / @SA-<id8> / @all + slash + NL overrides
+      addressing.ts              # R8: pure parser for @PA / @SA-<id8> / @all + slash + NL overrides; 0.30.11: line-anchored ADDRESS_RE
+      live_sessions.ts           # 0.30.8+: heartbeat-fresh session_ids from sessions.json (90s threshold); getLiveOtherSessionIds()
+      system_events.ts           # 0.30.16+: append-only JSONL bus for cross-MCP events (permission_request_pending, permission_verdict)
+      permission_relay.ts        # 0.30.15+: PA-gated permission engine; PermissionRelay class with registerPending/resolveVerdict/cleanup
     tools/
       remember.ts                # note() handler + R4 gate
       recall.ts                  # lookup() handler
@@ -38,6 +41,7 @@ plugins/orchestrator/
       check_similar.ts           # check_similar() handler
       update_note_helpers.ts     # snapshotRevision, appendToNoteContent
       session_task.ts            # update_session_task handler
+      permission.ts              # 0.30.15+: respond_to_permission handler (PA-only; conditional on ORCHESTRATOR_PA_PERMISSION_RELAY=1)
       hook_event.ts              # _hook_event dispatcher (per-event hook logic)
   skills/                        # proactive skill prompts (incl. pa-bootstrap, pa-pause, pa-resume, pa-takeover from R8)
   agents/                        # prime-agent (R8, replaces memory-concierge), orchestrator-reflect
@@ -64,7 +68,7 @@ Routing constants in `mcp/types.ts`:
 
 ### Schema
 
-Migrations live in `mcp/db/schema.ts`, versioned 1-20 (project) and 100-101 (global-only). Migration 20 (R8, 0.29.0) drops `session_messages` and `session_message_reads` after the cross-session messaging system was replaced by agent-channel notifications.
+Migrations live in `mcp/db/schema.ts`, versioned 1-21 (project) and 100-101 (global-only). Migration 20 (R8, 0.29.0) drops `session_messages` and `session_message_reads` after the cross-session messaging system was replaced by agent-channel notifications. Migration 21 (0.30.15+) creates `permission_audit` for the PA-gated permission relay - one row per request_id with `source_session`, `tool_name`, `description`, `input_preview`, `verdict`, `pa_session`, `pa_reason`, `resolved_at`, `resolved_by`. Project-scoped: each project's permission decisions stay with that project's DB.
 
 The `notes` table holds everything. Work items, decisions, checkpoints, open threads - they are all the same row shape, differentiated by the `type` column. Status, priority, and due date fields are populated only for `type = 'work_item'` but the columns exist on every row.
 
@@ -119,7 +123,7 @@ RELATIONSHIP_TYPES = [
 
 ## MCP tool surface
 
-Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal `_hook_event` for hook routing). Grouped by verb class so their equal-priority intent is visible at a glance.
+Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal `_hook_event` for hook routing), plus one conditional PA-only tool (`respond_to_permission`, registered only when `ORCHESTRATOR_PA_PERMISSION_RELAY=1` and role=prime). Grouped by verb class so their equal-priority intent is visible at a glance.
 
 ### Capture
 
@@ -161,6 +165,7 @@ There is **no `send_message` / `read_messages` tool** (deleted in R8). Communica
 | Tool | Purpose |
 |---|---|
 | `update_session_task` | Broadcast what the caller is currently working on (writes `session_registry.current_task` AND `sessions.json` entry). Peers see this as the `from_task` field on every channel notification you generate, in their briefing's Cross-Session Activity section, and in hook-time activity injections. |
+| `respond_to_permission` | **PA-only, conditional** (registered when `ORCHESTRATOR_PA_PERMISSION_RELAY=1` and role=prime). Args: `request_id`, `verdict` (`allow` / `deny` / `defer_to_human`), `reason?`. Non-allow verdicts require a non-empty reason. Emits a `permission_verdict` event onto the `system_events.jsonl` bus targeted at the originating SA (looked up in `permission_audit`); the SA's filewatcher reads the bus on its next tick and calls `permissionRelay.resolveVerdict` to unblock the pending Promise. See "Permission relay architecture" below. |
 
 ### Admin
 
@@ -257,11 +262,104 @@ Cross-session real-time communication via `notifications/claude/channel`. Replac
 
 **`addressing.ts`** - pure parser. Given event content + sender entry + sessions registry, returns `{targets, pa_addressed, override_command, unresolved_addresses}`. Recognizes `@PA`, `@SA-<id8>`, `@all`, conversational `PA, ...` prefix, slash commands (`/pa-pause`, `/pa-resume`), and natural-language equivalents ("PA, back off", "PA, come back in"). Sender always excluded from own targets. Unresolved `@SA-<id8>` references dropped silently with a warning flag.
 
+**Line-anchored address regex (0.30.11+).** `ADDRESS_RE` requires the `@`-tag to be in an addressing context:
+- start of content or line (optionally after a list bullet `-` / `*`)
+- after a comma (recipient chain: `@A, @B sync up`)
+- after `and` / `&` with whitespace (recipient chain: `@A and @B sync up`)
+
+Descriptive mentions in mid-prose ("my warm tick addresses @SA-95e6890e every 50min", `"@PA warm" reply`) no longer trip routing. Pre-0.30.11 these falsely addressed PA's private dialogue with the user into SA contexts via channel routing (work_item b4c37849).
+
 **`agent_channel_filter.ts`** - pure filter. Decides which JSONL events warrant cross-session forwarding. Forwards: user input, assistant text, mutating tool calls (Edit/Write/Bash/MultiEdit/git_*), summaries. Drops: tool_result bodies (too noisy; PA can read JSONL ad-hoc if it cares), system messages, read-only tool calls. Walks all blocks of a multi-block assistant message and prefers text over tool-use for forwarding, so a Read-then-text pattern doesn't lose the text.
 
 **`agent_channel_state.ts`** - atomic-write helpers for the three filesystem state files (`sessions.json`, `state.json`, `offsets-<receiver_id8>.json`). Uses temp-file + rename pattern so concurrent reads from sibling instances see either the old or new state, never a torn write. Tolerant readers - parse failure returns empty/default rather than throwing.
 
 The shared filesystem state replaces the per-process `inboxCounters` Map and the SQLite `session_messages` table that the R6/R7 architecture relied on. No counter drift, no per-session inbox, no polling - notifications fire in real-time as soon as the filewatcher sees the JSONL line written.
+
+### live_sessions.ts + ghost-session filter (0.30.8+)
+
+`session_tracker`'s "active siblings" used to derive from the project DB only: a 24h window over `session_log` / `session_registry`. That worked when sessions terminated cleanly, but Ctrl+C'd / force-closed / crashed sessions left their `session_registry` row behind - they kept showing up as "active" for up to 24 hours until the cleanup pass reaped them. Field reports: PA / SAs hearing about ghost siblings whose MCP had been dead for hours, and briefing's `cross_session` section listing notes attributed to long-departed sessions.
+
+`live_sessions.ts` adds the live signal: `sessions.json`'s 90s heartbeat is authoritative on "this MCP is currently alive". The 30s heartbeat tick is written by AgentChannel; anything more than 90s stale (3 missed heartbeats) is treated as dead.
+
+`getLiveOtherSessionIds(sessionId)` returns the heartbeat-fresh OTHER session_ids (excluding self), or `null` when `sessions.json` doesn't exist (project not using agent-channel). The session_tracker's `getActiveSiblings` and the briefing composer's `cross_session` SQL both intersect against this set:
+
+- If `getLiveOtherSessionIds()` returns `null`: fall back to the 24h DB-only behavior (no live filter available).
+- If `getLiveOtherSessionIds()` returns `[]`: short-circuit to zero matches (the live filter is authoritative AND empty).
+- Otherwise: `WHERE n.source_session IN (?, ?, ...)` against the live-other list, building one placeholder per id.
+
+Tests pass `() => null` to the SessionTracker constructor so the live-filter path stays inert and 24h DB-only behavior is exercised - same path users without agent-channel see.
+
+`session_log` (the "I surfaced this note before" history) is NOT intersected with live sessions. A session that surfaced a note an hour ago is still a real "I saw this" signal even if that session has since died. The ghost-session problem is specifically about who counts as a current sibling source, not who has touched a note historically.
+
+### Permission relay architecture (0.30.15+, opt-in)
+
+PA-gated tool-permission routing. When `ORCHESTRATOR_PA_PERMISSION_RELAY=1` is set in the SA's environment, Claude Code's tool-permission prompts go to PA instead of the SA's terminal. PA evaluates against user-patterns / conventions / anti-patterns and emits a verdict; the SA's permission_relay resolves a pending Promise; the SA's notification handler emits the verdict back to CC.
+
+**Three cooperating modules:**
+
+**`mcp/engine/permission_relay.ts`** - the `PermissionRelay` class. Owned by SAs only (PAs never instantiate one; they only respond). Stores pending requests keyed by `request_id`. Methods:
+- `registerPending(input)` - writes a `permission_audit` row (verdict `NULL` until resolved), sets a 30s timeout that fires `defer_to_human` if PA hasn't responded by then, returns a Promise. Collision handling: if the same `request_id` is registered twice (CC retry on transient failure), the existing Promise is mirrored - both callers settle together when the verdict lands, preventing orphaned `resolve` closures.
+- `resolveVerdict(request_id, verdict_input)` - first-verdict-wins guard. Updates the audit row + clears the timeout + resolves the Promise. Double-resolve is a no-op.
+- `listSourceFor(request_id)` - lookup helper. Checks in-memory pending first, then queries `permission_audit` for past requests.
+- `cleanup()` - shutdown helper. Settles all in-flight pending Promises with `defer_to_human` (so the SA's notification handler returns sensibly to CC) and clears their timers. Without this, `await registerPending(...)` would hang forever and the Node event loop would stay alive, preventing clean MCP exit.
+
+**`mcp/engine/system_events.ts`** - the cross-MCP file bus. `<project>/.orchestrator-state/agent-channel/system_events.jsonl`, append-only JSONL. Each event has `event_type` (discriminator), `from_session`, `to_session` (single target; broadcast not supported on this bus), `ts`, plus event-type-specific payload fields. `appendSystemEvent` ensures parent dir exists and emits one JSON-per-line. `readNewSystemEvents` reads from a caller-tracked byte offset, handles truncation (size < offset -> reset to 0), skips malformed lines (one bad entry doesn't break the bus), and returns parsed events + the new offset. The bus exists because the regular JSONL filewatcher reads events authored by sessions; permission routing emits events authored by MCPs themselves, which the session filewatcher can't see.
+
+**`mcp/tools/permission.ts`** - the `respond_to_permission` MCP tool. PA-only. Args: `request_id`, `verdict` (`allow` / `deny` / `defer_to_human`), `reason?`. Contract: non-allow verdicts MUST have a non-empty reason - the handler refuses without one to keep the audit log comprehensible. Emits a `permission_verdict` event via an injected `emitChannelEvent` callback (which `server.ts` wires to `appendSystemEvent` - the verdict MUST traverse to the SA's MCP process via the bus; an in-process notification would stay local to PA).
+
+**The cross-MCP flow (server.ts wiring, Phase 2b):**
+
+```
+1. CC -> SA's MCP: notifications/claude/channel/permission_request (request_id, tool_name, ...)
+2. SA's notification handler (registered conditionally on PERMISSION_RELAY_ENABLED && role=="subordinate"):
+   - Defense-in-depth: zod safeParse on raw params (the SDK's setNotificationHandler with `as any`
+     cast does NOT runtime-validate). Malformed -> stderr log + drop.
+   - Resolve PA's session_id from sessions.json. No PA active -> log + return (CC falls back
+     to terminal prompt).
+   - relay.registerPending(...) -> writes audit row, returns Promise.
+   - appendSystemEvent("permission_request_pending", to=PA's session_id).
+   - await Promise.
+3. PA's MCP AgentChannel filewatcher: processSystemEvents() on next tick reads new bus events.
+   - Sees event addressed to PA -> emit a channel notification to PA's session inline
+     (event_type="permission_request_pending", pa_addressed=true).
+4. PA reads the inline notification, evaluates, calls respond_to_permission({request_id, verdict, reason}).
+5. respond_to_permission handler:
+   - Look up source_session from permission_audit table (the SA's MCP wrote the row).
+   - emitChannelEvent callback -> appendSystemEvent("permission_verdict", to=source SA).
+6. SA's MCP AgentChannel filewatcher: processSystemEvents() on next tick reads the verdict event.
+   - permissionRelay.resolveVerdict(request_id, ...) -> resolves the awaiting Promise.
+7. SA's notification handler (back from await):
+   - For allow/deny: server.notification("notifications/claude/channel/permission", {behavior, message}).
+   - For defer_to_human: DO NOT emit. Absence is CC's signal to fall back to terminal prompt.
+     (Emitting deny would foreclose that fallback. Caught by code-review 2026-05-11.)
+```
+
+The defer_to_human + no-emit contract is load-bearing. CC's protocol treats response absence as the fallback signal; if we silently mapped `defer_to_human` to `behavior: "deny"` (which the v0.30.17 code initially did) we'd trap the SA at the permission gate with no escape. The v0.30.18 fix removes the silent mapping.
+
+### Per-PID session-id resolution (0.30.19+)
+
+`getFallbackSessionId()` in `mcp/server.ts` resolves the current session_id when a tool handler is called without an explicit `session_id` argument. Resolution order:
+
+1. Explicit param to the handler.
+2. `CLAUDE_SESSION_ID` env var (Claude Code doesn't reliably set this; defensive only).
+3. **Per-claude-PID file** (0.30.19+): walk the process tree to find the claude.exe ancestor PID, then read `<project>/.orchestrator-state/active-session-<claude_pid>`. Race-free because each claude session writes its own per-PID file; concurrent siblings can't collide.
+4. **Legacy single-file**: `<project>/.orchestrator-state/active-session`. Last-writer-wins across concurrent siblings; included for back-compat with pre-0.30.19 hooks.
+
+The session-start hook (`hooks/session-start`) writes BOTH files - per-PID AND legacy single - so new MCPs prefer the per-PID path and old MCPs fall back to legacy.
+
+**Process tree walk.** `findClaudeAncestorPid()` walks up to 8 ancestors looking for `claude` / `claude.exe`. Windows: WMIC `process where processid=N get name,parentprocessid`. Unix: `/proc/<pid>/stat` field 2 (comm in parens) and field 4 (ppid). Cached on first successful resolution (the MCP server is per-session by stdio design - its session_id cannot change during its lifetime).
+
+**Why this exists.** Pre-0.30.19, concurrent Claude Code sessions in the same project all wrote to a single `active-session` file. Last writer won. If session B started seconds after session A and B's hook ran first, A's MCP read B's session_id from the shared file and registered the wrong session_id in `sessions.json`. Subsequent heartbeats kept overwriting the entry with the wrong role - "impostor MCP". Diagnosed in `120b8e59-fbef-4847-8c04-6bc7aa3ad378` (orchestrator KB) and tracked as work_item `ea1bec63`.
+
+The legacy single-file path is still tried if per-PID read fails, with an explicit stderr warning when claude_pid is known but per-PID file is missing:
+
+```
+[orchestrator] resolved session_id from LEGACY active-session file
+(claude_pid=N but per-PID file missing): xxxxxxxx...
+(if you have multiple concurrent claude sessions, this read is racy)
+```
+
+This makes the racy fallback visible in plugin logs so operators can correlate impostor symptoms with stale hooks.
 
 ## Skills and agents
 
@@ -437,7 +535,9 @@ This is a post-filter rather than an index because array-containment queries in 
 
 ## Testing
 
-`tests/` mirrors the engine / tools split. `bun test` runs the whole suite. Zod coercion means HTTP-style string inputs work from the MCP client without manual parsing in handlers.
+`tests/` mirrors the engine / tools split. `bun test` runs the whole suite (497 tests across 38 files as of 0.30.19, 0 fail). Zod coercion means HTTP-style string inputs work from the MCP client without manual parsing in handlers.
+
+New 0.30.x test files cover the new modules: `tests/engine/live_sessions.test.ts`, `tests/engine/permission_relay.test.ts`, `tests/engine/system_events.test.ts`, `tests/engine/agent_channel_permission.test.ts` (integration of filewatcher with permission routing), `tests/tools/permission.test.ts`, and updated `tests/engine/addressing.test.ts` covering the line-anchored regex.
 
 ## Build and install
 

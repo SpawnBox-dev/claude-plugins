@@ -21625,10 +21625,68 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}".${totalHint}` : `No notes found matching "${input.query}".${totalHint}`
     };
   }
+  if (input.type || input.tag) {
+    const conditions = [];
+    const params = [];
+    if (input.type) {
+      conditions.push("type = ?");
+      params.push(input.type);
+    }
+    if (input.tag) {
+      conditions.push("(',' || COALESCE(tags, '') || ',') LIKE ?");
+      params.push(`%,${input.tag},%`);
+    }
+    if (!(input.include_superseded ?? false)) {
+      conditions.push("superseded_by IS NULL");
+    }
+    if (input.code_ref) {
+      conditions.push("code_refs LIKE ?");
+      params.push(`%${input.code_ref}%`);
+    }
+    const whereClause = conditions.join(" AND ");
+    const sql = `
+      SELECT id, type, content, keywords, confidence, created_at, updated_at,
+             source_session, code_refs, tags, superseded_by, status, priority, due_date
+      FROM notes
+      WHERE ${whereClause}
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `;
+    params.push(limit);
+    const projectRows = projectDb2.query(sql).all(...params);
+    const globalRows = globalDb2.query(sql).all(...params);
+    const merged = [...projectRows, ...globalRows].sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? "")).slice(0, limit);
+    const results = merged.map((row) => ({
+      id: row.id,
+      type: row.type,
+      content: row.content,
+      keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
+      confidence: row.confidence,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      tags: row.tags ?? null,
+      code_refs: parseCodeRefs(row.code_refs ?? null),
+      source_session: row.source_session ?? null,
+      superseded_by: row.superseded_by ?? null,
+      status: row.status ?? null,
+      priority: row.priority ?? null,
+      due_date: row.due_date ?? null
+    }));
+    const filterLabel = [
+      input.type ? `type="${input.type}"` : null,
+      input.tag ? `tag="${input.tag}"` : null,
+      input.code_ref ? `code_ref="${input.code_ref}"` : null
+    ].filter(Boolean).join(", ");
+    return {
+      results,
+      detail: null,
+      message: results.length > 0 ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}.` : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`
+    };
+  }
   return {
     results: [],
     detail: null,
-    message: "Provide either a query or an id to recall notes."
+    message: "Provide either a query, an id, or a type/tag filter to recall notes."
   };
 }
 
@@ -24203,7 +24261,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.19"
+  version: "0.30.20"
 }, {
   capabilities: {
     tools: {},
@@ -24281,7 +24339,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.19** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.20** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24480,7 +24538,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file.", {
+server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
@@ -25671,7 +25729,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.19 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.20 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

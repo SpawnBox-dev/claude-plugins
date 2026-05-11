@@ -12,14 +12,17 @@ Durable. Version-controlled. Meant to be readable without the running plugin.
 
 ## Contents
 
+- [agent-getting-started.md](./agent-getting-started.md) - For AI agents (Claude Code sessions) that just had the orchestrator plugin installed. Discovers the plugin via concrete tool calls, explains single-agent vs PA+SA topology, addressing rules, permission relay opt-in, common pitfalls.
+
 - [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) - The three-dimension design-intent test (always-up-to-date / more-accurate-over-time / faster-to-traverse), R1-R5 architectural roots, load-bearing constraints, and the deterministic-vs-judgment dividing line that separates plumbing from agent decisions.
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - Plugin layout grounded in the actual source: dual-SQLite data model, the ~18 MCP tool surface grouped by verb class, engine components, skills and agents, hook flow, and the retrieval pipelines for lookup / note / briefing.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) - Plugin layout grounded in the actual source: dual-SQLite data model, MCP tool surface grouped by verb class, engine components (including live_sessions / permission_relay / system_events), skills and agents, hook flow, retrieval pipelines for lookup / note / briefing, permission relay architecture, per-PID session-id resolution, ghost-session filtering.
 
-- [DECISIONS.md](./DECISIONS.md) - Reverse-chronological decision log. Each entry: date, change, rationale, what-was-rejected, where it shipped. Covers the R1 - R4.1 shipments plus the framing decision that named the R-series.
+- [DECISIONS.md](./DECISIONS.md) - Reverse-chronological decision log. Each entry: date, change, rationale, what-was-rejected, where it shipped. Covers R1 - R8 (cross-session messaging supersession) plus the 0.30.x architectural work (ghost-session filter, addressing parser tightening, PA's two missions, PA-gated permission relay, per-PID active-session resolution).
 
 ## How to use
 
 - New contributor: read in order. DESIGN-PRINCIPLES first (why), ARCHITECTURE second (how), DECISIONS as reference.
+- Just had the plugin installed in a Claude Code session and want to use it: read `agent-getting-started.md`.
 - Changing the tool surface, data model, or retrieval path: re-read DESIGN-PRINCIPLES's R1-R5 and the deterministic-vs-judgment section before proposing, then append an entry to DECISIONS after shipping.
 - Debugging unexpected plugin behavior: DECISIONS is often the fastest path to "why does it do that" because it preserves the rejected alternatives inline.

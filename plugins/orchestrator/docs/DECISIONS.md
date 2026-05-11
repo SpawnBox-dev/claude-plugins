@@ -6,6 +6,205 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-05-11 - Per-PID active-session resolution closes impostor-MCP race (0.30.19)
+
+**Change.** The session-start hook now writes the current session_id to BOTH `active-session-<ppid>` (per-claude-PID) AND `active-session` (legacy single-file fallback). The MCP's `getFallbackSessionId()` walks the process tree (WMIC on Windows, `/proc/<pid>/stat` on Linux) to find the claude.exe ancestor PID, then reads `active-session-<that_pid>` preferentially. Falls back to the legacy single-file with an explicit stderr warning when per-PID is missing.
+
+**Why.** Pre-0.30.19, concurrent Claude Code sessions in the same project all wrote to one shared `active-session` file. Last writer won. If session B's hook ran milliseconds after session A's hook, A's MCP read B's session_id and registered the WRONG session_id in `sessions.json`. Subsequent 30s heartbeats kept overwriting the wrong entry - "impostor MCP". A PA expecting role=prime might find itself appearing as role=subordinate. The race was diagnosed in note `120b8e59-fbef-4847-8c04-6bc7aa3ad378` (orchestrator KB) and tracked as work_item `ea1bec63`.
+
+Per-PID files are race-free because each claude process writes its own file. The legacy single-file remains so old hooks (pre-0.30.19) still work, with a visible warning so operators correlate impostor symptoms with stale hook installs.
+
+**Rejected.**
+- Env var (`CLAUDE_SESSION_ID`) - Claude Code doesn't reliably set it on MCP spawn. Defense-in-depth only.
+- Lockfile-based serialization on the shared file - adds complexity for a problem that goes away with per-PID. Locks also fail badly under crash.
+- Renaming the file scheme without back-compat - users with mid-version hooks would lose fallback resolution entirely. Dual-write covers the migration window.
+- Walking only the immediate parent (process.ppid). The MCP child's parent is bun, not claude. Need to walk up to 8 ancestors looking for claude.exe / claude.
+
+**Test additions.** Existing session_tracker tests + a new manual VM repro (concurrent claude windows) confirm per-PID isolation. The cached resolution prevents repeated WMIC calls on every tool invocation.
+
+**Shipped:** v0.30.19. Closes work_item `ea1bec63`.
+
+---
+
+## 2026-05-11 - Defer_to_human -> no-emit (permission relay Phase 2b review fix, 0.30.18)
+
+**Change.** When PA emits a `defer_to_human` verdict, the SA's notification handler now returns WITHOUT emitting `notifications/claude/channel/permission` to CC. Pre-fix (v0.30.17), `defer_to_human` was silently mapped to `behavior: "deny"` on emit.
+
+**Why.** Code-review caught it: CC's tool-permission protocol uses response ABSENCE as the signal to fall back to the terminal prompt. Emitting `behavior: "deny"` would have foreclosed that fallback and trapped the SA at the permission gate with no escape path. `defer_to_human` is supposed to mean "PA opts out; let the human decide" - it must produce silence, not a deny verdict, for the fallback to fire.
+
+Also in this ship: `setNotificationHandler` with the `as any` cast does NOT runtime-validate params (the SDK uses the schema only for method dispatch). The handler now does explicit `z.safeParse` at entry and logs + drops malformed inbound shapes, instead of propagating `undefined` fields downstream into the relay and bus.
+
+**Rejected.**
+- Adding a `behavior: "defer_to_human"` value to CC's protocol - not under our control; CC's permission protocol shape is fixed.
+- Logging defer_to_human as a soft warning but still emitting deny - same trap, with a misleading log.
+
+**Shipped:** v0.30.18.
+
+---
+
+## 2026-05-11 - Permission relay design: file-bus over direct MCP-to-MCP, env-var opt-in, audit table (0.30.15 - 0.30.17)
+
+**Change.** PA-gated tool-permission routing. When `ORCHESTRATOR_PA_PERMISSION_RELAY=1` is set in the SA's environment, Claude Code's `notifications/claude/channel/permission_request` notifications go to PA instead of stopping at the SA's terminal. PA reads the request inline, calls `respond_to_permission({request_id, verdict, reason?})`, and the SA's pending Promise resolves with the verdict. The SA's notification handler emits the verdict back to CC for `allow` / `deny`, or returns silently for `defer_to_human` (so CC falls back to terminal).
+
+Three new modules implement this in three phases:
+
+- **Phase 1 (0.30.15):** `mcp/engine/permission_relay.ts` (PermissionRelay class with `registerPending` / `resolveVerdict` / `cleanup` / `listSourceFor`), `mcp/tools/permission.ts` (the `respond_to_permission` MCP tool with non-allow-requires-reason contract), migration 21 (`permission_audit` table).
+- **Phase 2a (0.30.16):** `mcp/engine/system_events.ts` (append-only JSONL bus at `<project>/.orchestrator-state/agent-channel/system_events.jsonl`). AgentChannel extended with `processSystemEvents()` that drains the bus on every tick alongside JSONL transcripts.
+- **Phase 2b (0.30.17):** server.ts wiring. Conditional `claude/channel/permission` capability declaration gated by the env var. SA-side notification handler. PA-side tool registration. Routing both directions through the bus.
+
+**Why file-bus instead of direct MCP-to-MCP.** The agent_channel filewatcher reads JSONL transcripts (events authored by sessions). Permission routing needs to emit events authored by MCPs themselves (the SA's MCP wrote no JSONL line when CC sent it a permission_request notification, and the verdict event has to traverse from PA's MCP process to the SA's MCP process). A direct MCP-to-MCP notification doesn't exist - each MCP runs as a separate stdio child of Claude Code; they don't connect to each other. The append-only file bus is the simplest cross-process mechanism that survives crashes (file persists), supports offset tracking (each MCP advances its own offset), tolerates malformed lines (one bad entry doesn't break the bus), and rides on the same filewatcher tick that already exists.
+
+**Why audit table over write-only audit log.** Permission decisions are durable: someone may want to review what PA approved last week. SQLite gives us indexed queries on `source_session`, `tool_name`, `verdict`, `requested_at`. Migration 21 adds `permission_audit` to the project DB - project-scoped (each project's permission decisions stay with that project).
+
+**Why env-var opt-in (default off).** Permission routing changes the trust boundary for tool execution. Defaulting to PA-gating without explicit opt-in would surprise users who installed the orchestrator plugin for memory/coordination but not for tool gatekeeping. Env-var lets the user decide per-session whether to route through PA. Tested with `ORCHESTRATOR_PA_PERMISSION_RELAY=1` in spawnbox; default-off for everyone else.
+
+**Why non-allow verdicts require a reason.** Audit log needs to stay comprehensible weeks later. "PA denied tool X for SA Y at time Z" with no reason is a debugging dead end. Allow verdicts can be implicit (low-risk read, aligned with patterns) but deny and defer must say WHY. The respond_to_permission handler refuses without a reason on non-allow verdicts.
+
+**Why first-verdict-wins guard.** A double-resolve race exists between PA's verdict arriving and the 30s timeout firing. Without the `resolved: boolean` flag, both paths could fire `entry.resolve()` and `entry.timer` could trigger after the verdict landed. The guard is one field and one early-return in `resolveVerdict`.
+
+**Why timeout to defer_to_human (not deny).** PA might be unresponsive (crashed, paused, slow). Defaulting to deny would trap the SA. Default to defer_to_human so CC falls back to terminal - the user keeps agency.
+
+**Code-review fixes during ship.**
+- **cleanup() Promise leak (0.30.17 fix).** Without `cleanup()`, pending Promises from `await registerPending(...)` would never settle on MCP shutdown. The Node event loop would stay alive, preventing clean exit. Fixed by `cleanup()` iterating pending entries, clearing timers, and resolving all unresolved Promises with `{verdict: "defer_to_human", pa_session: "<shutdown>"}`.
+- **Duplicate request_id orphan (0.30.17 fix).** If CC retries on transient failure with the same request_id, `map.set()` would overwrite the existing PendingEntry. The original Promise's `resolve` closure becomes orphaned - first caller's await would hang forever. Fixed by detecting collision in `registerPending`, returning a new Promise that mirrors the existing entry's resolve so both callers settle together.
+- **Phase 2b silent-deny on defer (0.30.18 fix).** See separate entry above.
+- **Phase 2b unvalidated notification params (0.30.18 fix).** See separate entry above.
+
+**Rejected.**
+- TCP / Unix socket bus between MCPs - more infrastructure for cross-platform compatibility; file bus is enough and works identically on Windows, Linux, macOS.
+- D-Bus / IPC mechanism - heavyweight; the throughput is one event per permission decision (very low).
+- PA polling a SQLite table for pending requests - polling latency vs. push-on-bus. The filewatcher already polls on a 1.5s tick; piggybacking is free.
+- PA writing verdicts directly to a shared DB column on the request row - same throughput shape but requires the SA's relay to poll the DB. Bus is event-shaped; polling is wrong for event delivery.
+- Per-request file (write a `request-<id>.json`, delete on resolve) - filesystem churn, dir-listing races, more state to GC. JSONL append is simpler.
+- Per-tool risk classification in the orchestrator - that's PA's judgment. Plugin provides the channel; PA decides per-request.
+
+**Shipped:** v0.30.15 (Phase 1), v0.30.16 (Phase 2a), v0.30.17 (Phase 2b), v0.30.18 (review fixes).
+
+---
+
+## 2026-05-11 - PA's second mission: ultra-macro forest view + multi-repo awareness (0.30.13, 0.30.14)
+
+**Change.** Expanded `agents/prime-agent.md` to formalize PA's second defining duty: hold the whole-project macro model so SAs don't make tree-level decisions that break the forest. "Forest" was expanded from "code architecture" (the initial framing in 0.30.13) to ultra-macro in 0.30.14: code architecture + product strategy + business model + market context + people + operations + project memory. Also expanded to multi-repo: "the project" is often delivered by several coordinating repos (app + landing-page + worker + plugins + docs), and PA's macro model spans the union, not just the cwd repo. Step 5.6 (load forest-view context) and Step 5.7 (discover multi-repo scope) added to `/pa-bootstrap`.
+
+**Why.** Live observation: SAs tunnel-vision into the individual file/function/test they're working on. They make decisions that look locally correct but conflict with the macro. Sometimes the code-architecture macro, but just as often:
+- The BUSINESS macro - SA recommends a feature that contradicts the product's positioning ("non-technical teens / parents / educators" target audience), or refactors a flow that destabilizes a paying-tier path.
+- The OPERATIONS macro - SA proposes a flow that breaks the deployment pipeline, or contradicts an on-call posture, or violates a data-retention contract.
+- The PEOPLE macro - SA drafts outreach to a community user whose engagement note documents a different in-flight thread, contradicting an active conversation PA opened two days ago.
+- The COMMITMENT macro - SA touches code that intersects a commitment (hibernation-restore SLA, deadline, stakeholder expectation) without knowing the commitment exists.
+
+This is a recurring failure mode. PA exists in part to prevent it. The single-repo framing of 0.30.13 understated the scope; the ultra-macro + multi-repo expansion of 0.30.14 captured what was already true in practice (SpawnBox spans app + landing-page + worker + plugins + docs repos, all coordinating around a single business).
+
+**Mechanism.** PA loads `architecture` / `decision` / `convention` / `anti_pattern` / (eventually) `risk` / `commitment` / `insight` notes into working context at bootstrap. When an SA proposes work, PA's reflex check is:
+- Does this conflict with a decision I know about?
+- Does this duplicate a convention I know about?
+- Does this walk into an anti-pattern I know about?
+- Does this overlap with another SA's in-flight task?
+- Does this touch a commitment, risk, or open engagement thread?
+- Does this have cross-repo blast radius (landing-page download links, worker API contracts, plugin source compat)?
+
+If yes to any: surface the macro context to the SA via channel addressing BEFORE they proceed.
+
+**Limitation.** The orchestrator MCP today reads `project.db` from the running session's cwd only - it does NOT auto-union across multiple project DBs from related repos. The user must explicitly describe the multi-repo map in CLAUDE.md or `architecture` notes, and PA holds the map in working context and applies it proactively. A future feature could auto-discover or be configured with related repo paths.
+
+**Rejected.**
+- Treating forest-view as optional / deferred capture - SAs were already breaking the forest in field testing. Capturing the duty in `prime-agent.md` + `/pa-bootstrap` makes it operational immediately.
+- Constraining forest-view to "code architecture" (the 0.30.13 initial scope) - business / operations / people errors were just as common in field testing. The 0.30.14 expansion captures observed reality.
+- Auto-union project DBs across repos - more infrastructure for a problem solvable today by PA holding the multi-repo map in working context. The MCP today reads one cwd-bound DB; cross-repo awareness lives in PA's loaded knowledge until the auto-union work happens.
+
+**Shipped:** v0.30.13 (forest-view, code-architecture framing), v0.30.14 (ultra-macro + multi-repo).
+
+---
+
+## 2026-05-11 - PA-as-artificial-user identity (0.30.12)
+
+**Change.** Added "Your fundamental identity: artificial user" section to `agents/prime-agent.md`, and Step 5.5 (load user-pattern context) to `/pa-bootstrap`. PA's defining duty - above coordination, above tool-redirection, above self-improvement - is to be an artificial version of the user this orchestrator instance serves. `user_pattern` notes in the global DB (`~/.claude/orchestrator/global.db`) persist across every project and encode the user's preferences, work habits, communication style, decision biases, values, and explicit dislikes. PA loads them at bootstrap and reloads them whenever it's about to act on the user's behalf in a non-trivial moment.
+
+**Why.** Pre-0.30.12 framing: PA was "the orchestrator's persistent thinking partner". That described WHAT PA does but not WHY PA can act with authority. The artificial-user framing makes the authority explicit: when an SA hits a decision point that maps onto a captured user_pattern, PA speaks with the user's authority - "don't use em-dashes" is a settled preference, PA can directly correct an SA without checking. Without this framing, PA hedges on judgment calls that should be settled.
+
+The user_pattern knowledge compounds. The orchestrator's long-term value to a user is largely the user-pattern knowledge it accumulates over time. PA needs to be the active loader + curator of that knowledge so it shapes every interaction. The briefing's `cross_project` section surfaces some patterns, but an explicit lookup at bootstrap guarantees PA is loaded.
+
+**Mechanism.** `lookup({type: "user_pattern", limit: 25})` at bootstrap, plus reload at judgment points (addressing an SA on a judgment call, approving a destructive action, proposing a design, framing a question). When the user corrects PA, expresses a preference, calls out an assumption, or shows a value through reaction, capture as `note({type: "user_pattern", ...})`.
+
+**Rejected.**
+- Framing PA as "the orchestrator's persistent thinking partner" without the artificial-user duty - leaves PA's authority ambiguous. The whole point of routing SA decisions through PA is that PA can speak for the user; that needs to be explicit in PA's contract.
+- Capturing user-pattern knowledge only when prompted, not proactively - the value of pattern accumulation compounds with capture rate. Proactive capture is the load-bearing default.
+- Loading only project-scoped patterns at bootstrap - user_pattern is a GLOBAL_TYPE (always written to the global DB) for exactly this reason: patterns persist across every project the user works in. Loading from project DB would miss most of the corpus.
+
+**Discovery (lookup tool gotcha).** While writing the bootstrap steps, `lookup({type: "user_pattern", limit: 25})` was discovered to return "Provide either a query or an id to recall notes." in version 0.30.19 - the lookup tool did not support type-only enumeration. The bootstrap skill ships with the broken pattern. Fix queued for 0.30.20: extend `handleRecall` to treat `{type, limit}` (no query, no id) as a recent-N enumeration mode. See `agent-getting-started.md` for the workaround pattern in the meantime.
+
+**Shipped:** v0.30.12.
+
+---
+
+## 2026-05-11 - Addressing parser requires addressing context (0.30.11)
+
+**Change.** `ADDRESS_RE` in `mcp/engine/addressing.ts` tightened. An `@PA` / `@SA-<id8>` / `@all` token only counts as addressing when it sits in an addressing context:
+- start of content or line (optionally after a list bullet `-` / `*`)
+- after a comma (recipient chain: `@A, @B sync up`)
+- after `and` / `&` with whitespace (recipient chain: `@A and @B sync up`)
+
+Mentions in the middle of prose ("my warm tick addresses @SA-95e6890e every 50min", `"@PA warm" reply`) no longer trip routing.
+
+**Why.** Field bug (work_item `b4c37849`): PA's private dialogue with the user contained descriptive references to addressing semantics ("the warm tick addresses @SA-X every 50min"). The pre-0.30.11 regex matched `@SA-X` anywhere in content. Result: PA's musing about its own architecture leaked into SA-X's context via the channel router, because the regex treated the descriptive mention as an actual address.
+
+Addressing is intentional in human communication: it appears at the start of a directive ("@SA-X do Y"), at the start of a recipient chain ("@A, @B sync up"), or as the head of a list item. Mid-prose mentions are descriptive, not addressing. The regex now reflects that.
+
+**Rejected.**
+- Stopword-filtering verbs preceding `@` ("addresses @X" -> ignore) - brittle; verbs change ("mentions @X", "refers to @X", "talks to @X" all describe rather than address). Anchoring to the syntactic context is more robust.
+- Requiring trailing punctuation after `@<tag>` - too restrictive; `@SA-X do this thing.` would have lost the address (the period attaches to "thing", not to `@SA-X`).
+- Treating ANY `@SA-<id8>` reference as addressing, with a "did you mean to address?" hint in the channel notification - that's user-hostile UX for the common case (false trip from prose) and noisier than the fix.
+
+**Test additions.** `tests/engine/addressing.test.ts` updated with prose-mention cases that should NOT trip and addressing-context cases that should. Covers list bullets, comma chains, "and" / "&" chains, mid-sentence mentions, quoted strings.
+
+**Shipped:** v0.30.11.
+
+---
+
+## 2026-05-11 - Shutdown observability + 5-min liveness heartbeat (0.30.10)
+
+**Change.** MCP server in `mcp/server.ts` now logs WHY it's shutting down (`stdin-end` / `stdin-close` / `SIGTERM` / `SIGINT` / `SIGHUP` / `uncaughtException`) with pid, uptime, session_id, and timestamp to stderr. Also emits an "alive" heartbeat to stderr every 5 minutes with the same fields.
+
+**Why.** Field bug (2026-05-11): an idle SA's MCP child silently died (sessions.json showed `session_departed`) while claude.exe stayed alive. The user had to manually `/plugin reconnect`. We have no Claude Code MCP supervision logs accessible - the only handle is the MCP server's own stderr. Pre-0.30.10 there was no exit trace, so the failure was invisible. The new logging:
+- Captures the exact trigger (stdin close vs signal vs exception) so we can correlate with Claude Code's behavior.
+- Captures pid + uptime + timestamp + session_id so multi-session crashes are disambiguable.
+- Emits "alive" every 5 minutes so when an MCP goes silent, the last "alive" line bounds the failure window upper.
+
+`unhandledRejection` is logged but does NOT shutdown - rejections aren't always load-bearing, and killing the MCP on every transient rejection would cause user-visible churn. Load-bearing rejections will surface in the next operation.
+
+**Rejected.**
+- Sending shutdown traces to an orchestrator log file - the stderr stream is captured by Claude Code into its plugin log surface, which is what operators check. Writing to a separate file would split the trail.
+- More frequent heartbeat (30s, 1min) - cheap but accumulates noise in the plugin log without proportional debug value. 5min is a good bracket for "MCP went silent" without flooding.
+- Letting `uncaughtException` propagate (default behavior - process exits) - we want the exit logged before the process dies, hence the explicit shutdown call.
+
+**Shipped:** v0.30.10.
+
+---
+
+## 2026-05-11 - Ghost-session filter via sessions.json heartbeat intersection (0.30.8, 0.30.9)
+
+**Change.** Added `mcp/engine/live_sessions.ts` with `getLiveSessionIds()` and `getLiveOtherSessionIds()`. Both read `<project>/.orchestrator-state/agent-channel/sessions.json` and return the set of `session_id`s whose `last_heartbeat_at` is within 90s. Returns `null` when sessions.json doesn't exist (project not using agent-channel; caller falls back to 24h DB-only behavior).
+
+AgentChannel's sibling list and the briefing's `cross_session` SQL both intersect against this set:
+- `null` -> 24h DB-only behavior (preserves single-agent users + projects without agent-channel).
+- `[]` -> short-circuit to zero matches (live filter is authoritative AND empty).
+- Otherwise -> `WHERE n.source_session IN (?, ?, ...)` with one placeholder per live id.
+
+`session_log` (the historical "I surfaced this note" record) is NOT intersected. A session that surfaced a note an hour ago is still a real "I saw this" signal even if the session has since died. The ghost-session problem is specifically about who counts as a CURRENT sibling source, not who has touched a note historically.
+
+**Why.** "Active siblings" was deriving solely from the DB's 24h window over `session_log` / `session_registry`. Sessions that exited cleanly removed their own entries; sessions that died (Ctrl+C, force-close, crash) kept showing up as active for up to 24 hours until the cleanup pass reaped them. PA / SA briefings listed ghost siblings whose MCP had been dead for hours, and `cross_session` attributed notes to long-departed sessions.
+
+The 30s heartbeat in `sessions.json` was already there (the agent-channel heartbeat tick keeps it fresh). The fix was wiring it into the sibling discovery path: a sibling only counts as live if it shows up in BOTH the 24h DB window AND the 90s heartbeat-fresh set. 0.30.8 wired it into AgentChannel; 0.30.9 extended it to briefing's `cross_session`.
+
+**Rejected.**
+- Replacing the DB window entirely with the heartbeat set - loses single-agent users and projects not using agent-channel. The null-fallback preserves them.
+- Shorter heartbeat threshold (30s, 60s) - generous threshold accommodates slow Windows IO. 90s = 3 missed heartbeats at 30s cadence; if all three drop, the MCP is genuinely gone.
+- Reaping the DB row on heartbeat-stale - destroys the historical record (`session_log` should still show "this session surfaced these notes"). The fix is filtering at query time, not deleting state.
+- Synchronous heartbeat write on every tool call - more writes, more lock contention. The 30s tick is sufficient.
+
+**Shipped:** v0.30.8 (AgentChannel sibling list), v0.30.9 (briefing cross_session).
+
+---
+
 ## 2026-04-30 - R7.9 Roll back scope-as-filter; messaging is single-path
 
 > **Superseded by R8 (0.29.0, 2026-05-09).** The entire messaging system - `send_message`, `read_messages`, `peek_inbox`, the `session_messages` table, `MessageScope`, `drainInbox`, `DrainContext`, all of it - was deleted. This entry is preserved as historical record of the contract that existed pre-R8; do not treat any of its claims as currently active.
