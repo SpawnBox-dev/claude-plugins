@@ -23340,7 +23340,7 @@ var PAUSE_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(back\s*off|stand\s*down|take\s*fi
 var RESUME_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(come\s*back|resume|you\s*can\s*(come\s*back|resume|return))\b/i;
 var SLASH_PAUSE_RE = /^\s*\/pa-pause\b/i;
 var SLASH_RESUME_RE = /^\s*\/pa-resume\b/i;
-var ADDRESS_RE = /@(PA|PrimeAgent|all|SA-[a-f0-9]{8})/gi;
+var ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:[-*][ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
 function parseAddressing(content, sender, sessions) {
   let override_command = null;
   if (SLASH_PAUSE_RE.test(content) || PAUSE_NL_RE.test(content)) {
@@ -23876,7 +23876,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.10"
+  version: "0.30.11"
 }, {
   capabilities: {
     tools: {},
@@ -23956,7 +23956,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.10** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.11** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25221,7 +25221,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.10 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.11 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

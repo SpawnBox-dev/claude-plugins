@@ -88,4 +88,61 @@ describe("addressing parser", () => {
     expect(result.targets).toEqual([]);
     expect(result.unresolved_addresses).toEqual(["deadbeef"]);
   });
+
+  // 0.30.11 - mention vs address disambiguation (work_item b4c37849)
+  test("descriptive mention of @SA in middle of prose does NOT address", () => {
+    // Real leak case: PA explained warming and referenced @SA descriptively
+    const result = parseAddressing(
+      "my warm tick already addresses @SA-d4e5f6a7 every 50min",
+      PA,
+      SESSIONS,
+    );
+    expect(result.targets).toEqual([]);
+  });
+
+  test("quoted @PA reference does NOT address PA", () => {
+    // Real leak case: PA quoted what an SA might say in a reply
+    const result = parseAddressing(
+      'the SA processes a turn ("@PA warm" reply) and keeps cache fresh',
+      SA_A,
+      SESSIONS,
+    );
+    expect(result.pa_addressed).toBe(false);
+    expect(result.targets).toEqual([]);
+  });
+
+  test("@-address on a new line (after \\n) DOES address", () => {
+    const result = parseAddressing(
+      "Here is some context.\n@SA-d4e5f6a7 please proceed",
+      PA,
+      SESSIONS,
+    );
+    expect(result.targets).toEqual([SA_B.session_id]);
+  });
+
+  test("@-address after a comma DOES chain-address", () => {
+    const result = parseAddressing("@SA-d4e5f6a7, @SA-abc12345 sync up", PA, SESSIONS);
+    expect(result.targets).toEqual(expect.arrayContaining([SA_A.session_id, SA_B.session_id]));
+    expect(result.targets).toHaveLength(2);
+  });
+
+  test("@-address in a list bullet DOES address", () => {
+    const result = parseAddressing(
+      "Tasks:\n- @SA-d4e5f6a7: fix the bug\n- @SA-abc12345: run the tests",
+      PA,
+      SESSIONS,
+    );
+    expect(result.targets).toEqual(expect.arrayContaining([SA_A.session_id, SA_B.session_id]));
+    expect(result.targets).toHaveLength(2);
+  });
+
+  test("descriptive mention of @PA in middle of prose does NOT address PA", () => {
+    const result = parseAddressing(
+      "via @PA in your terminal output - PA's tailing will surface the address",
+      SA_A,
+      SESSIONS,
+    );
+    expect(result.pa_addressed).toBe(false);
+    expect(result.targets).not.toContain(PA.session_id);
+  });
 });
