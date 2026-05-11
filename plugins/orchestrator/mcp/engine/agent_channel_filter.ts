@@ -53,15 +53,26 @@ export function filterEvent(raw: any): FilteredEvent | null {
     const text = typeof msg?.content === "string" ? msg.content : null;
     if (!text) return null;
 
-    // Skip channel-injected content (echo prevention). When Claude Code
-    // delivers a notifications/claude/channel event to a session, it injects
-    // the <channel ...>...</channel> tag inline AND records that injection in
-    // the receiving session's JSONL as a `user`-typed entry. If we forward
-    // those, every original event causes N echoes (one per channel-attached
-    // sibling). The receiving session never typed `<channel ...>` as user
-    // input themselves, so dropping these is safe. Match leading whitespace
-    // to handle any indenting CC might add.
+    // Skip channel-injected content (echo prevention). Two variants:
+    //
+    // 1. Raw `<channel ...>` tag form - what arrives when CC injects a
+    //    channel notification into a receiving session's prompt. CC records
+    //    that injection in the JSONL as a `user`-typed entry. Without this
+    //    filter, every original event causes N echoes (one per channel-
+    //    attached sibling). 0.29.9 added this filter.
+    //
+    // 2. `← core:` display form - what shows in CC's terminal pane when the
+    //    channel content is collapsed for visual display. If the user
+    //    copies a line from their scrollback and pastes it back, the paste
+    //    arrives as user_input starting with `← core:`. Without filtering,
+    //    that paste gets re-broadcast (and if the pasted text contained any
+    //    `@SA-<id8>` patterns, those would route as a directive even though
+    //    the user just meant to quote). 0.30.5 added this filter.
+    //
+    // The receiving session never types `<channel ...>` or `← core:` as
+    // genuine user input themselves, so dropping these is safe.
     if (/^\s*<channel\b/.test(text)) return null;
+    if (/^\s*←\s*core:/i.test(text)) return null;
 
     return { event_type: "user_input", content: text };
   }

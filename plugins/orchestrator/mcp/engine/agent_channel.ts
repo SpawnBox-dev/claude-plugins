@@ -69,30 +69,59 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 90_000;
 
 /**
- * Decorate the channel-content body with a sender header + markdown blockquote.
- * Makes channel-injected events visually distinct from a receiving session's
- * own assistant output in terminals that render markdown. Each non-blank line
- * of the original content is quoted with a leading `> `.
+ * Decorate the channel-content body — but only when the decoration is
+ * load-bearing.
  *
- * Applied only to user_input / assistant_text / tool_use events (the ones that
- * carry verbose content from peer sessions). Session join/depart and override
- * events emit hand-crafted short labels and skip this wrapper to avoid header
- * redundancy.
+ * Decoration history:
+ * - 0.30.2: wrapped every event with a markdown header + blockquote
+ *   (`**PA** (id8) · event_type:` + `> ` per line). Empirically markdown
+ *   does NOT render in Claude Code's channel content area - the asterisks
+ *   and `> ` arrived as literal characters, AND the terminal pane collapses
+ *   multi-line content to a one-line preview anyway. Net result: 36+ chars
+ *   of header noise per event with zero rendered benefit.
+ * - 0.30.5: drop decoration entirely for unaddressed events (peer chatter,
+ *   observer traffic). The CC terminal prefix `← core:` plus the channel
+ *   envelope's `from_id8` attribute already convey "this is from session X
+ *   on the orchestrator channel" - re-adding a `[SA-<id8>]` prefix to the
+ *   content is pure noise. Keep a compact `[sender] @target | ` prefix
+ *   ONLY when the event is actually addressed (pa_addressed=true OR
+ *   addr.targets non-empty); the receiver needs to know they're being
+ *   directed at vs. just observing.
+ *
+ * Applied only to user_input / assistant_text / tool_use / summary events.
+ * Session join/depart and override events emit hand-crafted short labels
+ * and skip this wrapper.
  */
 function decorateChannelContent(
   content: string,
   sender: SessionEntry,
   eventType: string,
+  addrTargets: string[],
+  paAddressed: boolean,
+  sessions: SessionEntry[],
 ): string {
-  const senderLabel =
-    sender.role === "prime"
-      ? `**PA** (${sender.id8})`
-      : `**SA-${sender.id8}**`;
-  const quoted = content
-    .split("\n")
-    .map((line) => `> ${line}`)
-    .join("\n");
-  return `${senderLabel} · ${eventType}:\n${quoted}`;
+  // No addressing → pass content through raw, save the tokens.
+  if (!paAddressed && addrTargets.length === 0) {
+    return content;
+  }
+
+  const senderLabel = sender.role === "prime" ? "PA" : `SA-${sender.id8}`;
+  const evtSuffix = eventType === "assistant_text" ? "" : `·${eventType}`;
+
+  // Resolve target session_ids to display labels.
+  let targetLabels: string[];
+  if (paAddressed) {
+    const pa = sessions.find((s) => s.role === "prime");
+    targetLabels = [pa ? `@PA-${pa.id8}` : `@PA`];
+  } else {
+    targetLabels = addrTargets.map((sid) => {
+      const s = sessions.find((x) => x.session_id === sid);
+      if (!s) return `@${sid.slice(0, 8)}`;
+      return s.role === "prime" ? `@PA-${s.id8}` : `@SA-${s.id8}`;
+    });
+  }
+
+  return `[${senderLabel}${evtSuffix}] ${targetLabels.join(",")} | ${content}`;
 }
 
 export class AgentChannel {
@@ -309,7 +338,14 @@ export class AgentChannel {
     const isGlobalPaused = overrideState.pa_global_pause.active;
 
     this.emit({
-      content: decorateChannelContent(ev.content, sender, ev.event_type),
+      content: decorateChannelContent(
+        ev.content,
+        sender,
+        ev.event_type,
+        addr.targets,
+        addr.pa_addressed,
+        sessions,
+      ),
       meta: {
         from_session: sender.session_id,
         from_id8: sender.id8,

@@ -23360,6 +23360,8 @@ function filterEvent(raw) {
       return null;
     if (/^\s*<channel\b/.test(text))
       return null;
+    if (/^\s*\u2190\s*core:/i.test(text))
+      return null;
     return { event_type: "user_input", content: text };
   }
   if (raw.type === "assistant") {
@@ -23451,13 +23453,25 @@ function writeAllOffsets(stateDir, receiverId8, offsets) {
 var POLL_INTERVAL_MS = 1500;
 var HEARTBEAT_INTERVAL_MS = 30000;
 var STALE_THRESHOLD_MS = 90000;
-function decorateChannelContent(content, sender, eventType) {
-  const senderLabel = sender.role === "prime" ? `**PA** (${sender.id8})` : `**SA-${sender.id8}**`;
-  const quoted = content.split(`
-`).map((line) => `> ${line}`).join(`
-`);
-  return `${senderLabel} \xB7 ${eventType}:
-${quoted}`;
+function decorateChannelContent(content, sender, eventType, addrTargets, paAddressed, sessions) {
+  if (!paAddressed && addrTargets.length === 0) {
+    return content;
+  }
+  const senderLabel = sender.role === "prime" ? "PA" : `SA-${sender.id8}`;
+  const evtSuffix = eventType === "assistant_text" ? "" : `\xB7${eventType}`;
+  let targetLabels;
+  if (paAddressed) {
+    const pa = sessions.find((s) => s.role === "prime");
+    targetLabels = [pa ? `@PA-${pa.id8}` : `@PA`];
+  } else {
+    targetLabels = addrTargets.map((sid) => {
+      const s = sessions.find((x) => x.session_id === sid);
+      if (!s)
+        return `@${sid.slice(0, 8)}`;
+      return s.role === "prime" ? `@PA-${s.id8}` : `@SA-${s.id8}`;
+    });
+  }
+  return `[${senderLabel}${evtSuffix}] ${targetLabels.join(",")} | ${content}`;
 }
 
 class AgentChannel {
@@ -23621,7 +23635,7 @@ class AgentChannel {
     const isPaused = !!overrideState.sa_pauses[sender.session_id];
     const isGlobalPaused = overrideState.pa_global_pause.active;
     this.emit({
-      content: decorateChannelContent(ev.content, sender, ev.event_type),
+      content: decorateChannelContent(ev.content, sender, ev.event_type, addr.targets, addr.pa_addressed, sessions),
       meta: {
         from_session: sender.session_id,
         from_id8: sender.id8,
@@ -23804,7 +23818,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.4"
+  version: "0.30.5"
 }, {
   capabilities: {
     tools: {},
@@ -23884,7 +23898,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.4** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.5** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25119,7 +25133,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.4 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.5 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
