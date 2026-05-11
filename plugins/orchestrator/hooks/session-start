@@ -42,13 +42,71 @@ fi
 if [ -n "$SID" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   STATE_DIR="$CLAUDE_PROJECT_DIR/.orchestrator-state"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
-  # Per-PPID file (race-free; PPID = claude.exe's PID since this hook
-  # runs as a child of claude). MCP reads this preferentially.
-  if [ -n "${PPID:-}" ]; then
+
+  # Find the real claude.exe PID by walking up our process tree.
+  #
+  # 0.30.25 fix: bash $PPID is unreliable on Git Bash for Windows -
+  # the MSYS layer assigns virtual PIDs that don't correspond to
+  # real Windows process IDs. Previously the per-PID file ended up
+  # as `active-session-1` which never matched what the bun was
+  # looking for. Solution: on Windows, read /proc/$$/winpid (MSYS
+  # provides the real Windows PID there) and walk from that PID via
+  # PowerShell, mirroring the bun's findClaudeAncestorPid() walk.
+  CLAUDE_PID=""
+  case "$(uname -s 2>/dev/null || echo Windows)" in
+    MINGW*|MSYS*|CYGWIN*|*NT*)
+      # Windows (Git Bash / MSYS): start from /proc/$$/winpid (real
+      # Windows PID for this bash, not the virtual MSYS PID). Walk
+      # via PowerShell - Get-CimInstance is reliable across all
+      # supported Win10/Win11 builds; wmic is being removed.
+      WIN_PID=""
+      if [ -r "/proc/$$/winpid" ]; then
+        WIN_PID=$(cat "/proc/$$/winpid" 2>/dev/null | tr -d '[:space:]')
+      fi
+      if [ -n "$WIN_PID" ]; then
+        CLAUDE_PID=$(powershell.exe -NoProfile -Command "
+          \$walk = $WIN_PID
+          for (\$i = 0; \$i -lt 10; \$i++) {
+            try {
+              \$p = Get-CimInstance Win32_Process -Filter \"ProcessId = \$walk\" -ErrorAction Stop
+              if (-not \$p) { break }
+              if (\$p.Name -eq 'claude.exe') { Write-Output \$walk; exit 0 }
+              if (-not \$p.ParentProcessId -or \$p.ParentProcessId -eq 0 -or \$p.ParentProcessId -eq \$walk) { break }
+              \$walk = \$p.ParentProcessId
+            } catch { break }
+          }
+        " 2>/dev/null | tr -d '[:space:]' || printf '')
+      fi
+      ;;
+    *)
+      # Linux/Mac: walk via /proc/<pid>/stat (field 2 = comm in parens,
+      # field after rparen is ppid).
+      WALK_PID=$$
+      for i in 1 2 3 4 5 6 7 8; do
+        [ -r "/proc/$WALK_PID/stat" ] || break
+        STAT=$(cat "/proc/$WALK_PID/stat" 2>/dev/null) || break
+        NAME_LC=$(printf '%s' "$STAT" | sed 's/^[^(]*(//' | sed 's/).*$//' | tr '[:upper:]' '[:lower:]')
+        REST=$(printf '%s' "$STAT" | sed 's/^.*) //')
+        PPID_X=$(printf '%s' "$REST" | awk '{print $2}')
+        if [ "$NAME_LC" = "claude" ] || [ "$NAME_LC" = "claude.exe" ]; then
+          CLAUDE_PID=$WALK_PID; break
+        fi
+        if [ -z "$PPID_X" ] || [ "$PPID_X" = "0" ] || [ "$PPID_X" = "$WALK_PID" ]; then break; fi
+        WALK_PID=$PPID_X
+      done
+      ;;
+  esac
+
+  # Per-claude.exe-PID file (race-free). Write whichever PID we
+  # resolved; if the walk failed, write `active-session-$PPID` as
+  # before (best-effort - the bun will fall through to legacy).
+  if [ -n "$CLAUDE_PID" ]; then
+    printf '%s' "$SID" > "$STATE_DIR/active-session-$CLAUDE_PID" 2>/dev/null || true
+  elif [ -n "${PPID:-}" ]; then
     printf '%s' "$SID" > "$STATE_DIR/active-session-$PPID" 2>/dev/null || true
   fi
-  # Legacy single-file (preserved for pre-0.30.19 MCPs and single-
-  # session users).
+  # Legacy single-file (preserved for pre-0.30.19 MCPs and as a
+  # fallback when per-PID resolution fails).
   printf '%s' "$SID" > "$STATE_DIR/active-session" 2>/dev/null || true
   if [ ! -f "$STATE_DIR/.gitignore" ]; then
     printf '*\n' > "$STATE_DIR/.gitignore" 2>/dev/null || true
