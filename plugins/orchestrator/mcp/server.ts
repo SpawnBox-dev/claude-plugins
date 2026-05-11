@@ -302,7 +302,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.17",
+    version: "0.30.18",
   },
   {
     capabilities: {
@@ -417,7 +417,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.17** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.18** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -2044,17 +2044,32 @@ function startAgentChannel(): void {
     if (PERMISSION_RELAY_ENABLED) {
       if (role === "subordinate" && permissionRelay) {
         const relay = permissionRelay;
+        const permissionRequestParamsSchema = z.object({
+          request_id: z.string(),
+          tool_name: z.string(),
+          description: z.string(),
+          input_preview: z.string(),
+        });
         server.server.setNotificationHandler(
           z.object({
             method: z.literal("notifications/claude/channel/permission_request"),
-            params: z.object({
-              request_id: z.string(),
-              tool_name: z.string(),
-              description: z.string(),
-              input_preview: z.string(),
-            }),
+            params: permissionRequestParamsSchema,
           }) as any,
-          async ({ params }: { params: { request_id: string; tool_name: string; description: string; input_preview: string } }): Promise<void> => {
+          async (raw: any): Promise<void> => {
+            // Defense-in-depth: the SDK's setNotificationHandler with `as any`
+            // cast does NOT runtime-validate params (the schema is used only
+            // for method dispatch). Parse explicitly so malformed inbound
+            // shapes fail loud here, not silently downstream with `undefined`
+            // fields propagated into the relay/bus.
+            const parsed = permissionRequestParamsSchema.safeParse(raw?.params);
+            if (!parsed.success) {
+              process.stderr.write(
+                `permission-relay: rejected malformed permission_request: ` +
+                  `${parsed.error.message}\n`,
+              );
+              return;
+            }
+            const params = parsed.data;
             // 1. Resolve PA's session_id from sessions.json so we can target
             //    the bus event correctly. Read it fresh each request - PA
             //    may have started after this SA.
@@ -2111,14 +2126,27 @@ function startAgentChannel(): void {
 
             const verdict = await pending;
 
-            // 4. Emit the verdict back to CC. The protocol expects
-            //    notifications/claude/channel/permission with the verdict.
+            // 4. Emit the verdict back to CC, but ONLY for definitive
+            //    verdicts (allow / deny). For `defer_to_human` - which
+            //    fires on timeout, shutdown, or PA's explicit deferral -
+            //    we deliberately do NOT respond. CC's protocol uses
+            //    response absence as the signal to fall back to the
+            //    terminal permission prompt. Emitting `behavior: "deny"`
+            //    would actively foreclose that fallback and trap the SA
+            //    at a permission gate. (Caught by code-review 2026-05-11.)
+            if (verdict.verdict === "defer_to_human") {
+              process.stderr.write(
+                `permission-relay: deferring request ${params.request_id} ` +
+                  `to terminal (pa_session=${verdict.pa_session})\n`,
+              );
+              return;
+            }
             await server.server
               .notification({
                 method: "notifications/claude/channel/permission",
                 params: {
                   request_id: params.request_id,
-                  behavior: verdict.verdict === "allow" ? "allow" : "deny",
+                  behavior: verdict.verdict, // "allow" or "deny"
                   ...(verdict.pa_reason ? { message: verdict.pa_reason } : {}),
                 },
               })
@@ -2283,7 +2311,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.17 ` +
+    `[orchestrator] MCP server starting - version=0.30.18 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

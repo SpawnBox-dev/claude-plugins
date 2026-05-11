@@ -24151,7 +24151,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.17"
+  version: "0.30.18"
 }, {
   capabilities: {
     tools: {},
@@ -24229,7 +24229,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.17** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.18** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25462,15 +25462,23 @@ function startAgentChannel() {
     if (PERMISSION_RELAY_ENABLED) {
       if (role === "subordinate" && permissionRelay) {
         const relay = permissionRelay;
+        const permissionRequestParamsSchema = exports_external.object({
+          request_id: exports_external.string(),
+          tool_name: exports_external.string(),
+          description: exports_external.string(),
+          input_preview: exports_external.string()
+        });
         server.server.setNotificationHandler(exports_external.object({
           method: exports_external.literal("notifications/claude/channel/permission_request"),
-          params: exports_external.object({
-            request_id: exports_external.string(),
-            tool_name: exports_external.string(),
-            description: exports_external.string(),
-            input_preview: exports_external.string()
-          })
-        }), async ({ params }) => {
+          params: permissionRequestParamsSchema
+        }), async (raw) => {
+          const parsed = permissionRequestParamsSchema.safeParse(raw?.params);
+          if (!parsed.success) {
+            process.stderr.write(`permission-relay: rejected malformed permission_request: ${parsed.error.message}
+`);
+            return;
+          }
+          const params = parsed.data;
           let paSessionId = null;
           try {
             const sessionsFile = join6(stateDir, "sessions.json");
@@ -25508,11 +25516,16 @@ function startAgentChannel() {
 `);
           }
           const verdict = await pending;
+          if (verdict.verdict === "defer_to_human") {
+            process.stderr.write(`permission-relay: deferring request ${params.request_id} to terminal (pa_session=${verdict.pa_session})
+`);
+            return;
+          }
           await server.server.notification({
             method: "notifications/claude/channel/permission",
             params: {
               request_id: params.request_id,
-              behavior: verdict.verdict === "allow" ? "allow" : "deny",
+              behavior: verdict.verdict,
               ...verdict.pa_reason ? { message: verdict.pa_reason } : {}
             }
           }).catch((err) => {
@@ -25606,7 +25619,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.17 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.18 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
