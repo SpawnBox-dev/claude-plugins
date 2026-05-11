@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.29.7",
+    version: "0.29.8",
   },
   {
     capabilities: {
@@ -293,7 +293,7 @@ const server = new McpServer(
       },
     },
     instructions: [
-      "Cross-session events arrive as <channel source=\"agent-channel\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed.",
+      "Cross-session events arrive as <channel source=\"orchestrator\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's name and will always be \"orchestrator\".)",
       "",
       "Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form \"PA, ...\" or \"PrimeAgent, ...\" also addresses PA.",
       "",
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.29.7** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.29.8** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1835,6 +1835,38 @@ function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, ti
 // ── Agent-channel filewatcher ────────────────────────────────────────────
 let agentChannel: AgentChannel | null = null;
 
+/**
+ * Convert a rich ChannelNotification.meta into the on-wire `Record<string, string>`
+ * the channels contract requires. Drops null/undefined entries; coerces booleans
+ * to "true"/"false", numbers to their string form, and arrays to comma-joined
+ * strings. Objects (other than arrays) are dropped — those shouldn't appear in
+ * channel meta anyway.
+ *
+ * See https://code.claude.com/docs/en/channels-reference: "Each entry becomes
+ * an attribute on the <channel> tag. Keys must be identifiers: letters, digits,
+ * and underscores only. Keys containing hyphens or other characters are
+ * silently dropped." Values must be strings.
+ */
+function sanitizeChannelMeta(
+  raw: Record<string, unknown>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === "string") {
+      out[k] = v;
+    } else if (typeof v === "boolean") {
+      out[k] = v ? "true" : "false";
+    } else if (typeof v === "number") {
+      out[k] = String(v);
+    } else if (Array.isArray(v)) {
+      out[k] = v.map(String).join(",");
+    }
+    // objects and everything else: dropped
+  }
+  return out;
+}
+
 function startAgentChannel(): void {
   const sessionId = resolveSessionId();
   if (!sessionId) {
@@ -1896,11 +1928,22 @@ function startAgentChannel(): void {
       (notif) => {
         // The MCP SDK's high-level McpServer wraps a low-level Server at
         // server.server. notification() goes via the underlying transport.
+        //
+        // CRITICAL: per https://code.claude.com/docs/en/channels-reference, the
+        // channel notification `meta` field type is `Record<string, string>`.
+        // Claude Code's receive-side validator silently drops notifications
+        // whose meta contains non-string values (null, undefined, boolean,
+        // array). The SDK does NOT catch this on the send side. Without
+        // sanitization, the entire channel architecture is invisible to
+        // receivers despite the MCP server appearing healthy. Pre-0.29.8 the
+        // orchestrator emitted booleans (pa_addressed), nulls (from_task), and
+        // undefineds (tool_name, addressed_to, ...) and silently lost every
+        // notification.
         void server.server.notification({
           method: "notifications/claude/channel",
           params: {
             content: notif.content,
-            meta: notif.meta,
+            meta: sanitizeChannelMeta(notif.meta),
           },
         });
       },
@@ -1937,7 +1980,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.29.7 ` +
+    `[orchestrator] MCP server starting - version=0.29.8 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

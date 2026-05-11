@@ -31,10 +31,17 @@ import {
   type SessionEntry,
 } from "./agent_channel_state";
 
+// NOTE: The MCP channels contract (https://code.claude.com/docs/en/channels-reference)
+// requires meta values to be strings; Claude Code's receive-side validator silently
+// drops notifications whose meta contains non-string values. The internal
+// ChannelNotification.meta below carries rich types for in-process use; conversion
+// to the on-wire string-only form happens in server.ts at the MCP boundary via
+// sanitizeChannelMeta. Also note: the <channel source="..."> attribute is set
+// automatically by Claude Code from the MCP server's `name` field — so receivers
+// will see source="orchestrator" regardless of any meta.source we pass.
 export interface ChannelNotification {
   content: string;
   meta: {
-    source: "agent-channel";
     from_session: string;
     from_id8: string;
     from_role: "prime" | "subordinate";
@@ -127,7 +134,6 @@ export class AgentChannel {
         this.emit({
           content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
           meta: {
-            source: "agent-channel",
             from_session: entry.session_id,
             from_id8: entry.id8,
             from_role: entry.role,
@@ -146,7 +152,6 @@ export class AgentChannel {
         this.emit({
           content: `[session_departed] ${entry.name} (${entry.id8})`,
           meta: {
-            source: "agent-channel",
             from_session: entry.session_id,
             from_id8: entry.id8,
             from_role: entry.role,
@@ -279,7 +284,6 @@ export class AgentChannel {
     this.emit({
       content: ev.content,
       meta: {
-        source: "agent-channel",
         from_session: sender.session_id,
         from_id8: sender.id8,
         from_role: sender.role,

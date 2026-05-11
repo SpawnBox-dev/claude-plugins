@@ -22640,7 +22640,7 @@ var VARIANTS = [
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? Before diving in, try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
-  '[orch] Agent-channel: cross-session events arrive as <channel source="agent-channel" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
+  '[orch] Agent-channel: cross-session events arrive as <channel source="orchestrator" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.',
   "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
   "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
@@ -23503,7 +23503,6 @@ class AgentChannel {
         this.emit({
           content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
           meta: {
-            source: "agent-channel",
             from_session: entry.session_id,
             from_id8: entry.id8,
             from_role: entry.role,
@@ -23520,7 +23519,6 @@ class AgentChannel {
         this.emit({
           content: `[session_departed] ${entry.name} (${entry.id8})`,
           meta: {
-            source: "agent-channel",
             from_session: entry.session_id,
             from_id8: entry.id8,
             from_role: entry.role,
@@ -23615,7 +23613,6 @@ class AgentChannel {
     this.emit({
       content: ev.content,
       meta: {
-        source: "agent-channel",
         from_session: sender.session_id,
         from_id8: sender.id8,
         from_role: sender.role,
@@ -23797,7 +23794,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.29.7"
+  version: "0.29.8"
 }, {
   capabilities: {
     tools: {},
@@ -23806,7 +23803,7 @@ var server = new McpServer({
     }
   },
   instructions: [
-    'Cross-session events arrive as <channel source="agent-channel" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed.',
+    `Cross-session events arrive as <channel source="orchestrator" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's name and will always be "orchestrator".)`,
     "",
     'Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form "PA, ..." or "PrimeAgent, ..." also addresses PA.',
     "",
@@ -23877,7 +23874,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.29.7** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.29.8** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25037,6 +25034,23 @@ function cascadeResolution(db, noteId, timestamp) {
   return results;
 }
 var agentChannel = null;
+function sanitizeChannelMeta(raw) {
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === null || v === undefined)
+      continue;
+    if (typeof v === "string") {
+      out[k] = v;
+    } else if (typeof v === "boolean") {
+      out[k] = v ? "true" : "false";
+    } else if (typeof v === "number") {
+      out[k] = String(v);
+    } else if (Array.isArray(v)) {
+      out[k] = v.map(String).join(",");
+    }
+  }
+  return out;
+}
 function startAgentChannel() {
   const sessionId = resolveSessionId();
   if (!sessionId) {
@@ -25070,7 +25084,7 @@ function startAgentChannel() {
         method: "notifications/claude/channel",
         params: {
           content: notif.content,
-          meta: notif.meta
+          meta: sanitizeChannelMeta(notif.meta)
         }
       });
     });
@@ -25094,7 +25108,7 @@ process.stdin.on("close", () => {
     agentChannel.stop();
 });
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.7 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.29.8 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
