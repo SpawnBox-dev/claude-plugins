@@ -31,6 +31,9 @@ import { handleUpdateSessionTask } from "./tools/session_task";
 import { handleHookEvent, buildHookEnvelope, type HookEvent } from "./tools/hook_event";
 import { AgentChannel } from "./engine/agent_channel";
 import type { SessionEntry } from "./engine/agent_channel_state";
+import { PermissionRelay } from "./engine/permission_relay";
+import { appendSystemEvent } from "./engine/system_events";
+import { handleRespondToPermission, RespondToPermissionInputSchema } from "./tools/permission";
 import { homedir } from "node:os";
 
 // ── Session ID fallback ─────────────────────────────────────────────────
@@ -276,21 +279,35 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
 
+// 0.30.17+: opt-in PA-gated tool permission routing. When this env var is
+// set, the orchestrator MCP declares the `claude/channel/permission`
+// capability and routes inbound permission_request notifications through
+// the agent-channel to PA for authorization (work_item 32250d62).
+// Default-off: existing single-agent and multi-agent users without PA
+// are unaffected.
+const PERMISSION_RELAY_ENABLED =
+  process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
+
+const experimentalCapabilities: Record<string, object> = {
+  // Real-time channel notifications. Used by the agent-channel
+  // subsystem (mcp/engine/agent_channel.ts) to deliver inline
+  // <channel ...>content</channel> events for cross-session chat.
+  // Same primitive the official Discord plugin uses.
+  "claude/channel": {},
+};
+if (PERMISSION_RELAY_ENABLED) {
+  experimentalCapabilities["claude/channel/permission"] = {};
+}
+
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.16",
+    version: "0.30.17",
   },
   {
     capabilities: {
       tools: {},
-      experimental: {
-        // Real-time channel notifications. Used by the agent-channel
-        // subsystem (mcp/engine/agent_channel.ts) to deliver inline
-        // <channel ...>content</channel> events for cross-session chat.
-        // Same primitive the official Discord plugin uses.
-        "claude/channel": {},
-      },
+      experimental: experimentalCapabilities,
     },
     instructions: [
       "Cross-session events arrive as <channel source=\"plugin:orchestrator:core\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)",
@@ -400,7 +417,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.16** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.17** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1836,6 +1853,19 @@ function cascadeResolution(db: import("bun:sqlite").Database, noteId: string, ti
 let agentChannel: AgentChannel | null = null;
 
 /**
+ * SA's PermissionRelay instance. Created when:
+ *   (a) the PA-permission-relay env var is enabled, AND
+ *   (b) this MCP serves a subordinate session (PAs don't receive
+ *       permission_requests from CC about themselves).
+ *
+ * The agent-channel filewatcher routes inbound permission_verdict events
+ * (from PA, on the system_events bus) to this relay via resolveVerdict.
+ * The MCP notification handler (registered conditionally below) calls
+ * registerPending to block until the verdict arrives.
+ */
+let permissionRelay: PermissionRelay | null = null;
+
+/**
  * Convert a rich ChannelNotification.meta into the on-wire `Record<string, string>`
  * the channels contract requires. Drops null/undefined entries; coerces booleans
  * to "true"/"false", numbers to their string form, and arrays to comma-joined
@@ -1929,6 +1959,19 @@ function startAgentChannel(): void {
 
   const stateDir = join(projectDir, ".orchestrator-state", "agent-channel");
 
+  // SA-side permission relay: created only when env opt-in AND this is a
+  // subordinate. PAs don't need a relay (no inbound permission_requests
+  // about themselves) - PA's MCP just routes verdicts back via the bus.
+  if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
+    permissionRelay = new PermissionRelay(getProjectDb(), {
+      selfSessionId: sessionId,
+      defaultTimeoutMs: 30_000,
+    });
+    process.stderr.write(
+      `permission-relay: enabled for subordinate session ${sessionId}\n`,
+    );
+  }
+
   try {
     agentChannel = new AgentChannel(
       stateDir,
@@ -1973,6 +2016,10 @@ function startAgentChannel(): void {
             );
           });
       },
+      // Inject the permission relay so the filewatcher can route inbound
+      // verdict events to resolveVerdict (when this is a subordinate
+      // session with the env opt-in). Undefined for PA / opt-out.
+      permissionRelay ?? undefined,
     );
     agentChannel.start();
     process.stderr.write(
@@ -1980,6 +2027,182 @@ function startAgentChannel(): void {
         `id8=${self.id8} name=${name} state_dir=${stateDir} ` +
         `projects_hash_dir=${projectsHashDir}\n`,
     );
+
+    // ── PA-gated permission routing (Phase 2b, work_item 32250d62) ──────
+    //
+    // When PERMISSION_RELAY_ENABLED:
+    // - Subordinate sessions register a notification handler for inbound
+    //   permission_request from CC. The handler appends a
+    //   permission_request_pending event to the system_events bus
+    //   (addressed to PA's session) and awaits the relay Promise, then
+    //   emits the verdict back to CC via notifications/claude/channel/permission.
+    // - Prime sessions register the respond_to_permission tool. The tool's
+    //   emitChannelEvent callback appends a permission_verdict event to
+    //   the system_events bus (addressed to the originating SA). NOTE:
+    //   This MUST write to the bus (not to a local MCP notification) so
+    //   the verdict can traverse to the SA's MCP process.
+    if (PERMISSION_RELAY_ENABLED) {
+      if (role === "subordinate" && permissionRelay) {
+        const relay = permissionRelay;
+        server.server.setNotificationHandler(
+          z.object({
+            method: z.literal("notifications/claude/channel/permission_request"),
+            params: z.object({
+              request_id: z.string(),
+              tool_name: z.string(),
+              description: z.string(),
+              input_preview: z.string(),
+            }),
+          }) as any,
+          async ({ params }: { params: { request_id: string; tool_name: string; description: string; input_preview: string } }): Promise<void> => {
+            // 1. Resolve PA's session_id from sessions.json so we can target
+            //    the bus event correctly. Read it fresh each request - PA
+            //    may have started after this SA.
+            let paSessionId: string | null = null;
+            try {
+              const sessionsFile = join(stateDir, "sessions.json");
+              if (existsSync(sessionsFile)) {
+                const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
+                const entries: Array<{ session_id?: string; role?: string }> =
+                  Array.isArray(data) ? data : data?.sessions ?? [];
+                paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
+              }
+            } catch {
+              // Fall through to terminal prompt
+            }
+
+            // 2. If no PA available, fail-safe by deferring to human (CC
+            //    will fall back to terminal prompt). Don't block on a
+            //    non-existent PA.
+            if (!paSessionId) {
+              process.stderr.write(
+                `permission-relay: no PA active; deferring request ${params.request_id} to human\n`,
+              );
+              return;
+            }
+
+            // 3. Register pending + append to bus + await verdict.
+            const pending = relay.registerPending({
+              request_id: params.request_id,
+              source_session: sessionId,
+              tool_name: params.tool_name,
+              description: params.description,
+              input_preview: params.input_preview,
+            });
+            try {
+              appendSystemEvent(stateDir, {
+                event_type: "permission_request_pending",
+                from_session: sessionId,
+                to_session: paSessionId,
+                ts: new Date().toISOString(),
+                request_id: params.request_id,
+                tool_name: params.tool_name,
+                description: params.description,
+                input_preview: params.input_preview,
+              });
+            } catch (err) {
+              process.stderr.write(
+                `permission-relay: bus append failed for ${params.request_id}: ${
+                  err instanceof Error ? err.message : String(err)
+                }\n`,
+              );
+              // Fall through - the relay still has a Promise + timeout.
+            }
+
+            const verdict = await pending;
+
+            // 4. Emit the verdict back to CC. The protocol expects
+            //    notifications/claude/channel/permission with the verdict.
+            await server.server
+              .notification({
+                method: "notifications/claude/channel/permission",
+                params: {
+                  request_id: params.request_id,
+                  behavior: verdict.verdict === "allow" ? "allow" : "deny",
+                  ...(verdict.pa_reason ? { message: verdict.pa_reason } : {}),
+                },
+              })
+              .catch((err) => {
+                process.stderr.write(
+                  `permission-relay: verdict emit failed for ${params.request_id}: ${
+                    err instanceof Error ? err.message : String(err)
+                  }\n`,
+                );
+              });
+          },
+        );
+        process.stderr.write(
+          `permission-relay: SA notification handler registered for session ${sessionId}\n`,
+        );
+      }
+
+      if (role === "prime") {
+        // PA-side tool: respond_to_permission. The tool's emitChannelEvent
+        // callback writes a permission_verdict event to the system_events
+        // bus addressed to the originating SA (looked up from the audit
+        // table or the request_id's bus entry).
+        server.tool(
+          "respond_to_permission",
+          "PA-only: respond to a routed permission_request_pending channel event. " +
+            "Pass the request_id from the event, verdict (allow/deny/defer_to_human), " +
+            "and a reason (required for non-allow verdicts; audited).",
+          RespondToPermissionInputSchema.shape,
+          async (input) => {
+            // Look up originating SA from the permission_audit table (the
+            // bus event from the SA already wrote a row when registerPending
+            // fired, then this MCP's filewatcher saw the event but doesn't
+            // own a relay - so we read the audit directly).
+            const row = getProjectDb()
+              .query("SELECT source_session FROM permission_audit WHERE request_id = ?")
+              .get(input.request_id) as { source_session: string } | undefined;
+            const toSession = row?.source_session;
+            if (!toSession) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `respond_to_permission: no audit row for request_id=${input.request_id}. ` +
+                      `Cannot route verdict - the originating SA's MCP must have written the audit ` +
+                      `row first. Possible causes: request_id wrong, SA's MCP died, or the request ` +
+                      `was already resolved.`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+
+            const result = await handleRespondToPermission(input, {
+              paSessionId: sessionId,
+              emitChannelEvent: (event) => {
+                // CRITICAL (per code-review of Phase 2a): this callback
+                // MUST write to the system_events bus, not emit a local
+                // MCP notification. The verdict needs to traverse to the
+                // SA's MCP process via the file-based bus; an in-process
+                // notification stays local to PA.
+                appendSystemEvent(stateDir, {
+                  event_type: event.event_type,
+                  from_session: sessionId,
+                  to_session: toSession,
+                  ts: new Date().toISOString(),
+                  request_id: event.request_id,
+                  verdict: event.verdict,
+                  pa_session: event.pa_session,
+                  ...(event.pa_reason ? { pa_reason: event.pa_reason } : {}),
+                });
+              },
+            });
+
+            return {
+              content: [{ type: "text" as const, text: result.message }],
+              ...(result.emitted ? {} : { isError: true }),
+            };
+          },
+        );
+        process.stderr.write(
+          `permission-relay: PA tool 'respond_to_permission' registered for session ${sessionId}\n`,
+        );
+      }
+    }
   } catch (err) {
     process.stderr.write(
       `agent-channel: FAILED TO START - ${err instanceof Error ? err.message : String(err)}\n` +
@@ -2060,7 +2283,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.16 ` +
+    `[orchestrator] MCP server starting - version=0.30.17 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

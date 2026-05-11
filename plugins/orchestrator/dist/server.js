@@ -23531,9 +23531,19 @@ function writeAllOffsets(stateDir, receiverId8, offsets) {
 
 // mcp/engine/system_events.ts
 import { existsSync as existsSync5, readFileSync as readFileSync3, statSync } from "fs";
+import { appendFileSync, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3 } from "fs";
 import { dirname as dirname2, join as join4 } from "path";
 function systemEventsPath(stateDir) {
   return join4(stateDir, "system_events.jsonl");
+}
+function appendSystemEvent(stateDir, event) {
+  const path2 = systemEventsPath(stateDir);
+  const dir = dirname2(path2);
+  if (!existsSync5(dir)) {
+    mkdirSync3(dir, { recursive: true });
+  }
+  appendFileSync(path2, JSON.stringify(event) + `
+`);
 }
 function readNewSystemEvents(stateDir, lastOffset) {
   const path2 = systemEventsPath(stateDir);
@@ -23852,6 +23862,131 @@ class AgentChannel {
   }
 }
 
+// mcp/engine/permission_relay.ts
+class PermissionRelay {
+  db;
+  options;
+  pending = new Map;
+  defaultTimeoutMs;
+  constructor(db, options) {
+    this.db = db;
+    this.options = options;
+    this.defaultTimeoutMs = options.defaultTimeoutMs ?? 30000;
+  }
+  registerPending(input) {
+    const existing = this.pending.get(input.request_id);
+    if (existing && !existing.resolved) {
+      return new Promise((resolve) => {
+        const originalResolve = existing.resolve;
+        existing.resolve = (v) => {
+          originalResolve(v);
+          resolve(v);
+        };
+      });
+    }
+    this.db.run(`INSERT OR IGNORE INTO permission_audit
+        (request_id, source_session, requested_at, tool_name, description, input_preview)
+       VALUES (?, ?, ?, ?, ?, ?)`, [
+      input.request_id,
+      input.source_session,
+      new Date().toISOString(),
+      input.tool_name,
+      input.description,
+      input.input_preview
+    ]);
+    return new Promise((resolve) => {
+      const entry = {
+        source_session: input.source_session,
+        resolve,
+        timer: null,
+        resolved: false
+      };
+      entry.timer = setTimeout(() => {
+        if (entry.resolved)
+          return;
+        entry.resolved = true;
+        this.db.run(`UPDATE permission_audit
+             SET verdict = ?, resolved_at = ?, resolved_by = ?
+           WHERE request_id = ?`, ["defer_to_human", new Date().toISOString(), "timeout", input.request_id]);
+        this.pending.delete(input.request_id);
+        entry.resolve({ verdict: "defer_to_human", pa_session: "<timeout>" });
+      }, this.defaultTimeoutMs);
+      this.pending.set(input.request_id, entry);
+    });
+  }
+  resolveVerdict(request_id, input) {
+    const entry = this.pending.get(request_id);
+    if (!entry || entry.resolved)
+      return;
+    entry.resolved = true;
+    if (entry.timer)
+      clearTimeout(entry.timer);
+    this.db.run(`UPDATE permission_audit
+         SET verdict = ?, pa_session = ?, pa_reason = ?, resolved_at = ?, resolved_by = ?
+       WHERE request_id = ?`, [
+      input.verdict,
+      input.pa_session,
+      input.pa_reason ?? null,
+      new Date().toISOString(),
+      "pa",
+      request_id
+    ]);
+    this.pending.delete(request_id);
+    entry.resolve({
+      verdict: input.verdict,
+      pa_session: input.pa_session,
+      pa_reason: input.pa_reason
+    });
+  }
+  listSourceFor(request_id) {
+    const entry = this.pending.get(request_id);
+    if (entry)
+      return entry.source_session;
+    const row = this.db.query("SELECT source_session FROM permission_audit WHERE request_id = ?").get(request_id);
+    return row?.source_session ?? null;
+  }
+  pendingCount() {
+    return this.pending.size;
+  }
+  cleanup() {
+    for (const entry of this.pending.values()) {
+      if (entry.timer)
+        clearTimeout(entry.timer);
+      if (!entry.resolved) {
+        entry.resolved = true;
+        entry.resolve({ verdict: "defer_to_human", pa_session: "<shutdown>" });
+      }
+    }
+    this.pending.clear();
+  }
+}
+
+// mcp/tools/permission.ts
+var RespondToPermissionInputSchema = exports_external.object({
+  request_id: exports_external.string().describe("The request_id from the permission_request_pending channel event"),
+  verdict: exports_external.enum(["allow", "deny", "defer_to_human"]).describe("PA's verdict on the request"),
+  reason: exports_external.string().optional().describe("PA's stated reasoning. Required for non-allow verdicts; encouraged on high-risk allows. Recorded in the permission_audit table.")
+});
+async function handleRespondToPermission(input, ctx) {
+  if (input.verdict !== "allow" && (!input.reason || input.reason.trim().length === 0)) {
+    return {
+      emitted: false,
+      message: `Refused: verdict='${input.verdict}' requires a non-empty reason (audit + later comprehension).`
+    };
+  }
+  ctx.emitChannelEvent({
+    event_type: "permission_verdict",
+    request_id: input.request_id,
+    verdict: input.verdict,
+    pa_session: ctx.paSessionId,
+    pa_reason: input.reason
+  });
+  return {
+    emitted: true,
+    message: `Verdict '${input.verdict}' emitted for request ${input.request_id}.`
+  };
+}
+
 // mcp/server.ts
 import { homedir as homedir2 } from "os";
 var cachedFallbackSessionId = null;
@@ -24007,15 +24142,20 @@ async function startSidecar() {
   sidecarProcess = result.proc;
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
+var PERMISSION_RELAY_ENABLED = process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
+var experimentalCapabilities = {
+  "claude/channel": {}
+};
+if (PERMISSION_RELAY_ENABLED) {
+  experimentalCapabilities["claude/channel/permission"] = {};
+}
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.16"
+  version: "0.30.17"
 }, {
   capabilities: {
     tools: {},
-    experimental: {
-      "claude/channel": {}
-    }
+    experimental: experimentalCapabilities
   },
   instructions: [
     `Cross-session events arrive as <channel source="plugin:orchestrator:core" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)`,
@@ -24089,7 +24229,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.16** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.17** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25249,6 +25389,7 @@ function cascadeResolution(db, noteId, timestamp) {
   return results;
 }
 var agentChannel = null;
+var permissionRelay = null;
 function sanitizeChannelMeta(raw) {
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
@@ -25294,6 +25435,14 @@ function startAgentChannel() {
     current_task: null
   };
   const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
+  if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
+    permissionRelay = new PermissionRelay(getProjectDb(), {
+      selfSessionId: sessionId,
+      defaultTimeoutMs: 30000
+    });
+    process.stderr.write(`permission-relay: enabled for subordinate session ${sessionId}
+`);
+  }
   try {
     agentChannel = new AgentChannel(stateDir, projectsHashDir, self, (notif) => {
       server.server.notification({
@@ -25306,10 +25455,113 @@ function startAgentChannel() {
         process.stderr.write(`agent-channel: notification failed (event suppressed): ${err instanceof Error ? err.message : String(err)}
 `);
       });
-    });
+    }, permissionRelay ?? undefined);
     agentChannel.start();
     process.stderr.write(`agent-channel: started as ${role} session_id=${sessionId} id8=${self.id8} name=${name} state_dir=${stateDir} projects_hash_dir=${projectsHashDir}
 `);
+    if (PERMISSION_RELAY_ENABLED) {
+      if (role === "subordinate" && permissionRelay) {
+        const relay = permissionRelay;
+        server.server.setNotificationHandler(exports_external.object({
+          method: exports_external.literal("notifications/claude/channel/permission_request"),
+          params: exports_external.object({
+            request_id: exports_external.string(),
+            tool_name: exports_external.string(),
+            description: exports_external.string(),
+            input_preview: exports_external.string()
+          })
+        }), async ({ params }) => {
+          let paSessionId = null;
+          try {
+            const sessionsFile = join6(stateDir, "sessions.json");
+            if (existsSync7(sessionsFile)) {
+              const data = JSON.parse(readFileSync5(sessionsFile, "utf8"));
+              const entries = Array.isArray(data) ? data : data?.sessions ?? [];
+              paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
+            }
+          } catch {}
+          if (!paSessionId) {
+            process.stderr.write(`permission-relay: no PA active; deferring request ${params.request_id} to human
+`);
+            return;
+          }
+          const pending = relay.registerPending({
+            request_id: params.request_id,
+            source_session: sessionId,
+            tool_name: params.tool_name,
+            description: params.description,
+            input_preview: params.input_preview
+          });
+          try {
+            appendSystemEvent(stateDir, {
+              event_type: "permission_request_pending",
+              from_session: sessionId,
+              to_session: paSessionId,
+              ts: new Date().toISOString(),
+              request_id: params.request_id,
+              tool_name: params.tool_name,
+              description: params.description,
+              input_preview: params.input_preview
+            });
+          } catch (err) {
+            process.stderr.write(`permission-relay: bus append failed for ${params.request_id}: ${err instanceof Error ? err.message : String(err)}
+`);
+          }
+          const verdict = await pending;
+          await server.server.notification({
+            method: "notifications/claude/channel/permission",
+            params: {
+              request_id: params.request_id,
+              behavior: verdict.verdict === "allow" ? "allow" : "deny",
+              ...verdict.pa_reason ? { message: verdict.pa_reason } : {}
+            }
+          }).catch((err) => {
+            process.stderr.write(`permission-relay: verdict emit failed for ${params.request_id}: ${err instanceof Error ? err.message : String(err)}
+`);
+          });
+        });
+        process.stderr.write(`permission-relay: SA notification handler registered for session ${sessionId}
+`);
+      }
+      if (role === "prime") {
+        server.tool("respond_to_permission", "PA-only: respond to a routed permission_request_pending channel event. Pass the request_id from the event, verdict (allow/deny/defer_to_human), and a reason (required for non-allow verdicts; audited).", RespondToPermissionInputSchema.shape, async (input) => {
+          const row = getProjectDb().query("SELECT source_session FROM permission_audit WHERE request_id = ?").get(input.request_id);
+          const toSession = row?.source_session;
+          if (!toSession) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `respond_to_permission: no audit row for request_id=${input.request_id}. Cannot route verdict - the originating SA's MCP must have written the audit row first. Possible causes: request_id wrong, SA's MCP died, or the request was already resolved.`
+                }
+              ],
+              isError: true
+            };
+          }
+          const result = await handleRespondToPermission(input, {
+            paSessionId: sessionId,
+            emitChannelEvent: (event) => {
+              appendSystemEvent(stateDir, {
+                event_type: event.event_type,
+                from_session: sessionId,
+                to_session: toSession,
+                ts: new Date().toISOString(),
+                request_id: event.request_id,
+                verdict: event.verdict,
+                pa_session: event.pa_session,
+                ...event.pa_reason ? { pa_reason: event.pa_reason } : {}
+              });
+            }
+          });
+          return {
+            content: [{ type: "text", text: result.message }],
+            ...result.emitted ? {} : { isError: true }
+          };
+        });
+        process.stderr.write(`permission-relay: PA tool 'respond_to_permission' registered for session ${sessionId}
+`);
+      }
+    }
   } catch (err) {
     process.stderr.write(`agent-channel: FAILED TO START - ${err instanceof Error ? err.message : String(err)}
   state_dir=${stateDir}
@@ -25354,7 +25606,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.16 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.17 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

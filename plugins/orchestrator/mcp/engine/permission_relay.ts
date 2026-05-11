@@ -86,8 +86,29 @@ export class PermissionRelay {
    * audit row, sets up the timeout, and returns a Promise that the
    * orchestrator MCP's notification handler can `await` before emitting
    * its `notifications/claude/channel/permission` response back to CC.
+   *
+   * If the same request_id is registered twice (e.g. CC retries on
+   * transient failure), the existing pending Promise is returned -
+   * both callers will see the same verdict when it lands. This
+   * preserves first-Promise's resolve closure (which would otherwise
+   * be orphaned on map.set overwrite) and keeps the audit row
+   * consistent.
    */
   registerPending(input: PendingRequestInput): Promise<ResolvedVerdict> {
+    // Collision handling: if request_id already pending, build a Promise
+    // that mirrors the existing entry's resolve. Both callers settle
+    // together when the verdict lands.
+    const existing = this.pending.get(input.request_id);
+    if (existing && !existing.resolved) {
+      return new Promise<ResolvedVerdict>((resolve) => {
+        const originalResolve = existing.resolve;
+        existing.resolve = (v) => {
+          originalResolve(v);
+          resolve(v);
+        };
+      });
+    }
+
     this.db.run(
       `INSERT OR IGNORE INTO permission_audit
         (request_id, source_session, requested_at, tool_name, description, input_preview)
@@ -122,7 +143,7 @@ export class PermissionRelay {
           ["defer_to_human", new Date().toISOString(), "timeout", input.request_id],
         );
         this.pending.delete(input.request_id);
-        resolve({ verdict: "defer_to_human", pa_session: "<timeout>" });
+        entry.resolve({ verdict: "defer_to_human", pa_session: "<timeout>" });
       }, this.defaultTimeoutMs);
       this.pending.set(input.request_id, entry);
     });
@@ -186,12 +207,22 @@ export class PermissionRelay {
   }
 
   /**
-   * Shutdown helper: clear all pending timers without resolving (used on
-   * MCP teardown). Callers should NOT rely on `await` returning after this.
+   * Shutdown helper: settle all in-flight requests with a synthetic
+   * shutdown verdict before clearing the map. Without settling, the
+   * caller's `await registerPending(...)` would hang forever and the
+   * Node.js event loop would stay alive (preventing clean MCP exit).
+   *
+   * The shutdown verdict is `defer_to_human` so the SA's notification
+   * handler returns a sensible response to CC (which CC then routes to
+   * the terminal prompt as a fallback).
    */
   cleanup(): void {
     for (const entry of this.pending.values()) {
       if (entry.timer) clearTimeout(entry.timer);
+      if (!entry.resolved) {
+        entry.resolved = true;
+        entry.resolve({ verdict: "defer_to_human", pa_session: "<shutdown>" });
+      }
     }
     this.pending.clear();
   }

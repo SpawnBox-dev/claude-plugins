@@ -115,6 +115,62 @@ describe("PermissionRelay", () => {
     expect(row.verdict).toBe("allow"); // audit row only records the first
   });
 
+  test("cleanup() settles in-flight Promises with shutdown verdict (no leak)", async () => {
+    const p1 = relay.registerPending({
+      request_id: "shut-1",
+      source_session: "self-sa",
+      tool_name: "Bash",
+      description: "x",
+      input_preview: "x",
+    });
+    const p2 = relay.registerPending({
+      request_id: "shut-2",
+      source_session: "self-sa",
+      tool_name: "Edit",
+      description: "y",
+      input_preview: "y",
+    });
+    relay.cleanup();
+    const v1 = await p1;
+    const v2 = await p2;
+    expect(v1.verdict).toBe("defer_to_human");
+    expect(v1.pa_session).toBe("<shutdown>");
+    expect(v2.verdict).toBe("defer_to_human");
+    expect(v2.pa_session).toBe("<shutdown>");
+    expect(relay.pendingCount()).toBe(0);
+  });
+
+  test("duplicate request_id registration: both callers receive the same verdict", async () => {
+    const p1 = relay.registerPending({
+      request_id: "dup-1",
+      source_session: "self-sa",
+      tool_name: "Bash",
+      description: "first",
+      input_preview: "first",
+    });
+    const p2 = relay.registerPending({
+      request_id: "dup-1",
+      source_session: "self-sa",
+      tool_name: "Bash",
+      description: "retry",
+      input_preview: "retry",
+    });
+    relay.resolveVerdict("dup-1", {
+      verdict: "allow",
+      pa_session: "pa",
+      pa_reason: "ok",
+    });
+    const [v1, v2] = await Promise.all([p1, p2]);
+    expect(v1.verdict).toBe("allow");
+    expect(v2.verdict).toBe("allow");
+    expect(v1.pa_reason).toBe("ok");
+    // Audit row reflects only first INSERT (subsequent inserts are
+    // IGNORE'd, so description='first' from the first call).
+    const row = db.query("SELECT * FROM permission_audit WHERE request_id = ?").get("dup-1") as any;
+    expect(row.description).toBe("first");
+    expect(row.verdict).toBe("allow");
+  });
+
   test("verdict types validated: only allow|deny|defer_to_human accepted", () => {
     // Spec contract: callers must pass valid verdict strings. Engine
     // doesn't try to validate beyond the type system - this test
