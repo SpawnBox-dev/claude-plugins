@@ -1,5 +1,6 @@
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -46,13 +47,62 @@ import { homedir } from "node:os";
 // Resolution order:
 //   1. Explicit param (best)
 //   2. CLAUDE_SESSION_ID env var (if Claude Code ever sets it on MCP spawn)
-//   3. $CLAUDE_PROJECT_DIR/.orchestrator-state/active-session (hook-written)
+//   3. Per-claude-PID active-session-<pid> file (0.30.19+, race-free)
+//   4. $CLAUDE_PROJECT_DIR/.orchestrator-state/active-session (legacy
+//      single-file, last-writer-wins across concurrent siblings)
 //
 // Cache the first successful read for this MCP server's lifetime because the
 // server is per-session by stdio design - its session_id cannot change.
-// Multi-session users should still pass session_id explicitly because the
-// fallback file is last-writer-wins across sibling sessions.
+//
+// 0.30.19+ race fix (work_item ea1bec63): added the per-PID file resolution
+// path. Walk the process tree to find the claude.exe PID in our ancestry,
+// then read active-session-<claude_pid>. The hook writes both files; new
+// MCPs prefer per-PID, old MCPs use legacy. This eliminates the impostor-
+// MCP race where N concurrent claude sessions stomped each other's session_id
+// in the shared active-session file.
 let cachedFallbackSessionId: string | null = null;
+
+/**
+ * Find the PID of the claude.exe (or `claude` on unix) process in this
+ * MCP child's ancestry. Returns null if walking fails or claude isn't
+ * found in the chain within a small bound.
+ *
+ * Windows: WMIC to walk process tree. Unix: read /proc/<pid>/stat or
+ * /proc/<pid>/status for parent PID + comm.
+ */
+function findClaudeAncestorPid(): number | null {
+  const start = process.pid;
+  let pid: number | null = start;
+  for (let depth = 0; depth < 8 && pid; depth++) {
+    let name = "";
+    let ppid = 0;
+    try {
+      if (process.platform === "win32") {
+        const out = execSync(
+          `wmic process where processid=${pid} get name,parentprocessid /value`,
+          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        );
+        name = (out.match(/Name=([^\r\n]+)/)?.[1] ?? "").trim().toLowerCase();
+        ppid = parseInt(out.match(/ParentProcessId=(\d+)/)?.[1] ?? "0", 10);
+      } else {
+        // Linux: /proc/<pid>/stat field 2 is comm (in parens), field 4 is ppid
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const rparen = stat.lastIndexOf(")");
+        if (rparen < 0) break;
+        name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+        const fields = stat.slice(rparen + 2).split(/\s+/);
+        ppid = parseInt(fields[1] ?? "0", 10);
+      }
+    } catch {
+      break;
+    }
+    // Match claude/claude.exe; tolerate trailing whitespace from wmic.
+    if (name === "claude.exe" || name === "claude") return pid;
+    if (!ppid || ppid === pid) break;
+    pid = ppid;
+  }
+  return null;
+}
 
 function getFallbackSessionId(): string | undefined {
   if (cachedFallbackSessionId) return cachedFallbackSessionId;
@@ -70,14 +120,47 @@ function getFallbackSessionId(): string | undefined {
     process.env.ORCHESTRATOR_PROJECT_ROOT ||
     process.env.CLAUDE_PROJECT_DIR ||
     process.cwd();
+  const stateDir = join(projectDir, ".orchestrator-state");
 
-  const file = join(projectDir, ".orchestrator-state", "active-session");
+  // 0.30.19+ race-free path: read per-claude-PID file. Each claude
+  // session writes a file keyed on its own PID, so concurrent siblings
+  // never collide.
+  const claudePid = findClaudeAncestorPid();
+  if (claudePid) {
+    const perPidFile = join(stateDir, `active-session-${claudePid}`);
+    try {
+      if (existsSync(perPidFile)) {
+        const raw = readFileSync(perPidFile, "utf8").trim();
+        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+          cachedFallbackSessionId = raw;
+          process.stderr.write(
+            `[orchestrator] resolved session_id from per-PID file ` +
+              `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...\n`,
+          );
+          return raw;
+        }
+      }
+    } catch {
+      // Non-fatal - fall through to legacy single-file
+    }
+  }
+
+  // Legacy single-file fallback (racy under concurrent siblings but
+  // works for single-session users and pre-0.30.19 hooks).
+  const file = join(stateDir, "active-session");
   try {
     if (existsSync(file)) {
       const raw = readFileSync(file, "utf8").trim();
       // Sanitize: same rule as the bash helper. Defence in depth.
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
+        if (claudePid) {
+          process.stderr.write(
+            `[orchestrator] resolved session_id from LEGACY active-session file ` +
+              `(claude_pid=${claudePid} but per-PID file missing): ${raw.slice(0, 8)}... ` +
+              `(if you have multiple concurrent claude sessions, this read is racy)\n`,
+          );
+        }
         return raw;
       }
     }
@@ -302,7 +385,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.18",
+    version: "0.30.19",
   },
   {
     capabilities: {
@@ -417,7 +500,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.18** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.19** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -2311,7 +2394,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.18 ` +
+    `[orchestrator] MCP server starting - version=0.30.19 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

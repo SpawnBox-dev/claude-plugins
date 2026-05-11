@@ -27,9 +27,28 @@ fi
 
 # Persist to fallback file - the MCP server reads this when an agent forgets
 # to pass session_id. Path matches getFallbackSessionId in mcp/server.ts.
+#
+# 0.30.19+: write to BOTH a per-PPID file AND the legacy single-file
+# location. The per-PPID file is the race-free path: this hook's parent
+# is claude.exe (the session-owning process), and the MCP child also
+# parents to that claude.exe - so both processes agree on the PID and
+# read/write the same file without contention from sibling claude
+# sessions. The legacy file is kept for backwards compat with old MCPs.
+#
+# Why race-free: each claude session has a unique PID. Per-PPID file
+# names (active-session-<pid>) are per-session, so concurrent siblings
+# don't collide. The single-file legacy path was racy because all
+# sessions wrote to the same name and last-writer-wins.
 if [ -n "$SID" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   STATE_DIR="$CLAUDE_PROJECT_DIR/.orchestrator-state"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
+  # Per-PPID file (race-free; PPID = claude.exe's PID since this hook
+  # runs as a child of claude). MCP reads this preferentially.
+  if [ -n "${PPID:-}" ]; then
+    printf '%s' "$SID" > "$STATE_DIR/active-session-$PPID" 2>/dev/null || true
+  fi
+  # Legacy single-file (preserved for pre-0.30.19 MCPs and single-
+  # session users).
   printf '%s' "$SID" > "$STATE_DIR/active-session" 2>/dev/null || true
   if [ ! -f "$STATE_DIR/.gitignore" ]; then
     printf '*\n' > "$STATE_DIR/.gitignore" 2>/dev/null || true

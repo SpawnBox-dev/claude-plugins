@@ -6520,6 +6520,7 @@ var require_dist = __commonJS((exports, module) => {
 // mcp/server.ts
 import { resolve, join as join6 } from "path";
 import { existsSync as existsSync7, readFileSync as readFileSync5 } from "fs";
+import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -23990,6 +23991,37 @@ async function handleRespondToPermission(input, ctx) {
 // mcp/server.ts
 import { homedir as homedir2 } from "os";
 var cachedFallbackSessionId = null;
+function findClaudeAncestorPid() {
+  const start = process.pid;
+  let pid = start;
+  for (let depth = 0;depth < 8 && pid; depth++) {
+    let name = "";
+    let ppid = 0;
+    try {
+      if (process.platform === "win32") {
+        const out = execSync(`wmic process where processid=${pid} get name,parentprocessid /value`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        name = (out.match(/Name=([^\r\n]+)/)?.[1] ?? "").trim().toLowerCase();
+        ppid = parseInt(out.match(/ParentProcessId=(\d+)/)?.[1] ?? "0", 10);
+      } else {
+        const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+        const rparen = stat.lastIndexOf(")");
+        if (rparen < 0)
+          break;
+        name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+        const fields = stat.slice(rparen + 2).split(/\s+/);
+        ppid = parseInt(fields[1] ?? "0", 10);
+      }
+    } catch {
+      break;
+    }
+    if (name === "claude.exe" || name === "claude")
+      return pid;
+    if (!ppid || ppid === pid)
+      break;
+    pid = ppid;
+  }
+  return null;
+}
 function getFallbackSessionId() {
   if (cachedFallbackSessionId)
     return cachedFallbackSessionId;
@@ -23999,12 +24031,32 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const file = join6(projectDir, ".orchestrator-state", "active-session");
+  const stateDir = join6(projectDir, ".orchestrator-state");
+  const claudePid = findClaudeAncestorPid();
+  if (claudePid) {
+    const perPidFile = join6(stateDir, `active-session-${claudePid}`);
+    try {
+      if (existsSync7(perPidFile)) {
+        const raw = readFileSync5(perPidFile, "utf8").trim();
+        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+          cachedFallbackSessionId = raw;
+          process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
+`);
+          return raw;
+        }
+      }
+    } catch {}
+  }
+  const file = join6(stateDir, "active-session");
   try {
     if (existsSync7(file)) {
       const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
+        if (claudePid) {
+          process.stderr.write(`[orchestrator] resolved session_id from LEGACY active-session file ` + `(claude_pid=${claudePid} but per-PID file missing): ${raw.slice(0, 8)}... ` + `(if you have multiple concurrent claude sessions, this read is racy)
+`);
+        }
         return raw;
       }
     }
@@ -24151,7 +24203,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.18"
+  version: "0.30.19"
 }, {
   capabilities: {
     tools: {},
@@ -24229,7 +24281,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.18** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.19** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25619,7 +25671,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.18 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.19 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
