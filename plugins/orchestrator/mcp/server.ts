@@ -22,6 +22,7 @@ import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
+import { resolveNoteId } from "./tools/id_resolver";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs } from "./utils";
 import { createAutoLinks } from "./engine/linker";
@@ -385,7 +386,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.20",
+    version: "0.30.21",
   },
   {
     capabilities: {
@@ -500,7 +501,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.20** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.21** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -757,7 +758,7 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further.",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
@@ -1009,17 +1010,28 @@ server.tool(
     if (session_id) registerSessionOnce(session_id);
     const globalDb = getGlobalDb();
 
+    // id8-prefix resolution: try project first, fall back to global.
+    let resolved = resolveNoteId(projectDb, id);
     let db = projectDb;
-    let row = db
+    if (!resolved.id && !resolved.ambiguous) {
+      resolved = resolveNoteId(globalDb, id);
+      db = globalDb;
+    }
+    if (resolved.ambiguous) {
+      return {
+        content: [{ type: "text" as const, text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }],
+      };
+    }
+    if (!resolved.id) {
+      return {
+        content: [{ type: "text" as const, text: `No note found with id "${id}".` }],
+      };
+    }
+    id = resolved.id;
+
+    const row = db
       .query(`SELECT id, type, content, status FROM notes WHERE id = ?`)
       .get(id) as { id: string; type: string; content: string; status: string | null } | null;
-
-    if (!row) {
-      db = globalDb;
-      row = db
-        .query(`SELECT id, type, content, status FROM notes WHERE id = ?`)
-        .get(id) as { id: string; type: string; content: string; status: string | null } | null;
-    }
 
     if (!row) {
       return {
@@ -1421,6 +1433,22 @@ server.tool(
   },
   async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
     const projectDb = getProjectDb();
+
+    // Resolve id8 prefix -> full UUID. The orchestrator surfaces note IDs as
+    // 8-char hex prefixes in hook hints, agent-channel events, and stop
+    // nudges; agents acting on those need the resolver to find the row.
+    const resolved = resolveNoteId(projectDb, id);
+    if (resolved.ambiguous) {
+      return {
+        content: [{ type: "text" as const, text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }],
+      };
+    }
+    if (!resolved.id) {
+      return {
+        content: [{ type: "text" as const, text: `No note found with id "${id}".` }],
+      };
+    }
+    id = resolved.id;
 
     const row = projectDb
       .query(`SELECT id, type, content, context, tags, status, priority, due_date FROM notes WHERE id = ?`)
@@ -2394,7 +2422,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.20 ` +
+    `[orchestrator] MCP server starting - version=0.30.21 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

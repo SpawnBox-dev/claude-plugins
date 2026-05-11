@@ -3,6 +3,7 @@ import type { Note, NoteSummary, NoteType, NoteRevision } from "../types";
 import { findRelatedNotes, findRelatedNotesHybrid } from "../engine/linker";
 import type { EmbeddingClient } from "../engine/embeddings";
 import { parseCodeRefs } from "../utils";
+import { resolveNoteId } from "./id_resolver";
 
 export interface RecallInput {
   query?: string;
@@ -262,18 +263,38 @@ export async function handleRecall(
 ): Promise<RecallResult> {
   const limit = input.limit ?? 10;
 
-  // Detail mode: fetch a specific note by ID
+  // Detail mode: fetch a specific note by ID. Accepts the full 36-char UUID
+  // or the 8-char id8 prefix that the orchestrator surfaces in hook hints,
+  // agent-channel events, and stop nudges.
   if (input.id) {
-    let note = tryFetchNote(projectDb, input.id);
+    let resolved = resolveNoteId(projectDb, input.id);
     let db = projectDb;
     let isGlobal = false;
 
-    if (!note) {
-      note = tryFetchNote(globalDb, input.id);
+    if (!resolved.id && !resolved.ambiguous) {
+      resolved = resolveNoteId(globalDb, input.id);
       db = globalDb;
       isGlobal = true;
     }
 
+    if (resolved.ambiguous) {
+      return {
+        results: [],
+        detail: null,
+        message: `ID prefix "${input.id}" is ambiguous in ${isGlobal ? "global" : "project"} DB - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.`,
+      };
+    }
+
+    if (!resolved.id) {
+      return {
+        results: [],
+        detail: null,
+        message: `No note found with id "${input.id}".`,
+      };
+    }
+
+    const fullId = resolved.id;
+    const note = tryFetchNote(db, fullId);
     if (!note) {
       return {
         results: [],
@@ -285,21 +306,21 @@ export async function handleRecall(
     note.is_global = isGlobal;
     const depth = input.depth ?? 1;
     const linkLimit = input.link_limit ?? 20;
-    const { links, totalCount } = fetchLinkedNotes(db, input.id, depth, linkLimit);
+    const { links, totalCount } = fetchLinkedNotes(db, fullId, depth, linkLimit);
 
     // R2: always surface supersede chain in detail (cheap single-hop graph query)
-    const supersede_chain = fetchSupersedeChain(db, input.id);
+    const supersede_chain = fetchSupersedeChain(db, fullId);
 
     // R2: fetch revisions only when requested
     let revisions: NoteRevision[] | undefined = undefined;
     if (input.include_history) {
-      revisions = fetchRevisions(db, input.id);
+      revisions = fetchRevisions(db, fullId);
     }
 
     return {
       results: [],
       detail: { ...note, links, revisions, supersede_chain, total_link_count: totalCount },
-      message: `Found note "${input.id}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`,
+      message: `Found note "${fullId}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`,
     };
   }
 

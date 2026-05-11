@@ -628,4 +628,70 @@ describe("R3.7: fetchSupersedeChain filters auto-linker false positives", () => 
     const supersededByIds = result.detail!.supersede_chain!.superseded_by.map((n: any) => n.id);
     expect(supersededByIds).toContain(current.note_id!);
   });
+
+  describe("id8 prefix resolution (0.30.21)", () => {
+    test("resolves an 8-char hex id8 prefix to the full note in project DB", async () => {
+      const stored = await handleRemember(projectDb, globalDb, {
+        content: "Note targeted by id8 prefix lookup",
+        type: "decision",
+      });
+      const fullId = stored.note_id!;
+      const id8 = fullId.slice(0, 8);
+
+      const result = await handleRecall(projectDb, globalDb, { id: id8 });
+      expect(result.detail).toBeTruthy();
+      expect(result.detail!.id).toBe(fullId);
+      expect(result.message).toContain(fullId);
+    });
+
+    test("resolves an id8 prefix in global DB when not in project DB", async () => {
+      const stored = await handleRemember(projectDb, globalDb, {
+        content: "Global note targeted by id8 prefix lookup",
+        type: "user_pattern",
+        scope: "global",
+      } as any);
+      const fullId = stored.note_id!;
+      const id8 = fullId.slice(0, 8);
+
+      const result = await handleRecall(projectDb, globalDb, { id: id8 });
+      expect(result.detail).toBeTruthy();
+      expect(result.detail!.id).toBe(fullId);
+      expect(result.detail!.is_global).toBe(true);
+    });
+
+    test("returns ambiguous error when id8 prefix matches multiple notes", async () => {
+      // Manually insert two notes with the same 8-char prefix to exercise the
+      // ambiguity path (real UUIDv4 collisions at id8 are vanishingly rare).
+      const ts = now();
+      const a = "deadbeef-1111-1111-1111-111111111111";
+      const b = "deadbeef-2222-2222-2222-222222222222";
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at, confidence) VALUES (?, 'insight', 'a', ?, ?, 'medium')`,
+        [a, ts, ts]
+      );
+      projectDb.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at, confidence) VALUES (?, 'insight', 'b', ?, ?, 'medium')`,
+        [b, ts, ts]
+      );
+
+      const result = await handleRecall(projectDb, globalDb, { id: "deadbeef" });
+      expect(result.detail).toBeNull();
+      expect(result.message).toMatch(/ambiguous/i);
+      expect(result.message).toContain(a);
+      expect(result.message).toContain(b);
+    });
+
+    test("preserves not-found behavior for unknown id8 prefix", async () => {
+      const result = await handleRecall(projectDb, globalDb, { id: "abcdef00" });
+      expect(result.detail).toBeNull();
+      expect(result.message).toMatch(/no note found/i);
+    });
+
+    test("non-hex 8-char string falls through as not-found (no prefix scan)", async () => {
+      // Eight chars but contains 'z' - shouldn't be treated as a UUID prefix.
+      const result = await handleRecall(projectDb, globalDb, { id: "zzzzzzzz" });
+      expect(result.detail).toBeNull();
+      expect(result.message).toMatch(/no note found/i);
+    });
+  });
 });

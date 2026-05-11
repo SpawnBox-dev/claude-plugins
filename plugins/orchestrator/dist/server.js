@@ -21383,6 +21383,23 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
   };
 }
 
+// mcp/tools/id_resolver.ts
+function resolveNoteId(db, idOrPrefix) {
+  if (!idOrPrefix)
+    return { id: null };
+  const exact = db.query("SELECT id FROM notes WHERE id = ? LIMIT 1").get(idOrPrefix);
+  if (exact)
+    return { id: exact.id };
+  if (!/^[0-9a-f]{8}$/i.test(idOrPrefix))
+    return { id: null };
+  const matches = db.query("SELECT id FROM notes WHERE id LIKE ? LIMIT 5").all(`${idOrPrefix.toLowerCase()}-%`);
+  if (matches.length === 0)
+    return { id: null };
+  if (matches.length === 1)
+    return { id: matches[0].id };
+  return { id: null, ambiguous: matches.map((m) => m.id) };
+}
+
 // mcp/tools/recall.ts
 function tryFetchNote(db, id) {
   const row = db.query(`SELECT id, type, content, keywords, confidence, created_at, updated_at,
@@ -21541,14 +21558,30 @@ function getTotalHint(projectDb2, globalDb2, type) {
 async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
   const limit = input.limit ?? 10;
   if (input.id) {
-    let note = tryFetchNote(projectDb2, input.id);
+    let resolved = resolveNoteId(projectDb2, input.id);
     let db = projectDb2;
     let isGlobal = false;
-    if (!note) {
-      note = tryFetchNote(globalDb2, input.id);
+    if (!resolved.id && !resolved.ambiguous) {
+      resolved = resolveNoteId(globalDb2, input.id);
       db = globalDb2;
       isGlobal = true;
     }
+    if (resolved.ambiguous) {
+      return {
+        results: [],
+        detail: null,
+        message: `ID prefix "${input.id}" is ambiguous in ${isGlobal ? "global" : "project"} DB - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.`
+      };
+    }
+    if (!resolved.id) {
+      return {
+        results: [],
+        detail: null,
+        message: `No note found with id "${input.id}".`
+      };
+    }
+    const fullId = resolved.id;
+    const note = tryFetchNote(db, fullId);
     if (!note) {
       return {
         results: [],
@@ -21559,16 +21592,16 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     note.is_global = isGlobal;
     const depth = input.depth ?? 1;
     const linkLimit = input.link_limit ?? 20;
-    const { links, totalCount } = fetchLinkedNotes(db, input.id, depth, linkLimit);
-    const supersede_chain = fetchSupersedeChain(db, input.id);
+    const { links, totalCount } = fetchLinkedNotes(db, fullId, depth, linkLimit);
+    const supersede_chain = fetchSupersedeChain(db, fullId);
     let revisions = undefined;
     if (input.include_history) {
-      revisions = fetchRevisions(db, input.id);
+      revisions = fetchRevisions(db, fullId);
     }
     return {
       results: [],
       detail: { ...note, links, revisions, supersede_chain, total_link_count: totalCount },
-      message: `Found note "${input.id}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
+      message: `Found note "${fullId}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
     };
   }
   if (input.query) {
@@ -24261,7 +24294,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.20"
+  version: "0.30.21"
 }, {
   capabilities: {
     tools: {},
@@ -24339,7 +24372,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.20** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.21** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24538,7 +24571,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further.", {
+server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
@@ -24778,12 +24811,24 @@ server.tool("close_thread", "Declare a tracked open_thread, commitment, or work_
   if (session_id)
     registerSessionOnce(session_id);
   const globalDb2 = getGlobalDb();
+  let resolved = resolveNoteId(projectDb2, id);
   let db = projectDb2;
-  let row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
-  if (!row) {
+  if (!resolved.id && !resolved.ambiguous) {
+    resolved = resolveNoteId(globalDb2, id);
     db = globalDb2;
-    row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
   }
+  if (resolved.ambiguous) {
+    return {
+      content: [{ type: "text", text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }]
+    };
+  }
+  if (!resolved.id) {
+    return {
+      content: [{ type: "text", text: `No note found with id "${id}".` }]
+    };
+  }
+  id = resolved.id;
+  const row = db.query(`SELECT id, type, content, status FROM notes WHERE id = ?`).get(id);
   if (!row) {
     return {
       content: [{ type: "text", text: `No note found with id "${id}".` }]
@@ -25082,6 +25127,18 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
 }, async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
   const projectDb2 = getProjectDb();
+  const resolved = resolveNoteId(projectDb2, id);
+  if (resolved.ambiguous) {
+    return {
+      content: [{ type: "text", text: `ID prefix "${id}" is ambiguous - matches ${resolved.ambiguous.length} notes: ${resolved.ambiguous.join(", ")}. Use the full UUID.` }]
+    };
+  }
+  if (!resolved.id) {
+    return {
+      content: [{ type: "text", text: `No note found with id "${id}".` }]
+    };
+  }
+  id = resolved.id;
   const row = projectDb2.query(`SELECT id, type, content, context, tags, status, priority, due_date FROM notes WHERE id = ?`).get(id);
   if (!row) {
     return {
@@ -25729,7 +25786,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.20 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.21 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
