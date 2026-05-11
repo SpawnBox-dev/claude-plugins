@@ -68,6 +68,33 @@ const POLL_INTERVAL_MS = 1500;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 90_000;
 
+/**
+ * Decorate the channel-content body with a sender header + markdown blockquote.
+ * Makes channel-injected events visually distinct from a receiving session's
+ * own assistant output in terminals that render markdown. Each non-blank line
+ * of the original content is quoted with a leading `> `.
+ *
+ * Applied only to user_input / assistant_text / tool_use events (the ones that
+ * carry verbose content from peer sessions). Session join/depart and override
+ * events emit hand-crafted short labels and skip this wrapper to avoid header
+ * redundancy.
+ */
+function decorateChannelContent(
+  content: string,
+  sender: SessionEntry,
+  eventType: string,
+): string {
+  const senderLabel =
+    sender.role === "prime"
+      ? `**PA** (${sender.id8})`
+      : `**SA-${sender.id8}**`;
+  const quoted = content
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return `${senderLabel} · ${eventType}:\n${quoted}`;
+}
+
 export class AgentChannel {
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -282,7 +309,7 @@ export class AgentChannel {
     const isGlobalPaused = overrideState.pa_global_pause.active;
 
     this.emit({
-      content: ev.content,
+      content: decorateChannelContent(ev.content, sender, ev.event_type),
       meta: {
         from_session: sender.session_id,
         from_id8: sender.id8,
