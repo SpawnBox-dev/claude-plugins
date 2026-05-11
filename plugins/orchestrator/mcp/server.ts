@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.9",
+    version: "0.30.10",
   },
   {
     capabilities: {
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.9** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.10** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1993,12 +1993,66 @@ function startAgentChannel(): void {
 // Stop agent-channel cleanly on stdin close (Claude Code closes the MCP
 // connection by closing stdin). Without this, sessions.json would retain a
 // dangling entry until stale-cleanup reaped it after 90s.
-process.stdin.on("end", () => {
+//
+// 0.30.10 observability: log to stderr WHY the MCP is shutting down so we
+// can correlate against Claude Code's behavior. Issue observed 2026-05-11:
+// an idle SA's MCP child silently died (session_departed event fired)
+// while claude.exe stayed alive - manual /plugin reconnect was required.
+// We have no Claude Code MCP supervision logs accessible, so the only
+// observability handle is the MCP server's own stderr. Capture the trigger
+// (stdin end vs close, vs signal) + timestamp + pid + uptime so the next
+// occurrence has an evidence trail.
+const mcpStartMs = Date.now();
+function logShutdownTrigger(trigger: string): void {
+  const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
+  process.stderr.write(
+    `[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} ` +
+      `pid=${process.pid} uptime_sec=${uptimeSec} ` +
+      `session_id=${resolveSessionId() ?? "<none>"}\n`,
+  );
+}
+let shutdownLogged = false;
+function shutdownOnce(trigger: string): void {
+  if (shutdownLogged) return;
+  shutdownLogged = true;
+  logShutdownTrigger(trigger);
   if (agentChannel) agentChannel.stop();
+}
+process.stdin.on("end", () => shutdownOnce("stdin-end"));
+process.stdin.on("close", () => shutdownOnce("stdin-close"));
+process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
+process.on("SIGINT", () => shutdownOnce("SIGINT"));
+process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
+process.on("uncaughtException", (err) => {
+  process.stderr.write(
+    `[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} ` +
+      `msg=${err instanceof Error ? err.message : String(err)}\n` +
+      `stack=${err instanceof Error ? (err.stack ?? "<no stack>") : "<not an Error>"}\n`,
+  );
+  shutdownOnce("uncaughtException");
 });
-process.stdin.on("close", () => {
-  if (agentChannel) agentChannel.stop();
+process.on("unhandledRejection", (reason) => {
+  process.stderr.write(
+    `[orchestrator] unhandledRejection at=${new Date().toISOString()} pid=${process.pid} ` +
+      `reason=${reason instanceof Error ? reason.message : String(reason)}\n` +
+      `stack=${reason instanceof Error ? (reason.stack ?? "<no stack>") : "<not an Error>"}\n`,
+  );
+  // Do NOT shutdown - unhandled rejections shouldn't kill the MCP. Just log
+  // them so we can correlate with any later disconnect. If the rejection is
+  // load-bearing, the next operation will surface it.
 });
+
+// Liveness heartbeat to stderr every 5 minutes. Lets us bracket exactly when
+// the MCP went silent if it ever disconnects unexpectedly - the last "alive"
+// timestamp before the gap is the upper bound for the failure window. Cheap
+// (one stderr write every 5min); no orchestrator-internal effect.
+setInterval(() => {
+  process.stderr.write(
+    `[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} ` +
+      `uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} ` +
+      `session_id=${resolveSessionId() ?? "<none>"}\n`,
+  );
+}, 5 * 60 * 1000).unref();
 
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
@@ -2006,7 +2060,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.9 ` +
+    `[orchestrator] MCP server starting - version=0.30.10 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

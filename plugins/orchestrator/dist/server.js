@@ -23876,7 +23876,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.9"
+  version: "0.30.10"
 }, {
   capabilities: {
     tools: {},
@@ -23956,7 +23956,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.9** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.10** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -25185,16 +25185,43 @@ function startAgentChannel() {
 `);
   }
 }
-process.stdin.on("end", () => {
+var mcpStartMs = Date.now();
+function logShutdownTrigger(trigger) {
+  const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
+  process.stderr.write(`[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${uptimeSec} session_id=${resolveSessionId() ?? "<none>"}
+`);
+}
+var shutdownLogged = false;
+function shutdownOnce(trigger) {
+  if (shutdownLogged)
+    return;
+  shutdownLogged = true;
+  logShutdownTrigger(trigger);
   if (agentChannel)
     agentChannel.stop();
+}
+process.stdin.on("end", () => shutdownOnce("stdin-end"));
+process.stdin.on("close", () => shutdownOnce("stdin-close"));
+process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
+process.on("SIGINT", () => shutdownOnce("SIGINT"));
+process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
+process.on("uncaughtException", (err) => {
+  process.stderr.write(`[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} msg=${err instanceof Error ? err.message : String(err)}
+stack=${err instanceof Error ? err.stack ?? "<no stack>" : "<not an Error>"}
+`);
+  shutdownOnce("uncaughtException");
 });
-process.stdin.on("close", () => {
-  if (agentChannel)
-    agentChannel.stop();
+process.on("unhandledRejection", (reason) => {
+  process.stderr.write(`[orchestrator] unhandledRejection at=${new Date().toISOString()} pid=${process.pid} reason=${reason instanceof Error ? reason.message : String(reason)}
+stack=${reason instanceof Error ? reason.stack ?? "<no stack>" : "<not an Error>"}
+`);
 });
+setInterval(() => {
+  process.stderr.write(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
+`);
+}, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.9 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.10 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
