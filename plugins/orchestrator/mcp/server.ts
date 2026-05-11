@@ -127,42 +127,75 @@ function getFallbackSessionId(): string | undefined {
   // 0.30.19+ race-free path: read per-claude-PID file. Each claude
   // session writes a file keyed on its own PID, so concurrent siblings
   // never collide.
+  //
+  // 0.30.23+ impostor-race close: when we have a valid claude.exe ancestor
+  // (we're not an orphan), the per-PID file is AUTHORITATIVE. The bun's
+  // startup can race the SessionStart hook (which writes the per-PID file),
+  // so we retry briefly. We do NOT fall back to the legacy single-file
+  // when we have a claudePid - that path is the source of impostor-race
+  // bugs where a fresh bun (e.g. spawned by sa-start or discord-start)
+  // reads the LEGACY file (which contains a DIFFERENT session's id) and
+  // caches the wrong session_id forever, heartbeating that session's
+  // entry with our role+name.
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
     const perPidFile = join(stateDir, `active-session-${claudePid}`);
-    try {
-      if (existsSync(perPidFile)) {
-        const raw = readFileSync(perPidFile, "utf8").trim();
-        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
-          cachedFallbackSessionId = raw;
-          process.stderr.write(
-            `[orchestrator] resolved session_id from per-PID file ` +
-              `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...\n`,
-          );
-          return raw;
+    // Retry up to ~5s for the SessionStart hook to land its per-PID write.
+    const maxAttempts = 20;
+    const sleepMs = 250;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (existsSync(perPidFile)) {
+          const raw = readFileSync(perPidFile, "utf8").trim();
+          if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+            cachedFallbackSessionId = raw;
+            process.stderr.write(
+              `[orchestrator] resolved session_id from per-PID file ` +
+                `(claude_pid=${claudePid}, attempt=${attempt + 1}): ${raw.slice(0, 8)}...\n`,
+            );
+            return raw;
+          }
         }
+      } catch {
+        // Non-fatal - retry
       }
-    } catch {
-      // Non-fatal - fall through to legacy single-file
+      if (attempt < maxAttempts - 1) {
+        // Synchronous sleep so callers expecting immediate resolution still get
+        // a final answer. 5s ceiling is well below CC's MCP startup deadline.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+      }
     }
+    // Per-PID file never appeared. We have a claude.exe ancestor (we're
+    // not an orphan), but our session's hook didn't write its file.
+    // Refusing to fall back to legacy because that's the impostor-race
+    // trap (b4c37849 / role-clobber observed 2026-05-11). Surface the
+    // failure - the MCP server will start without a session_id and
+    // tool calls without explicit session_id will see <none> in the
+    // session_id field, which is a loud, visible failure mode rather
+    // than the silent identity-clobber the legacy fallback caused.
+    process.stderr.write(
+      `[orchestrator] WARNING: per-PID file ${perPidFile} did not appear after ` +
+        `${maxAttempts * sleepMs / 1000}s. session_id will resolve to <none> for ` +
+        `this MCP instance until a tool call provides explicit session_id. ` +
+        `Refusing to fall back to legacy active-session (impostor-race avoidance).\n`,
+    );
+    return undefined;
   }
 
-  // Legacy single-file fallback (racy under concurrent siblings but
-  // works for single-session users and pre-0.30.19 hooks).
+  // No claude.exe ancestor (we're an orphan or test environment). Fall
+  // back to legacy single-file as best-effort. Orphan watchdog (added in
+  // 0.30.23) should kill us within ~60s anyway.
   const file = join(stateDir, "active-session");
   try {
     if (existsSync(file)) {
       const raw = readFileSync(file, "utf8").trim();
-      // Sanitize: same rule as the bash helper. Defence in depth.
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
-        if (claudePid) {
-          process.stderr.write(
-            `[orchestrator] resolved session_id from LEGACY active-session file ` +
-              `(claude_pid=${claudePid} but per-PID file missing): ${raw.slice(0, 8)}... ` +
-              `(if you have multiple concurrent claude sessions, this read is racy)\n`,
-          );
-        }
+        process.stderr.write(
+          `[orchestrator] no claude.exe ancestor found; resolved session_id ` +
+            `from LEGACY active-session file: ${raw.slice(0, 8)}... ` +
+            `(this bun is likely orphaned and will be reaped by the watchdog)\n`,
+        );
         return raw;
       }
     }
@@ -387,7 +420,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.22",
+    version: "0.30.23",
   },
   {
     capabilities: {
@@ -417,7 +450,7 @@ const server = new McpServer(
 // ── briefing ────────────────────────────────────────────────────────────
 server.tool(
   "briefing",
-  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
+  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.23+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
   {
     event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
     sections: z
@@ -461,7 +494,7 @@ server.tool(
 
     let text = result.formatted;
 
-    // 0.30.22 summary mode: post-process the formatted briefing to compress
+    // 0.30.23 summary mode: post-process the formatted briefing to compress
     // verbose sections. The composer already truncates per-item content to
     // 120 chars; summary mode tightens that further to 60 and trims long
     // checkpoint / auto-retro bodies to 240. Done as a post-process here
@@ -483,7 +516,7 @@ server.tool(
 );
 
 /**
- * Post-process a briefing's formatted text for summary mode (0.30.22).
+ * Post-process a briefing's formatted text for summary mode (0.30.23).
  *
  * Strategy: walk lines, detect work-item / open-thread / decision list lines
  * (start with `- ` and contain `**<id>**` markup), trim the content portion
@@ -578,7 +611,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.22** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.23** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -835,7 +868,7 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.23+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).",
   {
     query: z.string().optional(),
     id: z.string().optional(),
@@ -2465,13 +2498,55 @@ setInterval(() => {
   );
 }, 5 * 60 * 1000).unref();
 
+// 0.30.23+ orphan-bun watchdog: every 60s, verify our parent claude.exe is
+// still alive. If it's gone (or the ancestor walk no longer reaches the same
+// PID we started with), this bun has been orphaned - shut down cleanly to
+// stop heartbeating sessions.json, processing peer JSONLs, and clobbering
+// the live PA/SA's state.
+//
+// Without this watchdog, bun processes whose parent claude.exe died (window
+// closed, plugin reload race, claude crash, etc.) keep running forever. They
+// accumulate (10+ orphans observed 2026-05-11), each heartbeating their
+// session entry with whatever role/name they happened to cache at startup,
+// and reading every other session's JSONL forever - net effect is identity
+// clobber on sessions.json + resource leak.
+const initialParentClaudePid = findClaudeAncestorPid();
+if (initialParentClaudePid) {
+  process.stderr.write(
+    `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}\n`,
+  );
+  setInterval(() => {
+    const currentParent = findClaudeAncestorPid();
+    if (!currentParent || currentParent !== initialParentClaudePid) {
+      process.stderr.write(
+        `[orchestrator] parent claude.exe gone (was pid=${initialParentClaudePid}, ` +
+          `now=${currentParent ?? "null"}). Shutting down to avoid becoming an ` +
+          `orphan that clobbers live sessions.\n`,
+      );
+      shutdownOnce("parent-claude-gone");
+    }
+  }, 60 * 1000).unref();
+} else {
+  // No claude.exe ancestor at startup - we're already an orphan (probably
+  // started from a test harness or stale process tree). Exit immediately
+  // rather than running indefinitely.
+  process.stderr.write(
+    `[orchestrator] no claude.exe ancestor at startup; refusing to run as orphan. Exiting.\n`,
+  );
+  // Use setImmediate so the server has a chance to init enough to log,
+  // then exit. shutdownOnce isn't defined yet at this point in module
+  // evaluation if you read top-to-bottom, but we're inside an IIFE-like
+  // block that runs after the function declarations, so it's safe.
+  setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
+}
+
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
   // Startup version banner. Goes to stderr (which Claude Code captures into
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.22 ` +
+    `[orchestrator] MCP server starting - version=0.30.23 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

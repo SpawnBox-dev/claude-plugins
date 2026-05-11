@@ -24192,17 +24192,27 @@ function getFallbackSessionId() {
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
     const perPidFile = join6(stateDir, `active-session-${claudePid}`);
-    try {
-      if (existsSync7(perPidFile)) {
-        const raw = readFileSync5(perPidFile, "utf8").trim();
-        if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
-          cachedFallbackSessionId = raw;
-          process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
+    const maxAttempts = 20;
+    const sleepMs = 250;
+    for (let attempt = 0;attempt < maxAttempts; attempt++) {
+      try {
+        if (existsSync7(perPidFile)) {
+          const raw = readFileSync5(perPidFile, "utf8").trim();
+          if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
+            cachedFallbackSessionId = raw;
+            process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}, attempt=${attempt + 1}): ${raw.slice(0, 8)}...
 `);
-          return raw;
+            return raw;
+          }
         }
+      } catch {}
+      if (attempt < maxAttempts - 1) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
       }
-    } catch {}
+    }
+    process.stderr.write(`[orchestrator] WARNING: per-PID file ${perPidFile} did not appear after ` + `${maxAttempts * sleepMs / 1000}s. session_id will resolve to <none> for ` + `this MCP instance until a tool call provides explicit session_id. ` + `Refusing to fall back to legacy active-session (impostor-race avoidance).
+`);
+    return;
   }
   const file = join6(stateDir, "active-session");
   try {
@@ -24210,10 +24220,8 @@ function getFallbackSessionId() {
       const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
-        if (claudePid) {
-          process.stderr.write(`[orchestrator] resolved session_id from LEGACY active-session file ` + `(claude_pid=${claudePid} but per-PID file missing): ${raw.slice(0, 8)}... ` + `(if you have multiple concurrent claude sessions, this read is racy)
+        process.stderr.write(`[orchestrator] no claude.exe ancestor found; resolved session_id ` + `from LEGACY active-session file: ${raw.slice(0, 8)}... ` + `(this bun is likely orphaned and will be reaped by the watchdog)
 `);
-        }
         return raw;
       }
     }
@@ -24360,7 +24368,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.22"
+  version: "0.30.23"
 }, {
   capabilities: {
     tools: {},
@@ -24385,7 +24393,7 @@ var server = new McpServer({
   ].join(`
 `)
 });
-server.tool("briefing", 'Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you\'re missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: "summary"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `"full"` (current rendering).', {
+server.tool("briefing", 'Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you\'re missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.23+): pass `output_mode: "summary"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `"full"` (current rendering).', {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
   sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint, curation_candidates"),
   output_mode: exports_external.enum(["full", "summary"]).optional().describe("'full' (default): current rendering. 'summary': per-item content truncated to 60 chars (was 120), recovery checkpoint and auto-retro bodies truncated to 240 chars. Use when you just need the shape of in-flight work without full content."),
@@ -24486,7 +24494,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.22** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.23** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24685,7 +24693,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).", {
+server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.23+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
@@ -25897,8 +25905,25 @@ setInterval(() => {
   process.stderr.write(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
 `);
 }, 300000).unref();
+var initialParentClaudePid = findClaudeAncestorPid();
+if (initialParentClaudePid) {
+  process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}
+`);
+  setInterval(() => {
+    const currentParent = findClaudeAncestorPid();
+    if (!currentParent || currentParent !== initialParentClaudePid) {
+      process.stderr.write(`[orchestrator] parent claude.exe gone (was pid=${initialParentClaudePid}, now=${currentParent ?? "null"}). Shutting down to avoid becoming an orphan that clobbers live sessions.
+`);
+      shutdownOnce("parent-claude-gone");
+    }
+  }, 60000).unref();
+} else {
+  process.stderr.write(`[orchestrator] no claude.exe ancestor at startup; refusing to run as orphan. Exiting.
+`);
+  setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
+}
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.22 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.23 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
