@@ -21025,7 +21025,18 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   }
   return { noteId, linksCreated: links.length };
 }
+var NOTE_CONTENT_HARD_CHARS = 50000;
 async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
+  if (input.content.length > NOTE_CONTENT_HARD_CHARS) {
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      message: `Note content is ${input.content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (orchestrator design principle: decision 3b962e67). Split into multiple smaller notes linked via supersedes/related_to, or capture the bulk into a doc/file and reference it from a compact note with code_refs. If the content genuinely cannot be smaller, this is the kind of thing the PA should synthesize on demand from underlying notes - not a stored digest.`
+    };
+  }
   const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
   const db = useGlobal ? globalDb2 : projectDb2;
   const duplicates = findDuplicates(db, input.type, input.content);
@@ -21649,6 +21660,7 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       message: `Found note "${fullId}" with ${totalCount} link(s)${links.length < totalCount ? ` (showing top ${links.length} by relevance)` : ""}${revisions ? ` and ${revisions.length} revision(s)` : ""}.`
     };
   }
+  const offset = Math.max(0, input.offset ?? 0);
   if (input.query) {
     let queryVector;
     if (embeddingClient) {
@@ -21662,8 +21674,9 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       }
     }
     const includeSuperseded = input.include_superseded ?? false;
-    const projectResults = await findRelatedNotesHybrid(projectDb2, input.query, limit, queryVector, 0.7, includeSuperseded, input.code_ref);
-    const globalResults = await findRelatedNotesHybrid(globalDb2, input.query, limit, queryVector, 0.7, includeSuperseded, input.code_ref);
+    const fetchSize = offset + limit + 1;
+    const projectResults = await findRelatedNotesHybrid(projectDb2, input.query, fetchSize, queryVector, 0.7, includeSuperseded, input.code_ref);
+    const globalResults = await findRelatedNotesHybrid(globalDb2, input.query, fetchSize, queryVector, 0.7, includeSuperseded, input.code_ref);
     const GLOBAL_RESERVED = Math.min(3, globalResults.length);
     const seen = new Set;
     const merged = [];
@@ -21695,12 +21708,14 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       const needle = input.code_ref;
       filtered = filtered.filter((r) => Array.isArray(r.code_refs) && r.code_refs.includes(needle));
     }
-    const results = filtered.slice(0, limit);
+    const results = filtered.slice(offset, offset + limit);
     const totalHint = getTotalHint(projectDb2, globalDb2, input.type);
+    const moreHint = filtered.length > offset + limit ? ` (paginated: ${results.length} of ${filtered.length} known; pass \`offset: ${offset + limit}\` for next page)` : "";
+    const offsetLabel = offset > 0 ? ` from offset ${offset}` : "";
     return {
       results,
       detail: null,
-      message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}".${totalHint}` : `No notes found matching "${input.query}".${totalHint}`
+      message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}"${offsetLabel}.${totalHint}${moreHint}` : offset > 0 ? `No more results after offset ${offset} for "${input.query}".${totalHint}` : `No notes found matching "${input.query}".${totalHint}`
     };
   }
   if (input.type || input.tag) {
@@ -21722,6 +21737,7 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       params.push(`%${input.code_ref}%`);
     }
     const whereClause = conditions.join(" AND ");
+    const fetchSize = offset + limit + 1;
     const sql = `
       SELECT id, type, content, keywords, confidence, created_at, updated_at,
              source_session, code_refs, tags, superseded_by, status, priority, due_date
@@ -21730,10 +21746,12 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       ORDER BY updated_at DESC
       LIMIT ?
     `;
-    params.push(limit);
+    params.push(fetchSize);
     const projectRows = projectDb2.query(sql).all(...params);
     const globalRows = globalDb2.query(sql).all(...params);
-    const merged = [...projectRows, ...globalRows].sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? "")).slice(0, limit);
+    const allMerged = [...projectRows, ...globalRows].sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+    const merged = allMerged.slice(offset, offset + limit);
+    const hasMore = allMerged.length > offset + limit;
     const results = merged.map((row) => ({
       id: row.id,
       type: row.type,
@@ -21755,10 +21773,12 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       input.tag ? `tag="${input.tag}"` : null,
       input.code_ref ? `code_ref="${input.code_ref}"` : null
     ].filter(Boolean).join(", ");
+    const offsetLabel = offset > 0 ? ` from offset ${offset}` : "";
+    const moreHint = hasMore ? ` (pass \`offset: ${offset + limit}\` for next page)` : "";
     return {
       results,
       detail: null,
-      message: results.length > 0 ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}.` : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`
+      message: results.length > 0 ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}${offsetLabel}.${moreHint}` : offset > 0 ? `No more results after offset ${offset} for {${filterLabel}}.` : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`
     };
   }
   return {
@@ -24358,7 +24378,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.25"
+  version: "0.30.26"
 }, {
   capabilities: {
     tools: {},
@@ -24383,7 +24403,7 @@ var server = new McpServer({
   ].join(`
 `)
 });
-server.tool("briefing", 'Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you\'re missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.25+): pass `output_mode: "summary"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `"full"` (current rendering).', {
+server.tool("briefing", 'Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you\'re missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: "summary"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `"full"` (current rendering).', {
   event: exports_external.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
   sections: exports_external.array(exports_external.enum(BRIEFING_SECTIONS)).optional().describe("Filter to specific sections. Omit for full briefing. Options: work_items, open_threads, decisions, neglected, drift, user_model, cross_project, cross_session, checkpoint, curation_candidates"),
   output_mode: exports_external.enum(["full", "summary"]).optional().describe("'full' (default): current rendering. 'summary': per-item content truncated to 60 chars (was 120), recovery checkpoint and auto-retro bodies truncated to 240 chars. Use when you just need the shape of in-flight work without full content."),
@@ -24484,7 +24504,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.25** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.26** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -24683,12 +24703,13 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     content: [{ type: "text", text: result.message }]
   };
 });
-server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.25+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).", {
+server.tool("lookup", "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.26+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.", {
   query: exports_external.string().optional(),
   id: exports_external.string().optional(),
   type: exports_external.enum(NOTE_TYPES).optional(),
   tag: exports_external.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
   limit: exports_external.coerce.number().optional(),
+  offset: exports_external.coerce.number().min(0).optional().describe("Pagination offset (0.30.26+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
   depth: exports_external.coerce.number().min(1).max(5).optional(),
   include_superseded: exports_external.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
   include_history: exports_external.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
@@ -24696,7 +24717,7 @@ server.tool("lookup", "Search what you already know. Use this before implementin
   code_ref: exports_external.string().optional().describe("Filter results to notes that reference this exact file or module path in their code_refs array. Exact string match; no wildcards. Useful for 'what do we know about mcp/server.ts?' queries."),
   output_mode: exports_external.enum(["full", "summary"]).optional().describe("'full' (default): rich rendering with content, code_refs, maintain hints, annotations. 'summary': one-liner per result (id8 + type + truncated content), no code_refs / hints / annotations. Detail-mode (`id`-by-id) summary: type + truncated content, no linked notes, no supersede chain, no maintain hints. Use summary mode when enumerating candidates without needing full bodies."),
   session_id: exports_external.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations.")
-}, async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, output_mode, session_id }) => {
+}, async ({ query, id, type, tag, limit, offset, depth, include_superseded, include_history, link_limit, code_ref, output_mode, session_id }) => {
   const projectDb2 = getProjectDb();
   const result = await handleRecall(projectDb2, getGlobalDb(), {
     query,
@@ -24704,6 +24725,7 @@ server.tool("lookup", "Search what you already know. Use this before implementin
     type,
     tag,
     limit,
+    offset,
     depth,
     include_superseded,
     include_history,
@@ -25028,6 +25050,16 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   }
   if (append_content !== undefined && content !== undefined) {
     return { content: [{ type: "text", text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
+  }
+  const NOTE_CONTENT_HARD_CHARS2 = 50000;
+  if (content !== undefined && content.length > NOTE_CONTENT_HARD_CHARS2) {
+    return { content: [{ type: "text", text: `Note content rewrite is ${content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Primitives should stay primitive (decision 3b962e67). Split into multiple linked notes.` }] };
+  }
+  if (append_content !== undefined) {
+    const projectedLen = (row.content?.length ?? 0) + 4 + 32 + append_content.length;
+    if (projectedLen > NOTE_CONTENT_HARD_CHARS2) {
+      return { content: [{ type: "text", text: `Append would grow note to ~${projectedLen} chars (current ${row.content?.length ?? 0} + append ${append_content.length}) - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
+    }
   }
   const updates = [];
   if (append_content !== undefined) {
@@ -25913,7 +25945,7 @@ if (initialParentClaudePid) {
   setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
 }
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.25 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.26 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

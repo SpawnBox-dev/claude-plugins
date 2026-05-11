@@ -149,12 +149,35 @@ async function insertNote(
   return { noteId, linksCreated: links.length };
 }
 
+/** 0.30.26+ per-note hard size limit. Primitives should stay primitive;
+ *  notes that grow unboundedly become hidden pre-computed digests, which
+ *  violates the orchestrator's design principle (decision 3b962e67). A
+ *  hard ceiling forces agents to split into multiple linked notes (better
+ *  graph shape) or capture bulk into a doc/file and reference it.
+ *
+ *  The limit is generous (50K chars ≈ ~12K tokens) - any single concept
+ *  that won't fit in 50K is almost certainly multiple concepts that
+ *  should be separate primitives. */
+const NOTE_CONTENT_HARD_CHARS = 50_000;
+
 export async function handleRemember(
   projectDb: Database,
   globalDb: Database,
   input: RememberInput,
   embeddingClient?: EmbeddingClient | null
 ): Promise<RememberResult> {
+  // 0.30.26+ size check before any DB work
+  if (input.content.length > NOTE_CONTENT_HARD_CHARS) {
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      message: `Note content is ${input.content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (orchestrator design principle: decision 3b962e67). Split into multiple smaller notes linked via supersedes/related_to, or capture the bulk into a doc/file and reference it from a compact note with code_refs. If the content genuinely cannot be smaller, this is the kind of thing the PA should synthesize on demand from underlying notes - not a stored digest.`,
+    };
+  }
+
   // Determine which DB to use
   const useGlobal =
     input.scope === "global" || GLOBAL_TYPES.includes(input.type);

@@ -128,14 +128,15 @@ function getFallbackSessionId(): string | undefined {
   // session writes a file keyed on its own PID, so concurrent siblings
   // never collide.
   //
-  // 0.30.25 fix: 0.30.25 removed the legacy fallback when a claude
+  // 0.30.24 fix: 0.30.23 removed the legacy fallback when a claude
   // ancestor existed but the per-PID file didn't. Turned out the hook
   // on Git Bash for Windows writes `active-session-1` (bash $PPID
   // resolves to 1, not the real claude.exe PID), so the per-PID file
   // for the bun's actual claude ancestor never exists. Without the
   // legacy fallback, session_id resolves to undefined and agent-channel
-  // never starts. We restore the legacy fallback but keep the orphan
-  // watchdog + per-PID preference order.
+  // never starts. 0.30.24 restored the legacy fallback as defense-in-depth;
+  // 0.30.26 then fixed the hook to write the correct claude.exe PID so
+  // the per-PID path is the primary source going forward.
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
     const perPidFile = join(stateDir, `active-session-${claudePid}`);
@@ -158,7 +159,7 @@ function getFallbackSessionId(): string | undefined {
 
   // Legacy single-file fallback. Racy under concurrent siblings - the
   // file holds the LAST session that ran SessionStart, which may not
-  // be us. Mitigated by the orphan-bun watchdog (0.30.25+) that kills
+  // be us. Mitigated by the orphan-bun watchdog (0.30.23+) that kills
   // buns whose parent claude.exe is gone within ~60s, so impostor races
   // self-resolve.
   const file = join(stateDir, "active-session");
@@ -397,7 +398,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.25",
+    version: "0.30.26",
   },
   {
     capabilities: {
@@ -427,7 +428,7 @@ const server = new McpServer(
 // ── briefing ────────────────────────────────────────────────────────────
 server.tool(
   "briefing",
-  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.25+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
+  "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
   {
     event: z.enum(["startup", "resume", "clear", "compact"]).optional().default("startup"),
     sections: z
@@ -471,7 +472,7 @@ server.tool(
 
     let text = result.formatted;
 
-    // 0.30.25 summary mode: post-process the formatted briefing to compress
+    // 0.30.22 summary mode: post-process the formatted briefing to compress
     // verbose sections. The composer already truncates per-item content to
     // 120 chars; summary mode tightens that further to 60 and trims long
     // checkpoint / auto-retro bodies to 240. Done as a post-process here
@@ -493,7 +494,7 @@ server.tool(
 );
 
 /**
- * Post-process a briefing's formatted text for summary mode (0.30.25).
+ * Post-process a briefing's formatted text for summary mode (0.30.22).
  *
  * Strategy: walk lines, detect work-item / open-thread / decision list lines
  * (start with `- ` and contain `**<id>**` markup), trim the content portion
@@ -588,7 +589,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.25** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.26** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -845,13 +846,14 @@ server.tool(
 // ── lookup ──────────────────────────────────────────────────────────────
 server.tool(
   "lookup",
-  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.25+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.).",
+  "Search what you already know. Use this before implementing anything, when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what do we know about X?' queries before touching a file. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.26+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.",
   {
     query: z.string().optional(),
     id: z.string().optional(),
     type: z.enum(NOTE_TYPES).optional(),
     tag: z.string().optional().describe("Filter results by tag (substring match on comma-separated tags field)"),
     limit: z.coerce.number().optional(),
+    offset: z.coerce.number().min(0).optional().describe("Pagination offset (0.30.26+). Pass `offset: N` with the same `limit` to fetch the next page of search-mode or list-mode results. Default 0. Response message indicates the next offset when more results are available."),
     depth: z.coerce.number().min(1).max(5).optional(),
     include_superseded: z.coerce.boolean().optional().describe("If true, include notes that have been superseded by newer ones. Default false - superseded notes are hidden from search results but still retrievable by explicit id lookup."),
     include_history: z.coerce.boolean().optional().describe("If true, detail-mode lookup (when id is provided) includes the ordered revision chain from note_revisions. Default false. Superseded-chain sections are ALWAYS included in detail view regardless of this flag - they come from the links graph, not the revision table."),
@@ -860,7 +862,7 @@ server.tool(
     output_mode: z.enum(["full", "summary"]).optional().describe("'full' (default): rich rendering with content, code_refs, maintain hints, annotations. 'summary': one-liner per result (id8 + type + truncated content), no code_refs / hints / annotations. Detail-mode (`id`-by-id) summary: type + truncated content, no linked notes, no supersede chain, no maintain hints. Use summary mode when enumerating candidates without needing full bodies."),
     session_id: z.string().optional().describe("Session ID for tracking which notes have been surfaced. Enables dedup annotations."),
   },
-  async ({ query, id, type, tag, limit, depth, include_superseded, include_history, link_limit, code_ref, output_mode, session_id }) => {
+  async ({ query, id, type, tag, limit, offset, depth, include_superseded, include_history, link_limit, code_ref, output_mode, session_id }) => {
     const projectDb = getProjectDb();
     const result = await handleRecall(
       projectDb,
@@ -871,6 +873,7 @@ server.tool(
         type,
         tag,
         limit,
+        offset,
         depth,
         include_superseded,
         include_history,
@@ -1227,6 +1230,21 @@ server.tool(
 
     if (append_content !== undefined && content !== undefined) {
       return { content: [{ type: "text" as const, text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
+    }
+
+    // 0.30.26+ hard size limit (matches handleRemember). For content
+    // rewrites: check the new content directly. For append_content:
+    // check what the final content WILL be (current + appended) so
+    // appends can't sneak past by being individually small.
+    const NOTE_CONTENT_HARD_CHARS = 50_000;
+    if (content !== undefined && content.length > NOTE_CONTENT_HARD_CHARS) {
+      return { content: [{ type: "text" as const, text: `Note content rewrite is ${content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (decision 3b962e67). Split into multiple linked notes.` }] };
+    }
+    if (append_content !== undefined) {
+      const projectedLen = (row.content?.length ?? 0) + 4 + 32 + append_content.length; // approx new timestamped block
+      if (projectedLen > NOTE_CONTENT_HARD_CHARS) {
+        return { content: [{ type: "text" as const, text: `Append would grow note to ~${projectedLen} chars (current ${row.content?.length ?? 0} + append ${append_content.length}) - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
+      }
     }
 
     const updates: string[] = [];
@@ -2475,7 +2493,7 @@ setInterval(() => {
   );
 }, 5 * 60 * 1000).unref();
 
-// 0.30.25+ orphan-bun watchdog: every 60s, verify our parent claude.exe is
+// 0.30.23+ orphan-bun watchdog: every 60s, verify our parent claude.exe is
 // still alive. If it's gone (or the ancestor walk no longer reaches the same
 // PID we started with), this bun has been orphaned - shut down cleanly to
 // stop heartbeating sessions.json, processing peer JSONLs, and clobbering
@@ -2523,7 +2541,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.25 ` +
+    `[orchestrator] MCP server starting - version=0.30.26 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +

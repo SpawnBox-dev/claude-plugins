@@ -694,4 +694,107 @@ describe("R3.7: fetchSupersedeChain filters auto-linker false positives", () => 
       expect(result.message).toMatch(/no note found/i);
     });
   });
+
+  describe("pagination (0.30.26)", () => {
+    test("list-mode enumeration paginates via offset", async () => {
+      // Seed 7 decisions with VERY distinct content so the Jaccard dedup
+      // doesn't collapse them as near-duplicates.
+      const distinctTopics = [
+        "Apache Kafka broker isolation strategy for tenant boundaries",
+        "Postgres replication topology with cascaded read replicas",
+        "Redis pub/sub fanout for real-time push notifications",
+        "DNS-based service discovery via Consul cluster",
+        "Kubernetes pod autoscaling triggered by custom metrics",
+        "GraphQL schema federation across microservices",
+        "Elasticsearch index sharding for time-series queries",
+      ];
+      for (const topic of distinctTopics) {
+        await handleRemember(projectDb, globalDb, {
+          content: topic,
+          type: "decision",
+        });
+        // Stagger updated_at so the deterministic DESC ordering is stable.
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      const page1 = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 3,
+      });
+      const page2 = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 3,
+        offset: 3,
+      });
+      const page3 = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 3,
+        offset: 6,
+      });
+
+      expect(page1.results.length).toBe(3);
+      expect(page2.results.length).toBe(3);
+      expect(page3.results.length).toBe(1);
+
+      const ids = new Set([
+        ...page1.results.map((r) => r.id),
+        ...page2.results.map((r) => r.id),
+        ...page3.results.map((r) => r.id),
+      ]);
+      // All seven distinct results across the three pages.
+      expect(ids.size).toBe(7);
+
+      // page1 message hints at next page
+      expect(page1.message).toMatch(/offset: 3/);
+      // page3 message says no more results (or is last page - no offset hint)
+      expect(page3.message).not.toMatch(/offset: 9/);
+    });
+
+    test("offset beyond end returns empty with no-more-results message", async () => {
+      await handleRemember(projectDb, globalDb, {
+        content: "only decision",
+        type: "decision",
+      });
+      const result = await handleRecall(projectDb, globalDb, {
+        type: "decision",
+        limit: 5,
+        offset: 100,
+      });
+      expect(result.results.length).toBe(0);
+      expect(result.message).toMatch(/no more results/i);
+    });
+  });
+
+  describe("per-note hard size limit (0.30.26)", () => {
+    test("rejects notes over 50KB at write time", async () => {
+      const bigContent = "x".repeat(50_001);
+      const result = await handleRemember(projectDb, globalDb, {
+        content: bigContent,
+        type: "insight",
+      });
+      expect(result.stored).toBe(false);
+      expect(result.note_id).toBeNull();
+      expect(result.message).toMatch(/exceeds hard limit/i);
+      expect(result.message).toMatch(/50000/);
+    });
+
+    test("accepts notes at the boundary (exactly 50000 chars)", async () => {
+      const boundary = "y".repeat(50_000);
+      const result = await handleRemember(projectDb, globalDb, {
+        content: boundary,
+        type: "insight",
+      });
+      expect(result.stored).toBe(true);
+      expect(result.note_id).toBeTruthy();
+    });
+
+    test("accepts small notes without warning", async () => {
+      const small = "a small primitive observation";
+      const result = await handleRemember(projectDb, globalDb, {
+        content: small,
+        type: "insight",
+      });
+      expect(result.stored).toBe(true);
+    });
+  });
 });

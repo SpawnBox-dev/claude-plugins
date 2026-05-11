@@ -11,6 +11,9 @@ export interface RecallInput {
   type?: NoteType;
   tag?: string;
   limit?: number;
+  /** 0.30.26+ pagination cursor for list-mode + search-mode results.
+   *  Pass `offset: <N>` with the same `limit` to fetch the next page. */
+  offset?: number;
   depth?: number;
   include_superseded?: boolean;
   include_history?: boolean;
@@ -335,6 +338,12 @@ export async function handleRecall(
   // deduplication" would miss a note titled "compressed backup hashing"
   // because there's no keyword overlap - even though they're semantically
   // about the same thing. Vector search catches that.
+  // 0.30.26+ pagination offset. Default 0. Used by both search-mode (page
+  // through a stable ranking) and list-mode (page through a typed/tagged
+  // enumeration). Search-mode fetches `offset + limit` raw rows then slices
+  // the post-filter result.
+  const offset = Math.max(0, input.offset ?? 0);
+
   if (input.query) {
     let queryVector: Float32Array | undefined;
     if (embeddingClient) {
@@ -354,6 +363,12 @@ export async function handleRecall(
 
     const includeSuperseded = input.include_superseded ?? false;
 
+    // 0.30.26+ pagination: fetch (offset + limit + 1) from each DB so we
+    // can detect whether more results exist after the current page. Hybrid
+    // search's ranking is stable-enough across calls that paging through
+    // this way is safe for sequential reads.
+    const fetchSize = offset + limit + 1;
+
     // R5.2 Important-3: propagate code_ref as a SQL-level pre-filter into the
     // FTS + hybrid search so the 2x-limit slice is already narrowed to notes
     // referencing the requested path. The TS post-filter below is kept as a
@@ -362,7 +377,7 @@ export async function handleRecall(
     const projectResults = await findRelatedNotesHybrid(
       projectDb,
       input.query,
-      limit,
+      fetchSize,
       queryVector,
       0.7,
       includeSuperseded,
@@ -371,7 +386,7 @@ export async function handleRecall(
     const globalResults = await findRelatedNotesHybrid(
       globalDb,
       input.query,
-      limit,
+      fetchSize,
       queryVector,
       0.7,
       includeSuperseded,
@@ -431,18 +446,25 @@ export async function handleRecall(
       );
     }
 
-    // Limit results
-    const results = filtered.slice(0, limit);
+    // Page slice: offset...offset+limit
+    const results = filtered.slice(offset, offset + limit);
 
     const totalHint = getTotalHint(projectDb, globalDb, input.type);
+    const moreHint =
+      filtered.length > offset + limit
+        ? ` (paginated: ${results.length} of ${filtered.length} known; pass \`offset: ${offset + limit}\` for next page)`
+        : "";
+    const offsetLabel = offset > 0 ? ` from offset ${offset}` : "";
 
     return {
       results,
       detail: null,
       message:
         results.length > 0
-          ? `Found ${results.length} note(s) matching "${input.query}".${totalHint}`
-          : `No notes found matching "${input.query}".${totalHint}`,
+          ? `Found ${results.length} note(s) matching "${input.query}"${offsetLabel}.${totalHint}${moreHint}`
+          : offset > 0
+            ? `No more results after offset ${offset} for "${input.query}".${totalHint}`
+            : `No notes found matching "${input.query}".${totalHint}`,
     };
   }
 
@@ -472,6 +494,13 @@ export async function handleRecall(
       params.push(`%${input.code_ref}%`);
     }
     const whereClause = conditions.join(" AND ");
+
+    // 0.30.26+ pagination: per-DB query fetches enough rows to cover the
+    // post-merge slice (offset + limit) PLUS ONE row to detect whether
+    // there's another page available. We don't push OFFSET into the SQL
+    // directly because each DB independently ranks by updated_at; we want
+    // the GLOBAL ordering after merge, so we slice the merged result.
+    const fetchSize = offset + limit + 1;
     const sql = `
       SELECT id, type, content, keywords, confidence, created_at, updated_at,
              source_session, code_refs, tags, superseded_by, status, priority, due_date
@@ -480,13 +509,14 @@ export async function handleRecall(
       ORDER BY updated_at DESC
       LIMIT ?
     `;
-    params.push(limit);
+    params.push(fetchSize);
 
     const projectRows = projectDb.query(sql).all(...params) as any[];
     const globalRows = globalDb.query(sql).all(...params) as any[];
-    const merged = [...projectRows, ...globalRows]
-      .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""))
-      .slice(0, limit);
+    const allMerged = [...projectRows, ...globalRows]
+      .sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));
+    const merged = allMerged.slice(offset, offset + limit);
+    const hasMore = allMerged.length > offset + limit;
 
     const results: NoteSummary[] = merged.map((row) => ({
       id: row.id,
@@ -518,13 +548,20 @@ export async function handleRecall(
       .filter(Boolean)
       .join(", ");
 
+    const offsetLabel = offset > 0 ? ` from offset ${offset}` : "";
+    const moreHint = hasMore
+      ? ` (pass \`offset: ${offset + limit}\` for next page)`
+      : "";
+
     return {
       results,
       detail: null,
       message:
         results.length > 0
-          ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}.`
-          : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`,
+          ? `Listed ${results.length} most-recent note(s) matching {${filterLabel}}${offsetLabel}.${moreHint}`
+          : offset > 0
+            ? `No more results after offset ${offset} for {${filterLabel}}.`
+            : `No notes match {${filterLabel}}. (Pass a query or id for semantic search.)`,
     };
   }
 
