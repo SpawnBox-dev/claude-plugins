@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.5",
+    version: "0.30.6",
   },
   {
     capabilities: {
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.5** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.6** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -1944,17 +1944,34 @@ function startAgentChannel(): void {
         // whose meta contains non-string values (null, undefined, boolean,
         // array). The SDK does NOT catch this on the send side. Without
         // sanitization, the entire channel architecture is invisible to
-        // receivers despite the MCP server appearing healthy. Pre-0.30.5 the
+        // receivers despite the MCP server appearing healthy. Pre-0.30.6 the
         // orchestrator emitted booleans (pa_addressed), nulls (from_task), and
         // undefineds (tool_name, addressed_to, ...) and silently lost every
         // notification.
-        void server.server.notification({
-          method: "notifications/claude/channel",
-          params: {
-            content: notif.content,
-            meta: sanitizeChannelMeta(notif.meta),
-          },
-        });
+        // Defense-in-depth: server.server.notification() returns a Promise
+        // that rejects if the transport isn't connected (e.g. during a brief
+        // window at MCP startup, or if Claude Code has closed stdin). The
+        // `void` discard turns those rejections into unhandled-promise events,
+        // which Bun crashes the entire MCP process on by default. .catch()
+        // here turns the rejection into a logged warning, keeping the MCP
+        // server alive even if a single notification fails to deliver.
+        // Channel events are best-effort - a missed one is better than a
+        // crashed MCP.
+        server.server
+          .notification({
+            method: "notifications/claude/channel",
+            params: {
+              content: notif.content,
+              meta: sanitizeChannelMeta(notif.meta),
+            },
+          })
+          .catch((err) => {
+            process.stderr.write(
+              `agent-channel: notification failed (event suppressed): ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          });
       },
     );
     agentChannel.start();
@@ -1989,7 +2006,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.5 ` +
+    `[orchestrator] MCP server starting - version=0.30.6 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
@@ -1999,6 +2016,21 @@ async function main() {
   // Initialize session tracker and clean up stale sessions
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
+
+  // Connect MCP transport FIRST so that any channel notifications fired by
+  // the agent-channel filewatcher's initial tick have a connected transport
+  // to ride on. Otherwise the filewatcher's first tick (which fires
+  // synchronously inside AgentChannel.start()) tries to emit notifications
+  // via server.server.notification() while transport is still undefined; the
+  // SDK throws "Not connected" and the rejection cascades to an unhandled
+  // promise rejection that crashes the MCP process (Bun's default behavior).
+  // This bug was invisible for sessions whose offsets-<id8>.json file was
+  // caught up (no events to emit on first tick), but crashed any fresh
+  // session that needed to process backlog from peer JSONLs at startup.
+  // Empirically observed and root-caused 2026-05-11 on the dual-channel
+  // Discord-ops session.
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
 
   // Start agent-channel filewatcher (no-ops if env not set).
   // R6/R7 messaging system was removed in 0.29.0 - cross-session
@@ -2027,10 +2059,6 @@ async function main() {
       startAgentChannel();
     }, 3000);
   }
-
-  // Connect transport FIRST so MCP tools are available immediately
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
 
   // Start embedding sidecar in background (never blocks MCP availability)
   startSidecar().then((client) => {
