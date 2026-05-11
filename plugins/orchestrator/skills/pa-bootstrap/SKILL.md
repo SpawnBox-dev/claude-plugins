@@ -131,6 +131,67 @@ to capture patterns as they emerge in interactions.
 orchestrator, not as an artificial-user. The whole point of PA is the
 latter.
 
+### 5.6. Load forest-view context (project macro model)
+
+PA's second mission (per prime-agent.md) is to hold the whole-project
+macro model so SAs don't make tree-level decisions that break the
+forest. Load the project's architecture + recent decisions into
+working context so you can apply them during SA coordination.
+
+```
+lookup({
+  type: "architecture",
+  limit: 15,
+})
+```
+
+```
+lookup({
+  type: "decision",
+  limit: 15,
+})
+```
+
+```
+lookup({
+  type: "convention",
+  limit: 10,
+})
+```
+
+```
+lookup({
+  type: "anti_pattern",
+  limit: 15,
+})
+```
+
+Skim each. You don't need to memorize content - you need to know WHAT
+exists so you can surface specific notes by ID when an SA's work
+intersects them. ("There's a convention about X - lookup({id: '...'})
+before you proceed.")
+
+Pair with the briefing's `work_items`, `open_threads`, and `cross_session`
+sections (already loaded via getting-started). Together, these form
+the project's working macro model in PA's context: what was decided,
+what's in flight, what's open, what's been broken before, who's doing
+what right now.
+
+When an SA proposes work, your reflex check is:
+- Does this conflict with a decision I know about?
+- Does this duplicate a convention I know about?
+- Does this walk into an anti-pattern I know about?
+- Does this overlap with another SA's in-flight task?
+
+If yes to any: surface the macro-context to the SA via channel
+addressing BEFORE they proceed. That's the forest-view duty in
+operation.
+
+**Do not skip this step either.** A PA that only loads user-pattern
+context but not project-macro context can act with user authority on
+preferences but still let SAs break the architecture - which the user
+will then have to clean up.
+
 ### 6. Check for any existing global pause
 
 Read `state.json` (same dir as sessions.json):

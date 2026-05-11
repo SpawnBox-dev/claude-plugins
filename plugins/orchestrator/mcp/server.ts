@@ -279,7 +279,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.12",
+    version: "0.30.13",
   },
   {
     capabilities: {
@@ -400,7 +400,7 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **0.30.12** (pid ${process.pid})`);
+    lines.push(`- **Version**: orchestrator MCP server **0.30.13** (pid ${process.pid})`);
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -2060,7 +2060,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.12 ` +
+    `[orchestrator] MCP server starting - version=0.30.13 ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
