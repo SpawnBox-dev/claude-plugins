@@ -30,6 +30,7 @@ import {
   writeAllOffsets,
   type SessionEntry,
 } from "./agent_channel_state";
+import { readNewSystemEvents } from "./system_events";
 
 // NOTE: The MCP channels contract (https://code.claude.com/docs/en/channels-reference)
 // requires meta values to be strings; Claude Code's receive-side validator silently
@@ -52,7 +53,8 @@ export interface ChannelNotification {
       | "session_joined"
       | "session_departed"
       | "override_set"
-      | "override_cleared";
+      | "override_cleared"
+      | "permission_request_pending";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -124,16 +126,37 @@ function decorateChannelContent(
   return `[${senderLabel}${evtSuffix}] ${targetLabels.join(",")} | ${content}`;
 }
 
+/**
+ * Optional dependency injection for the AgentChannel - lets the channel
+ * filewatcher route permission verdicts back to the SA's permission_relay
+ * when they arrive on the system_events bus. PA's MCP does NOT instantiate
+ * a relay (PA doesn't receive permission_requests from CC) so this is
+ * conditionally injected by server.ts.
+ */
+export interface PermissionRelayLike {
+  /** Resolve a pending request - called when a permission_verdict event
+   *  arrives addressed to this session. */
+  resolveVerdict(
+    request_id: string,
+    input: { verdict: "allow" | "deny" | "defer_to_human"; pa_session: string; pa_reason?: string },
+  ): void;
+}
+
 export class AgentChannel {
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private knownSessions = new Map<string, SessionEntry>();
+  /** Byte offset into system_events.jsonl for this filewatcher. */
+  private systemEventsOffset = 0;
 
   constructor(
     private projectStateDir: string, // <project>/.orchestrator-state/agent-channel/
     private projectsHashDir: string, // ~/.claude/projects/<hash>/
     private selfSession: SessionEntry, // this instance's own session
     private emit: EmitFn,
+    /** Optional. SA's MCP injects when receiving permission_request notifications
+     *  from CC; PA's MCP leaves it undefined. */
+    private permissionRelay?: PermissionRelayLike,
   ) {}
 
   start(): void {
@@ -251,8 +274,85 @@ export class AgentChannel {
       if (mutated) {
         writeAllOffsets(this.projectStateDir, this.selfSession.id8, offsets);
       }
+
+      // 0.30.16+: also process the system_events.jsonl bus for cross-MCP
+      // events (permission_request_pending, permission_verdict).
+      this.processSystemEvents();
     } catch (err) {
       process.stderr.write(`agent-channel tick error: ${err}\n`);
+    }
+  }
+
+  /**
+   * Read new entries on the system_events.jsonl bus and emit/route based
+   * on the event_type. Only events targeted at THIS session (to_session
+   * === selfSession.session_id) trigger local action.
+   *
+   * Currently handles two event_types:
+   *   - `permission_request_pending`: emit a channel notification to the
+   *     local session so PA (or whichever role this MCP serves) sees the
+   *     inbound permission request inline and can call respond_to_permission.
+   *   - `permission_verdict`: if a permissionRelay is injected (i.e. this
+   *     is the SA's MCP that emitted the original request), call
+   *     resolveVerdict to unblock the pending Promise.
+   */
+  private processSystemEvents(): void {
+    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsOffset);
+    this.systemEventsOffset = result.newOffset;
+
+    for (const ev of result.events) {
+      if (ev.to_session !== this.selfSession.session_id) continue;
+      // Self-emitted events: skip (we don't echo our own events).
+      if (ev.from_session === this.selfSession.session_id) continue;
+
+      switch (ev.event_type) {
+        case "permission_request_pending": {
+          const request_id = String(ev.request_id ?? "");
+          const tool_name = String(ev.tool_name ?? "");
+          const description = String(ev.description ?? "");
+          const input_preview = String(ev.input_preview ?? "");
+          if (!request_id) break;
+          this.emit({
+            content:
+              `[permission_request_pending] request_id=${request_id} ` +
+              `tool=${tool_name}\n` +
+              `description: ${description}\n` +
+              `input_preview: ${input_preview}\n` +
+              `from_session: ${ev.from_session}\n` +
+              `\n` +
+              `Decide via respond_to_permission({request_id, verdict, reason?}). ` +
+              `Verdict: allow | deny | defer_to_human. ` +
+              `Non-allow verdicts require a reason.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: ev.from_session.slice(0, 8),
+              from_role: "subordinate",
+              from_name: `<system_event>`,
+              from_task: null,
+              event_type: "permission_request_pending",
+              ts: typeof ev.ts === "string" ? ev.ts : new Date().toISOString(),
+              pa_addressed: true,
+              addressed_to: [this.selfSession.session_id],
+            },
+          });
+          break;
+        }
+        case "permission_verdict": {
+          if (!this.permissionRelay) break;
+          const request_id = String(ev.request_id ?? "");
+          const verdict = ev.verdict as "allow" | "deny" | "defer_to_human";
+          const pa_session = String(ev.pa_session ?? ev.from_session);
+          const pa_reason = typeof ev.pa_reason === "string" ? ev.pa_reason : undefined;
+          if (!request_id) break;
+          if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer_to_human") break;
+          this.permissionRelay.resolveVerdict(request_id, { verdict, pa_session, pa_reason });
+          break;
+        }
+        default:
+          // Unknown event_type - ignore. Forward-compat: future event
+          // types added to system_events should not crash old watchers.
+          break;
+      }
     }
   }
 

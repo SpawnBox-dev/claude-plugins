@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join5 } from "path";
-import { existsSync as existsSync6, readFileSync as readFileSync4 } from "fs";
+import { resolve, join as join6 } from "path";
+import { existsSync as existsSync7, readFileSync as readFileSync5 } from "fs";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -23353,8 +23353,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { readFileSync as readFileSync3, existsSync as existsSync5, statSync, readdirSync } from "fs";
-import { join as join4 } from "path";
+import { readFileSync as readFileSync4, existsSync as existsSync6, statSync as statSync2, readdirSync } from "fs";
+import { join as join5 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -23529,6 +23529,57 @@ function writeAllOffsets(stateDir, receiverId8, offsets) {
   atomicWrite(stateDir, offsetsFileName(receiverId8), JSON.stringify(offsets, null, 2));
 }
 
+// mcp/engine/system_events.ts
+import { existsSync as existsSync5, readFileSync as readFileSync3, statSync } from "fs";
+import { dirname as dirname2, join as join4 } from "path";
+function systemEventsPath(stateDir) {
+  return join4(stateDir, "system_events.jsonl");
+}
+function readNewSystemEvents(stateDir, lastOffset) {
+  const path2 = systemEventsPath(stateDir);
+  if (!existsSync5(path2)) {
+    return { events: [], newOffset: 0 };
+  }
+  let stat;
+  try {
+    stat = statSync(path2);
+  } catch {
+    return { events: [], newOffset: lastOffset };
+  }
+  if (stat.size === lastOffset) {
+    return { events: [], newOffset: lastOffset };
+  }
+  if (stat.size < lastOffset) {
+    lastOffset = 0;
+  }
+  let buf;
+  try {
+    const raw = readFileSync3(path2);
+    buf = raw.subarray(lastOffset).toString("utf8");
+  } catch {
+    return { events: [], newOffset: lastOffset };
+  }
+  const lines = buf.split(`
+`);
+  const events = [];
+  let consumed = 0;
+  for (let i = 0;i < lines.length - 1; i++) {
+    consumed += Buffer.byteLength(lines[i], "utf8") + 1;
+    const line = lines[i].trim();
+    if (!line)
+      continue;
+    try {
+      const ev = JSON.parse(line);
+      if (typeof ev?.event_type === "string" && typeof ev?.from_session === "string" && typeof ev?.to_session === "string") {
+        events.push(ev);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return { events, newOffset: lastOffset + consumed };
+}
+
 // mcp/engine/agent_channel.ts
 var POLL_INTERVAL_MS = 1500;
 var HEARTBEAT_INTERVAL_MS = 30000;
@@ -23559,14 +23610,17 @@ class AgentChannel {
   projectsHashDir;
   selfSession;
   emit;
+  permissionRelay;
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
-  constructor(projectStateDir, projectsHashDir, selfSession, emit) {
+  systemEventsOffset = 0;
+  constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
     this.selfSession = selfSession;
     this.emit = emit;
+    this.permissionRelay = permissionRelay;
   }
   start() {
     writeSession(this.projectStateDir, {
@@ -23637,9 +23691,9 @@ class AgentChannel {
     this.knownSessions = current;
   }
   listJsonlFiles() {
-    if (!existsSync5(this.projectsHashDir))
+    if (!existsSync6(this.projectsHashDir))
       return [];
-    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join4(this.projectsHashDir, f));
+    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join5(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -23656,16 +23710,73 @@ class AgentChannel {
       if (mutated) {
         writeAllOffsets(this.projectStateDir, this.selfSession.id8, offsets);
       }
+      this.processSystemEvents();
     } catch (err) {
       process.stderr.write(`agent-channel tick error: ${err}
 `);
+    }
+  }
+  processSystemEvents() {
+    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsOffset);
+    this.systemEventsOffset = result.newOffset;
+    for (const ev of result.events) {
+      if (ev.to_session !== this.selfSession.session_id)
+        continue;
+      if (ev.from_session === this.selfSession.session_id)
+        continue;
+      switch (ev.event_type) {
+        case "permission_request_pending": {
+          const request_id = String(ev.request_id ?? "");
+          const tool_name = String(ev.tool_name ?? "");
+          const description = String(ev.description ?? "");
+          const input_preview = String(ev.input_preview ?? "");
+          if (!request_id)
+            break;
+          this.emit({
+            content: `[permission_request_pending] request_id=${request_id} ` + `tool=${tool_name}
+` + `description: ${description}
+` + `input_preview: ${input_preview}
+` + `from_session: ${ev.from_session}
+` + `
+` + `Decide via respond_to_permission({request_id, verdict, reason?}). ` + `Verdict: allow | deny | defer_to_human. ` + `Non-allow verdicts require a reason.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: ev.from_session.slice(0, 8),
+              from_role: "subordinate",
+              from_name: `<system_event>`,
+              from_task: null,
+              event_type: "permission_request_pending",
+              ts: typeof ev.ts === "string" ? ev.ts : new Date().toISOString(),
+              pa_addressed: true,
+              addressed_to: [this.selfSession.session_id]
+            }
+          });
+          break;
+        }
+        case "permission_verdict": {
+          if (!this.permissionRelay)
+            break;
+          const request_id = String(ev.request_id ?? "");
+          const verdict = ev.verdict;
+          const pa_session = String(ev.pa_session ?? ev.from_session);
+          const pa_reason = typeof ev.pa_reason === "string" ? ev.pa_reason : undefined;
+          if (!request_id)
+            break;
+          if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer_to_human")
+            break;
+          this.permissionRelay.resolveVerdict(request_id, { verdict, pa_session, pa_reason });
+          break;
+        }
+        default:
+          break;
+      }
     }
   }
   processFile(file, sessions, overrideState, offsets) {
     const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
-      stat = statSync(file);
+      stat = statSync2(file);
     } catch {
       return false;
     }
@@ -23677,7 +23788,7 @@ class AgentChannel {
     }
     let buf;
     try {
-      const raw = readFileSync3(file);
+      const raw = readFileSync4(file);
       buf = raw.subarray(lastOffset).toString("utf8");
     } catch {
       return false;
@@ -23753,10 +23864,10 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const file = join5(projectDir, ".orchestrator-state", "active-session");
+  const file = join6(projectDir, ".orchestrator-state", "active-session");
   try {
-    if (existsSync6(file)) {
-      const raw = readFileSync4(file, "utf8").trim();
+    if (existsSync7(file)) {
+      const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         return raw;
@@ -23898,7 +24009,7 @@ async function startSidecar() {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.15"
+  version: "0.30.16"
 }, {
   capabilities: {
     tools: {},
@@ -23978,7 +24089,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.15** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **0.30.16** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -23987,8 +24098,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join5(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync6(fallbackFile);
+    const fallbackFile = join6(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync7(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -25169,7 +25280,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join5(homedir2(), ".claude", "projects", projectHash);
+  const projectsHashDir = join6(homedir2(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -25182,7 +25293,7 @@ function startAgentChannel() {
     last_heartbeat_at: new Date().toISOString(),
     current_task: null
   };
-  const stateDir = join5(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
   try {
     agentChannel = new AgentChannel(stateDir, projectsHashDir, self, (notif) => {
       server.server.notification({
@@ -25243,7 +25354,7 @@ setInterval(() => {
 `);
 }, 300000).unref();
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.15 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.16 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
