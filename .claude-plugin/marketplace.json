@@ -9,7 +9,7 @@
     {
       "name": "orchestrator",
       "description": "A persistent product co-pilot that learns your project and you. PrimeAgent + agent-channel cross-session orchestration via real-time MCP channel notifications.",
-      "version": "0.30.3",
+      "version": "0.30.4",
       "author": {
         "name": "SpawnBox-dev"
       },

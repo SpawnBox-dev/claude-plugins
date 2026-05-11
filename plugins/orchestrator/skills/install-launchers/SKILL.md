@@ -1,6 +1,6 @@
 ---
 name: install-launchers
-description: Use when setting up the orchestrator plugin in a new project (or refreshing after a plugin update). Installs the canonical pa-start / sa-start launchers into the current project root so the user can spawn PA/SA Claude Code sessions from their terminal.
+description: Use when setting up the orchestrator plugin in a new project (or refreshing after a plugin update). Installs the canonical pa-start / sa-start / discord-start launchers into the current project root so the user can spawn PA/SA/Discord-ops Claude Code sessions from their terminal.
 ---
 
 # Install orchestrator launchers into this project
@@ -8,15 +8,24 @@ description: Use when setting up the orchestrator plugin in a new project (or re
 ## Overview
 
 The orchestrator plugin ships canonical PowerShell launchers for spawning
-PrimeAgent (PA) and Subordinate Agent (SA) Claude Code sessions. These
-launchers must live in the user's project root (not the plugin's `bin/`)
-because the user invokes them from their OS terminal to spawn NEW Claude
-sessions - and Claude Code's plugin `bin/` PATH only applies inside an
+Claude Code sessions wired into the agent-channel. These launchers must
+live in the user's project root (not the plugin's `bin/`) because the
+user invokes them from their OS terminal to spawn NEW Claude sessions -
+and Claude Code's plugin `bin/` PATH only applies inside an
 already-running Claude session.
 
-This skill copies four files into the user's CWD and substitutes the
-marketplace slug into the copies so they reference the right
-`plugin:orchestrator@<marketplace>` for development-channels.
+Three launcher kinds ship today:
+
+| Launcher | Role | Channels attached | Tab color |
+|---|---|---|---|
+| `pa-start` | PrimeAgent (prime) | orchestrator | gold (#F59E0B) |
+| `sa-start` | Subordinate (subordinate) | orchestrator | default |
+| `discord-start` | Discord-ops (subordinate) | orchestrator + Discord | red (#DC2626) |
+
+This skill copies SIX files into the user's CWD (three `.ps1` +
+three `.bat` shims) and substitutes the marketplace slug into the
+copies so they reference the right `plugin:orchestrator@<marketplace>`
+for `--dangerously-load-development-channels`.
 
 ## When to use
 
@@ -73,13 +82,14 @@ echo "Marketplace: $MARKETPLACE"
 If `MARKETPLACE` is empty, ask the user for the correct marketplace slug
 (visible via `/plugin marketplace list`) before proceeding.
 
-### 4. Copy + substitute the four files
+### 4. Copy + substitute the six files
 
-The source files contain the literal token `__ORCH_MARKETPLACE__` where
-the slug needs to be. Copy each file and replace the token in-place:
+The source `.ps1` files contain the literal token `__ORCH_MARKETPLACE__`
+where the orchestrator marketplace slug needs to be. Copy each file and
+replace the token in-place:
 
 ```bash
-for f in pa-start.ps1 pa-start.bat sa-start.ps1 sa-start.bat; do
+for f in pa-start.ps1 pa-start.bat sa-start.ps1 sa-start.bat discord-start.ps1 discord-start.bat; do
   sed "s|__ORCH_MARKETPLACE__|$MARKETPLACE|g" "$SCRIPTS_DIR/$f" > "$PWD/$f"
   echo "Installed $f"
 done
@@ -87,12 +97,14 @@ done
 
 If any target file already exists at `$PWD/$f`, **ask the user before
 overwriting** - they may have a local customization worth preserving.
+This is especially relevant for `discord-start.bat`, which may have
+been hand-tuned for the user's existing Discord workflow.
 
 ### 5. Verify the install
 
 ```bash
-ls -la "$PWD"/{pa,sa}-start.{ps1,bat}
-grep -l "__ORCH_MARKETPLACE__" "$PWD"/{pa,sa}-start.{ps1,bat} || echo "Substitution complete."
+ls -la "$PWD"/{pa,sa,discord}-start.{ps1,bat}
+grep -l "__ORCH_MARKETPLACE__" "$PWD"/{pa,sa,discord}-start.{ps1,bat} || echo "Substitution complete."
 grep -h "plugin:orchestrator@" "$PWD"/pa-start.ps1
 ```
 
@@ -108,9 +120,11 @@ Print to terminal:
 Installed orchestrator launchers into <PROJECT_ROOT>. Usage:
   .\pa-start.bat                          Start a new PA (gold tab)
   .\pa-start.bat -Resume <uuid-or-name>   Resume an existing session as PA
-  .\sa-start.bat                          Start a new SA
+  .\sa-start.bat                          Start a new SA (default tab)
   .\sa-start.bat -Name "SA-frontend"      Start SA with an explicit name
   .\sa-start.bat -Resume <uuid-or-name>   Resume an existing session as SA
+  .\discord-start.bat                     Start a Discord-ops session (red tab,
+                                          both Discord + orchestrator channels)
 ```
 
 ## Quick reference
@@ -120,9 +134,31 @@ Installed orchestrator launchers into <PROJECT_ROOT>. Usage:
 | 1 | Confirm `$PWD` is project root | Terminal |
 | 2 | Locate scripts dir | `<base-dir>/scripts/` |
 | 3 | Extract marketplace slug | `<cache-path>` after `cache/` |
-| 4 | Copy + substitute `__ORCH_MARKETPLACE__` | `$PWD/*.{ps1,bat}` |
+| 4 | Copy + substitute `__ORCH_MARKETPLACE__` (6 files) | `$PWD/*.{ps1,bat}` |
 | 5 | Verify no unsubstituted tokens remain | grep check |
 | 6 | Print usage | Terminal |
+
+## How discord-start differs
+
+`discord-start` is unique because it attaches BOTH channel plugins to
+the same Claude Code session:
+
+- `--channels plugin:discord@claude-plugins-official` (allowlisted)
+- `--dangerously-load-development-channels plugin:orchestrator@<marketplace>` (third-party)
+
+The session receives events from both sources, distinguishable by the
+`source` attribute on the `<channel>` tag:
+
+- `<channel source="plugin:discord:discord" ...>` - incoming Discord chat
+- `<channel source="plugin:orchestrator:core" ...>` - cross-session events
+
+This is a powerful combination: PA can observe and coordinate the
+Discord-ops session, and the Discord-ops session can `@PA` when it
+needs help with a tricky Discord situation. The two flags coexist
+per the [channels reference](https://code.claude.com/docs/en/channels-reference),
+though the `--dangerously-load-development-channels` bypass does NOT
+extend to `--channels` entries (which is why Discord still needs its
+own `--channels` arg).
 
 ## Common mistakes
 
