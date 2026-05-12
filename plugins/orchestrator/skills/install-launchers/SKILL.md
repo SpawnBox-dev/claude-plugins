@@ -1,31 +1,46 @@
 ---
 name: install-launchers
-description: Use when setting up the orchestrator plugin in a new project (or refreshing after a plugin update). Installs the canonical pa-start / sa-start / discord-start launchers into the current project root so the user can spawn PA/SA/Discord-ops Claude Code sessions from their terminal.
+description: Use when setting up the orchestrator plugin in a new project (or refreshing after a plugin update). Installs the canonical pa-start / sa-start / discord-start launchers (PowerShell + bash variants) into the current project root so the user can spawn PA/SA/Discord-ops Claude Code sessions from their terminal on Windows, WSL, Linux, or macOS.
 ---
 
 # Install orchestrator launchers into this project
 
 ## Overview
 
-The orchestrator plugin ships canonical PowerShell launchers for spawning
-Claude Code sessions wired into the agent-channel. These launchers must
-live in the user's project root (not the plugin's `bin/`) because the
-user invokes them from their OS terminal to spawn NEW Claude sessions -
-and Claude Code's plugin `bin/` PATH only applies inside an
-already-running Claude session.
+The orchestrator plugin ships canonical launchers for spawning Claude Code
+sessions wired into the agent-channel. These launchers must live in the
+user's project root (not the plugin's `bin/`) because the user invokes
+them from their OS terminal to spawn NEW Claude sessions - and Claude
+Code's plugin `bin/` PATH only applies inside an already-running Claude
+session.
 
-Three launcher kinds ship today:
+Three launcher kinds ship today, each in three variants:
 
-| Launcher | Role | Channels attached | Tab color |
-|---|---|---|---|
-| `pa-start` | PrimeAgent (prime) | orchestrator | gold (#F59E0B) |
-| `sa-start` | Subordinate (subordinate) | orchestrator | default |
-| `discord-start` | Discord-ops (subordinate) | orchestrator + Discord | red (#DC2626) |
+| Launcher | Role | Channels attached | Tab color | Variants |
+|---|---|---|---|---|
+| `pa-start` | PrimeAgent (prime) | orchestrator | gold (#F59E0B) on `wt.exe` | `.ps1`, `.bat`, `.sh` |
+| `sa-start` | Subordinate (subordinate) | orchestrator | default | `.ps1`, `.bat`, `.sh` |
+| `discord-start` | Discord-ops (subordinate) | orchestrator + Discord | red (#DC2626) on `wt.exe` | `.ps1`, `.bat` |
 
-This skill copies SIX files into the user's CWD (three `.ps1` +
-three `.bat` shims) and substitutes the marketplace slug into the
-copies so they reference the right `plugin:orchestrator@<marketplace>`
-for `--dangerously-load-development-channels`.
+**Per-platform variant guide:**
+
+- `.ps1` — canonical PowerShell implementation. Real logic lives here.
+- `.bat` — 4-line cmd.exe shim that dispatches to the `.ps1`. Lets users
+  double-click or invoke from `cmd.exe`.
+- `.sh` — bash port of the `.ps1`. For users who run Claude Code from a
+  POSIX shell (WSL, Linux, macOS) and don't want PowerShell interop.
+
+Currently `discord-start` has no `.sh` variant because its dual-channel
+attach (Discord + orchestrator) is tightly coupled to wt.exe-style tab
+coloring and the Windows-side Discord plugin install path. WSL/Linux
+users who need Discord-ops can run `discord-start.bat` via interop or
+add a `.sh` port (PRs welcome).
+
+This skill copies EIGHT files into the user's CWD (three `.ps1` + three
+`.bat` shims + two `.sh` bash launchers) and substitutes the marketplace
+slug into the copies so they reference the right
+`plugin:orchestrator@<marketplace>` for
+`--dangerously-load-development-channels`.
 
 ## When to use
 
@@ -82,15 +97,21 @@ echo "Marketplace: $MARKETPLACE"
 If `MARKETPLACE` is empty, ask the user for the correct marketplace slug
 (visible via `/plugin marketplace list`) before proceeding.
 
-### 4. Copy + substitute the six files
+### 4. Copy + substitute the eight files
 
-The source `.ps1` files contain the literal token `__ORCH_MARKETPLACE__`
-where the orchestrator marketplace slug needs to be. Copy each file and
-replace the token in-place:
+The source `.ps1` and `.sh` files contain the literal token
+`__ORCH_MARKETPLACE__` where the orchestrator marketplace slug needs to
+be. Copy each file and replace the token in-place. The `.sh` files also
+need their executable bit preserved (`install -m 0755 ...`):
 
 ```bash
 for f in pa-start.ps1 pa-start.bat sa-start.ps1 sa-start.bat discord-start.ps1 discord-start.bat; do
   sed "s|__ORCH_MARKETPLACE__|$MARKETPLACE|g" "$SCRIPTS_DIR/$f" > "$PWD/$f"
+  echo "Installed $f"
+done
+for f in pa-start.sh sa-start.sh; do
+  sed "s|__ORCH_MARKETPLACE__|$MARKETPLACE|g" "$SCRIPTS_DIR/$f" > "$PWD/$f"
+  chmod 0755 "$PWD/$f"
   echo "Installed $f"
 done
 ```
@@ -103,21 +124,25 @@ been hand-tuned for the user's existing Discord workflow.
 ### 5. Verify the install
 
 ```bash
-ls -la "$PWD"/{pa,sa,discord}-start.{ps1,bat}
-grep -l "__ORCH_MARKETPLACE__" "$PWD"/{pa,sa,discord}-start.{ps1,bat} || echo "Substitution complete."
-grep -h "plugin:orchestrator@" "$PWD"/pa-start.ps1
+ls -la "$PWD"/{pa,sa,discord}-start.{ps1,bat} "$PWD"/{pa,sa}-start.sh
+grep -l "__ORCH_MARKETPLACE__" "$PWD"/{pa,sa,discord}-start.{ps1,bat} "$PWD"/{pa,sa}-start.sh 2>/dev/null \
+  || echo "Substitution complete."
+grep -h "plugin:orchestrator@" "$PWD"/pa-start.ps1 "$PWD"/pa-start.sh
+test -x "$PWD/pa-start.sh" && test -x "$PWD/sa-start.sh" && echo "bash launchers executable."
 ```
 
 The first grep should produce no output (the literal token is gone).
-The second should print the substituted plugin reference matching the
-marketplace slug.
+The second should print the substituted plugin reference twice (matching
+the marketplace slug). The `test -x` confirms `chmod` worked.
 
 ### 6. Output usage instructions
 
-Print to terminal:
+Print to terminal (adapt to user's platform - omit irrelevant rows):
 
 ```
 Installed orchestrator launchers into <PROJECT_ROOT>. Usage:
+
+Windows / cmd.exe / PowerShell:
   .\pa-start.bat                          Start a new PA (gold tab)
   .\pa-start.bat -Resume <uuid-or-name>   Resume an existing session as PA
   .\sa-start.bat                          Start a new SA (default tab)
@@ -125,6 +150,14 @@ Installed orchestrator launchers into <PROJECT_ROOT>. Usage:
   .\sa-start.bat -Resume <uuid-or-name>   Resume an existing session as SA
   .\discord-start.bat                     Start a Discord-ops session (red tab,
                                           both Discord + orchestrator channels)
+
+WSL / Linux / macOS bash:
+  ./pa-start.sh                           Start a new PA
+  ./pa-start.sh --resume <uuid-or-name>   Resume an existing session as PA
+  ./sa-start.sh                           Start a new SA
+  ./sa-start.sh --name SA-frontend        Start SA with an explicit name
+  ./sa-start.sh --effort max              Start SA at max reasoning effort
+  ./sa-start.sh --resume <uuid-or-name>   Resume an existing session as SA
 ```
 
 ## Quick reference
@@ -134,7 +167,7 @@ Installed orchestrator launchers into <PROJECT_ROOT>. Usage:
 | 1 | Confirm `$PWD` is project root | Terminal |
 | 2 | Locate scripts dir | `<base-dir>/scripts/` |
 | 3 | Extract marketplace slug | `<cache-path>` after `cache/` |
-| 4 | Copy + substitute `__ORCH_MARKETPLACE__` (6 files) | `$PWD/*.{ps1,bat}` |
+| 4 | Copy + substitute `__ORCH_MARKETPLACE__` (8 files; chmod +x the `.sh`) | `$PWD/*.{ps1,bat,sh}` |
 | 5 | Verify no unsubstituted tokens remain | grep check |
 | 6 | Print usage | Terminal |
 
@@ -162,10 +195,14 @@ own `--channels` arg).
 
 ## Common mistakes
 
-- **Forgetting the substitution step**: copying the raw `.ps1` files
-  with the literal `__ORCH_MARKETPLACE__` placeholder will produce
+- **Forgetting the substitution step**: copying the raw `.ps1` or `.sh`
+  files with the literal `__ORCH_MARKETPLACE__` placeholder will produce
   launchers that fail with "plugin not found in marketplace
   '__ORCH_MARKETPLACE__'". Always run the `sed` step.
+- **Forgetting `chmod +x` on the `.sh` files**: the source `.sh` files
+  have their executable bit set in the plugin repo, but `sed > $PWD/$f`
+  creates the destination as a regular file (mode 0644 by default).
+  Always `chmod 0755` after copying, or use `install -m 0755`.
 - **Picking the wrong cache version**: if the user has multiple
   installed versions, `sort | tail -1` may not be what they want. If
   uncertain, look at `/plugin` for the active version and use that
@@ -182,9 +219,14 @@ own `--channels` arg).
   right way to pick up launcher improvements. The installed copies are
   static; they don't auto-update with the plugin.
 - The launchers themselves are project-agnostic: they use `$PWD` (or
-  an explicit `-ProjectDir` parameter) as the project root, set
-  `ORCHESTRATOR_PROJECT_ROOT` env for the spawned MCP, and work in
-  any project where the orchestrator plugin is installed.
+  an explicit `-ProjectDir` / `--project-dir` parameter) as the project
+  root, set `ORCHESTRATOR_PROJECT_ROOT` env for the spawned MCP, and
+  work in any project where the orchestrator plugin is installed.
+- **Runtime deps for `.sh` launchers:** `pa-start.sh` needs `jq` and
+  GNU coreutils for the singleton check; `sa-start.sh` has no deps
+  beyond bash 4+. Standard on WSL/Ubuntu (`apt install jq` if missing).
+  macOS: `brew install jq coreutils` and the launcher must run under
+  bash 4+ (not the default 3.2).
 - The `__ORCH_MARKETPLACE__` placeholder makes the source scripts
   portable across marketplace slugs; only the COPIED versions in each
   project root are slug-specific.
