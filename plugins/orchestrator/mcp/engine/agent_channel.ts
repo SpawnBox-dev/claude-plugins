@@ -148,6 +148,9 @@ export class AgentChannel {
   private knownSessions = new Map<string, SessionEntry>();
   /** Byte offset into system_events.jsonl for this filewatcher. */
   private systemEventsOffset = 0;
+  /** Consecutive heartbeat-write failures. Reset on success. Used to
+   *  escalate stderr log level + suppress repetitive warnings. */
+  private heartbeatFailures = 0;
 
   constructor(
     private projectStateDir: string, // <project>/.orchestrator-state/agent-channel/
@@ -160,6 +163,42 @@ export class AgentChannel {
   ) {}
 
   start(): void {
+    // 0.30.32 (ghost-session fix): prefer prior name from sessions.json when
+    // selfSession.name was defaulted to "auto-<id8>" by the MCP-restart-
+    // without-launcher-env path. This preserves human-readable names like
+    // "SA-fe-data-contract" across `/mcp` reloads instead of clobbering them.
+    const priorEntry = readSessions(this.projectStateDir).find(
+      (s) => s.session_id === this.selfSession.session_id,
+    );
+    const isAutoName = this.selfSession.name === `auto-${this.selfSession.id8}`;
+    if (
+      priorEntry &&
+      priorEntry.name &&
+      priorEntry.name !== this.selfSession.name &&
+      !priorEntry.name.startsWith("auto-") &&
+      isAutoName
+    ) {
+      process.stderr.write(
+        `agent-channel: preserved prior name "${priorEntry.name}" ` +
+          `over default "${this.selfSession.name}" (MCP restart without ` +
+          `ORCHESTRATOR_AGENT_NAME env)\n`,
+      );
+      this.selfSession = { ...this.selfSession, name: priorEntry.name };
+    }
+
+    // 0.30.32 (ghost-session fix): if we were absent from sessions.json on
+    // startup, log loudly - it means a prior MCP heartbeat lapsed and we were
+    // reaped, OR something cleared sessions.json. This is the signal to look
+    // for in post-incident analysis of ghost-session reports.
+    if (!priorEntry) {
+      process.stderr.write(
+        `agent-channel: self not in sessions.json on start ` +
+          `(session_id=${this.selfSession.session_id}, ` +
+          `name=${this.selfSession.name}). Likely prior MCP restart after ` +
+          `reaper pruned us, or fresh install. Re-registering.\n`,
+      );
+    }
+
     writeSession(this.projectStateDir, {
       ...this.selfSession,
       last_heartbeat_at: new Date().toISOString(),
@@ -181,12 +220,56 @@ export class AgentChannel {
     removeSession(this.projectStateDir, this.selfSession.session_id);
   }
 
+  /**
+   * Write a heartbeat to sessions.json with the current timestamp. The
+   * write is the only thing standing between this session and the
+   * 90s-stale reaper, so it MUST survive transient I/O failures.
+   *
+   * 0.30.32 (ghost-session fix): wrapped in try/catch with stderr
+   * logging. Prior behavior let exceptions propagate from writeSession's
+   * atomicWrite (writeFileSync + renameSync) directly into the
+   * setInterval callback. In Bun + Node, an uncaught exception in a
+   * setInterval callback silently halts the interval - meaning a single
+   * transient Windows file-lock during the atomic rename (OneDrive
+   * sync, antivirus, EBUSY race) would permanently kill heartbeats for
+   * the rest of the session's life. The session then gets reaped after
+   * 90s, becomes a "ghost" - alive in claude.exe, invisible to
+   * agent-channel coordination. See open_thread 6fb3b978 for the full
+   * incident report (2026-05-12, SA-95e6890e).
+   *
+   * Recovery: writeSession already re-adds an absent self entry, so
+   * the next successful heartbeat after a transient failure transparently
+   * re-registers us. The atomicWrite retry in agent_channel_state.ts
+   * further reduces the probability of a write failure escaping this
+   * try/catch in the first place.
+   */
   private heartbeat(): void {
-    const updated = {
-      ...this.selfSession,
-      last_heartbeat_at: new Date().toISOString(),
-    };
-    writeSession(this.projectStateDir, updated);
+    try {
+      const updated = {
+        ...this.selfSession,
+        last_heartbeat_at: new Date().toISOString(),
+      };
+      writeSession(this.projectStateDir, updated);
+      if (this.heartbeatFailures > 0) {
+        process.stderr.write(
+          `agent-channel: heartbeat recovered after ` +
+            `${this.heartbeatFailures} consecutive failure(s)\n`,
+        );
+        this.heartbeatFailures = 0;
+      }
+    } catch (err) {
+      this.heartbeatFailures += 1;
+      // Log at increasing escalation. Suppress beyond 10 to avoid spam if
+      // the failure is persistent (e.g., disk full, perms permanently
+      // broken). Operator should already be paged at that point.
+      if (this.heartbeatFailures <= 3 || this.heartbeatFailures === 10) {
+        process.stderr.write(
+          `agent-channel: heartbeat write failed ` +
+            `(failure #${this.heartbeatFailures}, ` +
+            `session=${this.selfSession.id8}): ${err}\n`,
+        );
+      }
+    }
   }
 
   private detectSessionChanges(): void {
@@ -195,8 +278,21 @@ export class AgentChannel {
     );
     const now = Date.now();
 
-    // Reap stale
+    // Reap stale.
+    //
+    // 0.30.32 (ghost-session fix): NEVER reap self even if our own
+    // heartbeat_at appears stale in sessions.json. A stale-self entry
+    // means OUR heartbeat() failed to write recently - but our filewatcher
+    // tick is still running (we're literally executing this code), so the
+    // remedy is to let the NEXT heartbeat tick recover, not to self-destruct.
+    // Without this check, a transient GC pause / IO stall that delayed
+    // heartbeat past 90s would cause our own tick to remove our own entry,
+    // then the next heartbeat would re-add - but in the meantime any peer
+    // session's tick that landed in the gap would see us as departed and
+    // emit a session_departed event. Source of half the ghost-session false
+    // positives. See open_thread 6fb3b978 for the incident.
     for (const [sid, entry] of current) {
+      if (sid === this.selfSession.session_id) continue;
       const last = new Date(entry.last_heartbeat_at).getTime();
       if (now - last > STALE_THRESHOLD_MS) {
         current.delete(sid);

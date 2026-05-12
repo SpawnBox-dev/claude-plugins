@@ -9,7 +9,7 @@
  * Atomic writes (temp file + rename). Tolerant readers (parse failure → empty).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from "fs";
 import { join } from "path";
 
 /**
@@ -63,11 +63,64 @@ function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
+/**
+ * Atomic write with bounded retry on transient Windows file-lock errors.
+ *
+ * 0.30.32 (ghost-session fix): the prior single-attempt implementation
+ * threw on the first EBUSY / EPERM / EACCES / ENOENT (mid-rename race),
+ * which propagated up through writeSession into AgentChannel.heartbeat()'s
+ * setInterval callback. In Bun + Node, an uncaught exception in a timer
+ * callback silently halts the interval - one transient lock from OneDrive
+ * sync, antivirus, or two concurrent sessions racing on sessions.json
+ * was enough to permanently kill heartbeats for the rest of the session.
+ *
+ * Retry policy: 3 attempts with 50ms / 150ms / 450ms backoff. Total worst-
+ * case latency 650ms before throw, well under heartbeat interval (30s) so
+ * even a fully-retried write that ultimately fails is caught by the next
+ * heartbeat tick. SYNCHRONOUS sleep loop (not async) because the existing
+ * call sites are sync; converting them is a much bigger refactor and the
+ * total stall is bounded.
+ */
 function atomicWrite(dir: string, name: string, content: string): void {
   ensureDir(dir);
-  const tmp = join(dir, `${name}.tmp.${process.pid}.${Date.now()}`);
-  writeFileSync(tmp, content);
-  renameSync(tmp, join(dir, name));
+  const target = join(dir, name);
+  const RETRY_DELAYS_MS = [50, 150, 450];
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    // Fresh tmp filename per attempt so a half-written tmp from a prior
+    // attempt's writeFileSync failure doesn't collide.
+    const tmp = join(
+      dir,
+      `${name}.tmp.${process.pid}.${Date.now()}.${attempt}`,
+    );
+    try {
+      writeFileSync(tmp, content);
+      renameSync(tmp, target);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const retryable =
+        code === "EBUSY" ||
+        code === "EPERM" ||
+        code === "EACCES" ||
+        code === "ENOENT";
+      if (!retryable || attempt === RETRY_DELAYS_MS.length) {
+        throw err;
+      }
+      // Best-effort cleanup of the failed tmp (ignore errors - it may
+      // not exist if writeFileSync threw before creating it).
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // ignore
+      }
+      // Synchronous sleep before next attempt. Atomics.wait on a fresh
+      // SharedArrayBuffer is the canonical Bun/Node sync-sleep pattern.
+      const buf = new SharedArrayBuffer(4);
+      const view = new Int32Array(buf);
+      Atomics.wait(view, 0, 0, RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 function safeRead<T>(path: string, fallback: T): T {
