@@ -28,6 +28,20 @@ import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
+
+// 0.30.31: read plugin version from package.json at module load so the
+// McpServer registration field + startup banner self-sync with the
+// authoritative source. Previously this string was hand-edited in two
+// spots and forgotten on every other version bump (notes 19a4438a,
+// c1f87b01). One canonical source eliminates that drift forever.
+const PLUGIN_VERSION: string = (() => {
+  try {
+    const pkgPath = join(import.meta.dir, "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version as string;
+  } catch {
+    return "0.0.0-unknown";
+  }
+})();
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
 import { handleUpdateSessionTask } from "./tools/session_task";
@@ -424,7 +438,7 @@ if (PERMISSION_RELAY_ENABLED) {
 const server = new McpServer(
   {
     name: "orchestrator",
-    version: "0.30.28",
+    version: PLUGIN_VERSION,
   },
   {
     capabilities: {
@@ -2582,7 +2596,7 @@ async function main() {
   // the plugin log). Makes "is the new version actually running?" trivially
   // answerable without inferring from rendering changes.
   process.stderr.write(
-    `[orchestrator] MCP server starting - version=0.30.28 ` +
+    `[orchestrator] MCP server starting - version=${PLUGIN_VERSION} ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
