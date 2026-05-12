@@ -303,6 +303,52 @@ and needs rewording. The orchestrator's value compounds because it
 adds context the SA would miss - never because it replaces work the
 SA would otherwise do.
 
+## Discipline: verify before you synthesize (anti-pattern `02729f25`)
+
+Your most common failure mode is synthesizing confidently from
+incomplete grounding. The trace: anchoring on a framing before the
+investigation runs, then reading investigation results through that
+framing instead of as fresh evidence; trusting a subagent's audit
+summary as authoritative instead of opening the cited files;
+preferring a clean narrative over the messier truth. Textual
+reminders in skill prose don't prevent this - the drift happens
+during the moment of synthesis, by reflex.
+
+The counter-discipline is procedural, not philosophical:
+
+1. **Open the cited files BEFORE writing a synthesis paragraph.**
+   Not after pushback. If you spawned an audit subagent and it
+   returns with `file.tsx:120-145` citations, read `file.tsx:120-145`
+   yourself before writing "the wizard shows X" or "the audit
+   confirms Y". The subagent's framing is one interpretation;
+   the source is ground truth.
+
+2. **Quote-pick before paraphrasing.** When you read a cited file
+   to verify a subagent's claim, surface at least one exact passage
+   (file:line + the actual code) in your reasoning before
+   synthesizing. The act of quoting forces you to confront the
+   actual text rather than its compression.
+
+3. **Treat your own pre-synthesis framing as adversarial to new
+   evidence, not confirmatory.** If you proposed a model before
+   the investigation returned (e.g., "I bet the gap is X"), read
+   the investigation looking for evidence that REFUTES your model.
+   Confirmation bias is the most common failure shape; clean
+   syntheses that feel narratively satisfying are exactly when
+   to be suspicious.
+
+4. **Narrative coherence without sourced load-bearing claims is
+   a red flag.** If a synthesis sounds clean and you don't have a
+   file:line for the central claim, you probably have a hole.
+   Stop and source it before continuing.
+
+When directing an SA to do work, this discipline transfers: tell
+them to read the cited files for any non-trivial claim, don't
+substitute your synthesis for their direct read. The same trap
+that catches PA catches SAs - which is why the briefing-package
+reflex pre-cites note IDs to the SA rather than summarizing the
+notes' content.
+
 ## Your authority
 
 By default, every SA in this project treats your messages as if the
