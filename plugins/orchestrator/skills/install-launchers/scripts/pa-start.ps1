@@ -143,6 +143,13 @@ $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 $env:ORCHESTRATOR_AGENT_ROLE = 'prime'
 $env:SPAWNBOX_AGENT_ROLE = 'prime'
 
+# 0.30.31 (WI c03c9d6a): functional kind, distinct from role. PA is
+# both role='prime' and kind='prime' - they collapse for this session
+# type. Kept as a separate field so consumers can gate on kind uniformly
+# alongside SAs and discord-bot sessions without role-special-casing.
+$env:ORCHESTRATOR_SESSION_KIND = 'prime'
+$env:SPAWNBOX_SESSION_KIND = 'prime'
+
 # Opt into the PA-gated permission relay (0.30.17+). When set, SA permission
 # requests for unallowlisted tools route through agent-channel to PA for
 # authorization instead of falling back to in-terminal prompts. PA needs the

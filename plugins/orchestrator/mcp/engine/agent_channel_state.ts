@@ -12,6 +12,29 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
 import { join } from "path";
 
+/**
+ * Functional classification of an agent session, distinct from `role`.
+ *
+ * `role` ("prime" / "subordinate") encodes the orchestration position:
+ *  who has authority over whom. `kind` encodes WHAT this session is for
+ *  so other consumers (skills, classifier policies, briefing renderers)
+ *  can gate on identity without resorting to narrative pattern-matching
+ *  on session names or inferring from the role alone.
+ *
+ *  - "prime"        : PA - the project's orchestrator session.
+ *  - "subordinate"  : generic SA - the default working session.
+ *  - "discord-bot"  : SA specialized for live Discord community ops.
+ *                     role is still "subordinate" - kind distinguishes
+ *                     it from generic SAs for /discord-bootstrap skill
+ *                     identity checks + future per-kind classifier
+ *                     allowlists.
+ *
+ * Set at launch by ORCHESTRATOR_SESSION_KIND (or SPAWNBOX_SESSION_KIND
+ * for the legacy prefix). Optional - sessions launched without the env
+ * leave it undefined and consumers fall back to role-based heuristics.
+ */
+export type SessionKind = "prime" | "subordinate" | "discord-bot";
+
 export interface SessionEntry {
   session_id: string;
   id8: string;
@@ -20,6 +43,7 @@ export interface SessionEntry {
   started_at: string;
   last_heartbeat_at: string;
   current_task?: string | null;
+  kind?: SessionKind;
 }
 
 export interface OverrideState {

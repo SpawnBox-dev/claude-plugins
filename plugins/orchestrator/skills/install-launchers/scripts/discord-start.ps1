@@ -59,6 +59,14 @@ $env:SPAWNBOX_AGENT_ROLE = 'subordinate'
 $env:ORCHESTRATOR_AGENT_NAME = $sessionName
 $env:SPAWNBOX_AGENT_NAME = $sessionName
 
+# 0.30.31 (WI c03c9d6a): functional kind distinguishes the Discord-ops
+# session from generic SAs (both role='subordinate'). /discord-bootstrap
+# skill identity checks gate on kind='discord-bot' instead of fragile
+# name-pattern matching. Future per-kind classifier allowlists (e.g.
+# "discord-bot may read secrets.env during bootstrap") also gate on this.
+$env:ORCHESTRATOR_SESSION_KIND = 'discord-bot'
+$env:SPAWNBOX_SESSION_KIND = 'discord-bot'
+
 # Opt into the PA-gated permission relay (0.30.17+). When set, this SA's MCP
 # declares the `claude/channel/permission` capability so tool permission
 # requests route through agent-channel to PA for authorization instead of

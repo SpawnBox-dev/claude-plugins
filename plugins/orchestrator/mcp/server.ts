@@ -2161,6 +2161,20 @@ function startAgentChannel(): void {
     process.env.SPAWNBOX_AGENT_NAME ??
     `auto-${sessionId.slice(0, 8)}`;
 
+  // 0.30.31 (WI c03c9d6a): functional session kind, distinct from role.
+  // role encodes orchestration position (who has authority); kind encodes
+  // WHAT this session is for so consumers (skills, classifier policy, the
+  // briefing renderer) can gate on identity without narrative pattern-
+  // matching on names. Optional - older launchers that don't set the env
+  // leave kind undefined and consumers fall back to role-based heuristics.
+  const kindEnv =
+    process.env.ORCHESTRATOR_SESSION_KIND ??
+    process.env.SPAWNBOX_SESSION_KIND;
+  const kind: import("./engine/agent_channel_state").SessionKind | undefined =
+    kindEnv === "prime" || kindEnv === "subordinate" || kindEnv === "discord-bot"
+      ? kindEnv
+      : undefined;
+
   const self: SessionEntry = {
     session_id: sessionId,
     id8: sessionId.slice(0, 8),
@@ -2169,6 +2183,7 @@ function startAgentChannel(): void {
     started_at: new Date().toISOString(),
     last_heartbeat_at: new Date().toISOString(),
     current_task: null,
+    ...(kind ? { kind } : {}),
   };
 
   const stateDir = join(projectDir, ".orchestrator-state", "agent-channel");

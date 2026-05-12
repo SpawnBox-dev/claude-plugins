@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import type { SessionEntry } from "./agent_channel_state";
 
 /**
  * Read agent-channel `sessions.json` and return the set of session_ids whose
@@ -60,4 +61,42 @@ export function getLiveOtherSessionIds(sessionId: string): string[] | null {
     if (id !== sessionId) others.push(id);
   }
   return others;
+}
+
+/**
+ * Read agent-channel `sessions.json` and return the heartbeat-fresh entries
+ * (within 90s). Same liveness contract as getLiveSessionIds, but returns the
+ * full SessionEntry shape so callers can read auxiliary fields (`kind`,
+ * `name`, `role`, `current_task`) without a second file read.
+ *
+ * Returns `null` when sessions.json doesn't exist - callers fall back to
+ * DB-only logic the same way they would for getLiveSessionIds.
+ */
+export function getLiveSessions(): SessionEntry[] | null {
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  const sessionsFile = join(
+    projectDir,
+    ".orchestrator-state",
+    "agent-channel",
+    "sessions.json",
+  );
+  if (!existsSync(sessionsFile)) return null;
+  try {
+    const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
+    const entries: SessionEntry[] = Array.isArray(data)
+      ? data
+      : (data?.sessions ?? []);
+    const nowMs = Date.now();
+    const STALE_MS = 90_000;
+    return entries.filter((e) => {
+      if (!e?.session_id || !e?.last_heartbeat_at) return false;
+      const lastHbMs = new Date(e.last_heartbeat_at).getTime();
+      return Number.isFinite(lastHbMs) && nowMs - lastHbMs <= STALE_MS;
+    });
+  } catch {
+    return null;
+  }
 }

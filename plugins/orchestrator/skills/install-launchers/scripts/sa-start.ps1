@@ -113,6 +113,13 @@ $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 $env:ORCHESTRATOR_AGENT_ROLE = 'subordinate'
 $env:SPAWNBOX_AGENT_ROLE = 'subordinate'
 
+# 0.30.31 (WI c03c9d6a): functional kind, distinct from role. Generic
+# SAs are kind='subordinate' (same string as role). Discord-ops sessions
+# launched via discord-start.ps1 set kind='discord-bot' while remaining
+# role='subordinate'. Skills + classifier policy gate on kind, not role.
+$env:ORCHESTRATOR_SESSION_KIND = 'subordinate'
+$env:SPAWNBOX_SESSION_KIND = 'subordinate'
+
 # Opt into the PA-gated permission relay (0.30.17+). When set, this SA's MCP
 # declares the `claude/channel/permission` capability so tool permission
 # requests route through agent-channel to PA for authorization instead of

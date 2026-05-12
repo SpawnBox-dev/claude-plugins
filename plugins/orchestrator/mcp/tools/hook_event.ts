@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { SessionTracker } from "../engine/session_tracker";
+import { getLiveSessions } from "../engine/live_sessions";
 import { now } from "../utils";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
@@ -552,6 +553,20 @@ function renderSiblingActivity(
     if (shared.length >= 2) overlapping.push(s);
   }
 
+  // 0.30.31 (WI c03c9d6a): look up each sibling's kind from sessions.json
+  // so the briefing surfaces functional identity (discord-bot vs generic
+  // SA vs PA) alongside the session_id. Falls back to no kind suffix when
+  // the sibling was launched without ORCHESTRATOR_SESSION_KIND (e.g.
+  // older launcher or a plain `claude` invocation that joined the
+  // channel). Single sessions.json read; map by session_id for O(1) lookup.
+  const liveEntries = getLiveSessions();
+  const kindBySession = new Map<string, string>();
+  if (liveEntries) {
+    for (const e of liveEntries) {
+      if (e.kind) kindBySession.set(e.session_id, e.kind);
+    }
+  }
+
   // 0.29.0: show FULL session_id (not 8-char prefix). Prior behavior
   // truncated to slice(0, 8) which made the displayed id useless for any
   // tooling that needed the canonical session_id (e.g. addressing peers via
@@ -560,10 +575,12 @@ function renderSiblingActivity(
   const lines = sibs.map((s) => {
     const isOverlap = overlapping.some((o) => o.session_id === s.session_id);
     const marker = isOverlap ? " *POTENTIAL OVERLAP*" : "";
+    const kind = kindBySession.get(s.session_id);
+    const kindSuffix = kind ? ` (${kind})` : "";
     const task = s.current_task
       ? `: ${s.current_task.slice(0, 80)}`
       : ": (no task set)";
-    return `  - ${s.session_id}${marker}${task}`;
+    return `  - ${s.session_id}${kindSuffix}${marker}${task}`;
   });
 
   let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:\n${lines.join("\n")}`;
