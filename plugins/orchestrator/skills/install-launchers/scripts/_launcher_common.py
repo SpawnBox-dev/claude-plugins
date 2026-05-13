@@ -247,6 +247,21 @@ def supersede_existing_pa(project_dir: Path) -> None:
     time.sleep(2)
 
 
+def make_session_name(prefix: str) -> str:
+    """Build a timestamped session name: '<PREFIX>-YYYY-MM-DD-HH-MM-SS'.
+
+    Uses local time (matches the .ps1 launchers' `Get-Date -Format`).
+
+    Args:
+        prefix: 'PA' / 'SA' / 'DISCORD-LIVE'.
+
+    Returns:
+        The composed name string.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    return f"{prefix}-{stamp}"
+
+
 def project_hash_for(project_dir: PurePath) -> str:
     """Transform a project path to the Claude Code project-dir hash.
 
@@ -275,4 +290,5 @@ __all__ = [
     "resolve_project_dir",
     "resolve_resume_target",
     "supersede_existing_pa",
+    "make_session_name",
 ]
