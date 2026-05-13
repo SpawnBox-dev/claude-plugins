@@ -247,6 +247,51 @@ def supersede_existing_pa(project_dir: Path) -> None:
     time.sleep(2)
 
 
+def setup_env(
+    *,
+    role: str,
+    session_kind: str,
+    project_dir: Path,
+    session_name: str | None,
+) -> None:
+    """Set the launcher env vars on os.environ.
+
+    Inherited by the spawned claude.exe → orchestrator MCP. Matches the
+    .ps1 launchers' env-block exactly:
+
+      - MCP_TIMEOUT = '30000' (bump from CC's 5s default; bun cold-start)
+      - ORCHESTRATOR_PROJECT_ROOT (project root; for MCP when
+        CLAUDE_PROJECT_DIR isn't reliably set)
+      - ORCHESTRATOR_AGENT_ROLE + SPAWNBOX_AGENT_ROLE alias
+      - ORCHESTRATOR_SESSION_KIND + SPAWNBOX_SESSION_KIND alias
+      - ORCHESTRATOR_AGENT_NAME + SPAWNBOX_AGENT_NAME alias
+        (ONLY if session_name is provided — leaving unset preserves a
+        resumed session's existing /rename name)
+      - ORCHESTRATOR_PA_PERMISSION_RELAY = '1' (opt into PA-gated
+        permission relay)
+
+    Args:
+        role: 'prime' or 'subordinate'.
+        session_kind: 'prime' / 'subordinate' / 'discord-bot'.
+        project_dir: Absolute project root.
+        session_name: New session name, or None on --resume-without-name.
+    """
+    os.environ["MCP_TIMEOUT"] = "30000"
+    os.environ["ORCHESTRATOR_PROJECT_ROOT"] = str(project_dir)
+
+    os.environ["ORCHESTRATOR_AGENT_ROLE"] = role
+    os.environ["SPAWNBOX_AGENT_ROLE"] = role
+
+    os.environ["ORCHESTRATOR_SESSION_KIND"] = session_kind
+    os.environ["SPAWNBOX_SESSION_KIND"] = session_kind
+
+    os.environ["ORCHESTRATOR_PA_PERMISSION_RELAY"] = "1"
+
+    if session_name:
+        os.environ["ORCHESTRATOR_AGENT_NAME"] = session_name
+        os.environ["SPAWNBOX_AGENT_NAME"] = session_name
+
+
 def make_session_name(prefix: str) -> str:
     """Build a timestamped session name: '<PREFIX>-YYYY-MM-DD-HH-MM-SS'.
 
@@ -291,4 +336,5 @@ __all__ = [
     "resolve_resume_target",
     "supersede_existing_pa",
     "make_session_name",
+    "setup_env",
 ]
