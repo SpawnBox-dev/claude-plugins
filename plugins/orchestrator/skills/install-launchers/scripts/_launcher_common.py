@@ -87,6 +87,74 @@ def resolve_project_dir(arg: str | None) -> Path:
     return resolved
 
 
+import os
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _user_home() -> Path:
+    """Return the user's home dir, preferring $HOME then $USERPROFILE."""
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if not home:
+        return Path.home()
+    return Path(home)
+
+
+def resolve_resume_target(resume: str, project_dir: Path) -> str:
+    """Convert a --resume value to a session UUID.
+
+    If `resume` already matches the canonical UUID shape, it's returned
+    unchanged. Otherwise, search the project's JSONL directory
+    (~/.claude/projects/<project-hash>/) for a file containing the
+    literal text "Session renamed to: <resume>" and return that JSONL's
+    basename (the session UUID).
+
+    If the projects dir doesn't exist, or no matching JSONL is found,
+    exit with code 1 and an actionable message.
+
+    Args:
+        resume: The --resume CLI value (UUID or display name).
+        project_dir: The absolute project root (from resolve_project_dir).
+
+    Returns:
+        The session UUID string.
+    """
+    if _UUID_RE.match(resume):
+        return resume
+
+    project_hash = project_hash_for(project_dir)
+    jsonl_dir = _user_home() / ".claude" / "projects" / project_hash
+
+    if not jsonl_dir.is_dir():
+        print(f"ERROR: Projects dir not found: {jsonl_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    needle = f"Session renamed to: {resume}"
+    matches: list[Path] = []
+    for jsonl in jsonl_dir.glob("*.jsonl"):
+        try:
+            content = jsonl.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if needle in content:
+            matches.append(jsonl)
+
+    if not matches:
+        print(
+            f"ERROR: No session in {jsonl_dir} has been renamed to: {resume}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    newest = max(matches, key=lambda p: p.stat().st_mtime)
+    print(f" Resolved display name to session: {newest.stem}", file=sys.stderr)
+    return newest.stem
+
+
 def project_hash_for(project_dir: PurePath) -> str:
     """Transform a project path to the Claude Code project-dir hash.
 
@@ -113,4 +181,5 @@ __all__ = [
     "check_marketplace_substituted",
     "project_hash_for",
     "resolve_project_dir",
+    "resolve_resume_target",
 ]
