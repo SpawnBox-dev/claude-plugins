@@ -1,0 +1,13 @@
+[project]
+name = "orchestrator-launchers"
+version = "0.0.0"
+description = "Python launcher implementation for the orchestrator plugin. Stdlib only — no runtime dependencies."
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests/launchers"]
+addopts = ["-ra", "--strict-markers"]

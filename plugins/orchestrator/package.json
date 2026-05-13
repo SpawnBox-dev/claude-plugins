@@ -7,6 +7,7 @@
     "build": "bun build mcp/server.ts --outdir dist --target bun",
     "dev": "bun run mcp/server.ts",
     "test": "bun test",
+    "test:py": "uvx --from pytest pytest tests/launchers/",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
