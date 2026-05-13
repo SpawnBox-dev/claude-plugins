@@ -87,7 +87,10 @@ def resolve_project_dir(arg: str | None) -> Path:
     return resolved
 
 
+import json
 import os
+import time
+from datetime import datetime, timedelta, timezone
 
 
 _UUID_RE = re.compile(
@@ -155,6 +158,95 @@ def resolve_resume_target(resume: str, project_dir: Path) -> str:
     return newest.stem
 
 
+def _sessions_file_for(project_dir: Path) -> Path:
+    """Path to the agent-channel sessions.json under the project."""
+    return project_dir / ".orchestrator-state" / "agent-channel" / "sessions.json"
+
+
+def supersede_existing_pa(project_dir: Path) -> None:
+    """Demote any role=prime entries with fresh heartbeats.
+
+    Pre-emptively transitions existing role=prime sessions to role=
+    subordinate so the about-to-launch PA registers cleanly. Stale
+    primes (heartbeat older than 90 seconds) are presumed dead and left
+    alone — their record self-cleans on next aging pass.
+
+    Mirrors the .ps1 launchers' pre-launch supersede block. Differs in
+    one place: write errors are FATAL here (vs warn-only in .ps1).
+    Silent write failure leaves two role=prime entries, breaking the
+    singleton invariant.
+
+    Args:
+        project_dir: Absolute project root.
+
+    Returns:
+        None. Exits 1 only on write failure during demotion.
+    """
+    state_file = _sessions_file_for(project_dir)
+    if not state_file.is_file():
+        return
+
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as err:
+        # Parse error: treat as no-PA. Self-heals on next session register.
+        print(
+            f"WARNING: Could not parse {state_file} (treating as no-PA): {err}",
+            file=sys.stderr,
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    fresh_threshold = now - timedelta(seconds=90)
+    sessions = state.get("sessions", [])
+
+    fresh_primes = []
+    for s in sessions:
+        if s.get("role") != "prime":
+            continue
+        heartbeat_str = s.get("last_heartbeat_at")
+        if not heartbeat_str:
+            continue
+        try:
+            heartbeat = datetime.fromisoformat(heartbeat_str)
+        except (ValueError, TypeError):
+            continue
+        # Ensure timezone-aware comparison.
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        if heartbeat > fresh_threshold:
+            fresh_primes.append(s)
+
+    if not fresh_primes:
+        return
+
+    print("", file=sys.stderr)
+    print(" Existing PrimeAgent detected - auto-superseding:", file=sys.stderr)
+    for pa in fresh_primes:
+        print(f"   * {pa.get('session_id', '?')} ({pa.get('name', '?')})", file=sys.stderr)
+
+    for s in sessions:
+        if s.get("role") == "prime":
+            s["role"] = "subordinate"
+
+    try:
+        state_file.write_text(
+            json.dumps(state, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as err:
+        print(
+            f"ERROR: Could not write {state_file}: {err}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(" (Existing PA(s) demoted. New PA will register as prime.)", file=sys.stderr)
+    print(" (Press Ctrl+C in the next ~2s to cancel.)", file=sys.stderr)
+    print("", file=sys.stderr)
+    time.sleep(2)
+
+
 def project_hash_for(project_dir: PurePath) -> str:
     """Transform a project path to the Claude Code project-dir hash.
 
@@ -182,4 +274,5 @@ __all__ = [
     "project_hash_for",
     "resolve_project_dir",
     "resolve_resume_target",
+    "supersede_existing_pa",
 ]
