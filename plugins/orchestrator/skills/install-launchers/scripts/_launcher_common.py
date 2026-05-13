@@ -57,7 +57,34 @@ def check_marketplace_substituted() -> None:
 
 
 import re
-from pathlib import PurePath
+from pathlib import Path, PurePath
+
+
+def resolve_project_dir(arg: str | None) -> Path:
+    """Resolve the project-root path from a user-supplied CLI arg.
+
+    None / empty → CWD. Relative paths are resolved against CWD.
+    Absolute paths pass through. The result is always absolute. Exits
+    with code 1 if the resolved path doesn't exist (matches the .ps1
+    launchers' behavior).
+
+    Args:
+        arg: Value of --project-dir from argparse, or None when not given.
+
+    Returns:
+        The absolute Path to the project root.
+    """
+    if not arg:
+        base = Path.cwd()
+    else:
+        base = Path(arg)
+        if not base.is_absolute():
+            base = Path.cwd() / base
+    resolved = base.resolve()
+    if not resolved.is_dir():
+        print(f"ERROR: project-dir not found: {resolved}", file=sys.stderr)
+        sys.exit(1)
+    return resolved
 
 
 def project_hash_for(project_dir: PurePath) -> str:
@@ -85,4 +112,5 @@ __all__ = [
     "MARKETPLACE_PLACEHOLDER",
     "check_marketplace_substituted",
     "project_hash_for",
+    "resolve_project_dir",
 ]
