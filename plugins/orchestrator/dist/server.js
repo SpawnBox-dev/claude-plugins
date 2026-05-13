@@ -26272,8 +26272,67 @@ function isPidAliveAsClaudeExe(pid) {
     return false;
   }
 }
+function killOlderDuplicateMcps(myInitialParentClaudePid) {
+  if (process.platform !== "win32")
+    return;
+  const myPid = process.pid;
+  const script = `
+$myPid = ${myPid}
+$myParentClaude = ${myInitialParentClaudePid}
+
+$myProc = Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue
+if (-not $myProc) { exit 0 }
+$myStart = $myProc.CreationDate
+
+$myParentClaudeProc = Get-CimInstance Win32_Process -Filter "ProcessId = $myParentClaude" -ErrorAction SilentlyContinue
+if (-not $myParentClaudeProc) { exit 0 }
+$myParentClaudeStart = $myParentClaudeProc.CreationDate
+
+$siblings = Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" | Where-Object {
+  $_.CommandLine -like '*orchestrator*dist*server.js*' -and $_.ProcessId -ne $myPid
+}
+foreach ($s in $siblings) {
+  # Walk s's ancestor chain to find its claude.exe
+  $walk = $s.ProcessId
+  $ancestorClaude = 0
+  for ($i = 0; $i -lt 8; $i++) {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction SilentlyContinue
+    if (-not $p) { break }
+    if ($p.Name -eq 'claude.exe') { $ancestorClaude = $walk; break }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    $walk = $p.ParentProcessId
+  }
+  if ($ancestorClaude -ne $myParentClaude) { continue }
+
+  # PPID-reuse defense: if the "ancestor" claude.exe was created AFTER the
+  # sibling bun, it's not a real ancestor - it's a freed PID reassigned to a
+  # newer process. Skip the kill.
+  if ($s.CreationDate -lt $myParentClaudeStart) { continue }
+
+  # Kill if sibling older than me, or same start time and lower PID (tiebreak).
+  if ($s.CreationDate -lt $myStart -or ($s.CreationDate -eq $myStart -and $s.ProcessId -lt $myPid)) {
+    Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "killed:$($s.ProcessId):created=$($s.CreationDate.ToString('o'))"
+  }
+}
+`;
+  try {
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const out = execSync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1e4 });
+    const killed = out.split(`
+`).map((l) => l.trim()).filter((l) => l.startsWith("killed:"));
+    if (killed.length > 0) {
+      process.stderr.write(`[orchestrator] dedup: killed ${killed.length} older sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${killed.join("; ")}
+`);
+    }
+  } catch (err) {
+    process.stderr.write(`[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}
+`);
+  }
+}
 var initialParentClaudePid = findClaudeAncestorPid();
 if (initialParentClaudePid) {
+  killOlderDuplicateMcps(initialParentClaudePid);
   process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)
 `);
   setInterval(() => {

@@ -2661,8 +2661,110 @@ function isPidAliveAsClaudeExe(pid: number): boolean {
   }
 }
 
+/**
+ * Find sibling orchestrator MCP bun processes that share our parent claude.exe
+ * and were spawned BEFORE us, then force-kill them.
+ *
+ * Mitigates anthropics/claude-code#25976: rapid `/plugin update` then
+ * `/reload-plugins` can spawn a new MCP without killing the prior one - the
+ * plugin manager's child-process cleanup races the new spawn. We observed
+ * this 2026-05-12 (two orchestrator buns with the same claude.exe ancestor,
+ * 25s apart).
+ *
+ * Why this is needed in addition to the orphan watchdog: both duplicate MCPs
+ * have a valid live claude.exe ancestor, so the orphan watchdog (whose job is
+ * "detect dead parent, self-shutdown") cannot tell the duplicate apart from
+ * the legitimate one. This dedup runs at startup before the watchdog arms.
+ *
+ * "Newer wins" by Win32_Process.CreationDate: the plugin manager's intent on
+ * each reload is "this NEW process is the MCP" - so the youngest sibling is
+ * authoritative. Tie on creation time (vanishingly rare given microsecond
+ * resolution) tiebreaks on PID (higher wins).
+ *
+ * Validates against the documented Windows PPID-reuse failure mode (per
+ * Win32_Process docs - "ParentProcessId may refer to a process that reused
+ * a process identifier"): for the parent claude.exe to be a genuine ancestor
+ * of a child bun, parent.CreationDate must be <= child.CreationDate. If a
+ * sibling's "ancestor" claude.exe is younger than the sibling itself, the
+ * walk was fooled by a freed-then-reassigned PID and we don't kill.
+ *
+ * Best-effort (try/catch around the whole thing): if PowerShell fails or the
+ * scan errors, the orphan watchdog remains the safety net. We never propagate
+ * the error.
+ */
+function killOlderDuplicateMcps(myInitialParentClaudePid: number): void {
+  if (process.platform !== "win32") return;
+  const myPid = process.pid;
+  const script = `
+$myPid = ${myPid}
+$myParentClaude = ${myInitialParentClaudePid}
+
+$myProc = Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue
+if (-not $myProc) { exit 0 }
+$myStart = $myProc.CreationDate
+
+$myParentClaudeProc = Get-CimInstance Win32_Process -Filter "ProcessId = $myParentClaude" -ErrorAction SilentlyContinue
+if (-not $myParentClaudeProc) { exit 0 }
+$myParentClaudeStart = $myParentClaudeProc.CreationDate
+
+$siblings = Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" | Where-Object {
+  $_.CommandLine -like '*orchestrator*dist*server.js*' -and $_.ProcessId -ne $myPid
+}
+foreach ($s in $siblings) {
+  # Walk s's ancestor chain to find its claude.exe
+  $walk = $s.ProcessId
+  $ancestorClaude = 0
+  for ($i = 0; $i -lt 8; $i++) {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction SilentlyContinue
+    if (-not $p) { break }
+    if ($p.Name -eq 'claude.exe') { $ancestorClaude = $walk; break }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    $walk = $p.ParentProcessId
+  }
+  if ($ancestorClaude -ne $myParentClaude) { continue }
+
+  # PPID-reuse defense: if the "ancestor" claude.exe was created AFTER the
+  # sibling bun, it's not a real ancestor - it's a freed PID reassigned to a
+  # newer process. Skip the kill.
+  if ($s.CreationDate -lt $myParentClaudeStart) { continue }
+
+  # Kill if sibling older than me, or same start time and lower PID (tiebreak).
+  if ($s.CreationDate -lt $myStart -or ($s.CreationDate -eq $myStart -and $s.ProcessId -lt $myPid)) {
+    Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
+    Write-Output "killed:$($s.ProcessId):created=$($s.CreationDate.ToString('o'))"
+  }
+}
+`;
+  try {
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const out = execSync(
+      `powershell.exe -NoProfile -EncodedCommand ${encoded}`,
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 },
+    );
+    const killed = out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("killed:"));
+    if (killed.length > 0) {
+      process.stderr.write(
+        `[orchestrator] dedup: killed ${killed.length} older sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${killed.join("; ")}\n`,
+      );
+    }
+  } catch (err) {
+    // Non-fatal - the orphan watchdog is the second line of defense.
+    process.stderr.write(
+      `[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}\n`,
+    );
+  }
+}
+
 const initialParentClaudePid = findClaudeAncestorPid();
 if (initialParentClaudePid) {
+  // 0.30.37 (WI for anthropics/claude-code#25976): kill older sibling MCPs
+  // BEFORE arming the watchdog. The plugin manager's known race leaves stale
+  // duplicates that the watchdog can't distinguish from legitimate runs.
+  killOlderDuplicateMcps(initialParentClaudePid);
+
   process.stderr.write(
     `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)\n`,
   );
