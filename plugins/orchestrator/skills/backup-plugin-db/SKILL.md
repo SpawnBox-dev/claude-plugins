@@ -240,6 +240,37 @@ close to what `lookup` reports against the live DB.
 
 For a full destructive restore drill, see "Common mistakes" below.
 
+### 7. (Optional) Wire up failure alerting
+
+By default, a failing snapshot is visible but not loud:
+
+- **systemd-user:** `systemctl --user --failed` lists it; `journalctl --user -u <name>.service` has the traceback.
+- **cron:** stderr lands wherever your MTA delivers root cron mail, or in the per-user spool.
+- **Windows Scheduled Task:** the task's `LastTaskResult` is non-zero; Event Viewer → Task Scheduler logs the run.
+
+The shipped units stay narrow on purpose — alerting is opinionated and per-environment. If you already run a failure handler, attach it without editing the shipped unit:
+
+```bash
+# systemd-user: drop-in override (replace <name> with your --name slug,
+#               and <your-handler>@.service with your own template).
+mkdir -p ~/.config/systemd/user/<name>.service.d
+cat > ~/.config/systemd/user/<name>.service.d/onfailure.conf <<'EOF'
+[Unit]
+OnFailure=<your-handler>@%n.service
+EOF
+systemctl --user daemon-reload
+```
+
+```powershell
+# Windows: attach a follow-up action to the task without re-registering it.
+$task = Get-ScheduledTask -TaskName '<your task name>'
+$task.Settings.RestartCount    = 1
+$task.Settings.RestartInterval = 'PT1M'
+Set-ScheduledTask -InputObject $task
+# For richer alerting, layer a second Scheduled Task triggered by the
+# "Task failed to start" or "Task completed with non-zero result" event.
+```
+
 ## Quick reference
 
 | Step | What | Where |
