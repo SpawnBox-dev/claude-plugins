@@ -26245,7 +26245,24 @@ setInterval(() => {
   process.stderr.write(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
 `);
 }, 300000).unref();
-function isPidAliveAsClaudeExe(pid) {
+function getProcessCreationTime(pid) {
+  if (process.platform === "win32") {
+    try {
+      const script = `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CreationDate.ToString('o')`;
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      const out = execSync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const s = out.trim();
+      if (!s)
+        return null;
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function isPidAliveAsClaudeExe(pid, expectedCreationTime) {
   try {
     if (process.platform === "win32") {
       const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
@@ -26254,7 +26271,17 @@ function isPidAliveAsClaudeExe(pid) {
         return false;
       const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
       const name = firstCol.toLowerCase();
-      return name === "claude.exe" || name === "claude";
+      if (name !== "claude.exe" && name !== "claude")
+        return false;
+      if (expectedCreationTime) {
+        const actualCreation = getProcessCreationTime(pid);
+        if (!actualCreation)
+          return false;
+        const drift = Math.abs(actualCreation.getTime() - expectedCreationTime.getTime());
+        if (drift > 1000)
+          return false;
+      }
+      return true;
     } else {
       try {
         process.kill(pid, 0);
@@ -26331,13 +26358,15 @@ foreach ($s in $siblings) {
   }
 }
 var initialParentClaudePid = findClaudeAncestorPid();
+var initialParentClaudeCreationTime = initialParentClaudePid !== null ? getProcessCreationTime(initialParentClaudePid) : null;
 if (initialParentClaudePid) {
   killOlderDuplicateMcps(initialParentClaudePid);
-  process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)
+  const creationTimeNote = initialParentClaudeCreationTime ? ` created=${initialParentClaudeCreationTime.toISOString()}` : " (creation-time unavailable - PID-reuse defense disabled)";
+  process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}${creationTimeNote} (tick every 30s)
 `);
   setInterval(() => {
     try {
-      const alive = isPidAliveAsClaudeExe(initialParentClaudePid);
+      const alive = isPidAliveAsClaudeExe(initialParentClaudePid, initialParentClaudeCreationTime ?? undefined);
       if (!alive) {
         process.stderr.write(`[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. Shutting down to avoid becoming an orphan that clobbers live sessions.
 `);

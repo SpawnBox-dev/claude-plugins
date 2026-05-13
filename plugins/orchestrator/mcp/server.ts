@@ -2620,14 +2620,63 @@ setInterval(() => {
 // PowerShell -EncodedCommand. The one-time ~1-2s startup cost there is
 // acceptable; the hot path uses the faster tasklist.
 
-function isPidAliveAsClaudeExe(pid: number): boolean {
+/**
+ * Get a process's CreationDate via Win32_Process (Windows) or /proc start
+ * time (Unix). Used together with PID to defend against PID reuse - the
+ * same numeric PID can be reassigned to a new, unrelated process after the
+ * original exits.
+ *
+ * Returns null on any failure (process gone, query error, parse error) -
+ * callers treat null as "can't determine."
+ */
+function getProcessCreationTime(pid: number): Date | null {
+  if (process.platform === "win32") {
+    try {
+      const script = `(Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" -ErrorAction SilentlyContinue).CreationDate.ToString('o')`;
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      const out = execSync(
+        `powershell.exe -NoProfile -EncodedCommand ${encoded}`,
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const s = out.trim();
+      if (!s) return null;
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d : null;
+    } catch {
+      return null;
+    }
+  }
+  // Unix: /proc/<pid>/stat field 22 is starttime in clock ticks since boot.
+  // Converting to a wall-clock Date requires boot time + CLK_TCK. Skip for
+  // now (Unix path falls back to PID-only check without reuse defense).
+  return null;
+}
+
+/**
+ * Is this PID alive AND named claude.exe (or claude on Unix)? If
+ * `expectedCreationTime` is provided, also verify the process at this PID
+ * has the SAME creation time - defends against PID reuse where a freed
+ * claude.exe PID gets reassigned to a different process (including, observed
+ * 2026-05-12, a brand-new claude.exe instance after the user restarted
+ * Claude Code).
+ *
+ * Without the creation-time check, the watchdog can never fire when the
+ * user restarts Claude Code: old claude.exe at PID X dies; new claude.exe
+ * (different process, same PID X if Windows recycles) starts; tasklist sees
+ * "PID X is claude.exe alive"; watchdog thinks parent is fine. Then the
+ * orphan MCP runs forever. Confirmed root cause for two orphan buns observed
+ * 2026-05-12 (34088 + 15640, both with PID-reuse-fooled watchdogs).
+ */
+function isPidAliveAsClaudeExe(
+  pid: number,
+  expectedCreationTime?: Date,
+): boolean {
   try {
     if (process.platform === "win32") {
-      // tasklist is part of Windows itself (not deprecated like wmic) and
-      // returns in ~50-100ms - much faster than spinning up PowerShell to
-      // call Get-CimInstance, which matters when this fires every 30s on
-      // every running MCP. /FO CSV /NH yields one quote-delimited line per
-      // match: "name","pid","session","#","mem".
+      // Fast path: tasklist for existence + name. ~50ms vs Get-CimInstance's
+      // ~1-2s. Most ticks the parent IS alive with matching name; only when
+      // it is AND expectedCreationTime is provided do we pay for the second
+      // call to verify creation time.
       const out = execSync(
         `tasklist /FI "PID eq ${pid}" /FO CSV /NH`,
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
@@ -2636,10 +2685,25 @@ function isPidAliveAsClaudeExe(pid: number): boolean {
       if (!trimmed || trimmed.startsWith("INFO:")) return false;
       const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
       const name = firstCol.toLowerCase();
-      return name === "claude.exe" || name === "claude";
+      if (name !== "claude.exe" && name !== "claude") return false;
+      // PID-reuse defense via creation-time match
+      if (expectedCreationTime) {
+        const actualCreation = getProcessCreationTime(pid);
+        if (!actualCreation) return false;
+        const drift = Math.abs(
+          actualCreation.getTime() - expectedCreationTime.getTime(),
+        );
+        // 1s tolerance - Windows CreationDate has ~ms precision but small
+        // skew can come from timezone parsing / .NET ticks-vs-Date round-trip.
+        // Genuine PID reuse with another claude.exe is seconds-to-minutes
+        // apart, never within 1s.
+        if (drift > 1000) return false;
+      }
+      return true;
     } else {
       // Unix: process.kill(pid, 0) throws if dead. Then check /proc/<pid>/stat
-      // comm field matches claude.
+      // comm field matches claude. Creation-time reuse defense not yet
+      // implemented on Unix (TODO if/when an orphan-on-Unix case surfaces).
       try {
         process.kill(pid, 0);
       } catch {
@@ -2759,18 +2823,35 @@ foreach ($s in $siblings) {
 }
 
 const initialParentClaudePid = findClaudeAncestorPid();
+// 0.30.38: also capture parent claude.exe's creation time so the watchdog
+// can defend against PID reuse. Without this, when the user closes one
+// Claude Code window and opens another, Windows may reassign the freed
+// claude.exe PID to the new claude.exe - and a tasklist check on the old
+// PID would return "claude.exe alive" (because it IS, just a different
+// instance). Orphan watchdog stays armed forever, MCP runs forever.
+// Confirmed root cause for two orphan buns observed 2026-05-12.
+const initialParentClaudeCreationTime =
+  initialParentClaudePid !== null
+    ? getProcessCreationTime(initialParentClaudePid)
+    : null;
 if (initialParentClaudePid) {
   // 0.30.37 (WI for anthropics/claude-code#25976): kill older sibling MCPs
   // BEFORE arming the watchdog. The plugin manager's known race leaves stale
   // duplicates that the watchdog can't distinguish from legitimate runs.
   killOlderDuplicateMcps(initialParentClaudePid);
 
+  const creationTimeNote = initialParentClaudeCreationTime
+    ? ` created=${initialParentClaudeCreationTime.toISOString()}`
+    : " (creation-time unavailable - PID-reuse defense disabled)";
   process.stderr.write(
-    `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)\n`,
+    `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}${creationTimeNote} (tick every 30s)\n`,
   );
   setInterval(() => {
     try {
-      const alive = isPidAliveAsClaudeExe(initialParentClaudePid);
+      const alive = isPidAliveAsClaudeExe(
+        initialParentClaudePid,
+        initialParentClaudeCreationTime ?? undefined,
+      );
       if (!alive) {
         process.stderr.write(
           `[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. ` +
