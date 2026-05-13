@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join6 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "fs";
+import { resolve, join as join5 } from "path";
+import { existsSync as existsSync6, readFileSync as readFileSync3, writeFileSync } from "fs";
 import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
@@ -22639,6 +22639,15 @@ function getDb(stateDir) {
       offset_bytes INTEGER NOT NULL,
       PRIMARY KEY (receiver_id8, jsonl_path)
     );
+    CREATE TABLE IF NOT EXISTS system_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      from_session TEXT NOT NULL,
+      to_session TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
   dbCache.set(stateDir, db);
   return db;
@@ -22823,6 +22832,78 @@ function writeAllOffsets(stateDir, receiverId8, offsets) {
       upsert.run(receiverId8, jsonlPath, offset);
     }
   })();
+}
+function rowToSystemEvent(r) {
+  let payload = {};
+  try {
+    const parsed = JSON.parse(r.payload);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      payload = parsed;
+    }
+  } catch {}
+  return {
+    event_type: r.event_type,
+    from_session: r.from_session,
+    to_session: r.to_session,
+    ts: r.ts,
+    ...payload
+  };
+}
+function migrateSystemEventsLegacy(stateDir, db) {
+  const legacyPath = join2(stateDir, "system_events.jsonl");
+  if (!existsSync3(legacyPath))
+    return;
+  let lines = [];
+  try {
+    lines = readFileSync(legacyPath, "utf8").split(`
+`).filter((l) => l.trim());
+  } catch {
+    try {
+      unlinkSync(legacyPath);
+    } catch {}
+    return;
+  }
+  if (lines.length > 0) {
+    const stmt = db.prepare(`
+      INSERT INTO system_events (event_type, from_session, to_session, ts, payload)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    db.transaction(() => {
+      for (const line of lines) {
+        try {
+          const ev = JSON.parse(line);
+          if (!ev || typeof ev.event_type !== "string" || typeof ev.from_session !== "string" || typeof ev.to_session !== "string") {
+            continue;
+          }
+          const ts = typeof ev.ts === "string" ? ev.ts : new Date().toISOString();
+          const { event_type, from_session, to_session, ts: _ts, ...payload } = ev;
+          stmt.run(event_type, from_session, to_session, ts, JSON.stringify(payload));
+        } catch {}
+      }
+    })();
+  }
+  try {
+    unlinkSync(legacyPath);
+  } catch {}
+}
+function appendSystemEvent(stateDir, event) {
+  const db = getDb(stateDir);
+  migrateSystemEventsLegacy(stateDir, db);
+  const { event_type, from_session, to_session, ts, ...payload } = event;
+  const info = prep(db, `INSERT INTO system_events (event_type, from_session, to_session, ts, payload)
+     VALUES (?, ?, ?, ?, ?)`).run(event_type, from_session, to_session, ts, JSON.stringify(payload));
+  return Number(info.lastInsertRowid);
+}
+function readNewSystemEvents(stateDir, lastSeenId) {
+  const db = getDb(stateDir);
+  migrateSystemEventsLegacy(stateDir, db);
+  const rows = prep(db, `SELECT id, event_type, from_session, to_session, ts, payload
+       FROM system_events
+       WHERE id > ?
+       ORDER BY id`).all(lastSeenId);
+  const events = rows.map(rowToSystemEvent);
+  const newSeenId = rows.length > 0 ? rows[rows.length - 1].id : lastSeenId;
+  return { events, newSeenId };
 }
 
 // mcp/engine/live_sessions.ts
@@ -23804,8 +23885,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { readFileSync as readFileSync3, existsSync as existsSync6, statSync as statSync2, readdirSync } from "fs";
-import { join as join5 } from "path";
+import { readFileSync as readFileSync2, existsSync as existsSync5, statSync, readdirSync } from "fs";
+import { join as join4 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -23920,67 +24001,6 @@ function filterEvent(raw) {
   return null;
 }
 
-// mcp/engine/system_events.ts
-import { existsSync as existsSync5, readFileSync as readFileSync2, statSync } from "fs";
-import { appendFileSync, writeFileSync, mkdirSync as mkdirSync3 } from "fs";
-import { dirname as dirname2, join as join4 } from "path";
-function systemEventsPath(stateDir) {
-  return join4(stateDir, "system_events.jsonl");
-}
-function appendSystemEvent(stateDir, event) {
-  const path2 = systemEventsPath(stateDir);
-  const dir = dirname2(path2);
-  if (!existsSync5(dir)) {
-    mkdirSync3(dir, { recursive: true });
-  }
-  appendFileSync(path2, JSON.stringify(event) + `
-`);
-}
-function readNewSystemEvents(stateDir, lastOffset) {
-  const path2 = systemEventsPath(stateDir);
-  if (!existsSync5(path2)) {
-    return { events: [], newOffset: 0 };
-  }
-  let stat;
-  try {
-    stat = statSync(path2);
-  } catch {
-    return { events: [], newOffset: lastOffset };
-  }
-  if (stat.size === lastOffset) {
-    return { events: [], newOffset: lastOffset };
-  }
-  if (stat.size < lastOffset) {
-    lastOffset = 0;
-  }
-  let buf;
-  try {
-    const raw = readFileSync2(path2);
-    buf = raw.subarray(lastOffset).toString("utf8");
-  } catch {
-    return { events: [], newOffset: lastOffset };
-  }
-  const lines = buf.split(`
-`);
-  const events = [];
-  let consumed = 0;
-  for (let i = 0;i < lines.length - 1; i++) {
-    consumed += Buffer.byteLength(lines[i], "utf8") + 1;
-    const line = lines[i].trim();
-    if (!line)
-      continue;
-    try {
-      const ev = JSON.parse(line);
-      if (typeof ev?.event_type === "string" && typeof ev?.from_session === "string" && typeof ev?.to_session === "string") {
-        events.push(ev);
-      }
-    } catch {
-      continue;
-    }
-  }
-  return { events, newOffset: lastOffset + consumed };
-}
-
 // mcp/engine/agent_channel.ts
 var POLL_INTERVAL_MS = 1500;
 var HEARTBEAT_INTERVAL_MS = 30000;
@@ -24015,7 +24035,7 @@ class AgentChannel {
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
-  systemEventsOffset = 0;
+  systemEventsLastSeenId = 0;
   heartbeatFailures = 0;
   constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
     this.projectStateDir = projectStateDir;
@@ -24119,9 +24139,9 @@ class AgentChannel {
     this.knownSessions = current;
   }
   listJsonlFiles() {
-    if (!existsSync6(this.projectsHashDir))
+    if (!existsSync5(this.projectsHashDir))
       return [];
-    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join5(this.projectsHashDir, f));
+    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join4(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -24145,8 +24165,8 @@ class AgentChannel {
     }
   }
   processSystemEvents() {
-    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsOffset);
-    this.systemEventsOffset = result.newOffset;
+    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsLastSeenId);
+    this.systemEventsLastSeenId = result.newSeenId;
     for (const ev of result.events) {
       if (ev.to_session !== this.selfSession.session_id)
         continue;
@@ -24204,7 +24224,7 @@ class AgentChannel {
     const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
-      stat = statSync2(file);
+      stat = statSync(file);
     } catch {
       return false;
     }
@@ -24216,7 +24236,7 @@ class AgentChannel {
     }
     let buf;
     try {
-      const raw = readFileSync3(file);
+      const raw = readFileSync2(file);
       buf = raw.subarray(lastOffset).toString("utf8");
     } catch {
       return false;
@@ -24430,8 +24450,8 @@ async function handleRespondToPermission(input, ctx) {
 import { homedir as homedir2 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join6(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync4(pkgPath, "utf8")).version;
+    const pkgPath = join5(import.meta.dir, "..", "package.json");
+    return JSON.parse(readFileSync3(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -24439,24 +24459,40 @@ var PLUGIN_VERSION = (() => {
 var cachedFallbackSessionId = null;
 function findClaudeAncestorPid() {
   const start = process.pid;
+  if (process.platform === "win32") {
+    const script = `
+$walk = ${start}
+for ($i = 0; $i -lt 8; $i++) {
+  try {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction Stop
+    if (-not $p) { break }
+    if ($p.Name -eq 'claude.exe' -or $p.Name -eq 'claude') { Write-Output $walk; exit 0 }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    $walk = $p.ParentProcessId
+  } catch { break }
+}
+`;
+    try {
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      const out = execSync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const pid2 = parseInt(out.trim(), 10);
+      return Number.isFinite(pid2) && pid2 > 0 ? pid2 : null;
+    } catch {
+      return null;
+    }
+  }
   let pid = start;
   for (let depth = 0;depth < 8 && pid; depth++) {
     let name = "";
     let ppid = 0;
     try {
-      if (process.platform === "win32") {
-        const out = execSync(`wmic process where processid=${pid} get name,parentprocessid /value`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-        name = (out.match(/Name=([^\r\n]+)/)?.[1] ?? "").trim().toLowerCase();
-        ppid = parseInt(out.match(/ParentProcessId=(\d+)/)?.[1] ?? "0", 10);
-      } else {
-        const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
-        const rparen = stat.lastIndexOf(")");
-        if (rparen < 0)
-          break;
-        name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
-        const fields = stat.slice(rparen + 2).split(/\s+/);
-        ppid = parseInt(fields[1] ?? "0", 10);
-      }
+      const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
+      const rparen = stat.lastIndexOf(")");
+      if (rparen < 0)
+        break;
+      name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+      const fields = stat.slice(rparen + 2).split(/\s+/);
+      ppid = parseInt(fields[1] ?? "0", 10);
     } catch {
       break;
     }
@@ -24477,13 +24513,13 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join6(projectDir, ".orchestrator-state");
+  const stateDir = join5(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join6(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join5(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync7(perPidFile)) {
-        const raw = readFileSync4(perPidFile, "utf8").trim();
+      if (existsSync6(perPidFile)) {
+        const raw = readFileSync3(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -24493,17 +24529,17 @@ function getFallbackSessionId() {
       }
     } catch {}
   }
-  const file = join6(stateDir, "active-session");
+  const file = join5(stateDir, "active-session");
   try {
-    if (existsSync7(file)) {
-      const raw = readFileSync4(file, "utf8").trim();
+    if (existsSync6(file)) {
+      const raw = readFileSync3(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join6(stateDir, `active-session-${claudePid}`);
-          if (!existsSync7(perPidFile)) {
+          const perPidFile = join5(stateDir, `active-session-${claudePid}`);
+          if (!existsSync6(perPidFile)) {
             try {
-              writeFileSync2(perPidFile, raw, "utf8");
+              writeFileSync(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
 `);
             } catch {}
@@ -24792,8 +24828,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join6(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync7(fallbackFile);
+    const fallbackFile = join5(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync6(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -26009,7 +26045,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join6(homedir2(), ".claude", "projects", projectHash);
+  const projectsHashDir = join5(homedir2(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -26025,7 +26061,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join5(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -26072,9 +26108,9 @@ function startAgentChannel() {
           const params = parsed.data;
           let paSessionId = null;
           try {
-            const sessionsFile = join6(stateDir, "sessions.json");
-            if (existsSync7(sessionsFile)) {
-              const data = JSON.parse(readFileSync4(sessionsFile, "utf8"));
+            const sessionsFile = join5(stateDir, "sessions.json");
+            if (existsSync6(sessionsFile)) {
+              const data = JSON.parse(readFileSync3(sessionsFile, "utf8"));
               const entries = Array.isArray(data) ? data : data?.sessions ?? [];
               paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
             }
@@ -26209,18 +26245,55 @@ setInterval(() => {
   process.stderr.write(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
 `);
 }, 300000).unref();
+function isPidAliveAsClaudeExe(pid) {
+  try {
+    if (process.platform === "win32") {
+      const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      const trimmed = out.trim();
+      if (!trimmed || trimmed.startsWith("INFO:"))
+        return false;
+      const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
+      const name = firstCol.toLowerCase();
+      return name === "claude.exe" || name === "claude";
+    } else {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+      const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
+      const rparen = stat.lastIndexOf(")");
+      if (rparen < 0)
+        return false;
+      const name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+      return name === "claude" || name === "claude.exe";
+    }
+  } catch {
+    return false;
+  }
+}
 var initialParentClaudePid = findClaudeAncestorPid();
 if (initialParentClaudePid) {
-  process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}
+  process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)
 `);
   setInterval(() => {
-    const currentParent = findClaudeAncestorPid();
-    if (!currentParent || currentParent !== initialParentClaudePid) {
-      process.stderr.write(`[orchestrator] parent claude.exe gone (was pid=${initialParentClaudePid}, now=${currentParent ?? "null"}). Shutting down to avoid becoming an orphan that clobbers live sessions.
+    try {
+      const alive = isPidAliveAsClaudeExe(initialParentClaudePid);
+      if (!alive) {
+        process.stderr.write(`[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. Shutting down to avoid becoming an orphan that clobbers live sessions.
 `);
-      shutdownOnce("parent-claude-gone");
+        shutdownOnce("parent-claude-gone");
+      } else {
+        if (Math.random() < 0.03333333333333333) {
+          process.stderr.write(`[orchestrator] orphan watchdog tick - parent claude.exe pid=${initialParentClaudePid} still alive
+`);
+        }
+      }
+    } catch (err) {
+      process.stderr.write(`[orchestrator] orphan watchdog tick failed (will retry next interval): ${err}
+`);
     }
-  }, 60000).unref();
+  }, 30000).unref();
 } else {
   process.stderr.write(`[orchestrator] no claude.exe ancestor at startup; refusing to run as orphan. Exiting.
 `);

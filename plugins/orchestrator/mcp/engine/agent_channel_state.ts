@@ -229,6 +229,15 @@ function getDb(stateDir: string): Database {
       offset_bytes INTEGER NOT NULL,
       PRIMARY KEY (receiver_id8, jsonl_path)
     );
+    CREATE TABLE IF NOT EXISTS system_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_type TEXT NOT NULL,
+      from_session TEXT NOT NULL,
+      to_session TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      payload TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
   dbCache.set(stateDir, db);
   return db;
@@ -618,4 +627,175 @@ export function writeOffset(
     `INSERT OR REPLACE INTO offsets (receiver_id8, jsonl_path, offset_bytes)
      VALUES (?, ?, ?)`,
   ).run(receiverId8, jsonlPath, offset);
+}
+
+// === system_events (cross-MCP event bus, replaces legacy .jsonl) ===
+//
+// 0.30.36 (WI 3262525b): the previous file-based event bus
+// (`system_events.jsonl` with byte-offset bookkeeping) moved into SQLite
+// alongside sessions/state/offsets. Each event is a row with auto-increment
+// id; receivers track `lastSeenId` instead of byte offsets. Static SQL,
+// indexable lookups, no partial-line-read defensive parsing.
+//
+// Events are emitted cross-process (e.g. SA's MCP writes a permission_request
+// addressed to PA; PA's filewatcher reads it on next tick). Currently no
+// auto-reaping - rows accumulate. Add later via DELETE WHERE id < min(all
+// active receivers' last_seen_id) when the table grows enough to matter.
+
+export interface SystemEvent {
+  event_type: string;
+  from_session: string;
+  to_session: string;
+  ts: string;
+  /** Event-type-specific payload (any additional fields). */
+  [key: string]: unknown;
+}
+
+interface SystemEventRow {
+  id: number;
+  event_type: string;
+  from_session: string;
+  to_session: string;
+  ts: string;
+  payload: string;
+}
+
+function rowToSystemEvent(r: SystemEventRow): SystemEvent {
+  let payload: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(r.payload);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      payload = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Skip - corrupt payload, fall back to no extra fields
+  }
+  return {
+    event_type: r.event_type,
+    from_session: r.from_session,
+    to_session: r.to_session,
+    ts: r.ts,
+    ...payload,
+  };
+}
+
+function migrateSystemEventsLegacy(stateDir: string, db: Database): void {
+  const legacyPath = join(stateDir, "system_events.jsonl");
+  if (!existsSync(legacyPath)) return;
+
+  let lines: string[] = [];
+  try {
+    lines = readFileSync(legacyPath, "utf8")
+      .split("\n")
+      .filter((l) => l.trim());
+  } catch {
+    try {
+      unlinkSync(legacyPath);
+    } catch {
+      // race-tolerant
+    }
+    return;
+  }
+
+  if (lines.length > 0) {
+    const stmt = db.prepare(`
+      INSERT INTO system_events (event_type, from_session, to_session, ts, payload)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    db.transaction(() => {
+      for (const line of lines) {
+        try {
+          const ev = JSON.parse(line);
+          if (
+            !ev ||
+            typeof ev.event_type !== "string" ||
+            typeof ev.from_session !== "string" ||
+            typeof ev.to_session !== "string"
+          ) {
+            continue;
+          }
+          const ts = typeof ev.ts === "string" ? ev.ts : new Date().toISOString();
+          // Pull payload out (everything except the 4 standard fields)
+          const { event_type, from_session, to_session, ts: _ts, ...payload } = ev;
+          stmt.run(
+            event_type,
+            from_session,
+            to_session,
+            ts,
+            JSON.stringify(payload),
+          );
+        } catch {
+          // Skip malformed lines - don't break migration on a single bad entry
+        }
+      }
+    })();
+  }
+
+  try {
+    unlinkSync(legacyPath);
+  } catch {
+    // race-tolerant - another MCP may have raced us
+  }
+}
+
+/**
+ * Append a single cross-MCP event. Returns the assigned id (useful for
+ * tests / diagnostics; production callers typically ignore it).
+ */
+export function appendSystemEvent(
+  stateDir: string,
+  event: SystemEvent,
+): number {
+  const db = getDb(stateDir);
+  migrateSystemEventsLegacy(stateDir, db);
+  const { event_type, from_session, to_session, ts, ...payload } = event;
+  const info = prep(
+    db,
+    `INSERT INTO system_events (event_type, from_session, to_session, ts, payload)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    event_type,
+    from_session,
+    to_session,
+    ts,
+    JSON.stringify(payload),
+  );
+  return Number(info.lastInsertRowid);
+}
+
+/**
+ * Read new events with id > `lastSeenId`. Returns the parsed events plus the
+ * new max-id so the caller can persist it. Stateless from the DB's
+ * perspective - per-receiver "last seen" tracking is the caller's job
+ * (in-memory in AgentChannel, same pattern as the pre-0.30.36 byte offset).
+ *
+ * Replay-on-restart: callers store `lastSeenId` in memory only, so on MCP
+ * restart they begin at 0 and re-read everything in the table. That mirrors
+ * the pre-0.30.36 behavior where `systemEventsOffset` reset to 0 each tick.
+ */
+export function readNewSystemEvents(
+  stateDir: string,
+  lastSeenId: number,
+): { events: SystemEvent[]; newSeenId: number } {
+  const db = getDb(stateDir);
+  migrateSystemEventsLegacy(stateDir, db);
+  const rows = prep(
+    db,
+    `SELECT id, event_type, from_session, to_session, ts, payload
+       FROM system_events
+       WHERE id > ?
+       ORDER BY id`,
+  ).all(lastSeenId) as SystemEventRow[];
+  const events = rows.map(rowToSystemEvent);
+  const newSeenId = rows.length > 0 ? rows[rows.length - 1].id : lastSeenId;
+  return { events, newSeenId };
+}
+
+/**
+ * Test/diagnostic: wipe the system_events table. Don't call from production
+ * code - permission_request flows in flight would be lost.
+ */
+export function clearSystemEvents(stateDir: string): void {
+  const db = getDb(stateDir);
+  prep(db, `DELETE FROM system_events`).run();
 }

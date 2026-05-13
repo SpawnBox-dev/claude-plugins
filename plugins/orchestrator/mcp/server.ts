@@ -49,7 +49,7 @@ import { handleHookEvent, buildHookEnvelope, type HookEvent } from "./tools/hook
 import { AgentChannel } from "./engine/agent_channel";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
-import { appendSystemEvent } from "./engine/system_events";
+import { appendSystemEvent } from "./engine/agent_channel_state";
 import { handleRespondToPermission, RespondToPermissionInputSchema } from "./tools/permission";
 import { homedir } from "node:os";
 
@@ -83,36 +83,59 @@ let cachedFallbackSessionId: string | null = null;
  * MCP child's ancestry. Returns null if walking fails or claude isn't
  * found in the chain within a small bound.
  *
- * Windows: WMIC to walk process tree. Unix: read /proc/<pid>/stat or
- * /proc/<pid>/status for parent PID + comm.
+ * Windows: PowerShell + Get-CimInstance Win32_Process (wmic is deprecated
+ * and being removed - the session-start hook already migrated to this).
+ * Single PowerShell invocation walks the whole chain internally, so the
+ * cold-start cost is one ~1-2s shell startup rather than N.
+ *
+ * Unix: read /proc/<pid>/stat for parent PID + comm.
+ *
+ * 0.30.36 (WI d78867af): migrated off wmic. PowerShell command passed via
+ * -EncodedCommand (UTF-16LE base64) instead of inline quoting so we don't
+ * have to fight cmd.exe -> PowerShell escape layering.
  */
 function findClaudeAncestorPid(): number | null {
   const start = process.pid;
+  if (process.platform === "win32") {
+    const script = `
+$walk = ${start}
+for ($i = 0; $i -lt 8; $i++) {
+  try {
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction Stop
+    if (-not $p) { break }
+    if ($p.Name -eq 'claude.exe' -or $p.Name -eq 'claude') { Write-Output $walk; exit 0 }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    $walk = $p.ParentProcessId
+  } catch { break }
+}
+`;
+    try {
+      const encoded = Buffer.from(script, "utf16le").toString("base64");
+      const out = execSync(
+        `powershell.exe -NoProfile -EncodedCommand ${encoded}`,
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const pid = parseInt(out.trim(), 10);
+      return Number.isFinite(pid) && pid > 0 ? pid : null;
+    } catch {
+      return null;
+    }
+  }
+  // Unix path
   let pid: number | null = start;
   for (let depth = 0; depth < 8 && pid; depth++) {
     let name = "";
     let ppid = 0;
     try {
-      if (process.platform === "win32") {
-        const out = execSync(
-          `wmic process where processid=${pid} get name,parentprocessid /value`,
-          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-        );
-        name = (out.match(/Name=([^\r\n]+)/)?.[1] ?? "").trim().toLowerCase();
-        ppid = parseInt(out.match(/ParentProcessId=(\d+)/)?.[1] ?? "0", 10);
-      } else {
-        // Linux: /proc/<pid>/stat field 2 is comm (in parens), field 4 is ppid
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const rparen = stat.lastIndexOf(")");
-        if (rparen < 0) break;
-        name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
-        const fields = stat.slice(rparen + 2).split(/\s+/);
-        ppid = parseInt(fields[1] ?? "0", 10);
-      }
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const rparen = stat.lastIndexOf(")");
+      if (rparen < 0) break;
+      name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+      const fields = stat.slice(rparen + 2).split(/\s+/);
+      ppid = parseInt(fields[1] ?? "0", 10);
     } catch {
       break;
     }
-    // Match claude/claude.exe; tolerate trailing whitespace from wmic.
     if (name === "claude.exe" || name === "claude") return pid;
     if (!ppid || ppid === pid) break;
     pid = ppid;
@@ -2548,11 +2571,10 @@ setInterval(() => {
   );
 }, 5 * 60 * 1000).unref();
 
-// 0.30.23+ orphan-bun watchdog: every 60s, verify our parent claude.exe is
-// still alive. If it's gone (or the ancestor walk no longer reaches the same
-// PID we started with), this bun has been orphaned - shut down cleanly to
-// stop heartbeating sessions.json, processing peer JSONLs, and clobbering
-// the live PA/SA's state.
+// 0.30.23+ orphan-bun watchdog: periodically verify our parent claude.exe
+// is still alive. If it's gone, this bun has been orphaned - shut down
+// cleanly to stop heartbeating sessions, processing peer JSONLs, and
+// clobbering the live PA/SA's state.
 //
 // Without this watchdog, bun processes whose parent claude.exe died (window
 // closed, plugin reload race, claude crash, etc.) keep running forever. They
@@ -2560,22 +2582,118 @@ setInterval(() => {
 // session entry with whatever role/name they happened to cache at startup,
 // and reading every other session's JSONL forever - net effect is identity
 // clobber on sessions.json + resource leak.
+//
+// 0.30.36 (orphan watchdog reliability fix - WI d78867af):
+//
+// The prior implementation re-walked the process tree on each tick and
+// compared the FIRST claude.exe found in the chain against the initial.
+// This walk had two failure modes that let two orphans survive for hours
+// on 2026-05-12 (DATI-01 bun 36184, DISCORD-LIVE bun 4356):
+//
+//   1. The walk relied on WMIC to look up process info by PID. After
+//      Windows kills the parent claude.exe, the bun's PPID becomes a
+//      dangling reference; whether the lookup on a freed PID returned
+//      empty (walk -> null -> shutdown) vs stale/partial data depended on
+//      Windows version + service state. Also: wmic is being removed from
+//      Windows entirely - the session-start hook already migrated to
+//      Get-CimInstance, this watchdog hadn't.
+//   2. The setInterval callback had no try/catch wrap. An uncaught throw
+//      inside execSync or regex parse silently kills the timer for the
+//      rest of the process's life (same class as the 0.30.32 heartbeat
+//      ghost-session bug).
+//
+// The fix: replace the walk-and-compare with a direct liveness check on
+// the specific initial parent PID via `tasklist /FI "PID eq <N>"` (fast,
+// not deprecated, ~50ms). We capture initialParentClaudePid once at
+// startup; every tick we ask "is process initialParentClaudePid still
+// running AND still named claude.exe?" If no, we're orphaned, shutdown.
+// This bypasses the ancestor-walk entirely and depends only on a single
+// existence query - easier to reason about, far less surface for stale
+// process-table edge cases.
+//
+// Plus: tick body wrapped in try/catch (timer survives transient failures),
+// tick interval tightened to 30s (was 60s) so orphan window is at most
+// ~30s, sample tick logs outcome (visibility for future incidents).
+//
+// findClaudeAncestorPid (called once at startup to capture
+// initialParentClaudePid) also migrated off wmic to Get-CimInstance via
+// PowerShell -EncodedCommand. The one-time ~1-2s startup cost there is
+// acceptable; the hot path uses the faster tasklist.
+
+function isPidAliveAsClaudeExe(pid: number): boolean {
+  try {
+    if (process.platform === "win32") {
+      // tasklist is part of Windows itself (not deprecated like wmic) and
+      // returns in ~50-100ms - much faster than spinning up PowerShell to
+      // call Get-CimInstance, which matters when this fires every 30s on
+      // every running MCP. /FO CSV /NH yields one quote-delimited line per
+      // match: "name","pid","session","#","mem".
+      const out = execSync(
+        `tasklist /FI "PID eq ${pid}" /FO CSV /NH`,
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const trimmed = out.trim();
+      if (!trimmed || trimmed.startsWith("INFO:")) return false;
+      const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
+      const name = firstCol.toLowerCase();
+      return name === "claude.exe" || name === "claude";
+    } else {
+      // Unix: process.kill(pid, 0) throws if dead. Then check /proc/<pid>/stat
+      // comm field matches claude.
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const rparen = stat.lastIndexOf(")");
+      if (rparen < 0) return false;
+      const name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
+      return name === "claude" || name === "claude.exe";
+    }
+  } catch {
+    // Treat any unexpected error as "can't determine, assume dead" -
+    // conservative because the cost of a false positive (orphan thinks
+    // parent is dead and shuts down) is one terminal re-launch, while
+    // the cost of a false negative (orphan thinks parent is alive forever)
+    // is the very bug we're fixing.
+    return false;
+  }
+}
+
 const initialParentClaudePid = findClaudeAncestorPid();
 if (initialParentClaudePid) {
   process.stderr.write(
-    `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}\n`,
+    `[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid} (tick every 30s)\n`,
   );
   setInterval(() => {
-    const currentParent = findClaudeAncestorPid();
-    if (!currentParent || currentParent !== initialParentClaudePid) {
+    try {
+      const alive = isPidAliveAsClaudeExe(initialParentClaudePid);
+      if (!alive) {
+        process.stderr.write(
+          `[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. ` +
+            `Shutting down to avoid becoming an orphan that clobbers live sessions.\n`,
+        );
+        shutdownOnce("parent-claude-gone");
+      } else {
+        // Visibility tick. Once every 30 ticks (15 min) - cheap and lets
+        // post-mortems pinpoint exactly when the watchdog last confirmed
+        // the parent alive vs. when it should have triggered.
+        if (Math.random() < 1 / 30) {
+          process.stderr.write(
+            `[orchestrator] orphan watchdog tick - parent claude.exe pid=${initialParentClaudePid} still alive\n`,
+          );
+        }
+      }
+    } catch (err) {
+      // Defense against the 0.30.32 ghost-session bug class: an uncaught
+      // throw in setInterval permanently kills the timer. We log and
+      // continue ticking on the next interval rather than silently dying.
       process.stderr.write(
-        `[orchestrator] parent claude.exe gone (was pid=${initialParentClaudePid}, ` +
-          `now=${currentParent ?? "null"}). Shutting down to avoid becoming an ` +
-          `orphan that clobbers live sessions.\n`,
+        `[orchestrator] orphan watchdog tick failed (will retry next interval): ${err}\n`,
       );
-      shutdownOnce("parent-claude-gone");
     }
-  }, 60 * 1000).unref();
+  }, 30 * 1000).unref();
 } else {
   // No claude.exe ancestor at startup - we're already an orphan (probably
   // started from a test harness or stale process tree). Exit immediately

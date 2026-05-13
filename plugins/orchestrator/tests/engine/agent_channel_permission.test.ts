@@ -1,10 +1,18 @@
+// Force :memory: DB path so AgentChannel/state functions don't hold a file
+// lock that breaks rmSync teardown on Windows (bun:sqlite quirk - same as in
+// agent_channel_state.test.ts).
+process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
+
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentChannel, type PermissionRelayLike } from "../../mcp/engine/agent_channel";
-import { appendSystemEvent } from "../../mcp/engine/system_events";
-import type { SessionEntry } from "../../mcp/engine/agent_channel_state";
+import {
+  appendSystemEvent,
+  closeAgentChannelDb,
+  type SessionEntry,
+} from "../../mcp/engine/agent_channel_state";
 
 /**
  * Integration tests for the agent_channel filewatcher's system_events
@@ -24,7 +32,10 @@ function freshTempDir(): { stateDir: string; projectsDir: string; cleanup: () =>
   return {
     stateDir,
     projectsDir,
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    cleanup: () => {
+      closeAgentChannelDb(stateDir);
+      rmSync(root, { recursive: true, force: true });
+    },
   };
 }
 

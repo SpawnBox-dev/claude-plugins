@@ -182,10 +182,17 @@ describe("cascade resolution", () => {
     const timestamp = now();
     db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, blockerId]);
 
-    // Manually trigger cascade (simulating what close_thread does)
-    const { cascadeResolution } = require("../../mcp/server") as any;
-    // Since we can't import cascadeResolution directly (it's not exported),
-    // we test via the DB state after simulating the cascade manually
+    // cascadeResolution lives inside server.ts but isn't exported, so this
+    // test simulates the cascade manually via SQL below.
+    //
+    // 0.30.36 (test fragility fix): a prior version had a leftover
+    // `require("../../mcp/server")` here that didn't destructure anything
+    // usable but DID force the entire MCP server module to load
+    // transitively - agent_channel startup, the orphan watchdog (which runs
+    // a PowerShell ancestor walk on Windows), all the top-level IIFE code.
+    // Under suite load that regularly tipped the test past the 5s default
+    // timeout. The require was dead weight; removing it makes the test
+    // deterministic and fast.
 
     // Check: find items blocked by the now-resolved blocker
     const blockedItems = db

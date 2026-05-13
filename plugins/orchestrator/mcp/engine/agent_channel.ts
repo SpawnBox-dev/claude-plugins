@@ -28,9 +28,9 @@ import {
   readOverrideState,
   readOffsets,
   writeAllOffsets,
+  readNewSystemEvents,
   type SessionEntry,
 } from "./agent_channel_state";
-import { readNewSystemEvents } from "./system_events";
 
 // NOTE: The MCP channels contract (https://code.claude.com/docs/en/channels-reference)
 // requires meta values to be strings; Claude Code's receive-side validator silently
@@ -146,8 +146,12 @@ export class AgentChannel {
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private knownSessions = new Map<string, SessionEntry>();
-  /** Byte offset into system_events.jsonl for this filewatcher. */
-  private systemEventsOffset = 0;
+  /** Last `system_events.id` we've processed (auto-increment id in
+   *  agent_channel.db's system_events table, 0.30.36+; pre-0.30.36 this
+   *  was a byte offset into system_events.jsonl). In-memory only - reset
+   *  to 0 on MCP restart, so each fresh process replays the full event
+   *  history once before advancing. */
+  private systemEventsLastSeenId = 0;
   /** Consecutive heartbeat-write failures. Reset on success. Used to
    *  escalate stderr log level + suppress repetitive warnings. */
   private heartbeatFailures = 0;
@@ -393,8 +397,8 @@ export class AgentChannel {
    *     resolveVerdict to unblock the pending Promise.
    */
   private processSystemEvents(): void {
-    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsOffset);
-    this.systemEventsOffset = result.newOffset;
+    const result = readNewSystemEvents(this.projectStateDir, this.systemEventsLastSeenId);
+    this.systemEventsLastSeenId = result.newSeenId;
 
     for (const ev of result.events) {
       if (ev.to_session !== this.selfSession.session_id) continue;
