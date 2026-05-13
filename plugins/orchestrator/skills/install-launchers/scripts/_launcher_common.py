@@ -89,6 +89,9 @@ def resolve_project_dir(arg: str | None) -> Path:
 
 import json
 import os
+import platform
+import shutil
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -292,6 +295,74 @@ def setup_env(
         os.environ["SPAWNBOX_AGENT_NAME"] = session_name
 
 
+def launch(
+    claude_args: list[str],
+    *,
+    project_dir: Path,
+    tab_color: str | None,
+    no_wt: bool,
+) -> int:
+    """Spawn the claude process, optionally in a new Windows Terminal tab.
+
+    Platform branching:
+      - Windows + wt.exe present + not no_wt:
+            wt.exe -w new new-tab [--tabColor X] -d <project_dir> claude <argv>
+      - Windows otherwise:
+            subprocess.run([claude, *argv])
+      - POSIX (Linux/macOS/WSL):
+            os.execvp('claude', ['claude', *argv])
+            (replaces the Python process so the user's terminal stays)
+
+    Exits 127 with an actionable message if `claude` isn't on PATH.
+
+    Args:
+        claude_args: Args after the program name (from build_claude_args).
+        project_dir: Project root (used as -d for wt.exe tab cwd).
+        tab_color: Hex color for the wt.exe tab, e.g. '#F59E0B'. None for
+            no tab-color flag (SA launcher).
+        no_wt: When True, skip wt.exe even on Windows.
+
+    Returns:
+        The exit code of the launched claude (0 on POSIX via execvp).
+    """
+    claude_path = shutil.which("claude")
+    if not claude_path:
+        print(
+            "ERROR: 'claude' not found on PATH. Install Claude Code CLI: "
+            "https://docs.claude.com/en/docs/claude-code/quickstart",
+            file=sys.stderr,
+        )
+        sys.exit(127)
+
+    is_windows = platform.system() == "Windows"
+
+    if not is_windows:
+        # POSIX path: replace the Python process with claude.
+        os.execvp("claude", ["claude", *claude_args])
+        # execvp does not return on success; reachable only on failure.
+        print("ERROR: os.execvp returned (claude exec failed)", file=sys.stderr)
+        return 1
+
+    # Windows path.
+    wt_path = shutil.which("wt.exe")
+    use_wt = (not no_wt) and (wt_path is not None)
+
+    if use_wt:
+        cmd: list[str] = [
+            wt_path,
+            "-w", "new",
+            "new-tab",
+        ]
+        if tab_color:
+            cmd.extend(["--tabColor", tab_color])
+        cmd.extend(["-d", str(project_dir), "claude", *claude_args])
+        result = subprocess.run(cmd)
+        return result.returncode
+
+    result = subprocess.run([claude_path, *claude_args])
+    return result.returncode
+
+
 def build_claude_args(
     *,
     marketplace: str,
@@ -380,4 +451,5 @@ __all__ = [
     "make_session_name",
     "setup_env",
     "build_claude_args",
+    "launch",
 ]
