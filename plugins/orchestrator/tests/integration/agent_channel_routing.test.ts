@@ -1,9 +1,20 @@
+// Force :memory: DB path for tests BEFORE the agent_channel_state module
+// loads. bun:sqlite on Windows holds the .db file handle for an indefinite
+// window after Database.close() returns, which trips EBUSY in rmSync teardown.
+// `:memory:` DBs have no file to lock; per-stateDir cache key still isolates
+// each test. Production retains file-backed DBs via the default.
+process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
+
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { AgentChannel, type ChannelNotification } from "../../mcp/engine/agent_channel";
-import { writeSession, type SessionEntry } from "../../mcp/engine/agent_channel_state";
+import {
+  writeSession,
+  closeAgentChannelDb,
+  type SessionEntry,
+} from "../../mcp/engine/agent_channel_state";
 
 const PROJECT_HASH = "fixture-project";
 
@@ -22,6 +33,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Release cached SQLite connection (it's :memory: so no file lock, but the
+  // cache entry would otherwise persist across tests with stale state).
+  closeAgentChannelDb(stateDir);
   rmSync(baseDir, { recursive: true, force: true });
 });
 

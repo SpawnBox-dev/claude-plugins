@@ -1,3 +1,10 @@
+// Force :memory: DB path for tests BEFORE the module loads. bun:sqlite on
+// Windows holds the .db file handle for an indefinite window after
+// Database.close() returns, which trips EBUSY in rmSync test teardown.
+// `:memory:` DBs have no file to lock; per-stateDir cache key still isolates
+// each test. Production retains file-backed DBs via the default.
+process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
+
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
@@ -13,6 +20,7 @@ import {
   clearGlobalPause,
   readOffsets,
   writeOffset,
+  closeAgentChannelDb,
   type SessionEntry,
 } from "../../mcp/engine/agent_channel_state";
 
@@ -20,7 +28,27 @@ let stateDir: string;
 beforeEach(() => {
   stateDir = mkdtempSync(join(tmpdir(), "agent-channel-test-"));
 });
+function sleepSync(ms: number): void {
+  // bun:sqlite + WAL + Windows: the OS holds WAL/SHM file handles briefly
+  // after Database.close() returns. Without a small delay before rmSync,
+  // teardown hits EBUSY. Atomics.wait on a fresh SharedArrayBuffer is the
+  // canonical sync-sleep pattern in Bun. Production code never hits this
+  // because process exit releases handles before the OS cares.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 afterEach(() => {
+  closeAgentChannelDb(stateDir);
+  // Poll rmSync with backoff until WAL/SHM locks release. 10 attempts × 100ms
+  // = 1s max before giving up; usually first or second attempt succeeds.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      rmSync(stateDir, { recursive: true, force: true });
+      return;
+    } catch {
+      sleepSync(100);
+    }
+  }
   rmSync(stateDir, { recursive: true, force: true });
 });
 

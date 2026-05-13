@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join6 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "fs";
 import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
@@ -22569,16 +22569,280 @@ function handlePrepare(projectDb2, globalDb2, input) {
 }
 
 // mcp/engine/live_sessions.ts
-import { existsSync as existsSync3, readFileSync } from "fs";
+import { existsSync as existsSync4 } from "fs";
+import { join as join3 } from "path";
+
+// mcp/engine/agent_channel_state.ts
+import { readFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, unlinkSync } from "fs";
 import { join as join2 } from "path";
-function getLiveSessionIds() {
+import { Database as Database2 } from "bun:sqlite";
+var SESSIONS_FILE = "sessions.json";
+var STATE_FILE = "state.json";
+var AGENT_CHANNEL_DB_FILE = "agent_channel.db";
+function ensureDir(dir) {
+  if (!existsSync3(dir))
+    mkdirSync2(dir, { recursive: true });
+}
+var dbCache = new Map;
+var stmtCache = new WeakMap;
+function prep(db, sql) {
+  let dbStmts = stmtCache.get(db);
+  if (!dbStmts) {
+    dbStmts = new Map;
+    stmtCache.set(db, dbStmts);
+  }
+  let stmt = dbStmts.get(sql);
+  if (!stmt) {
+    stmt = db.prepare(sql);
+    dbStmts.set(sql, stmt);
+  }
+  return stmt;
+}
+function getDb(stateDir) {
+  const cached2 = dbCache.get(stateDir);
+  if (cached2)
+    return cached2;
+  ensureDir(stateDir);
+  const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
+  if (useInMemory && false) {}
+  const dbPath = useInMemory ? ":memory:" : join2(stateDir, AGENT_CHANNEL_DB_FILE);
+  const db = new Database2(dbPath);
+  if (!useInMemory) {
+    db.exec("PRAGMA journal_mode = WAL;");
+  }
+  db.exec("PRAGMA synchronous = NORMAL;");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      session_id TEXT PRIMARY KEY,
+      id8 TEXT NOT NULL,
+      role TEXT NOT NULL,
+      name TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      last_heartbeat_at TEXT NOT NULL,
+      current_task TEXT,
+      kind TEXT
+    );
+    CREATE TABLE IF NOT EXISTS global_pause (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      active INTEGER NOT NULL,
+      since TEXT,
+      set_by_session TEXT
+    );
+    CREATE TABLE IF NOT EXISTS sa_pause (
+      sa_session_id TEXT PRIMARY KEY,
+      since TEXT NOT NULL,
+      set_by_session TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS offsets (
+      receiver_id8 TEXT NOT NULL,
+      jsonl_path TEXT NOT NULL,
+      offset_bytes INTEGER NOT NULL,
+      PRIMARY KEY (receiver_id8, jsonl_path)
+    );
+  `);
+  dbCache.set(stateDir, db);
+  return db;
+}
+function rowToEntry(r) {
+  const entry = {
+    session_id: r.session_id,
+    id8: r.id8,
+    role: r.role,
+    name: r.name,
+    started_at: r.started_at,
+    last_heartbeat_at: r.last_heartbeat_at
+  };
+  if (r.current_task !== null)
+    entry.current_task = r.current_task;
+  if (r.kind !== null)
+    entry.kind = r.kind;
+  return entry;
+}
+function migrateSessionsLegacy(stateDir, db) {
+  const legacyPath = join2(stateDir, SESSIONS_FILE);
+  if (!existsSync3(legacyPath))
+    return;
+  let legacy = [];
+  try {
+    const data = JSON.parse(readFileSync(legacyPath, "utf8"));
+    legacy = Array.isArray(data) ? data : data?.sessions ?? [];
+  } catch {
+    try {
+      unlinkSync(legacyPath);
+    } catch {}
+    return;
+  }
+  if (legacy.length > 0) {
+    const stmt = db.prepare(`
+      INSERT INTO sessions
+        (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        id8 = excluded.id8,
+        role = excluded.role,
+        name = excluded.name,
+        started_at = excluded.started_at,
+        last_heartbeat_at = excluded.last_heartbeat_at,
+        current_task = excluded.current_task,
+        kind = excluded.kind
+      WHERE excluded.last_heartbeat_at > sessions.last_heartbeat_at
+    `);
+    db.transaction(() => {
+      for (const e of legacy) {
+        if (!e?.session_id)
+          continue;
+        stmt.run(e.session_id, e.id8 ?? "", e.role ?? "subordinate", e.name ?? "", e.started_at ?? new Date().toISOString(), e.last_heartbeat_at ?? new Date().toISOString(), e.current_task ?? null, e.kind ?? null);
+      }
+    })();
+  }
+  try {
+    unlinkSync(legacyPath);
+  } catch {}
+}
+function readSessions(stateDir) {
+  const db = getDb(stateDir);
+  migrateSessionsLegacy(stateDir, db);
+  const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind FROM sessions`).all();
+  return rows.map(rowToEntry);
+}
+function writeSession(stateDir, entry) {
+  if (!entry?.session_id)
+    return;
+  const db = getDb(stateDir);
+  prep(db, `INSERT OR REPLACE INTO sessions
+       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null);
+}
+function removeSession(stateDir, session_id) {
+  const db = getDb(stateDir);
+  prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
+}
+function migrateOverrideStateLegacy(stateDir, db) {
+  const legacyPath = join2(stateDir, STATE_FILE);
+  if (!existsSync3(legacyPath))
+    return;
+  let legacy = null;
+  try {
+    legacy = JSON.parse(readFileSync(legacyPath, "utf8"));
+  } catch {
+    try {
+      unlinkSync(legacyPath);
+    } catch {}
+    return;
+  }
+  if (legacy) {
+    db.transaction(() => {
+      if (legacy.pa_global_pause) {
+        db.prepare(`
+          INSERT OR IGNORE INTO global_pause (id, active, since, set_by_session)
+          VALUES (1, ?, ?, ?)
+        `).run(legacy.pa_global_pause.active ? 1 : 0, legacy.pa_global_pause.since, legacy.pa_global_pause.set_by_session);
+      }
+      if (legacy.sa_pauses) {
+        const saStmt = db.prepare(`
+          INSERT OR IGNORE INTO sa_pause (sa_session_id, since, set_by_session)
+          VALUES (?, ?, ?)
+        `);
+        for (const [sa, info] of Object.entries(legacy.sa_pauses)) {
+          if (info?.since && info?.set_by_session) {
+            saStmt.run(sa, info.since, info.set_by_session);
+          }
+        }
+      }
+    })();
+  }
+  try {
+    unlinkSync(legacyPath);
+  } catch {}
+}
+function readOverrideState(stateDir) {
+  const db = getDb(stateDir);
+  migrateOverrideStateLegacy(stateDir, db);
+  const gp = prep(db, `SELECT active, since, set_by_session FROM global_pause WHERE id = 1`).get();
+  const sas = prep(db, `SELECT sa_session_id, since, set_by_session FROM sa_pause`).all();
+  return {
+    pa_global_pause: gp ? {
+      active: gp.active === 1,
+      since: gp.since,
+      set_by_session: gp.set_by_session
+    } : { active: false, since: null, set_by_session: null },
+    sa_pauses: Object.fromEntries(sas.map((s) => [
+      s.sa_session_id,
+      { since: s.since, set_by_session: s.set_by_session }
+    ]))
+  };
+}
+function migrateOffsetsLegacy(stateDir, db, receiverId8) {
+  const legacyPath = join2(stateDir, `offsets-${receiverId8}.json`);
+  if (!existsSync3(legacyPath))
+    return;
+  let legacy = null;
+  try {
+    legacy = JSON.parse(readFileSync(legacyPath, "utf8"));
+  } catch {
+    try {
+      unlinkSync(legacyPath);
+    } catch {}
+    return;
+  }
+  if (legacy && typeof legacy === "object") {
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO offsets (receiver_id8, jsonl_path, offset_bytes)
+      VALUES (?, ?, ?)
+    `);
+    db.transaction(() => {
+      for (const [jsonlPath, offset] of Object.entries(legacy)) {
+        if (typeof offset === "number" && Number.isFinite(offset)) {
+          stmt.run(receiverId8, jsonlPath, offset);
+        }
+      }
+    })();
+  }
+  try {
+    unlinkSync(legacyPath);
+  } catch {}
+}
+function readOffsets(stateDir, receiverId8) {
+  const db = getDb(stateDir);
+  migrateOffsetsLegacy(stateDir, db, receiverId8);
+  const rows = prep(db, `SELECT jsonl_path, offset_bytes FROM offsets WHERE receiver_id8 = ?`).all(receiverId8);
+  return Object.fromEntries(rows.map((r) => [r.jsonl_path, r.offset_bytes]));
+}
+function writeAllOffsets(stateDir, receiverId8, offsets) {
+  const db = getDb(stateDir);
+  const keys = Object.keys(offsets);
+  db.transaction(() => {
+    if (keys.length === 0) {
+      prep(db, `DELETE FROM offsets WHERE receiver_id8 = ?`).run(receiverId8);
+      return;
+    }
+    prep(db, `DELETE FROM offsets WHERE receiver_id8 = ? AND jsonl_path NOT IN (SELECT value FROM json_each(?))`).run(receiverId8, JSON.stringify(keys));
+    const upsert = prep(db, `INSERT OR REPLACE INTO offsets (receiver_id8, jsonl_path, offset_bytes)
+       VALUES (?, ?, ?)`);
+    for (const [jsonlPath, offset] of Object.entries(offsets)) {
+      upsert.run(receiverId8, jsonlPath, offset);
+    }
+  })();
+}
+
+// mcp/engine/live_sessions.ts
+function getAgentChannelStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const sessionsFile = join2(projectDir, ".orchestrator-state", "agent-channel", "sessions.json");
-  if (!existsSync3(sessionsFile))
+  const stateDir = join3(projectDir, ".orchestrator-state", "agent-channel");
+  if (!existsSync4(stateDir))
+    return null;
+  const dbExists = existsSync4(join3(stateDir, "agent_channel.db"));
+  const legacyExists = existsSync4(join3(stateDir, "sessions.json"));
+  if (!dbExists && !legacyExists)
+    return null;
+  return stateDir;
+}
+function getLiveSessionIds() {
+  const stateDir = getAgentChannelStateDir();
+  if (!stateDir)
     return null;
   try {
-    const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
-    const entries = Array.isArray(data) ? data : data?.sessions ?? [];
+    const entries = readSessions(stateDir);
     const nowMs = Date.now();
     const STALE_MS = 90000;
     const liveIds = new Set;
@@ -22605,6 +22869,24 @@ function getLiveOtherSessionIds(sessionId) {
       others.push(id);
   }
   return others;
+}
+function getLiveSessions() {
+  const stateDir = getAgentChannelStateDir();
+  if (!stateDir)
+    return null;
+  try {
+    const entries = readSessions(stateDir);
+    const nowMs = Date.now();
+    const STALE_MS = 90000;
+    return entries.filter((e) => {
+      if (!e?.session_id || !e?.last_heartbeat_at)
+        return false;
+      const lastHbMs = new Date(e.last_heartbeat_at).getTime();
+      return Number.isFinite(lastHbMs) && nowMs - lastHbMs <= STALE_MS;
+    });
+  } catch {
+    return null;
+  }
 }
 
 // mcp/engine/session_tracker.ts
@@ -23151,11 +23433,21 @@ function renderSiblingActivity(ctx, sessionId, userPrompt) {
     if (shared.length >= 2)
       overlapping.push(s);
   }
+  const liveEntries = getLiveSessions();
+  const kindBySession = new Map;
+  if (liveEntries) {
+    for (const e of liveEntries) {
+      if (e.kind)
+        kindBySession.set(e.session_id, e.kind);
+    }
+  }
   const lines = sibs.map((s) => {
     const isOverlap = overlapping.some((o) => o.session_id === s.session_id);
     const marker = isOverlap ? " *POTENTIAL OVERLAP*" : "";
+    const kind = kindBySession.get(s.session_id);
+    const kindSuffix = kind ? ` (${kind})` : "";
     const task = s.current_task ? `: ${s.current_task.slice(0, 80)}` : ": (no task set)";
-    return `  - ${s.session_id}${marker}${task}`;
+    return `  - ${s.session_id}${kindSuffix}${marker}${task}`;
   });
   let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:
 ${lines.join(`
@@ -23512,7 +23804,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { readFileSync as readFileSync4, existsSync as existsSync6, statSync as statSync2, readdirSync } from "fs";
+import { readFileSync as readFileSync3, existsSync as existsSync6, statSync as statSync2, readdirSync } from "fs";
 import { join as join5 } from "path";
 
 // mcp/engine/addressing.ts
@@ -23628,69 +23920,9 @@ function filterEvent(raw) {
   return null;
 }
 
-// mcp/engine/agent_channel_state.ts
-import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, renameSync } from "fs";
-import { join as join3 } from "path";
-var SESSIONS_FILE = "sessions.json";
-var STATE_FILE = "state.json";
-function ensureDir(dir) {
-  if (!existsSync4(dir))
-    mkdirSync2(dir, { recursive: true });
-}
-function atomicWrite(dir, name, content) {
-  ensureDir(dir);
-  const tmp = join3(dir, `${name}.tmp.${process.pid}.${Date.now()}`);
-  writeFileSync(tmp, content);
-  renameSync(tmp, join3(dir, name));
-}
-function safeRead(path2, fallback) {
-  try {
-    if (!existsSync4(path2))
-      return fallback;
-    return JSON.parse(readFileSync2(path2, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-function readSessions(stateDir) {
-  const data = safeRead(join3(stateDir, SESSIONS_FILE), []);
-  if (Array.isArray(data))
-    return data;
-  return data.sessions ?? [];
-}
-function writeSession(stateDir, entry) {
-  const sessions = readSessions(stateDir);
-  const idx = sessions.findIndex((s) => s.session_id === entry.session_id);
-  if (idx >= 0)
-    sessions[idx] = entry;
-  else
-    sessions.push(entry);
-  atomicWrite(stateDir, SESSIONS_FILE, JSON.stringify({ sessions }, null, 2));
-}
-function removeSession(stateDir, session_id) {
-  const sessions = readSessions(stateDir).filter((s) => s.session_id !== session_id);
-  atomicWrite(stateDir, SESSIONS_FILE, JSON.stringify({ sessions }, null, 2));
-}
-var DEFAULT_STATE = {
-  pa_global_pause: { active: false, since: null, set_by_session: null },
-  sa_pauses: {}
-};
-function readOverrideState(stateDir) {
-  return safeRead(join3(stateDir, STATE_FILE), DEFAULT_STATE);
-}
-function offsetsFileName(receiverId8) {
-  return `offsets-${receiverId8}.json`;
-}
-function readOffsets(stateDir, receiverId8) {
-  return safeRead(join3(stateDir, offsetsFileName(receiverId8)), {});
-}
-function writeAllOffsets(stateDir, receiverId8, offsets) {
-  atomicWrite(stateDir, offsetsFileName(receiverId8), JSON.stringify(offsets, null, 2));
-}
-
 // mcp/engine/system_events.ts
-import { existsSync as existsSync5, readFileSync as readFileSync3, statSync } from "fs";
-import { appendFileSync, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync2, statSync } from "fs";
+import { appendFileSync, writeFileSync, mkdirSync as mkdirSync3 } from "fs";
 import { dirname as dirname2, join as join4 } from "path";
 function systemEventsPath(stateDir) {
   return join4(stateDir, "system_events.jsonl");
@@ -23723,7 +23955,7 @@ function readNewSystemEvents(stateDir, lastOffset) {
   }
   let buf;
   try {
-    const raw = readFileSync3(path2);
+    const raw = readFileSync2(path2);
     buf = raw.subarray(lastOffset).toString("utf8");
   } catch {
     return { events: [], newOffset: lastOffset };
@@ -23784,6 +24016,7 @@ class AgentChannel {
   heartbeatTimer = null;
   knownSessions = new Map;
   systemEventsOffset = 0;
+  heartbeatFailures = 0;
   constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
@@ -23792,6 +24025,17 @@ class AgentChannel {
     this.permissionRelay = permissionRelay;
   }
   start() {
+    const priorEntry = readSessions(this.projectStateDir).find((s) => s.session_id === this.selfSession.session_id);
+    const isAutoName = this.selfSession.name === `auto-${this.selfSession.id8}`;
+    if (priorEntry && priorEntry.name && priorEntry.name !== this.selfSession.name && !priorEntry.name.startsWith("auto-") && isAutoName) {
+      process.stderr.write(`agent-channel: preserved prior name "${priorEntry.name}" ` + `over default "${this.selfSession.name}" (MCP restart without ` + `ORCHESTRATOR_AGENT_NAME env)
+`);
+      this.selfSession = { ...this.selfSession, name: priorEntry.name };
+    }
+    if (!priorEntry) {
+      process.stderr.write(`agent-channel: self not in sessions.json on start ` + `(session_id=${this.selfSession.session_id}, ` + `name=${this.selfSession.name}). Likely prior MCP restart after ` + `reaper pruned us, or fresh install. Re-registering.
+`);
+    }
     writeSession(this.projectStateDir, {
       ...this.selfSession,
       last_heartbeat_at: new Date().toISOString()
@@ -23809,16 +24053,31 @@ class AgentChannel {
     removeSession(this.projectStateDir, this.selfSession.session_id);
   }
   heartbeat() {
-    const updated = {
-      ...this.selfSession,
-      last_heartbeat_at: new Date().toISOString()
-    };
-    writeSession(this.projectStateDir, updated);
+    try {
+      const updated = {
+        ...this.selfSession,
+        last_heartbeat_at: new Date().toISOString()
+      };
+      writeSession(this.projectStateDir, updated);
+      if (this.heartbeatFailures > 0) {
+        process.stderr.write(`agent-channel: heartbeat recovered after ` + `${this.heartbeatFailures} consecutive failure(s)
+`);
+        this.heartbeatFailures = 0;
+      }
+    } catch (err) {
+      this.heartbeatFailures += 1;
+      if (this.heartbeatFailures <= 3 || this.heartbeatFailures === 10) {
+        process.stderr.write(`agent-channel: heartbeat write failed ` + `(failure #${this.heartbeatFailures}, ` + `session=${this.selfSession.id8}): ${err}
+`);
+      }
+    }
   }
   detectSessionChanges() {
     const current = new Map(readSessions(this.projectStateDir).map((s) => [s.session_id, s]));
     const now3 = Date.now();
     for (const [sid, entry] of current) {
+      if (sid === this.selfSession.session_id)
+        continue;
       const last = new Date(entry.last_heartbeat_at).getTime();
       if (now3 - last > STALE_THRESHOLD_MS) {
         current.delete(sid);
@@ -23957,7 +24216,7 @@ class AgentChannel {
     }
     let buf;
     try {
-      const raw = readFileSync4(file);
+      const raw = readFileSync3(file);
       buf = raw.subarray(lastOffset).toString("utf8");
     } catch {
       return false;
@@ -24169,6 +24428,14 @@ async function handleRespondToPermission(input, ctx) {
 
 // mcp/server.ts
 import { homedir as homedir2 } from "os";
+var PLUGIN_VERSION = (() => {
+  try {
+    const pkgPath = join6(import.meta.dir, "..", "package.json");
+    return JSON.parse(readFileSync4(pkgPath, "utf8")).version;
+  } catch {
+    return "0.0.0-unknown";
+  }
+})();
 var cachedFallbackSessionId = null;
 function findClaudeAncestorPid() {
   const start = process.pid;
@@ -24182,7 +24449,7 @@ function findClaudeAncestorPid() {
         name = (out.match(/Name=([^\r\n]+)/)?.[1] ?? "").trim().toLowerCase();
         ppid = parseInt(out.match(/ParentProcessId=(\d+)/)?.[1] ?? "0", 10);
       } else {
-        const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+        const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
         const rparen = stat.lastIndexOf(")");
         if (rparen < 0)
           break;
@@ -24216,7 +24483,7 @@ function getFallbackSessionId() {
     const perPidFile = join6(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync7(perPidFile)) {
-        const raw = readFileSync5(perPidFile, "utf8").trim();
+        const raw = readFileSync4(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -24229,14 +24496,14 @@ function getFallbackSessionId() {
   const file = join6(stateDir, "active-session");
   try {
     if (existsSync7(file)) {
-      const raw = readFileSync5(file, "utf8").trim();
+      const raw = readFileSync4(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
           const perPidFile = join6(stateDir, `active-session-${claudePid}`);
           if (!existsSync7(perPidFile)) {
             try {
-              writeFileSync3(perPidFile, raw, "utf8");
+              writeFileSync2(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
 `);
             } catch {}
@@ -24326,22 +24593,22 @@ async function startSidecar() {
     }
   } catch {}
   try {
-    const { unlinkSync } = await import("fs");
-    unlinkSync(portFile);
+    const { unlinkSync: unlinkSync2 } = await import("fs");
+    unlinkSync2(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {
-      const { unlinkSync } = await import("fs");
-      unlinkSync(portFile);
+      const { unlinkSync: unlinkSync2 } = await import("fs");
+      unlinkSync2(portFile);
     } catch {}
     result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
   }
   if (!result) {
     try {
-      const { unlinkSync } = await import("fs");
-      unlinkSync(portFile);
+      const { unlinkSync: unlinkSync2 } = await import("fs");
+      unlinkSync2(portFile);
     } catch {}
     result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
   }
@@ -24390,7 +24657,7 @@ if (PERMISSION_RELAY_ENABLED) {
 }
 var server = new McpServer({
   name: "orchestrator",
-  version: "0.30.28"
+  version: PLUGIN_VERSION
 }, {
   capabilities: {
     tools: {},
@@ -25746,6 +26013,8 @@ function startAgentChannel() {
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
+  const kindEnv = process.env.ORCHESTRATOR_SESSION_KIND ?? process.env.SPAWNBOX_SESSION_KIND;
+  const kind = kindEnv === "prime" || kindEnv === "subordinate" || kindEnv === "discord-bot" ? kindEnv : undefined;
   const self = {
     session_id: sessionId,
     id8: sessionId.slice(0, 8),
@@ -25753,7 +26022,8 @@ function startAgentChannel() {
     name,
     started_at: new Date().toISOString(),
     last_heartbeat_at: new Date().toISOString(),
-    current_task: null
+    current_task: null,
+    ...kind ? { kind } : {}
   };
   const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
@@ -25804,7 +26074,7 @@ function startAgentChannel() {
           try {
             const sessionsFile = join6(stateDir, "sessions.json");
             if (existsSync7(sessionsFile)) {
-              const data = JSON.parse(readFileSync5(sessionsFile, "utf8"));
+              const data = JSON.parse(readFileSync4(sessionsFile, "utf8"));
               const entries = Array.isArray(data) ? data : data?.sessions ?? [];
               paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
             }
@@ -25957,7 +26227,7 @@ if (initialParentClaudePid) {
   setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
 }
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=0.30.28 pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  process.stderr.write(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
