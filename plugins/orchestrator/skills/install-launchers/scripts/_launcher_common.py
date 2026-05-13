@@ -292,6 +292,48 @@ def setup_env(
         os.environ["SPAWNBOX_AGENT_NAME"] = session_name
 
 
+def build_claude_args(
+    *,
+    marketplace: str,
+    session_name: str | None,
+    resume: str | None,
+    effort: str | None,
+    extra_channels: list[str] | None = None,
+) -> list[str]:
+    """Assemble the argv passed to `claude` (after the program name).
+
+    Layout:
+        [--channels <slug>] *   # extra_channels (Discord uses this)
+        --dangerously-load-development-channels plugin:orchestrator@<mkt>
+        [--effort <level>]      # if set
+        [--name <session_name>] # if set
+        [--resume <uuid>]       # if set
+
+    Args:
+        marketplace: Resolved marketplace slug (e.g. spawnbox-dev-claude-plugins).
+        session_name: Session name from make_session_name(), or None.
+        resume: Session UUID, or None.
+        effort: 'low'|'medium'|'high'|'xhigh'|'max', or None.
+        extra_channels: List of '--channels <slug>' values (Discord:
+            ['plugin:discord@claude-plugins-official']).
+
+    Returns:
+        The argv list, suitable for passing to subprocess or execvp.
+    """
+    argv: list[str] = []
+    for channel in extra_channels or []:
+        argv.extend(["--channels", channel])
+    argv.append("--dangerously-load-development-channels")
+    argv.append(f"plugin:orchestrator@{marketplace}")
+    if effort:
+        argv.extend(["--effort", effort])
+    if session_name:
+        argv.extend(["--name", session_name])
+    if resume:
+        argv.extend(["--resume", resume])
+    return argv
+
+
 def make_session_name(prefix: str) -> str:
     """Build a timestamped session name: '<PREFIX>-YYYY-MM-DD-HH-MM-SS'.
 
@@ -337,4 +379,5 @@ __all__ = [
     "supersede_existing_pa",
     "make_session_name",
     "setup_env",
+    "build_claude_args",
 ]
