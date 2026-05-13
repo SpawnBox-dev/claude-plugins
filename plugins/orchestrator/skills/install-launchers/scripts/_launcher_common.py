@@ -56,7 +56,33 @@ def check_marketplace_substituted() -> None:
         sys.exit(1)
 
 
+import re
+from pathlib import PurePath
+
+
+def project_hash_for(project_dir: PurePath) -> str:
+    """Transform a project path to the Claude Code project-dir hash.
+
+    Matches CC's literal character substitution: backslash, forward
+    slash, and drive-colon all become single dashes. Consecutive dashes
+    are NOT collapsed (so 'C:\\' yields 'C--'). Leading and trailing
+    dashes are stripped.
+
+    Args:
+        project_dir: A pathlib path (PurePosixPath or PureWindowsPath).
+
+    Returns:
+        The hash string used as the directory name under
+        ~/.claude/projects/.
+    """
+    raw = str(project_dir)
+    substituted = re.sub(r"[\\/:]", "-", raw)
+    stripped = re.sub(r"^-+|-+$", "", substituted)
+    return stripped
+
+
 __all__ = [
     "MARKETPLACE_PLACEHOLDER",
     "check_marketplace_substituted",
+    "project_hash_for",
 ]
