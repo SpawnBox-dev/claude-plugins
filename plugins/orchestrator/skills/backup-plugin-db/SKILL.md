@@ -54,6 +54,19 @@ the WAL sidecar desyncs from the main file. Snapshot, don't mirror.
 - As routine hygiene if the existing schedule needs to be re-pointed at a
   new destination
 
+## Prerequisites
+
+- Python 3.10+ on PATH. Verify: `python3 --version` (Linux/macOS) or `python --version` (Windows).
+- **Windows note:** if `python --version` prints `Python was not found...`,
+  you're hitting the Microsoft Store App Execution Alias stub, not a real
+  Python. Install via `winget install --id Python.Python.3.12`, the
+  Microsoft Store *Python 3.x* app, or python.org — then open a new
+  PowerShell so PATH refreshes.
+- A writable destination directory (cloud-sync folder, backed-up local
+  disk, NAS mount, etc.).
+- Linux/macOS: either `systemctl --user` working OR `crontab` available
+  (helper auto-selects).
+
 ## Steps
 
 ### 1. Pick a destination
