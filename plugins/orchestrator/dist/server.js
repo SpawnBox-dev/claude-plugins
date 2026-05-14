@@ -26044,7 +26044,7 @@ function startAgentChannel() {
 `);
     return;
   }
-  const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+  const projectHash = projectDir.replace(/[\\/:]/g, "-");
   const projectsHashDir = join5(homedir2(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
