@@ -2880,6 +2880,90 @@ function reapStaleActiveSessionFiles(stateDir: string): void {
   }
 }
 
+/**
+ * Startup hygiene: detect sibling orchestrator MCP processes whose
+ * parent claude is no longer alive, suggesting they outlived their
+ * owning session and may be running stale bytecode whose orphan
+ * watchdog never fired.
+ *
+ * Logs a warning naming the suspect PIDs - does NOT auto-kill, because
+ * killing a sibling MCP can disrupt infrastructure shared across live
+ * sessions (e.g. the python sidecar bound to .sidecar-port is
+ * deliberately shared - killing a sibling can take it down). Detection
+ * surfaces the issue; the operator decides whether to clean up.
+ *
+ * This complements the orphan-bun watchdog (which catches "parent dies
+ * while I'm alive" cases for processes loaded with the watchdog code).
+ * It does not help against orphans whose loaded bytecode predates the
+ * watchdog improvements - those need manual cleanup - but it makes
+ * such orphans visible at the next session's startup.
+ *
+ * Linux only. Windows already has killOlderDuplicateMcps for a related
+ * but different case (siblings sharing our parent claude); the orphan
+ * case on Windows is rare because parent death usually reaps children.
+ */
+function warnAboutLikelyOrphanSiblings(): void {
+  if (process.platform !== "linux") return;
+  const myPid = process.pid;
+  // Look for any other bun process whose cmdline references the
+  // orchestrator dist - that's the canonical sibling-MCP signature.
+  // We use a path suffix rather than an absolute marker so the check
+  // works regardless of where the plugin marketplace lives.
+  const distMarker = "orchestrator/dist/server.js";
+  let procDirs: string[];
+  try {
+    procDirs = readdirSync("/proc").filter((n) => /^\d+$/.test(n));
+  } catch {
+    return;
+  }
+  const orphanPids: number[] = [];
+  for (const pidStr of procDirs) {
+    const pid = Number(pidStr);
+    if (pid === myPid) continue;
+    let isSiblingMcp = false;
+    try {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8");
+      isSiblingMcp = cmdline.includes(distMarker);
+    } catch {
+      continue;
+    }
+    if (!isSiblingMcp) continue;
+    // Walk this sibling's parent chain looking for a live claude
+    // process. If we never find one in 8 hops, the sibling has no
+    // claude ancestor in its current tree - likely orphaned.
+    let walk = pid;
+    let foundClaude = false;
+    for (let depth = 0; depth < 8; depth++) {
+      try {
+        const stat = readFileSync(`/proc/${walk}/stat`, "utf8");
+        const rparen = stat.lastIndexOf(")");
+        if (rparen < 0) break;
+        const name = stat
+          .slice(stat.indexOf("(") + 1, rparen)
+          .toLowerCase();
+        if (name === "claude" || name === "claude.exe") {
+          foundClaude = true;
+          break;
+        }
+        const fields = stat.slice(rparen + 2).split(/\s+/);
+        const ppid = parseInt(fields[1] ?? "0", 10);
+        if (!ppid || ppid === walk || ppid === 1) break;
+        walk = ppid;
+      } catch {
+        break;
+      }
+    }
+    if (!foundClaude) orphanPids.push(pid);
+  }
+  if (orphanPids.length > 0) {
+    process.stderr.write(
+      `[orchestrator] startup hygiene: detected ${orphanPids.length} likely-orphan sibling MCP process(es): pid=${orphanPids.join(",")}. ` +
+        `Their parent claude is no longer in the process tree, suggesting they outlived their owning session and may be running stale bytecode whose watchdog never fired. ` +
+        `Diagnose with 'pstree -ps <pid>'; clean up with 'kill -9 <pid>' if confirmed orphan.\n`,
+    );
+  }
+}
+
 // Startup hygiene runs unconditionally - it doesn't depend on parent
 // claude resolution and benefits future startups even if THIS one is
 // about to exit (no-claude-ancestor case below).
@@ -2889,6 +2973,7 @@ function reapStaleActiveSessionFiles(stateDir: string): void {
     process.env.CLAUDE_PROJECT_DIR ||
     process.cwd();
   reapStaleActiveSessionFiles(join(startupProjectDir, ".orchestrator-state"));
+  warnAboutLikelyOrphanSiblings();
 }
 
 const initialParentClaudePid = findClaudeAncestorPid();
