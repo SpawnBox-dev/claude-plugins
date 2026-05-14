@@ -72,83 +72,151 @@ echo "$SCRIPTS_DIR"
 If the base directory was surfaced via the skill-load header, use that
 path's `scripts/` subdirectory directly.
 
-### 3. Detect existing `statusLine` setting
+### 3. Detect existing `statusLine` setting (global AND project)
 
-Claude Code's `statusLine` setting in `.claude/settings.json` is a
-single object — there's no built-in way to compose two statuslines. If
-the user already has one configured, we must not silently clobber it.
+Claude Code resolves `statusLine` from a precedence chain — the
+project-level `.claude/settings.json` shadows the global
+`~/.claude/settings.json`. If we write an unconditional statusLine into
+the project settings, we silently clobber a global statusline the user
+relies on (the global one stops rendering in this project). Check BOTH
+levels:
 
 ```bash
-SETTINGS="$PWD/.claude/settings.json"
-EXISTING=""
-if [ -f "$SETTINGS" ]; then
-  EXISTING=$(jq -r '.statusLine // empty | tostring' "$SETTINGS" 2>/dev/null || echo "")
+PROJECT_SETTINGS="$PWD/.claude/settings.json"
+GLOBAL_SETTINGS="$HOME/.claude/settings.json"
+
+EXISTING_LEVEL=""   # "project" | "global" | ""
+EXISTING_VALUE=""
+
+if [ -f "$PROJECT_SETTINGS" ]; then
+  v=$(jq -r '.statusLine // empty | tojson' "$PROJECT_SETTINGS" 2>/dev/null)
+  if [ -n "$v" ] && [ "$v" != "null" ]; then
+    EXISTING_LEVEL="project"
+    EXISTING_VALUE="$v"
+  fi
+fi
+
+if [ -z "$EXISTING_LEVEL" ] && [ -f "$GLOBAL_SETTINGS" ]; then
+  v=$(jq -r '.statusLine // empty | tojson' "$GLOBAL_SETTINGS" 2>/dev/null)
+  if [ -n "$v" ] && [ "$v" != "null" ]; then
+    EXISTING_LEVEL="global"
+    EXISTING_VALUE="$v"
+  fi
 fi
 ```
 
-If `EXISTING` is non-empty (and not the literal `"null"` from `jq`):
+If `EXISTING_LEVEL` is non-empty, surface the existing config and the
+four options:
 
 ```
-⚠ Existing statusLine detected:
-  <show $EXISTING>
+⚠ Existing statusLine detected at <project|global> level:
+  <show $EXISTING_VALUE>
 
-The orchestrator statusline cannot auto-compose with arbitrary
-existing statuslines (would require parsing + wrapping a shell
-command we don't own). Three options:
+  (1) AUTO-COMPOSE (recommended) — install a composed-wrapper script
+      that runs your existing statusline AND the orchestrator role
+      indicator together. Your existing statusline keeps rendering;
+      the orchestrator role indicator appears as the first line.
+      Non-destructive of your existing setup.
 
-  (1) SKIP install — keep your existing statusLine.
+  (2) SKIP — keep your existing statusLine, do not install the
+      orchestrator statusline.
 
-  (2) REPLACE — clobber the existing statusLine with the
-      orchestrator one. Your current setting will be lost; back it
-      up first if you want to restore it later.
+  (3) REPLACE — set the project-level statusLine to the orchestrator
+      one only. If your existing config was at the GLOBAL level, this
+      shadows it for this project only — your global statusline stays
+      intact and renders in other projects. If your existing was at
+      the PROJECT level, it's lost; back it up first.
 
-  (3) COMPOSE MANUALLY — install the orchestrator script and the
-      role-indicator fragment it produces, then merge it into your
-      existing statusline by hand. The fragment is one line of
-      text on stdout; you can wrap it in your existing script with
-      `$(/abs/path/to/orchestrator-statusline.sh)` or similar.
+  (4) COMPOSE MANUALLY — install the orchestrator scripts but do not
+      touch settings.json. You merge the fragment into your existing
+      statusline by hand. Use this when AUTO-COMPOSE's defaults
+      (running ~/.claude/statusline.sh as the user-side script) don't
+      match your setup.
 
 Which option?
 ```
 
-Wait for the user's answer before proceeding. Default to (1) skip if
-unclear.
+Wait for the user's answer before proceeding. Default to (1)
+AUTO-COMPOSE if unclear — it's non-destructive.
 
-If `EXISTING` is empty / absent: proceed to step 4 without prompting.
+**Stdin fan-out caveat (informs option 1):** Claude Code pipes session
+JSON to the statusLine command via stdin on every refresh. A naive
+"run cmd1; run cmd2" composition would have both commands fight over
+stdin (cmd1 consumes it, cmd2 sees EOF). The shipped
+`orchestrator-statusline-composed.sh` template handles this correctly:
+it captures stdin once, runs the orchestrator script (which ignores
+stdin), then re-pipes the captured JSON to the user's existing
+statusline. Do NOT hand-roll a composition that skips the stdin
+capture — the user's statusline will silently render blank.
+
+If `EXISTING_LEVEL` is empty: proceed to step 4 without prompting.
 
 ### 4. Copy script files into the project root
+
+The script set installed depends on the option chosen in step 3:
+
+- For options (1) AUTO-COMPOSE, (3) REPLACE, (4) COMPOSE MANUALLY:
+  install all four files.
+- For option (2) SKIP: install nothing, exit.
 
 ```bash
 INSTALL_DIR="$PWD"
 for f in orchestrator_statusline.py \
          orchestrator-statusline.sh \
-         orchestrator-statusline.ps1; do
+         orchestrator-statusline.ps1 \
+         orchestrator-statusline-composed.sh; do
   cp "$SCRIPTS_DIR/$f" "$INSTALL_DIR/$f"
 done
-chmod 755 "$INSTALL_DIR/orchestrator-statusline.sh"
+chmod 755 "$INSTALL_DIR/orchestrator-statusline.sh" \
+          "$INSTALL_DIR/orchestrator-statusline-composed.sh"
 ```
 
 On Windows the `chmod` step is a no-op.
 
+The fourth file (`orchestrator-statusline-composed.sh`) is the
+composed-wrapper template. It runs the orchestrator role indicator
+THEN the user's `~/.claude/statusline.sh` (re-piping captured stdin).
+For setups where the user's statusline is at a different path, the
+template's `USER_STATUSLINE` variable can be edited in-place — it's a
+single assignment at the top of the file.
+
 ### 5. Configure `.claude/settings.json`
 
-Create or update `.claude/settings.json` to wire the statusline:
+For option (4) COMPOSE MANUALLY: skip this step. The scripts are in
+place; the user merges into their existing settings.json on their own.
+
+For options (1) AUTO-COMPOSE and (3) REPLACE: write the statusLine
+command into the **project-level** `.claude/settings.json`. Project-
+level always takes precedence over global, so this is the right
+surface either way.
 
 ```bash
 mkdir -p "$PWD/.claude"
 SETTINGS="$PWD/.claude/settings.json"
 
-# Build the OS-appropriate command.
+# Build the OS-appropriate command — pointing at the composed wrapper
+# for option (1), or the orchestrator-only wrapper for option (3).
 case "$(uname -s 2>/dev/null || echo Windows)" in
   MINGW*|MSYS*|CYGWIN*|*NT*|Windows*)
-    CMD="powershell -NoProfile -ExecutionPolicy Bypass -File $INSTALL_DIR\\orchestrator-statusline.ps1"
+    WRAPPER_BASE="orchestrator-statusline.ps1"     # option (3)
+    COMPOSED_BASE="orchestrator-statusline-composed.sh"  # option (1) — bash via WSL
+    if [ "$CHOICE" = "auto-compose" ]; then
+      CMD="bash $INSTALL_DIR/$COMPOSED_BASE"
+    else
+      CMD="powershell -NoProfile -ExecutionPolicy Bypass -File $INSTALL_DIR\\$WRAPPER_BASE"
+    fi
     ;;
   *)
-    CMD="$INSTALL_DIR/orchestrator-statusline.sh"
+    if [ "$CHOICE" = "auto-compose" ]; then
+      CMD="$INSTALL_DIR/orchestrator-statusline-composed.sh"
+    else
+      CMD="$INSTALL_DIR/orchestrator-statusline.sh"
+    fi
     ;;
 esac
 
-# Merge into existing settings.json (or create new).
+# Merge into existing settings.json (or create new). Preserves
+# everything else in the file; only replaces `.statusLine`.
 if [ -f "$SETTINGS" ]; then
   jq --arg cmd "$CMD" '.statusLine = {"type": "command", "command": $cmd}' "$SETTINGS" > "$SETTINGS.new"
   mv "$SETTINGS.new" "$SETTINGS"
