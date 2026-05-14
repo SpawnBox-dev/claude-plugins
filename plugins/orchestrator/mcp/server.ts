@@ -1,5 +1,5 @@
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2820,6 +2820,75 @@ foreach ($s in $siblings) {
       `[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}\n`,
     );
   }
+}
+
+/**
+ * Startup hygiene: remove stale per-PID `active-session-<pid>` files
+ * whose owning claude process has exited. The per-PID file scheme
+ * (introduced in 0.30.19+) makes session_id lookup race-free for
+ * concurrent sessions, but nothing has been reaping these files when
+ * the claude process they belong to dies. On a developer machine with
+ * many short-lived sessions per day, they accumulate indefinitely.
+ *
+ * They are cosmetic - the legacy single `active-session` file remains
+ * the primary lookup - but a slow directory listing eventually becomes
+ * a real cost. This sweep runs once at MCP startup; it is cheap,
+ * idempotent, and race-safe (we only unlink files whose PID is verified
+ * gone via `process.kill(pid, 0)`).
+ */
+function reapStaleActiveSessionFiles(stateDir: string): void {
+  if (!existsSync(stateDir)) return;
+  let reaped = 0;
+  try {
+    const entries = readdirSync(stateDir);
+    for (const entry of entries) {
+      const m = entry.match(/^active-session-(\d+)$/);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      if (!Number.isFinite(pid) || pid <= 0) continue;
+      // Liveness probe: process.kill(pid, 0) throws if the PID does
+      // not exist. ESRCH = dead PID (reap). EPERM = alive but not
+      // ours to signal (rare for own state files; treat as alive to
+      // be safe). We don't distinguish error codes here because the
+      // failure cost of a missed reap is one extra orphan file at
+      // worst - next startup will retry.
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (!alive) {
+        try {
+          unlinkSync(join(stateDir, entry));
+          reaped++;
+        } catch {
+          // Lost a race with another session, or permission issue.
+          // Non-fatal; next startup will retry.
+        }
+      }
+    }
+  } catch {
+    // readdir failure - directory may not exist, or permission denied.
+    // Either way nothing to reap.
+  }
+  if (reaped > 0) {
+    process.stderr.write(
+      `[orchestrator] startup hygiene: reaped ${reaped} stale active-session-<pid> file(s) in ${stateDir}\n`,
+    );
+  }
+}
+
+// Startup hygiene runs unconditionally - it doesn't depend on parent
+// claude resolution and benefits future startups even if THIS one is
+// about to exit (no-claude-ancestor case below).
+{
+  const startupProjectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  reapStaleActiveSessionFiles(join(startupProjectDir, ".orchestrator-state"));
 }
 
 const initialParentClaudePid = findClaudeAncestorPid();

@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join5 } from "path";
-import { existsSync as existsSync6, readFileSync as readFileSync3, writeFileSync } from "fs";
+import { existsSync as existsSync6, readFileSync as readFileSync3, readdirSync as readdirSync2, unlinkSync as unlinkSync2, writeFileSync } from "fs";
 import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
@@ -24629,22 +24629,22 @@ async function startSidecar() {
     }
   } catch {}
   try {
-    const { unlinkSync: unlinkSync2 } = await import("fs");
-    unlinkSync2(portFile);
+    const { unlinkSync: unlinkSync3 } = await import("fs");
+    unlinkSync3(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync2 } = await import("fs");
-      unlinkSync2(portFile);
+      const { unlinkSync: unlinkSync3 } = await import("fs");
+      unlinkSync3(portFile);
     } catch {}
     result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
   }
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync2 } = await import("fs");
-      unlinkSync2(portFile);
+      const { unlinkSync: unlinkSync3 } = await import("fs");
+      unlinkSync3(portFile);
     } catch {}
     result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
   }
@@ -26356,6 +26356,43 @@ foreach ($s in $siblings) {
     process.stderr.write(`[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}
 `);
   }
+}
+function reapStaleActiveSessionFiles(stateDir) {
+  if (!existsSync6(stateDir))
+    return;
+  let reaped = 0;
+  try {
+    const entries = readdirSync2(stateDir);
+    for (const entry of entries) {
+      const m = entry.match(/^active-session-(\d+)$/);
+      if (!m)
+        continue;
+      const pid = Number(m[1]);
+      if (!Number.isFinite(pid) || pid <= 0)
+        continue;
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch {
+        alive = false;
+      }
+      if (!alive) {
+        try {
+          unlinkSync2(join5(stateDir, entry));
+          reaped++;
+        } catch {}
+      }
+    }
+  } catch {}
+  if (reaped > 0) {
+    process.stderr.write(`[orchestrator] startup hygiene: reaped ${reaped} stale active-session-<pid> file(s) in ${stateDir}
+`);
+  }
+}
+{
+  const startupProjectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  reapStaleActiveSessionFiles(join5(startupProjectDir, ".orchestrator-state"));
 }
 var initialParentClaudePid = findClaudeAncestorPid();
 var initialParentClaudeCreationTime = initialParentClaudePid !== null ? getProcessCreationTime(initialParentClaudePid) : null;
