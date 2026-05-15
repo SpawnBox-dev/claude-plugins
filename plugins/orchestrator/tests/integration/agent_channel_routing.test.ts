@@ -323,4 +323,69 @@ describe("agent-channel routing E2E", () => {
       ),
     ).toBe(false);
   });
+
+  // Single-recipient-set heuristic: when ALL @-addressed paragraphs in a
+  // message route to the same target set, the WHOLE content is delivered
+  // (including unaddressed structural continuation paragraphs like bullet
+  // lists, follow-up sentences, closing prose). This fixes the common-case
+  // truncation where a sender writes a directive with structure that has
+  // no @-address of its own — under strict per-paragraph filtering those
+  // paragraphs drop, leaving the receiver with just the intro paragraph
+  // and no scope.
+  test("single-recipient message with unaddressed continuation paragraphs delivers in full", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const sourceSa = makeSession("subordinate", "50ce0bba", "SA-source");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    const other = makeSession("subordinate", "deadbe11", "SA-other");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, sourceSa);
+    writeSession(stateDir, target);
+    writeSession(stateDir, other);
+
+    const sourceJsonl = join(projectsHashDir, `${sourceSa.session_id}.jsonl`);
+    writeFileSync(sourceJsonl, "");
+
+    // A typical PA dispatch: opening directive with @-address, then
+    // bulleted scope, then closing prose. Only the opening paragraph
+    // contains an explicit @SA-<id8> address.
+    const dispatch = [
+      "@SA-abc12345 dispatch reviewer on PR #72. Fix scope to surface in the brief:",
+      "- Patch 3 regex must match current upstream shape",
+      "- Multi-patch non-transactionality requires read-then-validate-all-then-apply",
+      "- `--help` sed range must terminate at header end (line 62)",
+      "Same branch, no new ADR, re-review through reviewer chain when meta-coder ships.",
+    ].join("\n\n");
+    appendAssistantEvent(sourceJsonl, dispatch);
+
+    const targetReceived: ChannelNotification[] = [];
+    const otherReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    const otherChan = new AgentChannel(stateDir, projectsHashDir, other, (n) =>
+      otherReceived.push(n),
+    );
+    targetChan.start();
+    otherChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+    otherChan.stop();
+
+    // SA-target receives the FULL content (intro + bullets + closing).
+    const targetContents = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(targetContents.length).toBe(1);
+    const got = targetContents[0];
+    expect(got).toContain("dispatch reviewer on PR #72");
+    expect(got).toContain("Patch 3 regex must match");
+    expect(got).toContain("Multi-patch non-transactionality");
+    expect(got).toContain("`--help` sed range");
+    expect(got).toContain("Same branch, no new ADR");
+
+    // SA-other (not addressed) receives nothing.
+    expect(
+      otherReceived.some((n) => n.meta.event_type === "assistant_text"),
+    ).toBe(false);
+  });
 });

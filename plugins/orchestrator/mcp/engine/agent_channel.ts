@@ -604,6 +604,17 @@ export class AgentChannel {
  * Used by SA receivers to extract only the parts of a sender's message
  * that were addressed to them - prevents PA-to-user prose in a mixed message
  * from leaking to an SA that was named in a different paragraph.
+ *
+ * Single-recipient-set heuristic: when ALL addressed paragraphs in a message
+ * route to the same target set, the whole content is emitted (no paragraph
+ * filtering). This fixes the common-case truncation where a sender writes
+ * a directive with structural continuation paragraphs (bullets, lists,
+ * follow-up prose, closing sentences) that have no @-address of their own -
+ * under strict per-paragraph filtering those paragraphs drop, leaving the
+ * receiver with just the intro and no scope. Per-paragraph filtering is
+ * still applied to genuinely mixed-audience messages (multiple @-addresses
+ * with DIFFERENT target sets) so private user-prose paragraphs interleaved
+ * between SA-directed paragraphs continue to not leak.
  */
 function filterParagraphsForReceiver(
   content: string,
@@ -612,12 +623,33 @@ function filterParagraphsForReceiver(
   sessions: SessionEntry[],
 ): string | null {
   const paragraphs = content.split(/\n{2,}/);
+  const paraAddrs = paragraphs.map((para) =>
+    parseAddressing(para, sender, sessions),
+  );
+
+  // Collect target-set signatures of the addressed paragraphs only.
+  const targetSets = paraAddrs
+    .filter((a) => a.targets.length > 0)
+    .map((a) => [...a.targets].sort().join(","));
+  const allAddressedParagraphsShareOneTargetSet =
+    targetSets.length > 0 && targetSets.every((s) => s === targetSets[0]);
+
+  if (allAddressedParagraphsShareOneTargetSet) {
+    // Single-recipient-set message: deliver the full content (including
+    // unaddressed structural continuation paragraphs) to the target set.
+    return paraAddrs.some((a) => a.targets.includes(receiverId))
+      ? content
+      : null;
+  }
+
+  // Mixed-audience fallback: per-paragraph filtering (the original safety
+  // property from work_item b4c37849 — paragraphs addressed to a different
+  // recipient must not leak to this receiver).
   const kept: string[] = [];
-  for (const para of paragraphs) {
-    const paraAddr = parseAddressing(para, sender, sessions);
-    if (paraAddr.targets.includes(receiverId)) {
+  paragraphs.forEach((para, i) => {
+    if (paraAddrs[i].targets.includes(receiverId)) {
       kept.push(para);
     }
-  }
+  });
   return kept.length > 0 ? kept.join("\n\n") : null;
 }

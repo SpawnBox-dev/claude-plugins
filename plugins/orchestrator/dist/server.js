@@ -24309,13 +24309,18 @@ class AgentChannel {
 }
 function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
   const paragraphs = content.split(/\n{2,}/);
+  const paraAddrs = paragraphs.map((para) => parseAddressing(para, sender, sessions));
+  const targetSets = paraAddrs.filter((a) => a.targets.length > 0).map((a) => [...a.targets].sort().join(","));
+  const allAddressedParagraphsShareOneTargetSet = targetSets.length > 0 && targetSets.every((s) => s === targetSets[0]);
+  if (allAddressedParagraphsShareOneTargetSet) {
+    return paraAddrs.some((a) => a.targets.includes(receiverId)) ? content : null;
+  }
   const kept = [];
-  for (const para of paragraphs) {
-    const paraAddr = parseAddressing(para, sender, sessions);
-    if (paraAddr.targets.includes(receiverId)) {
+  paragraphs.forEach((para, i) => {
+    if (paraAddrs[i].targets.includes(receiverId)) {
       kept.push(para);
     }
-  }
+  });
   return kept.length > 0 ? kept.join(`
 
 `) : null;
