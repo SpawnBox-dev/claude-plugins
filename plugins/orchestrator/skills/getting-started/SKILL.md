@@ -35,7 +35,26 @@ If for any reason you cannot find your session_id in the startup context, ask th
 
 ## Step 1 — Briefing
 
-Call `briefing({ event: "startup", session_id: "<your_session_id>" })` to get the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, cross-session activity from sibling sessions, AND a `curation_candidates` section surfacing stale notes worth maintaining). Default output covers all sections; pass `sections: [...]` to narrow. Scan it internally - including `curation_candidates` - and schedule maintenance opportunities alongside your task. Do NOT dump the full briefing to the user - only mention items directly relevant to their task.
+Call `briefing` with a tight `sections` filter to keep bootstrap-token consumption low:
+
+```
+briefing({
+  event: "startup",
+  session_id: "<your_session_id>",
+  sections: ["work_items","open_threads","decisions","checkpoint","user_model","cross_session"]
+})
+```
+
+This returns the session orientation (open threads, recent decisions, work items, user profile, last checkpoint, and cross-session activity from sibling sessions). Scan it internally and only mention items directly relevant to the user's task — do NOT dump the full briefing.
+
+**Why the `sections` filter?** Default rendering (no `sections`) also includes `neglected_areas` (tag soup, often ~3K tokens of stale tags), `drift`, and `curation_candidates` — these inflate routine bootstrap by 5-15K tokens without serving your immediate goal. Fetch them on explicit maintenance turns instead:
+
+```
+// Maintenance call — only when you're explicitly doing KB hygiene
+briefing({ event: "startup", session_id: "<id>", sections: ["neglected","drift","curation_candidates"] })
+```
+
+The `orchestrator:reflect` skill calls these maintenance sections automatically; you typically don't need them at routine bootstrap.
 
 On the first startup of a week (seven days since the last maintenance pass), the briefing may be prepended with a `## Auto-Retro` section. That's automatic maintenance: the orchestrator inline-invokes `retro` on a 7-day cadence so stale signal decays, orphans get flagged, and the knowledge base stays coherent without requiring the agent to remember. This is expected, not a surprise - scan the summary for anything actionable (broken code_refs, revalidation queue) and fold it into your maintenance plan.
 
@@ -45,12 +64,12 @@ If the Cross-Session Activity section is non-empty, note anything that affects y
 
 Check `process.env.ORCHESTRATOR_AGENT_ROLE` (or the legacy `SPAWNBOX_AGENT_ROLE`):
 
-- `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it sets `/model claude-opus-4-7`, `/effort max`, reads sessions.json, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
+- `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it sets `/model claude-opus-4-7`, `/effort max`, reads the agent-channel SQLite DB, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
 - `subordinate` (or unset) → You are a **Subordinate Agent (SA)**. The project's CLAUDE.md and the orchestrator plugin's CLAUDE.md describe your operating contract: PA's directives addressed to you (`@SA-<your-id8>` or unaddressed PA dialogue) are treated as the user's voice unless you're under `/pa-pause`. Address peers via `@PA` / `@SA-<id8>` / `@all` in your terminal output - the agent-channel filewatcher routes via `notifications/claude/channel`. **No `send_message` tool exists in 0.29.0+** - communication is purely terminal-output + filewatcher routing.
 
 ## Step 3 — Broadcast your task to peers
 
-If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` (and into `sessions.json` for the agent-channel filewatcher) so:
+If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` (and into the agent-channel DB for the filewatcher) so:
 
 - Peer sessions see what you're working on as the `from_task` field on every channel notification you generate.
 - Their next briefing's Cross-Session Activity surfaces your task.

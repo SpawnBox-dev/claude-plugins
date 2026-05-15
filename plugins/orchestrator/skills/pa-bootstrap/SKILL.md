@@ -1,6 +1,6 @@
 ---
 name: pa-bootstrap
-description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Sets model/effort, confirms role=prime, reads active sessions from sessions.json, verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
+description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Sets model/effort, confirms role=prime, reads active sessions from the SQLite agent-channel DB, verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
 ---
 
 # Bootstrap the PrimeAgent
@@ -21,18 +21,38 @@ These are per-session slash commands; the launcher .bat cannot pre-set them.
 
 ### 2. Confirm role and identity
 
-Read `$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/sessions.json`:
+The agent-channel state lives in SQLite under
+`$ORCHESTRATOR_PROJECT_ROOT/.orchestrator-state/agent-channel/agent_channel.db`
+(WAL-mode). The launchers set `$ORCHESTRATOR_PROJECT_ROOT` for you; use
+that env var rather than `$CLAUDE_PROJECT_DIR` (which is not propagated
+to PA sessions in current Claude Code).
+
+Query your own session and verify `role` is `prime`. The same query
+also lists every active session (used in Step 3):
 
 ```bash
-cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/sessions.json"
+python3 <<'PY'
+import os, sqlite3, datetime
+db = f"{os.environ['ORCHESTRATOR_PROJECT_ROOT']}/.orchestrator-state/agent-channel/agent_channel.db"
+c = sqlite3.connect(db); c.row_factory = sqlite3.Row
+now = datetime.datetime.now(datetime.timezone.utc)
+print("=== Sessions ===")
+for r in c.execute("SELECT id8, role, name, current_task, last_heartbeat_at FROM sessions ORDER BY last_heartbeat_at DESC"):
+    hb = datetime.datetime.fromisoformat(r['last_heartbeat_at'].replace('Z', '+00:00'))
+    age = (now - hb).total_seconds()
+    status = "ACTIVE" if age < 90 else f"stale {age:.0f}s"
+    print(f"[{status}] {r['id8']} role={r['role']} name={r['name']} task={r['current_task'] or '(none)'}")
+PY
 ```
 
-Find your own session entry (matches `$CLAUDE_SESSION_ID` env var, or the
-session_id you can see in your environment). Verify `role` is `prime`.
+Your own row should appear with `role=prime` and a fresh heartbeat
+(< 60s old). That row IS the wiring confirmation — agent-channel is
+running because the MCP server is writing your heartbeat to the table.
 
 **If role is `subordinate` despite env being correct**, you're likely
 fighting an impostor MCP — another orphaned bun process from a prior
-session that's heartbeating your entry with the wrong role. Diagnose:
+session that's heartbeating your entry with the wrong role. Diagnose
+(Windows):
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" |
@@ -41,7 +61,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" |
 ```
 
 For each `bun`, walk the parent chain to find the host `claude.exe`. If a
-bun's `started_at` in sessions.json matches your session_id but its
+bun's recent heartbeat in the DB matches your session_id but its
 ancestor `claude.exe` is launching a DIFFERENT session (e.g., the wrong
 `--resume <uuid>`), kill that bun — it's an impostor. Your legitimate
 MCP's next heartbeat (~30s) restores the correct entry.
@@ -56,8 +76,8 @@ broken).
 
 ### 3. Read active subordinates
 
-From sessions.json, list every session with `role=subordinate` whose
-`last_heartbeat_at` is within the last 90 seconds.
+The Step 2 query already lists every active session. SAs are rows
+where `role=subordinate` and the heartbeat age is `ACTIVE` (< 90s).
 
 Output a status block to terminal:
 
@@ -72,11 +92,11 @@ If zero SAs active, output `No SAs currently active. Run sa-start.bat to spin on
 ### 4. Verify agent-channel is wired
 
 The MCP server should have logged `agent-channel: started as prime ...`
-to its stderr when this session started. Check by tailing the orchestrator
-plugin's recent log output OR by confirming sessions.json contains your
-own entry with role=prime + a fresh heartbeat (< 60s old).
+to its stderr when this session started. The Step 2 query already
+confirms wiring — if your own row is present with a fresh heartbeat,
+the MCP is running and writing.
 
-If you can't confirm agent-channel is running, surface the failure
+If the query returns no row for your session_id, surface the failure
 verbatim and abort - PA without agent-channel is useless.
 
 ### 5. Load PA's operating contract
@@ -108,20 +128,23 @@ user_pattern notes in the global DB encode that user's preferences,
 work habits, communication style, decision biases, and values. They
 persist across every project.
 
-Run a targeted lookup to load recent + high-confidence user_patterns
-into your working context:
+Run a targeted lookup to load recent user_patterns into your working
+context. Use `output_mode: "summary"` — you need to know WHAT exists
+so you can drill into specific notes later, not memorize full bodies:
 
 ```
 lookup({
   type: "user_pattern",
   limit: 25,
+  output_mode: "summary",
 })
 ```
 
 Skim the returned notes and internalize them. They're the rules of
 engagement for how you act on this user's behalf. The briefing's
 cross_project section also surfaces some, but this explicit lookup
-guarantees you're loaded.
+guarantees you're loaded. Re-call any specific note in full mode
+(`lookup({id: "<id8>"})`) when an SA's task intersects it.
 
 If a user-pattern lookup returns zero results, that's normal for a
 fresh user (first project, no patterns captured yet). Your job is then
@@ -138,10 +161,15 @@ macro model so SAs don't make tree-level decisions that break the
 forest. Load the project's architecture + recent decisions into
 working context so you can apply them during SA coordination.
 
+All four lookups use `output_mode: "summary"` — same reasoning as
+5.5. You need the IDs and shapes, not the full bodies; full-mode
+follow-up happens when an SA's task intersects a specific note.
+
 ```
 lookup({
   type: "architecture",
   limit: 15,
+  output_mode: "summary",
 })
 ```
 
@@ -149,6 +177,7 @@ lookup({
 lookup({
   type: "decision",
   limit: 15,
+  output_mode: "summary",
 })
 ```
 
@@ -156,6 +185,7 @@ lookup({
 lookup({
   type: "convention",
   limit: 10,
+  output_mode: "summary",
 })
 ```
 
@@ -163,6 +193,7 @@ lookup({
 lookup({
   type: "anti_pattern",
   limit: 15,
+  output_mode: "summary",
 })
 ```
 
@@ -203,10 +234,10 @@ Scan for multi-repo references:
 
 ```bash
 # CLAUDE.md typically captures the project's repo structure
-grep -i 'repo\|repository' "$CLAUDE_PROJECT_DIR/CLAUDE.md" | head -20
+grep -i 'repo\|repository' "$ORCHESTRATOR_PROJECT_ROOT/CLAUDE.md" | head -20
 
 # docs/ may have architecture overviews
-ls "$CLAUDE_PROJECT_DIR/docs/" 2>/dev/null | head
+ls "$ORCHESTRATOR_PROJECT_ROOT/docs/" 2>/dev/null | head
 ```
 
 Also lookup architecture notes for cross-repo references:
@@ -216,6 +247,7 @@ lookup({
   type: "architecture",
   query: "repo OR landing OR worker OR plugin OR cross-repo",
   limit: 10,
+  output_mode: "summary",
 })
 ```
 
@@ -237,15 +269,24 @@ and apply it proactively.
 
 ### 6. Check for any existing global pause
 
-Read `state.json` (same dir as sessions.json):
+Query the `global_pause` table in the agent-channel DB:
 
 ```bash
-cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/state.json"
+python3 <<'PY'
+import os, sqlite3
+db = f"{os.environ['ORCHESTRATOR_PROJECT_ROOT']}/.orchestrator-state/agent-channel/agent_channel.db"
+c = sqlite3.connect(db); c.row_factory = sqlite3.Row
+rows = list(c.execute("SELECT * FROM global_pause WHERE active=1"))
+if rows:
+    for r in rows: print("global pause:", dict(r))
+else:
+    print("(no global pause active)")
+PY
 ```
 
-If `pa_global_pause.active` is true, mention it explicitly in the
-readiness output and ask the user if you should clear it. Typically yes
-(they just spawned a fresh PA), but their call.
+If a global pause is active, mention it explicitly in the readiness
+output and ask the user if you should clear it. Typically yes (they
+just spawned a fresh PA), but their call.
 
 ### 7. Output readiness
 
@@ -264,14 +305,15 @@ Override state: <none|paused-on-X|global-pause>.
 - Do NOT call any messaging tool. `send_message`, `read_messages`,
   `peek_inbox` were deleted in 0.29.0. Cross-session communication is via
   terminal output + agent-channel notifications.
-- Do NOT silently recover from a missing/malformed sessions.json. If the
-  state isn't sane at startup, surface the problem to the user and ask.
-  PA's job depends on accurate visibility into the project's session graph.
+- Do NOT silently recover from a missing/malformed agent-channel DB. If
+  the state isn't sane at startup, surface the problem to the user and
+  ask. PA's job depends on accurate visibility into the project's
+  session graph.
 
 ## On idempotency
 
 Re-running `/pa-bootstrap` mid-session is safe:
 - `/model` and `/effort` calls are no-ops if already at the target.
-- sessions.json read is read-only at this stage.
-- state.json is only modified if you choose to clear an existing global
+- Step 2 query is read-only.
+- Step 6 only modifies state if you choose to clear an existing global
   pause (the user's call).
