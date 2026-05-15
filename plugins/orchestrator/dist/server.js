@@ -24819,7 +24819,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **0.30.28** (pid ${process.pid})`);
+  lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -26044,7 +26044,7 @@ function startAgentChannel() {
 `);
     return;
   }
-  const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+  const projectHash = projectDir.replace(/[\\/:]/g, "-");
   const projectsHashDir = join5(homedir2(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
