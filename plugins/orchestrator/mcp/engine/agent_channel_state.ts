@@ -201,6 +201,18 @@ function getDb(stateDir: string): Database {
     db.exec("PRAGMA journal_mode = WAL;");
   }
   db.exec("PRAGMA synchronous = NORMAL;");
+  // WAL allows concurrent readers but writers serialize. Without a busy
+  // timeout, a concurrent writer throws SQLITE_BUSY immediately instead of
+  // waiting. Multiple Claude Code sessions in the same project all run their
+  // own MCP server with its own AgentChannel writing heartbeats, offsets,
+  // sessions, and system_events to this DB - and they all hit the stop-hook
+  // write path at end-of-session. Without this timeout, concurrent stop-hooks
+  // race for the writer lock, the loser sees SQLITE_BUSY immediately, Claude
+  // Code re-fires the stop-hook reminder, and the loser retries against the
+  // still-locked DB - producing the deadlock-shape that hangs both parent
+  // shells until host restart. Mirrors the same fix already applied to the
+  // global plugin DB at mcp/db/connection.ts.
+  db.run("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,

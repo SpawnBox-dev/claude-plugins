@@ -22611,6 +22611,7 @@ function getDb(stateDir) {
     db.exec("PRAGMA journal_mode = WAL;");
   }
   db.exec("PRAGMA synchronous = NORMAL;");
+  db.run("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
