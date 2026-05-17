@@ -159,4 +159,103 @@ describe("agent-channel filter", () => {
     });
     expect(ev).toBeNull();
   });
+
+  // dd5d81d8: decision-surfacing UI tools (AskUserQuestion / ExitPlanMode)
+  // are non-mutating tool_use and were therefore INVISIBLE to channel
+  // observers (PA). A channel observer must be able to see that an SA put a
+  // decision to the user, and what it was.
+
+  test("AskUserQuestion only (no text) - forwarded as a question summary, not dropped", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            input: {
+              questions: [
+                {
+                  question: "Push to origin now or hold?",
+                  header: "Deploy",
+                  options: [
+                    { label: "Push now", description: "..." },
+                    { label: "Hold", description: "..." },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(ev).not.toBeNull();
+    expect(ev?.event_type).toBe("assistant_text");
+    expect(ev?.content).toContain("asked the user");
+    expect(ev?.content).toContain("Push to origin now or hold?");
+    expect(ev?.content).toContain("Push now");
+    expect(ev?.content).toContain("Hold");
+  });
+
+  test("text + AskUserQuestion - text forwarded WITH the question summary appended (the PA-invisible gap)", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Here is the tradeoff analysis." },
+          {
+            type: "tool_use",
+            name: "AskUserQuestion",
+            input: {
+              questions: [
+                {
+                  question: "Which approach?",
+                  options: [{ label: "A" }, { label: "B" }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    expect(ev?.event_type).toBe("assistant_text");
+    expect(ev?.content).toContain("Here is the tradeoff analysis.");
+    expect(ev?.content).toContain("asked the user");
+    expect(ev?.content).toContain("Which approach?");
+    expect(ev?.content).toContain("A");
+    expect(ev?.content).toContain("B");
+  });
+
+  test("ExitPlanMode only - forwarded as a plan-presented signal, not dropped", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", name: "ExitPlanMode", input: { plan: "do X then Y" } },
+        ],
+      },
+    });
+    expect(ev).not.toBeNull();
+    expect(ev?.content.toLowerCase()).toContain("plan");
+  });
+
+  test("malformed AskUserQuestion input does not throw - forwards a generic marker", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: {
+        content: [{ type: "tool_use", name: "AskUserQuestion", input: {} }],
+      },
+    });
+    expect(ev).not.toBeNull();
+    expect(ev?.content.toLowerCase()).toContain("asked the user");
+  });
+
+  test("regression: plain text with NO decision-surfacing tool is forwarded verbatim (no spurious append)", () => {
+    const ev = filterEvent({
+      type: "assistant",
+      message: { content: [{ type: "text", text: "Just a status line." }] },
+    });
+    expect(ev?.event_type).toBe("assistant_text");
+    expect(ev?.content).toBe("Just a status line.");
+  });
 });

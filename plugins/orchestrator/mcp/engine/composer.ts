@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Briefing, BriefingSection, ContextPackage, CurationCandidate, NoteSummary, UserProfileEntry } from "../types";
-import { truncate, parseCodeRefs } from "../utils";
+import { truncate, parseCodeRefs, parseTagList, normalizeTagString } from "../utils";
 
 // R3.3: curation candidates thresholds
 const STALE_DAYS = 30;
@@ -95,7 +95,10 @@ function toSummary(row: any): NoteSummary {
           .map((k: string) => k.trim())
           .filter((k: string) => k.length > 0)
       : [],
-    tags: row.tags ?? null,
+    // c658ce38: heal JSON-array-stringified / baked-garbage tags for every
+    // display path (decisions, work items, cross-session, curation) - they
+    // all render NoteSummary.tags as `{${tags}}`. Clean csv is a no-op here.
+    tags: row.tags ? normalizeTagString(row.tags) || null : null,
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null,
@@ -187,8 +190,10 @@ export function composeBriefing(
 
     const tagSet = new Set<string>();
     for (const row of allTagRows) {
-      for (const tag of row.tags.split(",").map((t: string) => t.trim())) {
-        if (tag) tagSet.add(tag);
+      // c658ce38: parseTagList heals JSON-array-stringified tag values so a
+      // bracket/quote artifact never becomes a fake "neglected area".
+      for (const tag of parseTagList(row.tags)) {
+        tagSet.add(tag);
       }
     }
 
@@ -223,8 +228,8 @@ export function composeBriefing(
     if (recentNotes.length >= 5) {
       const tagFreq = new Map<string, number>();
       for (const row of recentNotes) {
-        for (const tag of row.tags.split(",").map((t: string) => t.trim())) {
-          if (tag) tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
+        for (const tag of parseTagList(row.tags)) {
+          tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
         }
       }
       const topTag = [...tagFreq.entries()].sort((a, b) => b[1] - a[1])[0];

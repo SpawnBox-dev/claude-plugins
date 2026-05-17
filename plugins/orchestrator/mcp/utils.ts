@@ -225,3 +225,62 @@ export function formatAge(iso: string, now: Date = new Date()): string {
   if (diffD < 60) return `${Math.floor(diffD / 7)}w`;
   return `${diffD}d`;
 }
+
+/**
+ * c658ce38: single source of truth for turning a stored-or-input `tags`
+ * value into clean plain tag strings. The `tags` column is contractually a
+ * comma-separated list, but callers have historically passed a
+ * JSON-array-stringified value (e.g. `["work_item","bug"]`). When that string
+ * was comma-split at write time, the literal `[`, `]`, `"` artifacts got
+ * baked into the stored value, and the briefing's neglected/drift tag-split
+ * then produced character-split garbage (`["combat`, `"design-decision"`,
+ * `"enrichment"]`).
+ *
+ * This parser is tolerant of all three forms and heals existing corrupted
+ * rows at READ time (no data migration needed):
+ *   - clean CSV:                "a, b ,c"                  -> [a, b, c]
+ *   - JSON-array string:        '["a","b","c"]'            -> [a, b, c]
+ *   - historical baked garbage: 'work_item,["a","b"]'      -> [work_item, a, b]
+ * Order-preserving + de-duplicated. Empties dropped. Never throws.
+ */
+export function parseTagList(raw: string | null | undefined): string[] {
+  if (!raw || typeof raw !== "string") return [];
+  const s = raw.trim();
+  if (!s) return [];
+
+  let tokens: string[];
+  if (s.startsWith("[")) {
+    // Possibly a JSON-array-stringified tags value (the root shape).
+    try {
+      const arr = JSON.parse(s);
+      tokens = Array.isArray(arr) ? arr.map((x) => String(x)) : s.split(",");
+    } catch {
+      tokens = s.split(",");
+    }
+  } else {
+    tokens = s.split(",");
+  }
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of tokens) {
+    // Strip JSON-array artifacts so already-baked-in garbage heals on read.
+    // Legitimate tags in this codebase are kebab/colon strings and never
+    // contain [ ] " ` - so this is lossless for valid tags.
+    const clean = tok.replace(/[\[\]"`]/g, "").trim();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
+/**
+ * c658ce38: normalize any tags value to the canonical comma-separated plain
+ * form for STORAGE. Use at every tags write site so new rows are never
+ * corrupted. Empty/garbage-only input yields "" (i.e. cleared).
+ */
+export function normalizeTagString(raw: string | null | undefined): string {
+  return parseTagList(raw).join(",");
+}

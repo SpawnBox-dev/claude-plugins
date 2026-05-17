@@ -27,6 +27,13 @@ export type HookEvent =
   | "PostToolUse"
   | "PostToolUseFailure"
   | "PreCompact"
+  // 167ffbaf: post-compaction SessionStart. Routed via hooks.json
+  // `matcher:"compact"` ONLY (the universal SessionStart stays the bash
+  // hook), so the dispatcher's "SessionStart" case is unambiguously the
+  // post-compact one. NOT added to HSO_EVENTS - SessionStart is not an
+  // HSO-valid hookEventName (see hook_envelope.test.ts ALLOWED_HSO_EVENT_
+  // NAMES); it delivers via top-level systemMessage like PreCompact.
+  | "SessionStart"
   | "Stop"
   | "StopFailure"
   | "SubagentStop"
@@ -155,6 +162,8 @@ export function handleHookEvent(ctx: HookCtx, args: HookEventArgs): HookEventRes
       return handlePostToolUseFailure(ctx, args);
     case "PreCompact":
       return handlePreCompact(ctx, args);
+    case "SessionStart":
+      return handleSessionStartCompact(ctx, args);
     case "Stop":
       return handleStop(ctx, args);
     case "StopFailure":
@@ -352,6 +361,113 @@ function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
   return {
     systemMessage:
       "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost.",
+  };
+}
+
+// 167ffbaf + e4774e4b: post-compaction re-orientation. Fires ONLY via
+// hooks.json SessionStart `matcher:"compact"` (universal SessionStart is the
+// bash hook), so this branch is unambiguously the post-compact path.
+// Delivers a BOUNDED durable-state digest as a top-level systemMessage
+// (SessionStart is not an HSO-valid hookEventName - verified vs
+// hook_envelope.test.ts ALLOWED_HSO_EVENT_NAMES; mirrors handlePreCompact's
+// shape). When a live PrimeAgent exists, also instructs the just-compacted
+// SA to solicit a one-shot, non-blocking PEER backstop (e4774e4b) so a
+// non-compacted peer can flag what the lossy compaction summary dropped -
+// the hook does not emit on the channel itself (that's the SA's output via
+// the filewatcher). Bounded-by-construction (05f072d3 cap discipline:
+// briefing() proved an unbounded hook payload breaks the session entry).
+const SESSIONSTART_CHECKPOINT_CAP = 4000;
+const SESSIONSTART_TOTAL_CAP = 7000;
+
+/**
+ * PURE post-compact re-orientation composer (167ffbaf + e4774e4b). Separated
+ * from the DB/disk reads so the `livePA` branch is deterministically
+ * testable - `getLiveSessions()` is a non-hermetic disk read (it reflects
+ * the real running fleet), so the impure shell stays untested for the live
+ * branch exactly like the other `getLiveSessions()` call site, and this pure
+ * core carries the test coverage. Bounded-by-construction (05f072d3 cap
+ * discipline: briefing() proved an unbounded hook payload breaks the entry).
+ */
+export function composePostCompactReorientation(opts: {
+  currentTask: string | null;
+  checkpoint: string | null;
+  livePA: boolean;
+}): string {
+  const { currentTask, checkpoint, livePA } = opts;
+  const parts: string[] = [
+    "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy.",
+  ];
+  if (currentTask) parts.push(`Your task: ${currentTask}`);
+  if (checkpoint) {
+    const capped =
+      checkpoint.length > SESSIONSTART_CHECKPOINT_CAP
+        ? checkpoint.slice(0, SESSIONSTART_CHECKPOINT_CAP) +
+          '\n...[checkpoint truncated for the post-compact budget - lookup the latest checkpoint note for the full content]'
+        : checkpoint;
+    parts.push(`Last checkpoint:\n${capped}`);
+  } else {
+    parts.push(
+      'No durable checkpoint found - reconstruct from your task above and a briefing({event:"compact"}) before proceeding.'
+    );
+  }
+  if (livePA) {
+    parts.push(
+      "Then post ONE line to the channel (non-blocking - post it and continue, do not wait for a reply): " +
+        `"@PA [post-compact recovery]${currentTask ? ` task=${currentTask};` : ""} <your post-compact state in one line>; peers, flag anything load-bearing compaction may have dropped." ` +
+        "A non-compacted peer can backstop what your summary lost. This is a targeted gap-check - do NOT re-request your full prior context."
+    );
+  }
+
+  let systemMessage = parts.join("\n\n");
+  if (systemMessage.length > SESSIONSTART_TOTAL_CAP) {
+    systemMessage =
+      systemMessage.slice(0, SESSIONSTART_TOTAL_CAP) +
+      '\n...[post-compact re-orientation truncated to fit the budget - lookup the latest checkpoint and call briefing({event:"compact"}) for the rest]';
+  }
+  return systemMessage;
+}
+
+function handleSessionStartCompact(
+  ctx: HookCtx,
+  args: HookEventArgs
+): HookEventResponse {
+  const sid = sanitizeSessionId(args.session_id);
+
+  let currentTask: string | null = null;
+  let checkpoint: string | null = null;
+  try {
+    const taskRow = ctx.db
+      .query(`SELECT current_task FROM session_registry WHERE session_id = ?`)
+      .get(sid) as { current_task: string | null } | null;
+    currentTask = taskRow?.current_task ?? null;
+  } catch {
+    /* registry missing - non-fatal */
+  }
+  try {
+    const cpRow = ctx.db
+      .query(
+        `SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
+      )
+      .get() as { content: string } | null;
+    checkpoint = cpRow?.content ?? null;
+  } catch {
+    /* notes missing - non-fatal */
+  }
+
+  let livePA = false;
+  try {
+    const live = getLiveSessions();
+    livePA = !!live && live.some((e) => e.role === "prime");
+  } catch {
+    livePA = false;
+  }
+
+  return {
+    systemMessage: composePostCompactReorientation({
+      currentTask,
+      checkpoint,
+      livePA,
+    }),
   };
 }
 

@@ -1,7 +1,11 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { handleRemember, bucketLabel } from "../../mcp/tools/remember";
+import {
+  handleRemember,
+  bucketLabel,
+  similarityAlertThreshold,
+} from "../../mcp/tools/remember";
 import type { EmbeddingClient } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
 
@@ -816,10 +820,15 @@ describe("R4.1: candidate rank buckets in gate message", () => {
   });
 
   test("candidate at 75-84% renders with ADJACENT prefix", async () => {
+    // fc7fcb0d: this test exercises the ADJACENT bucket LABEL rendering, not
+    // anti_pattern specifically. Retargeted anti_pattern -> decision because
+    // anti_pattern now gates at >= 0.85 (a 0.79 anti_pattern no longer fires);
+    // decision keeps the 0.75 bar so 0.79 still fires and still renders
+    // ADJACENT, preserving this test's original intent.
     const queryVec = new Float32Array([1, 0]);
     insertPriorNote(projectDb, {
       id: "adjacent-1",
-      type: "anti_pattern",
+      type: "decision",
       content: "alpha epsilon theta iota",
     });
     seedEmbedding(projectDb, "adjacent-1", vectorWithSimilarity(0.79));
@@ -829,7 +838,7 @@ describe("R4.1: candidate rank buckets in gate message", () => {
       globalDb,
       {
         content: "omega kappa sigma lambda",
-        type: "anti_pattern",
+        type: "decision",
       },
       makeMockClient(queryVec)
     );
@@ -925,5 +934,289 @@ describe("R4.1: candidate rank buckets in gate message", () => {
     expect(posAdj).toBeGreaterThan(-1);
     expect(posHigh).toBeLessThan(posLikely);
     expect(posLikely).toBeLessThan(posAdj);
+  });
+});
+
+// ===========================================================================
+// fc7fcb0d: type-aware similarity gate threshold + non-blocking adjacent
+// consolidation advisory
+//
+// The R4 gate used a flat 0.75 for all alert-scope types. anti_pattern notes
+// by design enumerate close-but-distinct failure modes that share vocabulary,
+// so 0.75 over-blocked them (dogfood: bot 4x/5h, dev 3x, +1 live 2026-05-17 -
+// a design-decision note blocked at 88% against the routing anti_pattern).
+//
+// Fix:
+//  - anti_pattern requires a stronger >= 0.85 match to BLOCK; decision /
+//    convention keep 0.75 (they SHOULD consolidate when similar).
+//  - Genuine dupes (>= 0.90, same claim) still fire for every type.
+//  - The consolidation purpose of the gate is preserved at the looser bar:
+//    when an anti_pattern is STORED but has near-matches in the
+//    [0.75, type-threshold) band, the success message carries a NON-BLOCKING
+//    "adjacent notes - consider consolidating" advisory naming the candidates.
+//    Loosening the block must not make near-dupes vanish silently.
+// ===========================================================================
+describe("fc7fcb0d: type-aware similarity gate threshold", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  // cos([1,0], [x,y]) = x / sqrt(x^2 + y^2). Pick x=sim, y=sqrt(1-sim^2).
+  function vectorWithSimilarity(targetSim: number): Float32Array {
+    const x = targetSim;
+    const y = Math.sqrt(Math.max(0, 1 - targetSim * targetSim));
+    return new Float32Array([x, y]);
+  }
+  function makeMockClient(vector: Float32Array): EmbeddingClient {
+    return {
+      embed: async (_texts: string[]) => [vector],
+    } as unknown as EmbeddingClient;
+  }
+  function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
+    const blob = Buffer.from(vector.buffer);
+    db.run(
+      `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?)`,
+      [noteId, blob, "bge-m3", new Date().toISOString()]
+    );
+  }
+  function insertPriorNote(
+    db: Database,
+    opts: { id: string; type: string; content: string }
+  ) {
+    const ts = now();
+    db.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        opts.id,
+        opts.type,
+        opts.content,
+        null,
+        "",
+        opts.type,
+        "medium",
+        0,
+        null,
+        null,
+        null,
+        ts,
+        ts,
+        null,
+      ]
+    );
+  }
+
+  // --- unit: the type-aware threshold map ------------------------------------
+
+  test("similarityAlertThreshold: anti_pattern stricter (0.85), decision/convention 0.75", () => {
+    expect(similarityAlertThreshold("anti_pattern")).toBe(0.85);
+    expect(similarityAlertThreshold("decision")).toBe(0.75);
+    expect(similarityAlertThreshold("convention")).toBe(0.75);
+    // Non-alert types never reach the gate; default is a harmless 0.75.
+    expect(similarityAlertThreshold("insight")).toBe(0.75);
+    expect(similarityAlertThreshold("architecture")).toBe(0.75);
+  });
+
+  // --- anti_pattern: relaxed BLOCK bar (the over-block bug) --------------------
+
+  test("anti_pattern near-match at 0.79 does NOT block, but surfaces a non-blocking consolidation advisory", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "ap-079",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "ap-079", vectorWithSimilarity(0.79));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "anti_pattern" },
+      makeMockClient(queryVec)
+    );
+
+    // Stored (no forced-resolution round-trip).
+    expect(result.stored).toBe(true);
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.note_id).toBeTruthy();
+    // ...but the consolidation purpose survives at the looser bar: the
+    // adjacent note is surfaced non-blockingly so the agent can consolidate
+    // if it's the same failure mode.
+    expect(result.message).toContain("ap-079");
+    expect(result.message.toLowerCase()).toContain("adjacent");
+  });
+
+  test("anti_pattern near-match at 0.87 DOES block (>= 0.85 bar)", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "ap-087",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "ap-087", vectorWithSimilarity(0.87));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "anti_pattern" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.stored).toBe(false);
+    expect(result.candidates![0].id).toBe("ap-087");
+  });
+
+  test("genuine anti_pattern duplicate at 0.96 still blocks (>=0.90 dupes always caught)", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "ap-096",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "ap-096", vectorWithSimilarity(0.96));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "anti_pattern" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+  });
+
+  test("anti_pattern with no near-match (0.60) stores clean, no advisory noise", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "ap-060",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "ap-060", vectorWithSimilarity(0.6));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "anti_pattern" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.blocked_on_resolution).toBeUndefined();
+    expect(result.message).not.toContain("ap-060");
+  });
+
+  // --- decision / convention: BLOCK bar unchanged at 0.75 ---------------------
+
+  test("decision near-match at 0.79 still blocks (0.75 bar unchanged)", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "dec-079",
+      type: "decision",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "dec-079", vectorWithSimilarity(0.79));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "decision" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.stored).toBe(false);
+  });
+
+  test("convention near-match at 0.79 still blocks (0.75 bar unchanged)", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "conv-079",
+      type: "convention",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "conv-079", vectorWithSimilarity(0.79));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "convention" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.stored).toBe(false);
+  });
+
+  // --- Fix 2 (first-class): the gate message states the effective bar --------
+
+  test("blocking gate message states the effective per-type threshold", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    insertPriorNote(projectDb, {
+      id: "ap-msg",
+      type: "anti_pattern",
+      content: "alpha epsilon theta iota",
+    });
+    seedEmbedding(projectDb, "ap-msg", vectorWithSimilarity(0.9));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      { content: "omega kappa sigma lambda", type: "anti_pattern" },
+      makeMockClient(queryVec)
+    );
+
+    expect(result.blocked_on_resolution).toBe(true);
+    expect(result.message).toContain("85%");
+    expect(result.message.toLowerCase()).toContain("anti_pattern");
+  });
+
+  // Review I3 lock: accept_new must surface the consolidation advisory with
+  // the SAME parity as the normal store path. Otherwise accepting-new after a
+  // gate block silently drops the [floor, blockThreshold) neighbors - the
+  // silent-fragmentation hole the first-class-consolidation rule forbids.
+  test("resolution accept_new surfaces the consolidation advisory (parity with normal path)", async () => {
+    const queryVec = new Float32Array([1, 0]);
+    function vec(sim: number) {
+      return new Float32Array([sim, Math.sqrt(Math.max(0, 1 - sim * sim))]);
+    }
+    function seed(db: Database, id: string, v: Float32Array) {
+      db.run(
+        `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
+         VALUES (?, 'anti_pattern', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, `prior ${id}`, null, "", "anti_pattern", "medium", 0, null, null, null, now(), now(), null]
+      );
+      db.run(
+        `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at) VALUES (?, ?, ?, ?)`,
+        [id, Buffer.from(v.buffer), "bge-m3", new Date().toISOString()]
+      );
+    }
+    // Blocking neighbor @0.87 (>=0.85) AND advisory neighbor @0.78 (in
+    // [0.75,0.85)). The gate fires on the 0.87; agent accepts-new.
+    seed(projectDb, "ap-block-087", vec(0.87));
+    seed(projectDb, "ap-advis-078", vec(0.78));
+
+    const result = await handleRemember(
+      projectDb,
+      globalDb,
+      {
+        content: "omega kappa sigma lambda",
+        type: "anti_pattern",
+        resolution: { action: "accept_new" },
+      },
+      { embed: async (_t: string[]) => [queryVec] } as unknown as EmbeddingClient
+    );
+
+    expect(result.stored).toBe(true);
+    expect(result.message).toContain("accept_new");
+    // The advisory neighbor is surfaced, not silently dropped.
+    expect(result.message).toContain("ap-advis-078");
+    expect(result.message.toLowerCase()).toContain("consolidat");
   });
 });

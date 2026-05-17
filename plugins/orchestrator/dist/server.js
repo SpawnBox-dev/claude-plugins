@@ -20317,6 +20317,37 @@ function formatAge(iso, now2 = new Date) {
     return `${Math.floor(diffD / 7)}w`;
   return `${diffD}d`;
 }
+function parseTagList(raw) {
+  if (!raw || typeof raw !== "string")
+    return [];
+  const s = raw.trim();
+  if (!s)
+    return [];
+  let tokens;
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      tokens = Array.isArray(arr) ? arr.map((x) => String(x)) : s.split(",");
+    } catch {
+      tokens = s.split(",");
+    }
+  } else {
+    tokens = s.split(",");
+  }
+  const seen = new Set;
+  const out = [];
+  for (const tok of tokens) {
+    const clean = tok.replace(/[\[\]"`]/g, "").trim();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+function normalizeTagString(raw) {
+  return parseTagList(raw).join(",");
+}
 
 // mcp/engine/deduplicator.ts
 var MIN_SHARED_KEYWORDS = 3;
@@ -20967,7 +20998,16 @@ function cascadeResolution(db, noteId, timestamp) {
 
 // mcp/tools/remember.ts
 var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
-var SIMILARITY_ALERT_THRESHOLD = 0.75;
+var SIMILARITY_ALERT_THRESHOLDS = {
+  decision: 0.75,
+  convention: 0.75,
+  anti_pattern: 0.85
+};
+var DEFAULT_SIMILARITY_ALERT_THRESHOLD = 0.75;
+var SIMILARITY_ADVISORY_FLOOR = 0.75;
+function similarityAlertThreshold(type) {
+  return SIMILARITY_ALERT_THRESHOLDS[type] ?? DEFAULT_SIMILARITY_ALERT_THRESHOLD;
+}
 function bucketLabel(similarity) {
   if (similarity >= 0.95)
     return "HIGH MATCH";
@@ -20975,13 +21015,24 @@ function bucketLabel(similarity) {
     return "LIKELY RELATED";
   return "ADJACENT";
 }
+function formatConsolidationAdvisory(candidates) {
+  if (candidates.length === 0)
+    return "";
+  const lines = candidates.map((c) => `  - ${c.id} [${c.type}] ${Math.round(c.similarity * 100)}% "${truncate(c.content, 90)}"`).join(`
+`);
+  return `
+
+[consolidation check - NOT blocking] ${candidates.length} adjacent note(s) ` + `below the block bar:
+${lines}
+` + `If this is the SAME knowledge/failure-mode, prefer update_note or supersede on the ` + `closest match to keep the catalog consolidated; if genuinely distinct, no action needed.`;
+}
 async function insertNote(db, globalDb2, input, embeddingClient) {
   const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
   const tagParts = [input.type];
   if (input.tags) {
-    for (const t of input.tags.split(",").map((s) => s.trim())) {
-      if (t && !tagParts.includes(t))
+    for (const t of parseTagList(input.tags)) {
+      if (!tagParts.includes(t))
         tagParts.push(t);
     }
   }
@@ -21053,7 +21104,9 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     };
   }
   let preInsertCandidates = [];
+  let advisoryCandidates = [];
   const isAlertScopeType = SIMILARITY_ALERT_TYPES.includes(input.type);
+  const blockThreshold = similarityAlertThreshold(input.type);
   if (isAlertScopeType && embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
@@ -21062,9 +21115,10 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
         const similar = handleCheckSimilar(db, queryVector, {
           proposed_action: input.content,
           types: SIMILARITY_ALERT_TYPES,
-          threshold: SIMILARITY_ALERT_THRESHOLD
+          threshold: SIMILARITY_ADVISORY_FLOOR
         });
-        preInsertCandidates = similar.results.slice(0, 3);
+        preInsertCandidates = similar.results.filter((c) => c.similarity >= blockThreshold).slice(0, 3);
+        advisoryCandidates = similar.results.filter((c) => c.similarity >= SIMILARITY_ADVISORY_FLOOR && c.similarity < blockThreshold).slice(0, 3);
       }
     } catch (err) {
       console.error(`[embed] Failed to compute similarity for gate:`, err);
@@ -21082,7 +21136,11 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
 ` + `- HIGH MATCH (95%+): likely the same knowledge. Default to update_existing (if additive) or supersede_existing (if replacing).
 ` + `- LIKELY RELATED (85-94%): probably the same topic, different angle. Consider update_existing if additive, or accept_new if the angle is distinct enough to warrant a separate note.
 ` + "- ADJACENT (75-84%): overlapping vocabulary but likely different concepts. accept_new is usually correct; update/supersede only if you are certain of duplication.";
+    const gatePct = Math.round(blockThreshold * 100);
+    const typeBarNote = input.type === "anti_pattern" ? " anti_pattern uses a stricter bar because vocabulary-adjacent-but-distinct" + " failure modes are expected - if this is a DIFFERENT failure mode/angle," + " accept_new is correct; if the SAME mode, prefer update_existing/" + "supersede_existing to keep the catalog consolidated." : "";
     const message = `Near-duplicate detected. Review before choosing resolution:
+
+` + `(Gate: ${input.type} blocks at >=${gatePct}% similarity.${typeBarNote})
 
 ` + candidateLines + `
 
@@ -21109,13 +21167,14 @@ Choose one:
     const targetId = input.resolution.target_id;
     if (action === "accept_new") {
       const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const advisory2 = formatConsolidationAdvisory(advisoryCandidates);
       return {
         stored: true,
         note_id: noteId2,
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}"${linksCreated2 > 0 ? ` with ${linksCreated2} auto-link(s)` : ""}. (resolution: accept_new)`
+        message: `Stored ${input.type} note "${noteId2}"${linksCreated2 > 0 ? ` with ${linksCreated2} auto-link(s)` : ""}. (resolution: accept_new)${advisory2}`
       };
     }
     if (!targetId) {
@@ -21209,13 +21268,14 @@ Choose one:
     };
   }
   const { noteId, linksCreated } = await insertNote(db, globalDb2, input, embeddingClient);
+  const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
     note_id: noteId,
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.`
+    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.${advisory}`
   };
 }
 function inferDimension(content) {
@@ -21851,7 +21911,7 @@ function toSummary(row) {
     source_session: row.source_session ?? null,
     superseded_by: row.superseded_by ?? null,
     keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()).filter((k) => k.length > 0) : [],
-    tags: row.tags ?? null,
+    tags: row.tags ? normalizeTagString(row.tags) || null : null,
     status: row.status ?? null,
     priority: row.priority ?? null,
     due_date: row.due_date ?? null,
@@ -21896,9 +21956,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     const allTagRows = projectDb2.query(`SELECT DISTINCT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
     const tagSet = new Set;
     for (const row of allTagRows) {
-      for (const tag of row.tags.split(",").map((t) => t.trim())) {
-        if (tag)
-          tagSet.add(tag);
+      for (const tag of parseTagList(row.tags)) {
+        tagSet.add(tag);
       }
     }
     for (const tag of tagSet) {
@@ -21918,9 +21977,8 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     if (recentNotes.length >= 5) {
       const tagFreq = new Map;
       for (const row of recentNotes) {
-        for (const tag of row.tags.split(",").map((t) => t.trim())) {
-          if (tag)
-            tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
+        for (const tag of parseTagList(row.tags)) {
+          tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
         }
       }
       const topTag = [...tagFreq.entries()].sort((a, b) => b[1] - a[1])[0];
@@ -22290,6 +22348,19 @@ function formatDueDate(dueDate) {
     return ` (due in ${diffDays}d)`;
   return ` (due ${dueDate})`;
 }
+var CHECKPOINT_RENDER_CAP = 6000;
+var AUTORETRO_RENDER_CAP = 3000;
+var CROSS_PROJECT_ITEM_CAP = 220;
+var CROSS_SESSION_MAX_ITEMS = 15;
+var NEGLECTED_MAX = 30;
+var USER_PROFILE_MAX_LINES = 24;
+var USER_PROFILE_OBS_CAP = 220;
+var BRIEFING_HARD_CEILING = 60000;
+function capWithMarker(text, cap, marker) {
+  if (text.length <= cap)
+    return text;
+  return (text.slice(0, Math.max(0, cap - marker.length)) + marker).slice(0, cap);
+}
 function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
   const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const lines = [];
@@ -22305,7 +22376,8 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
   if (include("checkpoint") && checkpoint) {
     const age = relativeTime(checkpoint.created_at);
     lines.push(`## Recovery Checkpoint (${age})`);
-    lines.push(checkpoint.content);
+    lines.push(capWithMarker(checkpoint.content, CHECKPOINT_RENDER_CAP, `
+...[checkpoint truncated for context budget - full content via lookup({id:"${checkpoint.id}"})]`));
     lines.push("");
   }
   if (include("work_items")) {
@@ -22362,8 +22434,12 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
   }
   if (include("neglected") && briefing.neglected_areas.length > 0) {
     lines.push("## Neglected Areas");
-    lines.push(briefing.neglected_areas.map((a) => `- ${a}`).join(`
+    const shownNeglected = briefing.neglected_areas.slice(0, NEGLECTED_MAX);
+    lines.push(shownNeglected.map((a) => `- ${a}`).join(`
 `));
+    if (briefing.neglected_areas.length > NEGLECTED_MAX) {
+      lines.push(`- ...and ${briefing.neglected_areas.length - NEGLECTED_MAX} more (call briefing({sections:["neglected"]}) for the full list)`);
+    }
     lines.push("");
   }
   if (include("drift") && briefing.drift_warning) {
@@ -22380,13 +22456,19 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
         existing.push(entry);
         byDim.set(entry.dimension, existing);
       }
+      const profileLines = [];
       for (const [dim, entries] of byDim) {
         const label = dim.replace(/_/g, " ");
         for (const entry of entries.slice(0, 4)) {
           const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
           const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
-          lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);
+          profileLines.push(`- **${label}**${conf}: ${truncate(entry.observation, USER_PROFILE_OBS_CAP)}${traj}`);
         }
+      }
+      for (const pl of profileLines.slice(0, USER_PROFILE_MAX_LINES))
+        lines.push(pl);
+      if (profileLines.length > USER_PROFILE_MAX_LINES) {
+        lines.push(`- ...and ${profileLines.length - USER_PROFILE_MAX_LINES} more profile entr(ies) - call briefing({sections:["user_model"]}) for the full profile`);
       }
       lines.push("");
     } else if (briefing.user_model_summary.length > 0) {
@@ -22398,7 +22480,7 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
   }
   if (include("cross_project") && globalPatterns.length > 0) {
     lines.push("## Cross-Project Patterns");
-    lines.push(globalPatterns.map((p) => `- ${p}`).join(`
+    lines.push(globalPatterns.map((p) => `- ${truncate(p, CROSS_PROJECT_ITEM_CAP)}`).join(`
 `));
     lines.push("");
   }
@@ -22419,18 +22501,24 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
       lines.push(`## Cross-Session Activity (${xs.active_session_count} other active session${xs.active_session_count === 1 ? "" : "s"})`);
       if (xs.new_notes.length > 0) {
         lines.push("### New since your last briefing");
-        for (const n of xs.new_notes) {
+        for (const n of xs.new_notes.slice(0, CROSS_SESSION_MAX_ITEMS)) {
           const tagStr = n.tags ? ` {${n.tags}}` : "";
           const age = relativeTime(n.created_at);
           lines.push(`- [${n.type}]${tagStr} **${n.id}** (${age}) ${truncate(n.content, 140)}`);
+        }
+        if (xs.new_notes.length > CROSS_SESSION_MAX_ITEMS) {
+          lines.push(`- ...and ${xs.new_notes.length - CROSS_SESSION_MAX_ITEMS} more new note(s) - call briefing({sections:["cross_session"]}) to page the full set`);
         }
         lines.push("");
       }
       if (xs.hot_notes.length > 0) {
         lines.push("### Hot across sessions (surfaced by 2+ others in last 2h)");
-        for (const n of xs.hot_notes) {
+        for (const n of xs.hot_notes.slice(0, CROSS_SESSION_MAX_ITEMS)) {
           const tagStr = n.tags ? ` {${n.tags}}` : "";
           lines.push(`- [${n.type}]${tagStr} **${n.id}** (${n.distinct_sessions} sessions, ${n.surfacings}x) ${truncate(n.content, 140)}`);
+        }
+        if (xs.hot_notes.length > CROSS_SESSION_MAX_ITEMS) {
+          lines.push(`- ...and ${xs.hot_notes.length - CROSS_SESSION_MAX_ITEMS} more hot note(s) - call briefing({sections:["cross_session"]}) to page the full set`);
         }
         lines.push("");
       }
@@ -22489,10 +22577,17 @@ function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
   }
   let formatted = formatBriefing(briefing, checkpoint, globalPatterns, input.event, input.sections);
   if (autoRetroSummary && !briefing.is_first_run) {
+    const cappedRetro = capWithMarker(autoRetroSummary, AUTORETRO_RENDER_CAP, `
+...[auto-retro summary truncated for context budget - run retro() for the full maintenance report]`);
     formatted = `## Auto-Retro
-${autoRetroSummary}
+${cappedRetro}
 
 ${formatted}`;
+  }
+  if (formatted.length > BRIEFING_HARD_CEILING) {
+    formatted = capWithMarker(formatted, BRIEFING_HARD_CEILING, `
+
+...[briefing clamped at ${BRIEFING_HARD_CEILING} chars to fit context - some trailing sections are incomplete. Page specific sections via briefing({sections:["..."]}) or query directly with lookup().]`);
   }
   if (sessionTracker && input.session_id) {
     try {
@@ -23260,6 +23355,8 @@ function handleHookEvent(ctx, args) {
       return handlePostToolUseFailure(ctx, args);
     case "PreCompact":
       return handlePreCompact(ctx, args);
+    case "SessionStart":
+      return handleSessionStartCompact(ctx, args);
     case "Stop":
       return handleStop(ctx, args);
     case "StopFailure":
@@ -23400,6 +23497,62 @@ function handlePreCompact(ctx, args) {
   }
   return {
     systemMessage: "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost."
+  };
+}
+var SESSIONSTART_CHECKPOINT_CAP = 4000;
+var SESSIONSTART_TOTAL_CAP = 7000;
+function composePostCompactReorientation(opts) {
+  const { currentTask, checkpoint, livePA } = opts;
+  const parts = [
+    "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy."
+  ];
+  if (currentTask)
+    parts.push(`Your task: ${currentTask}`);
+  if (checkpoint) {
+    const capped = checkpoint.length > SESSIONSTART_CHECKPOINT_CAP ? checkpoint.slice(0, SESSIONSTART_CHECKPOINT_CAP) + `
+...[checkpoint truncated for the post-compact budget - lookup the latest checkpoint note for the full content]` : checkpoint;
+    parts.push(`Last checkpoint:
+${capped}`);
+  } else {
+    parts.push('No durable checkpoint found - reconstruct from your task above and a briefing({event:"compact"}) before proceeding.');
+  }
+  if (livePA) {
+    parts.push("Then post ONE line to the channel (non-blocking - post it and continue, do not wait for a reply): " + `"@PA [post-compact recovery]${currentTask ? ` task=${currentTask};` : ""} <your post-compact state in one line>; peers, flag anything load-bearing compaction may have dropped." ` + "A non-compacted peer can backstop what your summary lost. This is a targeted gap-check - do NOT re-request your full prior context.");
+  }
+  let systemMessage = parts.join(`
+
+`);
+  if (systemMessage.length > SESSIONSTART_TOTAL_CAP) {
+    systemMessage = systemMessage.slice(0, SESSIONSTART_TOTAL_CAP) + `
+...[post-compact re-orientation truncated to fit the budget - lookup the latest checkpoint and call briefing({event:"compact"}) for the rest]`;
+  }
+  return systemMessage;
+}
+function handleSessionStartCompact(ctx, args) {
+  const sid = sanitizeSessionId(args.session_id);
+  let currentTask = null;
+  let checkpoint = null;
+  try {
+    const taskRow = ctx.db.query(`SELECT current_task FROM session_registry WHERE session_id = ?`).get(sid);
+    currentTask = taskRow?.current_task ?? null;
+  } catch {}
+  try {
+    const cpRow = ctx.db.query(`SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`).get();
+    checkpoint = cpRow?.content ?? null;
+  } catch {}
+  let livePA = false;
+  try {
+    const live = getLiveSessions();
+    livePA = !!live && live.some((e) => e.role === "prime");
+  } catch {
+    livePA = false;
+  }
+  return {
+    systemMessage: composePostCompactReorientation({
+      currentTask,
+      checkpoint,
+      livePA
+    })
   };
 }
 function handleStop(ctx, args) {
@@ -23948,6 +24101,30 @@ var MUTATING_TOOLS = new Set(["Edit", "Write", "Bash", "MultiEdit"]);
 function isMutatingTool(name) {
   return MUTATING_TOOLS.has(name) || name.startsWith("git_");
 }
+var DECISION_SURFACING_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
+function isDecisionSurfacingTool(name) {
+  return DECISION_SURFACING_TOOLS.has(name);
+}
+function summarizeDecisionSurfacingTool(name, input) {
+  if (name === "ExitPlanMode") {
+    return "[SA presented a plan for the user's approval]";
+  }
+  try {
+    const qs = Array.isArray(input?.questions) ? input.questions : [];
+    if (qs.length === 0) {
+      return "[SA asked the user a question (no detail available)]";
+    }
+    const parts = qs.slice(0, 4).map((q) => {
+      const qText = String(q?.question ?? "a question").slice(0, 140);
+      const opts = Array.isArray(q?.options) ? q.options.map((o) => String(o?.label ?? "").trim()).filter(Boolean).join(" / ") : "";
+      return opts ? `${qText} [options: ${opts}]` : qText;
+    });
+    const more = qs.length > 4 ? ` (+${qs.length - 4} more)` : "";
+    return `[SA asked the user] ${parts.join(" || ")}${more}`.slice(0, 600);
+  } catch {
+    return "[SA asked the user a question]";
+  }
+}
 function summarizeToolUse(name, input) {
   if (name === "Edit" || name === "Write" || name === "MultiEdit") {
     const path2 = input?.file_path ?? "<unknown>";
@@ -23980,18 +24157,36 @@ function filterEvent(raw) {
     const blocks = raw.message?.content;
     if (!Array.isArray(blocks))
       return null;
+    let firstText = null;
     let toolUseFallback = null;
+    let decisionSummary = null;
     for (const b of blocks) {
-      if (b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
-        return { event_type: "assistant_text", content: b.text };
+      if (firstText === null && b?.type === "text" && typeof b.text === "string" && b.text.trim()) {
+        firstText = b.text;
+        continue;
       }
-      if (!toolUseFallback && b?.type === "tool_use" && typeof b.name === "string" && isMutatingTool(b.name)) {
-        toolUseFallback = {
-          event_type: "tool_use",
-          tool_name: b.name,
-          content: summarizeToolUse(b.name, b.input)
-        };
+      if (b?.type === "tool_use" && typeof b.name === "string") {
+        if (decisionSummary === null && isDecisionSurfacingTool(b.name)) {
+          decisionSummary = summarizeDecisionSurfacingTool(b.name, b.input);
+        } else if (!toolUseFallback && isMutatingTool(b.name)) {
+          toolUseFallback = {
+            event_type: "tool_use",
+            tool_name: b.name,
+            content: summarizeToolUse(b.name, b.input)
+          };
+        }
       }
+    }
+    if (decisionSummary !== null) {
+      return {
+        event_type: "assistant_text",
+        content: firstText !== null ? `${firstText}
+
+${decisionSummary}` : decisionSummary
+      };
+    }
+    if (firstText !== null) {
+      return { event_type: "assistant_text", content: firstText };
     }
     return toolUseFallback;
   }
@@ -24307,13 +24502,85 @@ class AgentChannel {
     });
   }
 }
+var FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
+function splitContentUnits(content) {
+  const lines = content.split(`
+`);
+  const units = [];
+  let prose = [];
+  let code = [];
+  let inFence = false;
+  let fenceChar = "";
+  let fenceLen = 0;
+  const flushProse = () => {
+    if (prose.length === 0)
+      return;
+    for (const p of prose.join(`
+`).split(/\n{2,}/)) {
+      if (p.trim().length > 0)
+        units.push({ text: p, isCode: false });
+    }
+    prose = [];
+  };
+  for (const line of lines) {
+    const m = line.match(FENCE_RE);
+    if (m) {
+      const marker = m[1][0];
+      const runLen = m[1].length;
+      if (!inFence) {
+        flushProse();
+        inFence = true;
+        fenceChar = marker;
+        fenceLen = runLen;
+        code = [line];
+        continue;
+      }
+      if (marker === fenceChar && runLen >= fenceLen) {
+        code.push(line);
+        units.push({ text: code.join(`
+`), isCode: true });
+        code = [];
+        inFence = false;
+        fenceChar = "";
+        fenceLen = 0;
+        continue;
+      }
+      code.push(line);
+      continue;
+    }
+    if (inFence)
+      code.push(line);
+    else
+      prose.push(line);
+  }
+  if (inFence && code.length > 0) {
+    units.push({ text: code.join(`
+`), isCode: true });
+  }
+  flushProse();
+  return units;
+}
+function isColonHeader(text) {
+  return text.trimEnd().endsWith(":");
+}
 function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
-  const paragraphs = content.split(/\n{2,}/);
+  const units = splitContentUnits(content);
   const kept = [];
-  for (const para of paragraphs) {
-    const paraAddr = parseAddressing(para, sender, sessions);
-    if (paraAddr.targets.includes(receiverId)) {
-      kept.push(para);
+  let cascade = null;
+  for (const unit of units) {
+    if (unit.isCode) {
+      if (cascade && cascade.has(receiverId))
+        kept.push(unit.text);
+      continue;
+    }
+    const addr = parseAddressing(unit.text, sender, sessions);
+    if (addr.targets.length > 0) {
+      if (addr.targets.includes(receiverId))
+        kept.push(unit.text);
+      cascade = isColonHeader(unit.text) ? new Set(addr.targets) : null;
+    } else {
+      if (cascade && cascade.has(receiverId))
+        kept.push(unit.text);
     }
   }
   return kept.length > 0 ? kept.join(`
@@ -25415,7 +25682,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
          WHERE id = ?`, [
       newContent,
       newContext ?? null,
-      tags ?? row.tags,
+      tags != null ? normalizeTagString(tags) : row.tags,
       newKeywords ? newKeywords.join(",") : row.keywords,
       confidence ?? row.confidence ?? "medium",
       timestamp,
@@ -25567,8 +25834,8 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   const keywords = extractKeywords(textForKeywords);
   const tagParts = ["work_item"];
   if (tags) {
-    for (const t of tags.split(",").map((s) => s.trim())) {
-      if (t && !tagParts.includes(t))
+    for (const t of parseTagList(tags)) {
+      if (!tagParts.includes(t))
         tagParts.push(t);
     }
   }
@@ -25667,9 +25934,10 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     changes.push("content updated");
   }
   if (tags !== undefined) {
+    const normTags = normalizeTagString(tags);
     setFragments.push("tags = ?");
-    bindValues.push(tags);
-    changes.push(`tags: ${row.tags ?? "none"} -> ${tags || "cleared"}`);
+    bindValues.push(normTags);
+    changes.push(`tags: ${row.tags ?? "none"} -> ${normTags || "cleared"}`);
   }
   if (context !== undefined) {
     const newCtx = context === "" ? null : context;
@@ -25737,7 +26005,7 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   if (!actualParentId && parent_title) {
     actualParentId = generateId();
     const keywords = extractKeywords(parent_title);
-    const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
+    const tagParts = ["work_item", ...parseTagList(tags)];
     projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       actualParentId,
@@ -25760,7 +26028,7 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   for (const item of items) {
     const childId = generateId();
     const keywords = extractKeywords(item.content);
-    const tagParts = ["work_item", ...tags ? tags.split(",").map((s) => s.trim()) : []];
+    const tagParts = ["work_item", ...parseTagList(tags)];
     projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       childId,

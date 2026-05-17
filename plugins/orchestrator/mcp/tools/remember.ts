@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { NoteType, Dimension } from "../types";
 import { GLOBAL_TYPES, DIMENSIONS } from "../types";
-import { generateId, now, extractKeywords, stringifyCodeRefs } from "../utils";
+import { generateId, now, extractKeywords, stringifyCodeRefs, parseTagList } from "../utils";
 import { findDuplicates, MIN_SHARED_KEYWORDS } from "../engine/deduplicator";
 import { createAutoLinks } from "../engine/linker";
 import { promoteConfidence } from "../engine/scorer";
@@ -51,7 +51,33 @@ export interface RememberResult {
 }
 
 const SIMILARITY_ALERT_TYPES: NoteType[] = ["decision", "convention", "anti_pattern"];
-const SIMILARITY_ALERT_THRESHOLD = 0.75;
+
+// fc7fcb0d: type-aware BLOCK threshold. A flat 0.75 over-blocked anti_pattern
+// notes, which by design enumerate close-but-distinct failure modes that share
+// vocabulary (dogfood: bot 4x/5h, dev 3x, +1 live 2026-05-17 - a design
+// decision blocked at 88% against the routing anti_pattern). decision /
+// convention SHOULD consolidate when similar, so they keep 0.75; anti_pattern
+// requires a stronger 0.85 to BLOCK (genuine dupes >= 0.90 still caught). Only
+// the 3 SIMILARITY_ALERT_TYPES reach this gate (see isAlertScopeType); the
+// default is harmless for the rest.
+const SIMILARITY_ALERT_THRESHOLDS: Partial<Record<NoteType, number>> = {
+  decision: 0.75,
+  convention: 0.75,
+  anti_pattern: 0.85,
+};
+const DEFAULT_SIMILARITY_ALERT_THRESHOLD = 0.75;
+
+// Floor for SURFACING near-matches. A candidate at >= this floor but below the
+// type's BLOCK threshold does not block the write, but IS surfaced as a
+// non-blocking consolidation advisory - so loosening the block bar never makes
+// a near-duplicate vanish silently (preserves the gate's consolidation
+// purpose at the looser bar). Only non-empty for types whose block threshold
+// exceeds the floor (anti_pattern); decision/convention block at the floor.
+const SIMILARITY_ADVISORY_FLOOR = 0.75;
+
+export function similarityAlertThreshold(type: NoteType): number {
+  return SIMILARITY_ALERT_THRESHOLDS[type] ?? DEFAULT_SIMILARITY_ALERT_THRESHOLD;
+}
 
 /**
  * R4.1: Map a cosine similarity score to a rank bucket label. The rank
@@ -73,6 +99,32 @@ export function bucketLabel(similarity: number): string {
 }
 
 /**
+ * fc7fcb0d: format the non-blocking consolidation advisory appended to a
+ * stored note's message when near-matches existed at >= the advisory floor
+ * but below this type's BLOCK threshold. The note was NOT blocked (no forced
+ * resolution round-trip), but the agent still sees the adjacent notes so the
+ * gate's consolidation purpose survives the looser bar. Empty string when
+ * there are no advisory candidates (no noise on clean stores).
+ */
+function formatConsolidationAdvisory(
+  candidates: Array<{ id: string; type: string; content: string; similarity: number }>
+): string {
+  if (candidates.length === 0) return "";
+  const lines = candidates
+    .map(
+      (c) =>
+        `  - ${c.id} [${c.type}] ${Math.round(c.similarity * 100)}% "${truncate(c.content, 90)}"`
+    )
+    .join("\n");
+  return (
+    `\n\n[consolidation check - NOT blocking] ${candidates.length} adjacent note(s) ` +
+    `below the block bar:\n${lines}\n` +
+    `If this is the SAME knowledge/failure-mode, prefer update_note or supersede on the ` +
+    `closest match to keep the catalog consolidated; if genuinely distinct, no action needed.`
+  );
+}
+
+/**
  * Insert a new note into the given DB and return the new id. Extracted so
  * both the normal path and the R4 resolution paths (supersede_existing,
  * close_existing, accept_new) share identical insert semantics.
@@ -90,8 +142,10 @@ async function insertNote(
 
   const tagParts: string[] = [input.type];
   if (input.tags) {
-    for (const t of input.tags.split(",").map((s) => s.trim())) {
-      if (t && !tagParts.includes(t)) tagParts.push(t);
+    // c658ce38: normalize at capture so a JSON-array-stringified tags value
+    // never gets baked into the stored row.
+    for (const t of parseTagList(input.tags)) {
+      if (!tagParts.includes(t)) tagParts.push(t);
     }
   }
   const tagsStr = tagParts.join(",");
@@ -206,25 +260,39 @@ export async function handleRemember(
   // candidates BEFORE inserting; if any exist and the caller didn't supply a
   // resolution, REJECT the write and return the candidates so the agent can
   // choose an action.
-  let preInsertCandidates: Array<{
-    id: string;
-    type: string;
-    content: string;
-    similarity: number;
-  }> = [];
+  type Candidate = { id: string; type: string; content: string; similarity: number };
+  let preInsertCandidates: Candidate[] = [];
+  // fc7fcb0d: near-matches at >= floor but below this type's BLOCK threshold.
+  // These do NOT block; they ride along as a non-blocking consolidation
+  // advisory on the stored note's message.
+  let advisoryCandidates: Candidate[] = [];
 
   const isAlertScopeType = SIMILARITY_ALERT_TYPES.includes(input.type);
+  const blockThreshold = similarityAlertThreshold(input.type);
   if (isAlertScopeType && embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
       if (vecs && vecs.length > 0) {
         const queryVector = vecs[0];
+        // Query at the advisory FLOOR to see the whole near-neighborhood,
+        // then partition by this type's BLOCK threshold: >= blockThreshold
+        // blocks (forced resolution); [floor, blockThreshold) is a
+        // non-blocking consolidation advisory.
         const similar = handleCheckSimilar(db, queryVector, {
           proposed_action: input.content,
           types: SIMILARITY_ALERT_TYPES,
-          threshold: SIMILARITY_ALERT_THRESHOLD,
+          threshold: SIMILARITY_ADVISORY_FLOOR,
         });
-        preInsertCandidates = similar.results.slice(0, 3);
+        preInsertCandidates = similar.results
+          .filter((c) => c.similarity >= blockThreshold)
+          .slice(0, 3);
+        advisoryCandidates = similar.results
+          .filter(
+            (c) =>
+              c.similarity >= SIMILARITY_ADVISORY_FLOOR &&
+              c.similarity < blockThreshold
+          )
+          .slice(0, 3);
       }
     } catch (err) {
       console.error(`[embed] Failed to compute similarity for gate:`, err);
@@ -255,8 +323,17 @@ export async function handleRemember(
       "- LIKELY RELATED (85-94%): probably the same topic, different angle. Consider update_existing if additive, or accept_new if the angle is distinct enough to warrant a separate note.\n" +
       "- ADJACENT (75-84%): overlapping vocabulary but likely different concepts. accept_new is usually correct; update/supersede only if you are certain of duplication.";
 
+    const gatePct = Math.round(blockThreshold * 100);
+    const typeBarNote =
+      input.type === "anti_pattern"
+        ? " anti_pattern uses a stricter bar because vocabulary-adjacent-but-distinct" +
+          " failure modes are expected - if this is a DIFFERENT failure mode/angle," +
+          " accept_new is correct; if the SAME mode, prefer update_existing/" +
+          "supersede_existing to keep the catalog consolidated."
+        : "";
     const message =
       "Near-duplicate detected. Review before choosing resolution:\n\n" +
+      `(Gate: ${input.type} blocks at >=${gatePct}% similarity.${typeBarNote})\n\n` +
       candidateLines +
       "\n\n" +
       guidanceBlock +
@@ -287,13 +364,19 @@ export async function handleRemember(
     // beyond acknowledging the candidates.
     if (action === "accept_new") {
       const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+      // Parity with the normal store path: surface sub-block-threshold
+      // near-matches as a non-blocking consolidation advisory. Without this,
+      // accepting-new after a gate block would silently drop the
+      // [floor, blockThreshold) neighbors - exactly the silent-fragmentation
+      // hole the first-class-consolidation requirement forbids.
+      const advisory = formatConsolidationAdvisory(advisoryCandidates);
       return {
         stored: true,
         note_id: noteId,
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}. (resolution: accept_new)`,
+        message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}. (resolution: accept_new)${advisory}`,
       };
     }
 
@@ -420,13 +503,14 @@ export async function handleRemember(
 
   // ── Normal path: no gate, no resolution ────────────────────────────────
   const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+  const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
     note_id: noteId,
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.`,
+    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.${advisory}`,
   };
 }
 

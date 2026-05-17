@@ -323,4 +323,272 @@ describe("agent-channel routing E2E", () => {
       ),
     ).toBe(false);
   });
+
+  // =========================================================================
+  // 7ff34714: colon-gated sticky cascade + fenced-code-block-aware splitting.
+  // Design: decision note 88321142. An addressed paragraph opens a sticky
+  // cascade for its audience ONLY IF it is a colon-header (ends ":"); a
+  // non-colon addressed paragraph is a complete directive and opens NO
+  // cascade (preserves the locked b4c37849 mixed-audience invariant). Fenced
+  // code blocks are atomic (internal blank lines don't fragment) and any
+  // @-address inside them is literal content, never routing.
+  // =========================================================================
+
+  // Test A (was the trap): a colon-headed multi-paragraph directive must
+  // deliver IN FULL to the addressed SA - not just the header line.
+  test("colon-header directive: SA receives ALL continuation paragraphs (trap fixed)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, target);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-abc12345 Probe directive:",
+      "Do step X now and capture the output.",
+      "Then report Y back when complete.",
+    ].join("\n\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const targetReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    targetChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+
+    const got = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(got.length).toBe(1);
+    expect(got[0]).toContain("Probe directive");
+    expect(got[0]).toContain("Do step X now");
+    expect(got[0]).toContain("report Y back");
+  });
+
+  // Test B (regression lock): a NON-colon addressed paragraph does NOT open a
+  // cascade, so an interleaved user-private paragraph is NOT leaked to the
+  // SA. This is the colon-gate that preserves b4c37849.
+  test("non-colon addressed paragraph does NOT cascade trailing user prose (b4c37849 colon-gate)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-abc12345 First directive is complete.",
+      "Private aside to Jarid: the larger architectural pivot is needed.",
+      "@SA-deadbe11 Second directive for you.",
+    ].join("\n\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContents = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(aContents.length).toBe(1);
+    expect(aContents[0]).toContain("First directive is complete");
+    expect(aContents[0]).not.toContain("Private aside");
+    expect(aContents[0]).not.toContain("Second directive");
+
+    const bContents = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(bContents.length).toBe(1);
+    expect(bContents[0]).toContain("Second directive for you");
+    expect(bContents[0]).not.toContain("Private aside");
+    expect(bContents[0]).not.toContain("First directive");
+  });
+
+  // Test C: a colon-cascade is RESET when a later paragraph addresses someone
+  // else. Continuations flow to the colon-header's audience until the next
+  // address; the new address does not inherit the prior cascade.
+  test("colon-cascade resets on a new addressed paragraph", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-abc12345 do these steps:",
+      "step one of the work",
+      "step two of the work",
+      "@SA-deadbe11 your unrelated task.",
+      "a trailing note addressed to nobody",
+    ].join("\n\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContent = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(aContent).toContain("do these steps");
+    expect(aContent).toContain("step one of the work");
+    expect(aContent).toContain("step two of the work");
+    expect(aContent).not.toContain("your unrelated task");
+    expect(aContent).not.toContain("trailing note");
+
+    const bContent = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(bContent).toContain("your unrelated task");
+    expect(bContent).not.toContain("step one");
+    // B's directive ended with "." (no colon) so it opens NO cascade -
+    // the trailing nobody-addressed note must not reach B either.
+    expect(bContent).not.toContain("trailing note");
+  });
+
+  // Test D: fenced code blocks are atomic (internal blank line must not
+  // fragment the directive) AND an @SA-<id8> inside a fence is literal
+  // content, never routing.
+  test("fenced code block is atomic and @-address inside it is literal, not routing", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    // Colon-header to A, then a bash fence containing a blank line and a
+    // line that looks like an address to B, then a trailing instruction.
+    const msg = [
+      "@SA-abc12345 run this script:",
+      "",
+      "```bash",
+      "echo start-marker",
+      "",
+      'echo "@SA-deadbe11 literal-not-an-address"',
+      "echo end-marker",
+      "```",
+      "",
+      "confirm when complete",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContent = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    // The whole code block survives intact, including its internal blank
+    // line, and the cascade carries the post-fence instruction to A.
+    expect(aContent).toContain("run this script");
+    expect(aContent).toContain("echo start-marker");
+    expect(aContent).toContain("echo end-marker");
+    expect(aContent).toContain("literal-not-an-address");
+    expect(aContent).toContain("confirm when complete");
+
+    // SA-B must receive NOTHING: the @SA-deadbe11 inside the fence is
+    // literal content, not an address.
+    const bAssistant = bReceived.filter((n) => n.meta.event_type === "assistant_text");
+    expect(bAssistant.length).toBe(0);
+  });
+
+  // Test E (review I1 lock): CommonMark fence-length rule. A 3-backtick line
+  // INSIDE a 5-backtick fence must NOT close it (closer must be >= opener
+  // length, same char). Otherwise the outer block ends early and the rest -
+  // including an @SA-<id8> - leaks into routing.
+  test("a shorter same-char fence inside a longer fence does NOT close it (fence-length rule)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    // 5-backtick outer fence documenting a 3-backtick markdown example that
+    // itself contains a line that looks like an address to B.
+    const msg = [
+      "@SA-abc12345 here is the markdown to embed:",
+      "",
+      "`````markdown",
+      "```bash",
+      "echo hi",
+      "```",
+      "@SA-deadbe11 this whole thing is literal documentation",
+      "`````",
+      "",
+      "ship it when ready",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContent = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    // The inner ``` did NOT split the block: A gets the whole thing + the
+    // post-fence cascade line.
+    expect(aContent).toContain("here is the markdown to embed");
+    expect(aContent).toContain("echo hi");
+    expect(aContent).toContain("this whole thing is literal documentation");
+    expect(aContent).toContain("ship it when ready");
+
+    // B must receive NOTHING - the @SA-deadbe11 line is inside the still-open
+    // 5-backtick fence, hence literal, not routing.
+    const bAssistant = bReceived.filter((n) => n.meta.event_type === "assistant_text");
+    expect(bAssistant.length).toBe(0);
+  });
 });

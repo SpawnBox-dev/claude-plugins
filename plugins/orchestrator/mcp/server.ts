@@ -25,7 +25,7 @@ import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpe
 import { resolveNoteId } from "./tools/id_resolver";
 import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
-import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs } from "./utils";
+import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 
@@ -1362,7 +1362,8 @@ server.tool(
         [
           newContent,
           newContext ?? null,
-          tags ?? row.tags,
+          // c658ce38: normalize when a new tags value is supplied; absent -> keep existing.
+          tags != null ? normalizeTagString(tags) : row.tags,
           newKeywords ? newKeywords.join(",") : row.keywords,
           confidence ?? row.confidence ?? "medium",
           timestamp,
@@ -1584,8 +1585,9 @@ server.tool(
 
     const tagParts: string[] = ["work_item"];
     if (tags) {
-      for (const t of tags.split(",").map((s) => s.trim())) {
-        if (t && !tagParts.includes(t)) tagParts.push(t);
+      // c658ce38: normalize at capture (JSON-array-string -> clean tags).
+      for (const t of parseTagList(tags)) {
+        if (!tagParts.includes(t)) tagParts.push(t);
       }
     }
 
@@ -1698,9 +1700,12 @@ server.tool(
       changes.push("content updated");
     }
     if (tags !== undefined) {
+      // c658ce38: normalize at capture so a JSON-array-stringified tags
+      // value (or already-baked garbage) never gets stored.
+      const normTags = normalizeTagString(tags);
       setFragments.push("tags = ?");
-      bindValues.push(tags);
-      changes.push(`tags: ${row.tags ?? "none"} -> ${tags || "cleared"}`);
+      bindValues.push(normTags);
+      changes.push(`tags: ${row.tags ?? "none"} -> ${normTags || "cleared"}`);
     }
     if (context !== undefined) {
       const newCtx = context === "" ? null : context;
@@ -1788,7 +1793,7 @@ server.tool(
     if (!actualParentId && parent_title) {
       actualParentId = generateId();
       const keywords = extractKeywords(parent_title);
-      const tagParts = ["work_item", ...(tags ? tags.split(",").map(s => s.trim()) : [])];
+      const tagParts = ["work_item", ...parseTagList(tags)];
 
       projectDb.run(
         `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
@@ -1803,7 +1808,7 @@ server.tool(
     for (const item of items) {
       const childId = generateId();
       const keywords = extractKeywords(item.content);
-      const tagParts = ["work_item", ...(tags ? tags.split(",").map(s => s.trim()) : [])];
+      const tagParts = ["work_item", ...parseTagList(tags)];
 
       projectDb.run(
         `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)

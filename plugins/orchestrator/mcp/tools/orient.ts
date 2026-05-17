@@ -121,6 +121,42 @@ function formatDueDate(dueDate: string | null): string {
   return ` (due ${dueDate})`;
 }
 
+// 05f072d3: briefing() is the MANDATORY first call of every session. If the
+// assembled output exceeds the model tool-output token limit the call returns
+// an ERROR and breaks cold-start (observed live 2026-05-17: a 150,759-char
+// briefing broke SA-38a119fd's startup AND PA's independently). The render is
+// therefore bounded by CONSTRUCTION: every previously-unbounded section has a
+// hard char cap, so the sum of caps is structurally far below the ceiling -
+// overflow cannot happen regardless of KB size. Truncation is always HONEST:
+// a capped section emits an explicit marker (and, for the checkpoint, a
+// lookup pointer to the full note), never a silent omission. A truthful stub
+// is strictly better than silently dropping load-bearing context (handoff
+// fidelity - the same don't-mask-the-failure guardrail as the rest of this
+// batch). BRIEFING_HARD_CEILING is a final defense-in-depth tail clamp.
+const CHECKPOINT_RENDER_CAP = 6000; // continuity-critical: roomy, never dropped
+const AUTORETRO_RENDER_CAP = 3000;
+const CROSS_PROJECT_ITEM_CAP = 220;
+const CROSS_SESSION_MAX_ITEMS = 15; // per sub-list (new / hot)
+const NEGLECTED_MAX = 30;
+const USER_PROFILE_MAX_LINES = 24;
+const USER_PROFILE_OBS_CAP = 220;
+const BRIEFING_HARD_CEILING = 60000;
+
+/** Truncate `text` so the RESULT is at most `cap` chars, appending `marker`
+ *  only when truncation actually occurred. The marker fits WITHIN the budget
+ *  (not appended past it) so `cap` is a true hard bound - AC (a) requires the
+ *  ceiling to actually hold, not overshoot by marker.length. Honest-by-
+ *  construction: the marker's presence IS the signal that content was dropped. */
+export function capWithMarker(text: string, cap: number, marker: string): string {
+  if (text.length <= cap) return text;
+  // Reserve the marker's room inside the budget. The trailing .slice(0, cap)
+  // makes this provably total: even a pathological marker longer than the
+  // whole budget cannot make the result exceed `cap` (it would just be a
+  // clamped marker - a contractually-invalid input, but bounded). For every
+  // real call site cap >> marker.length, so the result is EXACTLY `cap`.
+  return (text.slice(0, Math.max(0, cap - marker.length)) + marker).slice(0, cap);
+}
+
 function formatBriefing(
   briefing: Briefing,
   checkpoint: Note | null,
@@ -147,7 +183,13 @@ function formatBriefing(
   if (include("checkpoint") && checkpoint) {
     const age = relativeTime(checkpoint.created_at);
     lines.push(`## Recovery Checkpoint (${age})`);
-    lines.push(checkpoint.content);
+    lines.push(
+      capWithMarker(
+        checkpoint.content,
+        CHECKPOINT_RENDER_CAP,
+        `\n...[checkpoint truncated for context budget - full content via lookup({id:"${checkpoint.id}"})]`
+      )
+    );
     lines.push("");
   }
 
@@ -211,7 +253,13 @@ function formatBriefing(
 
   if (include("neglected") && briefing.neglected_areas.length > 0) {
     lines.push("## Neglected Areas");
-    lines.push(briefing.neglected_areas.map((a) => `- ${a}`).join("\n"));
+    const shownNeglected = briefing.neglected_areas.slice(0, NEGLECTED_MAX);
+    lines.push(shownNeglected.map((a) => `- ${a}`).join("\n"));
+    if (briefing.neglected_areas.length > NEGLECTED_MAX) {
+      lines.push(
+        `- ...and ${briefing.neglected_areas.length - NEGLECTED_MAX} more (call briefing({sections:["neglected"]}) for the full list)`
+      );
+    }
     lines.push("");
   }
 
@@ -231,13 +279,22 @@ function formatBriefing(
         existing.push(entry);
         byDim.set(entry.dimension, existing);
       }
+      const profileLines: string[] = [];
       for (const [dim, entries] of byDim) {
         const label = dim.replace(/_/g, " ");
         for (const entry of entries.slice(0, 4)) {
           const traj = entry.trajectory !== "stable" ? ` (${entry.trajectory})` : "";
           const conf = entry.confidence === "high" ? "" : ` [${entry.confidence}]`;
-          lines.push(`- **${label}**${conf}: ${entry.observation}${traj}`);
+          profileLines.push(
+            `- **${label}**${conf}: ${truncate(entry.observation, USER_PROFILE_OBS_CAP)}${traj}`
+          );
         }
+      }
+      for (const pl of profileLines.slice(0, USER_PROFILE_MAX_LINES)) lines.push(pl);
+      if (profileLines.length > USER_PROFILE_MAX_LINES) {
+        lines.push(
+          `- ...and ${profileLines.length - USER_PROFILE_MAX_LINES} more profile entr(ies) - call briefing({sections:["user_model"]}) for the full profile`
+        );
       }
       lines.push("");
     } else if (briefing.user_model_summary.length > 0) {
@@ -249,7 +306,11 @@ function formatBriefing(
 
   if (include("cross_project") && globalPatterns.length > 0) {
     lines.push("## Cross-Project Patterns");
-    lines.push(globalPatterns.map((p) => `- ${p}`).join("\n"));
+    lines.push(
+      globalPatterns
+        .map((p) => `- ${truncate(p, CROSS_PROJECT_ITEM_CAP)}`)
+        .join("\n")
+    );
     lines.push("");
   }
 
@@ -278,18 +339,28 @@ function formatBriefing(
       lines.push(`## Cross-Session Activity (${xs.active_session_count} other active session${xs.active_session_count === 1 ? "" : "s"})`);
       if (xs.new_notes.length > 0) {
         lines.push("### New since your last briefing");
-        for (const n of xs.new_notes) {
+        for (const n of xs.new_notes.slice(0, CROSS_SESSION_MAX_ITEMS)) {
           const tagStr = n.tags ? ` {${n.tags}}` : "";
           const age = relativeTime(n.created_at);
           lines.push(`- [${n.type}]${tagStr} **${n.id}** (${age}) ${truncate(n.content, 140)}`);
+        }
+        if (xs.new_notes.length > CROSS_SESSION_MAX_ITEMS) {
+          lines.push(
+            `- ...and ${xs.new_notes.length - CROSS_SESSION_MAX_ITEMS} more new note(s) - call briefing({sections:["cross_session"]}) to page the full set`
+          );
         }
         lines.push("");
       }
       if (xs.hot_notes.length > 0) {
         lines.push("### Hot across sessions (surfaced by 2+ others in last 2h)");
-        for (const n of xs.hot_notes) {
+        for (const n of xs.hot_notes.slice(0, CROSS_SESSION_MAX_ITEMS)) {
           const tagStr = n.tags ? ` {${n.tags}}` : "";
           lines.push(`- [${n.type}]${tagStr} **${n.id}** (${n.distinct_sessions} sessions, ${n.surfacings}x) ${truncate(n.content, 140)}`);
+        }
+        if (xs.hot_notes.length > CROSS_SESSION_MAX_ITEMS) {
+          lines.push(
+            `- ...and ${xs.hot_notes.length - CROSS_SESSION_MAX_ITEMS} more hot note(s) - call briefing({sections:["cross_session"]}) to page the full set`
+          );
         }
         lines.push("");
       }
@@ -402,7 +473,26 @@ export function handleOrient(
   // an "## Auto-Retro" section before any other content makes it prominent but
   // non-blocking (other sections still render unchanged).
   if (autoRetroSummary && !briefing.is_first_run) {
-    formatted = `## Auto-Retro\n${autoRetroSummary}\n\n${formatted}`;
+    const cappedRetro = capWithMarker(
+      autoRetroSummary,
+      AUTORETRO_RENDER_CAP,
+      "\n...[auto-retro summary truncated for context budget - run retro() for the full maintenance report]"
+    );
+    formatted = `## Auto-Retro\n${cappedRetro}\n\n${formatted}`;
+  }
+
+  // 05f072d3 defense-in-depth: even with every per-section cap, clamp the
+  // whole formatted string as a final guarantee that briefing() - the
+  // mandatory first call - can NEVER return an over-limit error. This should
+  // never fire (sum of section caps is far below the ceiling); it is a
+  // structural backstop, and it is HONEST (explicit marker, points the agent
+  // at section-scoped paging) rather than a silent cut.
+  if (formatted.length > BRIEFING_HARD_CEILING) {
+    formatted = capWithMarker(
+      formatted,
+      BRIEFING_HARD_CEILING,
+      `\n\n...[briefing clamped at ${BRIEFING_HARD_CEILING} chars to fit context - some trailing sections are incomplete. Page specific sections via briefing({sections:["..."]}) or query directly with lookup().]`
+    );
   }
 
   // Advance the cursor to EXACTLY the same readAt we just queried against.

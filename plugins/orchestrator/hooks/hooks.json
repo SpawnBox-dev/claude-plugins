@@ -9,6 +9,20 @@
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/session-start"
           }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:orchestrator:core",
+            "tool": "_hook_event",
+            "input": {
+              "event": "SessionStart",
+              "session_id": "${session_id}"
+            }
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

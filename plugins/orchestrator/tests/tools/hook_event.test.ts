@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { SessionTracker } from "../../mcp/engine/session_tracker";
-import { handleHookEvent } from "../../mcp/tools/hook_event";
+import {
+  handleHookEvent,
+  buildHookEnvelope,
+  composePostCompactReorientation,
+} from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
 
 function freshSetup(): { db: Database; tracker: SessionTracker } {
@@ -807,6 +811,110 @@ describe("hook_event dispatcher", () => {
       expect(r.systemMessage).toBeDefined();
       expect(r.systemMessage).toContain("API error");
       expect(r.decision).toBeUndefined();
+    });
+  });
+
+  // 167ffbaf (+ e4774e4b): post-compaction SessionStart hook. Fires only via
+  // hooks.json `matcher:"compact"` (the universal SessionStart stays bash).
+  // Delivers a bounded re-orientation digest as a top-level systemMessage
+  // (NOT hookSpecificOutput - SessionStart is not an HSO-valid event name;
+  // verified against hook_envelope.test.ts ALLOWED_HSO_EVENT_NAMES) plus,
+  // when a live PA exists, an instruction to solicit a peer backstop.
+  describe("SessionStart (post-compact re-orientation)", () => {
+    function seedCheckpoint(db: any, content: string) {
+      db.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+        ["cp-compact", "checkpoint", content, now(), now()]
+      );
+    }
+
+    // --- Pure composer: livePA branches tested deterministically (the
+    //     handler's getLiveSessions() is a non-hermetic disk read - it
+    //     reflects the REAL running fleet - so the live branch is covered
+    //     here, not through the impure shell). ---
+
+    test("composer: NO live PA → omits the @PA peer-backstop directive, keeps self-restore", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "task two",
+        checkpoint: "checkpoint body two",
+        livePA: false,
+      });
+      expect(msg.toLowerCase()).toContain("compact");
+      expect(msg).toContain("task two");
+      expect(msg).toContain("checkpoint body two");
+      expect(msg).not.toContain("[post-compact recovery]");
+    });
+
+    test("composer: live PA → includes the one-shot @PA peer-backstop solicitation", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "wiring the post-compact hook",
+        checkpoint: "cp body",
+        livePA: true,
+      });
+      expect(msg).toContain("[post-compact recovery]");
+      expect(msg).toContain("wiring the post-compact hook");
+      expect(msg.toLowerCase()).toContain("non-blocking");
+    });
+
+    test("composer: huge checkpoint capped with an honest truncation marker, bounded total", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: null,
+        checkpoint: "HEAD " + "x".repeat(60_000) + " TAIL",
+        livePA: false,
+      });
+      expect(msg.length).toBeLessThanOrEqual(8000);
+      expect(msg.toLowerCase()).toContain("truncated");
+    });
+
+    test("composer: no checkpoint → sane re-orient, no literal undefined/null", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "task four",
+        checkpoint: null,
+        livePA: false,
+      });
+      expect(msg.toLowerCase()).toContain("compact");
+      expect(msg).toContain("task four");
+      expect(msg).not.toContain("undefined");
+      expect(msg).not.toContain("null");
+    });
+
+    // --- Handler: hermetic integration (DB digest + non-HSO envelope shape).
+    //     No livePA-dependent assertion here (that'd depend on the real
+    //     fleet); the HSO-trap guard is environment-independent. ---
+
+    test("handler: top-level systemMessage from DB state; NOT additionalContext; envelope has NO hookSpecificOutput (SessionStart-not-HSO guard)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("SC1");
+      tracker.updateCurrentTask("SC1", "wiring the post-compact hook");
+      seedCheckpoint(db, "Last state: implemented X, next is Y, open question Z.");
+
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "SC1" }
+      );
+
+      expect(r.systemMessage).toBeDefined();
+      expect(r.systemMessage!.toLowerCase()).toContain("compact");
+      expect(r.systemMessage).toContain("wiring the post-compact hook");
+      expect(r.systemMessage).toContain("implemented X, next is Y");
+      expect(r.additionalContext).toBeUndefined();
+      const env = buildHookEnvelope("SessionStart", r);
+      expect(env.systemMessage).toBeDefined();
+      expect(env.hookSpecificOutput).toBeUndefined();
+    });
+
+    test("handler: no checkpoint and no task → still a sane non-empty systemMessage (no crash)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("SC5");
+
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "SC5" }
+      );
+
+      expect(r.systemMessage).toBeDefined();
+      expect(r.systemMessage!.toLowerCase()).toContain("compact");
+      expect(r.systemMessage).not.toContain("undefined");
     });
   });
 });

@@ -596,14 +596,109 @@ export class AgentChannel {
   }
 }
 
+/** A routing unit: either a prose paragraph or an atomic fenced code block. */
+interface ContentUnit {
+  text: string;
+  /** Fenced code block - literal content: never split internally, never
+   *  parsed for addressing (an `@SA-<id8>` inside it is just text). */
+  isCode: boolean;
+}
+
+/** Opening/closing fence line: 3+ backticks or 3+ tildes at line start
+ *  (after optional indentation), optionally followed by an info string. */
+const FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
+
 /**
- * Filter content paragraphs to only those that address `receiverId`. Returns
- * null when no paragraph addresses this receiver (caller should suppress
- * the emit entirely). Paragraphs are separated by one or more blank lines.
+ * Split content into ordered routing units. Prose runs are paragraph-split on
+ * blank lines (`\n{2,}`), exactly as the legacy splitter did. Fenced code
+ * blocks (``` or ~~~) are ATOMIC: their internal blank lines do not fragment
+ * them, and their content is never parsed for addressing. An unclosed fence
+ * swallows the remainder of the message as one code unit (routing-safe: an
+ * `@SA-<id8>` in a dangling code block can't be mistaken for an address).
  *
- * Used by SA receivers to extract only the parts of a sender's message
- * that were addressed to them - prevents PA-to-user prose in a mixed message
- * from leaking to an SA that was named in a different paragraph.
+ * On fence-free content this produces exactly `content.split(/\n{2,}/)`
+ * (minus empty paragraphs), so the non-code common path is unchanged.
+ */
+function splitContentUnits(content: string): ContentUnit[] {
+  const lines = content.split("\n");
+  const units: ContentUnit[] = [];
+  let prose: string[] = [];
+  let code: string[] = [];
+  let inFence = false;
+  let fenceChar = "";
+  let fenceLen = 0; // opener run length; CommonMark closer must be >= this
+
+  const flushProse = () => {
+    if (prose.length === 0) return;
+    for (const p of prose.join("\n").split(/\n{2,}/)) {
+      if (p.trim().length > 0) units.push({ text: p, isCode: false });
+    }
+    prose = [];
+  };
+
+  for (const line of lines) {
+    const m = line.match(FENCE_RE);
+    if (m) {
+      const marker = m[1][0]; // "`" or "~"
+      const runLen = m[1].length;
+      if (!inFence) {
+        flushProse();
+        inFence = true;
+        fenceChar = marker;
+        fenceLen = runLen;
+        code = [line];
+        continue;
+      }
+      // CommonMark: the closing fence must use the same character AND be at
+      // least as long as the opener. A SHORTER same-char run (or a different
+      // char) is literal code content, NOT a close - otherwise a ``` inside a
+      // ````` block would prematurely end it and leak the rest (incl. any
+      // @SA-<id8>) into routing. This is the 7ff34714 code-block-atomicity
+      // guarantee done correctly.
+      if (marker === fenceChar && runLen >= fenceLen) {
+        code.push(line);
+        units.push({ text: code.join("\n"), isCode: true });
+        code = [];
+        inFence = false;
+        fenceChar = "";
+        fenceLen = 0;
+        continue;
+      }
+      // A non-closing fence-like line inside an open fence is literal code.
+      code.push(line);
+      continue;
+    }
+    if (inFence) code.push(line);
+    else prose.push(line);
+  }
+  // Unclosed fence: keep the remainder as one atomic (routing-inert) code unit.
+  if (inFence && code.length > 0) {
+    units.push({ text: code.join("\n"), isCode: true });
+  }
+  flushProse();
+  return units;
+}
+
+/** True when the last non-whitespace character is a colon - the signal that
+ *  an addressed paragraph is a HEADER introducing continuation paragraphs
+ *  (the documented 7ff34714 trap pattern: "@SA-x directive:"). */
+function isColonHeader(text: string): boolean {
+  return text.trimEnd().endsWith(":");
+}
+
+/**
+ * Extract only the parts of a sender's message addressed to `receiverId`.
+ * Returns null when nothing reaches this receiver (caller suppresses emit).
+ *
+ * 7ff34714 - colon-gated sticky cascade (design: decision note 88321142):
+ * an addressed paragraph delivers to its targets AND, if it is a colon-header
+ * ("...:"), opens a sticky cascade so subsequent UNADDRESSED continuation
+ * paragraphs (and atomic code blocks) also deliver to that same audience -
+ * until another addressed paragraph redefines the cascade. A non-colon
+ * addressed paragraph is a COMPLETE directive and opens no cascade, so an
+ * interleaved user-private paragraph is never leaked to the SA (preserves the
+ * locked b4c37849 mixed-audience invariant). Fenced code blocks are atomic
+ * and routing-inert (an `@SA-<id8>` inside one is literal, never an address).
  */
 function filterParagraphsForReceiver(
   content: string,
@@ -611,13 +706,31 @@ function filterParagraphsForReceiver(
   sender: SessionEntry,
   sessions: SessionEntry[],
 ): string | null {
-  const paragraphs = content.split(/\n{2,}/);
+  const units = splitContentUnits(content);
   const kept: string[] = [];
-  for (const para of paragraphs) {
-    const paraAddr = parseAddressing(para, sender, sessions);
-    if (paraAddr.targets.includes(receiverId)) {
-      kept.push(para);
+  // The audience of the currently-open colon-header directive, or null when
+  // no cascade is open.
+  let cascade: Set<string> | null = null;
+
+  for (const unit of units) {
+    if (unit.isCode) {
+      // Literal block: never addresses anyone. Rides an open cascade so a
+      // code block inside a colon-headed directive reaches the SA intact.
+      if (cascade && cascade.has(receiverId)) kept.push(unit.text);
+      continue;
+    }
+
+    const addr = parseAddressing(unit.text, sender, sessions);
+    if (addr.targets.length > 0) {
+      if (addr.targets.includes(receiverId)) kept.push(unit.text);
+      // Redefine the cascade: a colon-header opens one for THIS paragraph's
+      // audience; a complete (non-colon) directive closes any open cascade.
+      cascade = isColonHeader(unit.text) ? new Set(addr.targets) : null;
+    } else {
+      // Unaddressed continuation: delivers iff a cascade is open for us.
+      if (cascade && cascade.has(receiverId)) kept.push(unit.text);
     }
   }
+
   return kept.length > 0 ? kept.join("\n\n") : null;
 }

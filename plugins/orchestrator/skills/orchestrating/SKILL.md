@@ -104,6 +104,34 @@ Multiple Claude Code sessions can run against the same project simultaneously - 
 
 **Treat inbound channel events seriously.** When `<channel ...>` arrives in your context, the sender (filewatcher routing real cross-session activity) invested deliberate effort in routing it to you - acknowledge and act before continuing your own work. Ignoring it erodes the coordination value of the whole system.
 
+## PA-delegable decisions: route, don't always stop the user
+
+When you're about to ask the user a question (`AskUserQuestion`) that is a
+**PA-delegable** decision, route it to a live PrimeAgent instead of
+interrupting the user. This leverages PA-as-artificial-user for the class of
+decisions PA is authorized to make, and reserves the user's attention for the
+ones that genuinely need them.
+
+**Classify with architecture note `c90610f1`** (the authoritative
+PA-delegable vs Jarid-only boundary — `lookup` it; do not reinvent it). In
+short: PA-delegable = reversible ∧ applying an already-established
+rule/convention ∧ not billed/irreversible ∧ not a scope/release/money/
+product-taste call ∧ not access-control ∧ not manufactured from a vague
+signal. Failing any one of those ⇒ **Jarid-only**.
+
+**Routing rule (deterministic — no discretion on the fallback):**
+1. PA-delegable per `c90610f1` **AND a live PA session exists** → address
+   `@PA` on the channel with the question and its options, and wait for PA's
+   reply. (Live PA = a heartbeat-fresh prime in the session registry; if
+   you're unsure whether a PA is live, treat it as not — go to step 2.)
+2. **No live PA**, OR the decision is ambiguous, OR it is Jarid-only → ask
+   the user normally via `AskUserQuestion` in your own session window. Never
+   block waiting on an absent PA; never silently answer it yourself.
+
+Convention, not an enforced gate — no tool wrapper, no interception; the
+transport is the existing channel. Honor it by reflex, the same way you
+honor "address `@PA` when stuck."
+
 ## The Goal
 
 Every session leaves the knowledge base richer AND more accurate - richer via new captures (conventions, anti-patterns, decisions, user patterns, open threads tracked to resolution) AND more accurate via maintenance (`update_note`, `supersede_note`, `close_thread`) on the notes this session read and found wanting. Capture without maintenance grows the graph; maintenance without capture corrects it. Both matter every session.
