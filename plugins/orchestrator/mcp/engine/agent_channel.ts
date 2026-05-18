@@ -643,17 +643,48 @@ export class AgentChannel {
   }
 }
 
-/** A routing unit: either a prose paragraph or an atomic fenced code block. */
+/** A routing unit: a prose paragraph, an atomic fenced code block, or an
+ *  explicit-envelope block. */
 interface ContentUnit {
   text: string;
   /** Fenced code block - literal content: never split internally, never
    *  parsed for addressing (an `@SA-<id8>` inside it is just text). */
   isCode: boolean;
+  /** Explicit-envelope unit (WI eabc89b6 - the Discord-model fix): the raw
+   *  address spec from the `@@@ <addr>` opener (e.g. "@SA-19703445",
+   *  "@SA-a,@SA-b", "@PA", "@all"). When set, `text` is the verbatim inner
+   *  payload (markers stripped) and routing is EXPLICIT to those targets
+   *  only - the body is never address-parsed (an `@`-mention inside is
+   *  literal) and the envelope is cascade-transparent. This is what makes
+   *  "format the message however you want, it arrives whole" safe. */
+  envelopeAddr?: string;
 }
 
 /** Opening/closing fence line: 3+ backticks or 3+ tildes at line start
  *  (after optional indentation), optionally followed by an info string. */
 const FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
+
+/**
+ * Explicit-envelope delimiters (WI eabc89b6 - the Discord-model fix).
+ *
+ * The Anthropic Discord plugin never infers audience from message body: a
+ * `reply` has an explicit `chat_id` and the whole message goes there intact.
+ * The orchestrator can't take a destination parameter (comms are pure
+ * terminal text - the send tool was removed in 0.29.0), so the envelope makes
+ * the destination explicit and structural WITHIN the text:
+ *
+ *     @@@ @SA-19703445
+ *     ...anything: paragraphs, markdown, blank lines, ``` code fences,
+ *        literal @-mentions - all verbatim, none of it routed...
+ *     @@@
+ *
+ * OPEN = `@@@` + whitespace + an address spec (`@SA-<id8>` / `@SA-a,@SA-b` /
+ * `@PA` / `@all`). CLOSE = a bare `@@@` line. Open and close are disjoint
+ * (open requires a trailing `@addr`; close must be bare) so they never
+ * collide, and a bare-`@@@` only matters once an envelope is already open.
+ */
+const ENVELOPE_OPEN_RE = /^[ \t]*@@@[ \t]+(@\S.*?)[ \t]*$/;
+const ENVELOPE_CLOSE_RE = /^[ \t]*@@@[ \t]*$/;
 
 /**
  * Split content into ordered routing units. Prose runs are paragraph-split on
@@ -683,7 +714,30 @@ function splitContentUnits(content: string): ContentUnit[] {
     prose = [];
   };
 
+  // Explicit-envelope state (WI eabc89b6). Once `@@@ @addr` opens an
+  // envelope, every line up to the bare `@@@` closer is verbatim payload:
+  // atomic, never fence-parsed, never address-parsed, routed explicitly.
+  let inEnvelope = false;
+  let envelopeAddr = "";
+  let envelope: string[] = [];
+
   for (const line of lines) {
+    // An open envelope owns every line until the bare `@@@` closer. A fence
+    // opener or @-mention inside it is literal payload - the envelope is
+    // atomic and routing-explicit (this is what makes "format it however you
+    // want, it arrives whole" safe).
+    if (inEnvelope) {
+      if (ENVELOPE_CLOSE_RE.test(line)) {
+        units.push({ text: envelope.join("\n"), isCode: false, envelopeAddr });
+        envelope = [];
+        inEnvelope = false;
+        envelopeAddr = "";
+      } else {
+        envelope.push(line);
+      }
+      continue;
+    }
+
     const m = line.match(FENCE_RE);
     if (m) {
       const marker = m[1][0]; // "`" or "~"
@@ -715,8 +769,30 @@ function splitContentUnits(content: string): ContentUnit[] {
       code.push(line);
       continue;
     }
-    if (inFence) code.push(line);
-    else prose.push(line);
+    if (inFence) {
+      code.push(line);
+      continue;
+    }
+
+    // Not in a fence/envelope: an `@@@ @addr` line opens an explicit
+    // envelope. Pending prose flushes first - the envelope is its own
+    // atomic unit.
+    const env = line.match(ENVELOPE_OPEN_RE);
+    if (env) {
+      flushProse();
+      inEnvelope = true;
+      envelopeAddr = env[1].trim();
+      envelope = [];
+      continue;
+    }
+
+    prose.push(line);
+  }
+  // Unclosed envelope: emit the remainder as one atomic envelope unit -
+  // routing-safe over-containment to the explicit target (mirrors the
+  // unclosed-fence guarantee; the tail never leaks to cascade/others).
+  if (inEnvelope && envelope.length > 0) {
+    units.push({ text: envelope.join("\n"), isCode: false, envelopeAddr });
   }
   // Unclosed fence: keep the remainder as one atomic (routing-inert) code unit.
   if (inFence && code.length > 0) {
@@ -778,6 +854,18 @@ function filterParagraphsForReceiver(
   let cascade: Set<string> | null = null;
 
   for (const unit of units) {
+    if (unit.envelopeAddr !== undefined) {
+      // Explicit envelope (WI eabc89b6 - the Discord-model fix): route by
+      // the opener's DECLARED address only. The body is never address-
+      // parsed (an `@`-mention inside is literal) and the envelope is
+      // cascade-transparent - it neither opens nor closes a colon-cascade,
+      // so content around it routes exactly as if it weren't there. This is
+      // the explicit, structural destination the Anthropic Discord plugin
+      // has natively (its `reply` takes a chat_id); nothing is body-inferred.
+      const env = parseAddressing(unit.envelopeAddr, sender, sessions);
+      if (env.targets.includes(receiverId)) kept.push(unit.text);
+      continue;
+    }
     if (unit.isCode) {
       // Literal block: never addresses anyone. Rides an open cascade so a
       // code block inside a colon-headed directive reaches the SA intact.

@@ -411,22 +411,42 @@ detail, (c) describe the trap in concrete-shape terms, not vague,
 (d) frame as "may already be handled" so SA can verify without
 feeling micromanaged.
 
-**Multi-paragraph directives (orchestrator 0.30.39+, WI 7ff34714).**
-The agent-channel now applies a colon-gated sticky cascade: if your
-addressed paragraph is a colon-header (`@SA-<id8> <header>:`), every
-following unaddressed paragraph AND fenced code block delivers to that
-same SA in full, until another addressed paragraph redefines routing.
-So you may write structured, multi-paragraph, code-block-containing
-directives - provided (1) the FIRST line carries the `@SA-<id8>`
-address and (2) it ends with a colon to open the cascade. A non-colon
-addressed paragraph is treated as a complete one-off directive and
-opens no cascade (this is what keeps a private-to-user aside from
-leaking to an SA - the b4c37849 invariant). The note-ID-indirection
-reflex (cite the ID, let the SA `lookup`) remains good practice for
-DURABILITY (a bounced/compacted SA recovers the spec by ID regardless
-of channel state), but it is no longer FORCED by a truncation trap for
-colon-headed directives. `@`-addresses inside a fenced code block are
-literal content and never route - safe to paste transcripts/examples.
+**Multi-paragraph / formatted directives - use the EXPLICIT
+ENVELOPE (orchestrator 0.30.46+, WI eabc89b6).** This is the
+reliable mechanism and your default for anything longer than one
+plain paragraph. Opener on its own line, content in whatever shape
+you want, bare `@@@` closer:
+
+```
+@@@ @SA-<id8>
+**Any header (bold, no trailing colon needed), any structure.**
+
+Multiple paragraphs, bullets, blank lines, even fenced code
+blocks - all delivered verbatim.
+@@@
+```
+
+Everything between the markers goes to the named target(s) ONLY
+(`@@@ @SA-a,@SA-b` / `@@@ @PA` / `@@@ @all` also work), whole and
+unmodified; `@`-mentions inside are literal (never route); the
+envelope neither rides nor breaks any surrounding routing. This is
+the Discord-model property - explicit structural destination,
+atomic message - ported in-text: no body-inference, no truncation,
+no gymnastics. Prefer it for every structured directive.
+
+The older implicit path still works for SHORT messages: a bare
+`@SA-<id8>` one-liner, or a colon-header (`@SA-<id8> <header>:`)
+opening a sticky cascade over following unaddressed paragraphs
+(a non-colon addressed paragraph is a complete one-off and opens
+no cascade - the b4c37849 invariant that stops a private-to-user
+aside leaking to an SA). But that path is fragile by construction:
+a header not ending in a LITERAL colon (e.g. a bolded
+`**Directive:**`) silently drops every continuation paragraph, and
+the failure is invisible to both sender and receiver. The envelope
+exists precisely to remove that footgun - when in doubt, envelope
+it. The note-ID-indirection reflex (cite the ID, let the SA
+`lookup`) remains good practice for DURABILITY (a bounced/compacted
+SA recovers the spec by ID regardless of channel state).
 
 **Default to silence.** Most events warrant no surface. Surfacing
 on every loosely-relevant note trains SAs to ignore your

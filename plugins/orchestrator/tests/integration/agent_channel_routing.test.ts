@@ -825,4 +825,247 @@ describe("agent-channel routing E2E", () => {
     expect(bContents[0]).not.toContain("Private aside");
     expect(bContents[0]).not.toContain("First directive");
   });
+
+  // =========================================================================
+  // Explicit envelope (WI eabc89b6, Jarid GO 2026-05-18): the structural fix
+  // that removes the colon gymnastics. An agent wraps a block:
+  //     @@@ @SA-<id8>
+  //     ...anything: paragraphs, markdown, blank lines, code fences...
+  //     @@@
+  // The whole inner payload is ONE atomic unit, delivered VERBATIM to the
+  // opener's targets only (markers stripped), routes nowhere else, @-mentions
+  // inside are literal, cascade-transparent. Purely additive - no prior
+  // content uses `@@@`, so A-I stay green.
+  // =========================================================================
+
+  // Test J (headline): "format it however you want, it arrives in entirety."
+  // A deliberately trap-shaped payload - bold header with NO colon, multiple
+  // blank-line paragraphs, a fenced code block containing a literal @SA-other
+  // - delivers in full to the envelope target, and the literal mention does
+  // NOT route to the other SA.
+  test("explicit envelope delivers an arbitrarily-formatted multi-paragraph payload in full to its target only", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    const other = makeSession("subordinate", "deadbe11", "SA-other");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, target);
+    writeSession(stateDir, other);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@@@ @SA-abc12345",
+      "**Plan (bold header, NO colon, multiple paragraphs):**",
+      "",
+      "First paragraph of the body.",
+      "",
+      "Second paragraph, separated by a blank line.",
+      "",
+      "```bash",
+      'echo "@SA-deadbe11 literal inside envelope - must NOT route"',
+      "```",
+      "",
+      "Final paragraph - ship it.",
+      "@@@",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const targetReceived: ChannelNotification[] = [];
+    const otherReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    const otherChan = new AgentChannel(stateDir, projectsHashDir, other, (n) =>
+      otherReceived.push(n),
+    );
+    targetChan.start();
+    otherChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+    otherChan.stop();
+
+    const got = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(got.length).toBe(1);
+    // Every part of the arbitrarily-formatted payload arrives:
+    expect(got[0]).toContain("Plan (bold header, NO colon, multiple paragraphs)");
+    expect(got[0]).toContain("First paragraph of the body.");
+    expect(got[0]).toContain("Second paragraph, separated by a blank line.");
+    expect(got[0]).toContain("literal inside envelope - must NOT route");
+    expect(got[0]).toContain("Final paragraph - ship it.");
+    // Envelope markers themselves are stripped from delivered content.
+    expect(got[0]).not.toContain("@@@");
+
+    // The @SA-deadbe11 inside the envelope is literal - SA-other gets nothing.
+    const otherAssistant = otherReceived.filter(
+      (n) => n.meta.event_type === "assistant_text",
+    );
+    expect(otherAssistant.length).toBe(0);
+  });
+
+  // Test K (privacy + additivity): content OUTSIDE the envelope still routes
+  // by the existing per-paragraph rules. A private aside reaches nobody; an
+  // envelope reaches only its target; a normal addressed paragraph after the
+  // envelope still reaches its own SA. The envelope adds precision, never
+  // leaks (b4c37849 invariant preserved alongside the new mechanism).
+  test("envelope is precise; non-envelope content still routes per existing rules (additive, no leak)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "Private aside to Jarid - must not leak anywhere.",
+      "",
+      "@@@ @SA-abc12345",
+      "Envelope body for A only. Mentions @SA-deadbe11 literally.",
+      "@@@",
+      "",
+      "@SA-deadbe11 Real directive for B, outside the envelope.",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContents = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(aContents).toContain("Envelope body for A only");
+    expect(aContents).not.toContain("Private aside");
+    expect(aContents).not.toContain("Real directive for B");
+
+    const bContents = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(bContents).toContain("Real directive for B, outside the envelope");
+    expect(bContents).not.toContain("Envelope body for A only");
+    expect(bContents).not.toContain("Private aside");
+  });
+
+  // Test L (unclosed-envelope containment): an opener with no closer swallows
+  // the remainder and routes it ONLY to the envelope target - routing-safe
+  // over-containment (never leaks the tail to cascade/others), mirroring the
+  // unclosed-fence guarantee.
+  test("unclosed envelope swallows the remainder to its target only (routing-safe)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-deadbe11 a normal directive first.",
+      "",
+      "@@@ @SA-abc12345",
+      "Unclosed envelope body line one.",
+      "",
+      "Unclosed envelope body line two - swallows to end.",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContents = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(aContents).toContain("Unclosed envelope body line one.");
+    expect(aContents).toContain("Unclosed envelope body line two - swallows to end.");
+    expect(aContents).not.toContain("a normal directive first");
+
+    const bContents = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(bContents).toContain("a normal directive first");
+    expect(bContents).not.toContain("Unclosed envelope body");
+  });
+
+  // Test M (cascade-transparency): an envelope between a colon-cascade opener
+  // and its continuation does NOT break the cascade for the original SA, and
+  // the envelope's content does not leak to the cascade SA.
+  test("envelope is cascade-transparent (does not open/close the colon-cascade)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-abc12345 do these steps:",
+      "",
+      "step one for A",
+      "",
+      "@@@ @SA-deadbe11",
+      "this block is only for B",
+      "@@@",
+      "",
+      "step two for A - still in A's cascade, envelope was transparent",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContents = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(aContents).toContain("do these steps");
+    expect(aContents).toContain("step one for A");
+    expect(aContents).toContain("step two for A - still in A's cascade");
+    expect(aContents).not.toContain("this block is only for B");
+
+    const bContents = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(bContents).toContain("this block is only for B");
+    expect(bContents).not.toContain("step one for A");
+    expect(bContents).not.toContain("do these steps");
+  });
 });

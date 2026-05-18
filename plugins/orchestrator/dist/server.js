@@ -24087,7 +24087,7 @@ var PAUSE_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(back\s*off|stand\s*down|take\s*fi
 var RESUME_NL_RE = /^\s*(PA|PrimeAgent)\s*,?\s*(come\s*back|resume|you\s*can\s*(come\s*back|resume|return))\b/i;
 var SLASH_PAUSE_RE = /^\s*\/pa-pause\b/i;
 var SLASH_RESUME_RE = /^\s*\/pa-resume\b/i;
-var ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:[-*][ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
+var ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:(?:[-*]|@@@)[ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
 function parseAddressing(content, sender, sessions) {
   let override_command = null;
   if (SLASH_PAUSE_RE.test(content) || PAUSE_NL_RE.test(content)) {
@@ -24571,6 +24571,8 @@ class AgentChannel {
   }
 }
 var FENCE_RE = /^[ \t]*(`{3,}|~{3,})/;
+var ENVELOPE_OPEN_RE = /^[ \t]*@@@[ \t]+(@\S.*?)[ \t]*$/;
+var ENVELOPE_CLOSE_RE = /^[ \t]*@@@[ \t]*$/;
 function splitContentUnits(content) {
   const lines = content.split(`
 `);
@@ -24590,7 +24592,22 @@ function splitContentUnits(content) {
     }
     prose = [];
   };
+  let inEnvelope = false;
+  let envelopeAddr = "";
+  let envelope = [];
   for (const line of lines) {
+    if (inEnvelope) {
+      if (ENVELOPE_CLOSE_RE.test(line)) {
+        units.push({ text: envelope.join(`
+`), isCode: false, envelopeAddr });
+        envelope = [];
+        inEnvelope = false;
+        envelopeAddr = "";
+      } else {
+        envelope.push(line);
+      }
+      continue;
+    }
     const m = line.match(FENCE_RE);
     if (m) {
       const marker = m[1][0];
@@ -24616,10 +24633,23 @@ function splitContentUnits(content) {
       code.push(line);
       continue;
     }
-    if (inFence)
+    if (inFence) {
       code.push(line);
-    else
-      prose.push(line);
+      continue;
+    }
+    const env = line.match(ENVELOPE_OPEN_RE);
+    if (env) {
+      flushProse();
+      inEnvelope = true;
+      envelopeAddr = env[1].trim();
+      envelope = [];
+      continue;
+    }
+    prose.push(line);
+  }
+  if (inEnvelope && envelope.length > 0) {
+    units.push({ text: envelope.join(`
+`), isCode: false, envelopeAddr });
   }
   if (inFence && code.length > 0) {
     units.push({ text: code.join(`
@@ -24637,6 +24667,12 @@ function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
   const kept = [];
   let cascade = null;
   for (const unit of units) {
+    if (unit.envelopeAddr !== undefined) {
+      const env = parseAddressing(unit.envelopeAddr, sender, sessions);
+      if (env.targets.includes(receiverId))
+        kept.push(unit.text);
+      continue;
+    }
     if (unit.isCode) {
       if (cascade && cascade.has(receiverId))
         kept.push(unit.text);
@@ -25041,6 +25077,8 @@ var server = new McpServer({
     `Cross-session events arrive as <channel source="plugin:orchestrator:core" from_id8="..." from_role="..." event_type="..." ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)`,
     "",
     'Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form "PA, ..." or "PrimeAgent, ..." also addresses PA.',
+    "",
+    "For ANY multi-paragraph or markdown-formatted message to a specific recipient, use an EXPLICIT ENVELOPE - it is delivered whole, verbatim, formatted however you like, with zero truncation. Put the opener on its own line: `@@@ @SA-<id8>` (or `@@@ @SA-a,@SA-b` / `@@@ @PA` / `@@@ @all`), then your content with any blank lines / bold headers / bullets / ``` code fences, then a closing line that is exactly `@@@`. Everything between goes ONLY to those targets; `@`-mentions inside the envelope are literal text, not routing. This is the reliable way to send a structured directive - prefer it over a bare `@SA-<id8>` prefix for anything longer than one paragraph. (Without an envelope, only the addressed paragraph plus colon-header continuations reach the SA; blank-line-separated paragraphs after a non-colon line are dropped. The envelope removes that entirely.)",
     "",
     "If you are a subordinate (role=subordinate), treat PA-addressed messages as if the user said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
     "",

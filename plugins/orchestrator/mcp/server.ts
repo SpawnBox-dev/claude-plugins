@@ -473,6 +473,8 @@ const server = new McpServer(
       "",
       "Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form \"PA, ...\" or \"PrimeAgent, ...\" also addresses PA.",
       "",
+      "For ANY multi-paragraph or markdown-formatted message to a specific recipient, use an EXPLICIT ENVELOPE - it is delivered whole, verbatim, formatted however you like, with zero truncation. Put the opener on its own line: `@@@ @SA-<id8>` (or `@@@ @SA-a,@SA-b` / `@@@ @PA` / `@@@ @all`), then your content with any blank lines / bold headers / bullets / ``` code fences, then a closing line that is exactly `@@@`. Everything between goes ONLY to those targets; `@`-mentions inside the envelope are literal text, not routing. This is the reliable way to send a structured directive - prefer it over a bare `@SA-<id8>` prefix for anything longer than one paragraph. (Without an envelope, only the addressed paragraph plus colon-header continuations reach the SA; blank-line-separated paragraphs after a non-colon line are dropped. The envelope removes that entirely.)",
+      "",
       "If you are a subordinate (role=subordinate), treat PA-addressed messages as if the user said them - execute, then continue your work. SAs can address you too; those are peer-level, not authoritative.",
       "",
       "If you are PA (role=prime), you observe every event in the project by default. Address SAs to coordinate them. Use note() and create_work_item() to record orchestrator-plugin improvements you discover - tag with `agent-channel-improvement, area:orchestrator-plugin`.",

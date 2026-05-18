@@ -68,7 +68,13 @@ const SLASH_RESUME_RE = /^\s*\/pa-resume\b/i;
 // misinterpreted as actual addressing, which previously caused PA's thread
 // questions to the user to leak into SAs' contexts via the channel router.
 // (work_item b4c37849)
-const ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:[-*][ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
+// 0.30.46: `@@@` is also a valid line-lead addressing context - it is the
+// explicit-envelope opener (`@@@ @SA-<id8>`, WI eabc89b6). Treating it like a
+// list-bullet prefix lets parseAddressing resolve an envelope opener's
+// target(s) so the top-level processEvent receiver-gate doesn't drop the
+// event before per-unit envelope routing runs. Purely additive: no prior
+// content begins a line with `@@@ @addr`.
+const ADDRESS_RE = /(?:(?:^|\n)[ \t]*(?:(?:[-*]|@@@)[ \t]+)?|,[ \t]*|[ \t]+(?:and|&)[ \t]+)@(PA|PrimeAgent|all|SA-[a-f0-9]{8})\b/gim;
 
 export function parseAddressing(
   content: string,
