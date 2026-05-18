@@ -952,6 +952,54 @@ describe("hook_event dispatcher", () => {
       expect(msg.toLowerCase()).toMatch(/reconcile|verify/);
     });
 
+    // WI 2da3e119: the post-compact re-orientation must re-establish HOW TO
+    // OPERATE (the behavioral contract compaction summaries drop), not only
+    // WHAT (task/checkpoint). Deterministic in the emitted systemMessage -
+    // the just-compacted agent demonstrably skips the terse re-injected
+    // "invoke getting-started/every-turn" directive (e4774e4b/5d1c20fc class).
+    test("composer: re-establishes the distilled OPERATING CONTRACT (how-to-operate), not just state (WI 2da3e119)", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "some task",
+        checkpoint: "some checkpoint body",
+        livePA: false,
+      });
+      const lc = msg.toLowerCase();
+      // (1) every-turn loop is the keystone reflex, mandated explicitly
+      expect(lc).toContain("every-turn");
+      // (2) capture-the-moment, never defer, never .md-memory-substitute
+      expect(lc).toMatch(/capture .*(the moment|now)|never defer|capture later/);
+      expect(lc).toContain("note()");
+      // (3) verify-before-assert: WAS vs IS
+      expect(lc).toContain("what was");
+      expect(lc).toContain("what is");
+      // (4) messaging discipline + no-false-close
+      expect(lc).toContain("trap-safe");
+      expect(lc).toContain("no-false-close");
+      // (5) reload role contract; do not infer from the lossy summary
+      expect(lc).toMatch(/role contract|reload it|getting-started/);
+      // framed as not-optional / likely-degraded (counters the skip)
+      expect(lc).toMatch(/not optional|degraded|drops these/);
+      // does not regress the existing state content
+      expect(msg).toContain("some task");
+      expect(msg).toContain("some checkpoint body");
+    });
+
+    test("composer: operating-contract survives a huge checkpoint - it is budget-protected; the checkpoint is the elastic, lookup-recoverable part (WI 2da3e119)", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "t",
+        checkpoint: "HEAD " + "x".repeat(60_000) + " TAIL",
+        livePA: true,
+      });
+      // The load-bearing operating-contract is NOT what gets truncated:
+      expect(msg.toLowerCase()).toContain("every-turn");
+      expect(msg.toLowerCase()).toContain("no-false-close");
+      // still bounded, honest truncation marker present (checkpoint yielded)
+      expect(msg.length).toBeLessThanOrEqual(8000);
+      expect(msg.toLowerCase()).toContain("truncated");
+      // livePA peer-backstop inform line not clobbered by the OC addition
+      expect(msg.toLowerCase()).toContain("on your behalf");
+    });
+
     // --- Handler: hermetic integration (DB digest + non-HSO envelope shape).
     //     No livePA-dependent assertion here (that'd depend on the real
     //     fleet); the HSO-trap guard is environment-independent. ---

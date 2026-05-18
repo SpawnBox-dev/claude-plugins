@@ -420,6 +420,28 @@ export function composePostCompactReorientation(opts: {
   const parts: string[] = [
     "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy.",
   ];
+  // WI 2da3e119: re-establish HOW TO OPERATE, not only WHAT (task/checkpoint).
+  // Compaction summaries are task-narrative-heavy and lossily drop the
+  // behavioral operating reflexes; the terse re-injected "invoke
+  // getting-started/every-turn" directive is an optional-feeling side-
+  // instruction the just-compacted agent demonstrably SKIPS (e4774e4b /
+  // 5d1c20fc class). So the contract is folded into THIS deterministic
+  // emitted systemMessage (the agent cannot skip it). Placed as parts[1]
+  // (right after the header, before task/checkpoint/peer-backstop): the
+  // final SESSIONSTART_TOTAL_CAP slice truncates the END, so this fixed,
+  // load-bearing block always survives while the elastic, lookup-
+  // recoverable checkpoint is what yields (05f072d3 bounded-payload
+  // discipline preserved; detection-must-be-external + asymmetry rationale
+  // in notes e7779cae / 037fac50). Kept tight - load-bearing reflexes only,
+  // never a verbose dump.
+  parts.push(
+    "Operating contract - the compaction summary preserves task narrative but DROPS these behavioral reflexes; they are NOT optional and you have most likely been running degraded. Re-establish now: " +
+      "(1) The orchestrator every-turn loop (capture/lookup scan) is mandatory EVERY turn - the keystone reflex compaction most degrades; run it this turn and every turn hereafter, do not assume it survived the summary. " +
+      "(2) Capture knowledge the moment it appears via note()/update_note - never defer ('capture later' is the top cause of loss), and never substitute file/.md memory for orchestrator note(). " +
+      "(3) Verify before asserting: this summary + the KB = what WAS; current source/code/docs = what IS - no 'maybe/probably', check. " +
+      "(4) Cross-agent messages stay trap-safe / explicit-envelope; honor no-false-close (shipped != live-confirmed). " +
+      "(5) You operate under a role contract (prime or subordinate) - reload it via orchestrator:getting-started (PA also: /pa-bootstrap + prime-agent.md); do not infer your role/contract from the lossy summary."
+  );
   // The currentTask comes verbatim from session_registry.current_task, which
   // persists indefinitely until the session next calls update_session_task -
   // so right after a compaction it can be STALE (an old broadcast from before
