@@ -726,8 +726,20 @@ function filterParagraphsForReceiver(
       // Redefine the cascade: a colon-header opens one for THIS paragraph's
       // audience; a complete (non-colon) directive closes any open cascade.
       cascade = isColonHeader(unit.text) ? new Set(addr.targets) : null;
+    } else if (addr.had_address_syntax) {
+      // 7ff34714 general-class fix (WI 96798325): this paragraph IS an
+      // addressing line but resolved to ZERO deliverable targets - the
+      // sender self-addressing @PA as prime, an unresolved @SA-<id8>, or
+      // @all with no peers. It is a fresh DIRECTIVE BOUNDARY, never an
+      // unaddressed continuation, so it must CLOSE any open cascade rather
+      // than RIDE it. Riding it leaked the paragraph into the cascaded SA
+      // (the live-fail: a trailing "@PA reset-check" written by PA-prime
+      // reaching an SA mid-cascade). Nothing is delivered here - targets is
+      // empty so it does not include this receiver by construction.
+      cascade = null;
     } else {
-      // Unaddressed continuation: delivers iff a cascade is open for us.
+      // Genuinely unaddressed continuation (no addressing syntax at all):
+      // delivers iff a cascade is open for us.
       if (cascade && cascade.has(receiverId)) kept.push(unit.text);
     }
   }

@@ -591,4 +591,133 @@ describe("agent-channel routing E2E", () => {
     const bAssistant = bReceived.filter((n) => n.meta.event_type === "assistant_text");
     expect(bAssistant.length).toBe(0);
   });
+
+  // Test F (7ff34714 LIVE-FAIL regression lock - WI 96798325):
+  // The exact shape the 9-test suite missed and the clean confound-free live
+  // probe caught. A PA-PRIME sender writes a colon-header @SA cascade, then
+  // unaddressed continuations, a fenced code block, and a TRAILING non-colon
+  // "@PA ..." paragraph. Because the sender IS the prime, parseAddressing
+  // self-excludes @PA (addressing.ts:92 `pa.session_id !== sender.session_id`)
+  // and resolves it to ZERO targets. The pre-fix cascade-close gate
+  // (`addr.targets.length > 0`) then misclassified that syntactically-
+  // addressed paragraph as an UNADDRESSED continuation, so it rode the still-
+  // open SA cascade and LEAKED to the SA - reproducing the live failure
+  // verbatim. Fix: parseAddressing exposes `had_address_syntax`; a
+  // syntactically-addressed paragraph that resolves to no deliverable target
+  // still CLOSES the cascade (it is a directive boundary, never a
+  // continuation), so it cannot ride a prior cascade into an SA.
+  test("PA-prime trailing @PA paragraph does NOT leak into an open SA colon-cascade (7ff34714 live-fail lock)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    const other = makeSession("subordinate", "deadbe11", "SA-other");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, target);
+    writeSession(stateDir, other);
+
+    // PA-PRIME is the SENDER (the exact live scenario: PA addressing an SA
+    // with a colon-header cascade, then a trailing self-addressed @PA line).
+    const paJsonl = join(projectsHashDir, `${pa.session_id}.jsonl`);
+    writeFileSync(paJsonl, "");
+    const msg = [
+      "@SA-abc12345 colon-cascade live test:",
+      "",
+      "CONT-ALPHA",
+      "",
+      "CONT-BETA",
+      "",
+      "```bash",
+      'echo "@SA-deadbe11 literal, routed nowhere"',
+      "```",
+      "",
+      "@PA reset-check",
+    ].join("\n");
+    appendAssistantEvent(paJsonl, msg);
+
+    const targetReceived: ChannelNotification[] = [];
+    const otherReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    const otherChan = new AgentChannel(stateDir, projectsHashDir, other, (n) =>
+      otherReceived.push(n),
+    );
+    targetChan.start();
+    otherChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+    otherChan.stop();
+
+    const targetContent = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    // The legitimate cascade content DOES reach the SA:
+    expect(targetContent).toContain("colon-cascade live test");
+    expect(targetContent).toContain("CONT-ALPHA");
+    expect(targetContent).toContain("CONT-BETA");
+    expect(targetContent).toContain("literal, routed nowhere"); // fence rides cascade (intended)
+    // THE LEAK LOCK: the trailing @PA-from-PA paragraph must NOT reach the SA.
+    expect(targetContent).not.toContain("reset-check");
+
+    // SA-other is addressed nowhere (the @SA-deadbe11 is literal inside the
+    // fence). It must receive NOTHING.
+    const otherAssistant = otherReceived.filter(
+      (n) => n.meta.event_type === "assistant_text",
+    );
+    expect(otherAssistant.length).toBe(0);
+  });
+
+  // Test G (7ff34714 general-class lock - WI 96798325, second variant):
+  // Same root cause as Test F but the SECOND member of the bug class: a
+  // syntactically-addressed paragraph that resolves to ZERO targets because
+  // the @SA-<id8> is UNRESOLVED (no such session). The pre-fix gate
+  // `addr.targets.length > 0` is false, so it was misclassified as an
+  // unaddressed continuation and rode the still-open SA cascade, leaking a
+  // directive meant for a (non-existent) third party into SA-target. The
+  // class-complete fix (had_address_syntax) must close the cascade for THIS
+  // sub-case too, not only prime-self-@PA. (The third class member - @all
+  // resolving to empty - cannot co-occur with an SA receiver: @all resolves
+  // empty only when the sender is the sole session, in which case no SA
+  // receiver exists to leak to, so it is covered by the same had_address_
+  // syntax mechanism without a separate exploitable test.)
+  test("unresolved @SA-<id8> trailing an open colon-cascade does NOT leak to the cascaded SA (7ff34714 general-class lock)", async () => {
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    writeSession(stateDir, src);
+    writeSession(stateDir, target);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    // 99999999 is valid @SA-<id8> syntax ([a-f0-9]{8}) but resolves to no
+    // session - had_address_syntax=true, targets=[].
+    const msg = [
+      "@SA-abc12345 cascade for you:",
+      "",
+      "CONT-ONE",
+      "",
+      "CONT-TWO",
+      "",
+      "@SA-99999999 directive to a session that does not exist",
+    ].join("\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const targetReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    targetChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+
+    const targetContent = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content)
+      .join("\n---\n");
+    expect(targetContent).toContain("cascade for you");
+    expect(targetContent).toContain("CONT-ONE");
+    expect(targetContent).toContain("CONT-TWO");
+    // THE LEAK LOCK: the unresolved-@SA directive paragraph must NOT ride the
+    // cascade into SA-target.
+    expect(targetContent).not.toContain("does not exist");
+  });
 });

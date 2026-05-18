@@ -36,6 +36,18 @@ export interface AddressingResult {
   targets: string[];
   /** True if event addresses PA (explicit @PA, @PrimeAgent, or "PA,"/"PrimeAgent," prefix). */
   pa_addressed: boolean;
+  /** True if the content contained a recognized addressing FORM (an
+   *  @PA/@PrimeAgent/@SA-<id8>/@all token in an addressing context, or a
+   *  "PA,"/"PrimeAgent," conversational prefix) - REGARDLESS of whether it
+   *  resolved to any deliverable target. Distinguishes "this paragraph is
+   *  not an addressing line" from "this paragraph IS an addressing line that
+   *  resolved to zero targets" (sender self-addressing @PA as prime; an
+   *  unresolved @SA-<id8>; @all with no peers). The agent-channel cascade
+   *  router (filterParagraphsForReceiver) needs this to treat the latter as
+   *  a directive boundary that CLOSES an open colon-cascade, rather than as
+   *  an unaddressed continuation that rides it - the 7ff34714 live-fail
+   *  class (WI 96798325). */
+  had_address_syntax: boolean;
   /** Override command if recognized. */
   override_command: "pause" | "resume" | null;
   /** id8s that didn't resolve to a known session - dropped from targets. */
@@ -74,9 +86,15 @@ export function parseAddressing(
   const targets = new Set<string>();
   const unresolved: string[] = [];
   let pa_addressed = false;
+  // Set whenever a recognized addressing FORM is present, BEFORE/independent
+  // of the self-exclusion + resolution guards below. This is what lets the
+  // cascade router distinguish an empty-resolving addressed paragraph (a
+  // directive boundary) from genuinely unaddressed prose (a continuation).
+  let had_address_syntax = false;
 
   // Conversational PA-prefix form (e.g. "PA, please...")
   if (PA_PREFIX_RE.test(content)) {
+    had_address_syntax = true;
     const pa = sessions.find((s) => s.role === "prime");
     if (pa && pa.session_id !== sender.session_id) {
       targets.add(pa.session_id);
@@ -86,6 +104,10 @@ export function parseAddressing(
 
   // Explicit @-addresses
   for (const match of content.matchAll(ADDRESS_RE)) {
+    // A match here means an address token appeared in a genuine addressing
+    // context (the b4c37849 ADDRESS_RE already excludes mid-prose mentions).
+    // Record the FORM even if it resolves to no deliverable target below.
+    had_address_syntax = true;
     const tag = match[1].toLowerCase();
     if (tag === "pa" || tag === "primeagent") {
       const pa = sessions.find((s) => s.role === "prime");
@@ -111,6 +133,7 @@ export function parseAddressing(
   return {
     targets: Array.from(targets),
     pa_addressed,
+    had_address_syntax,
     override_command,
     unresolved_addresses: unresolved,
   };

@@ -24058,7 +24058,9 @@ function parseAddressing(content, sender, sessions) {
   const targets = new Set;
   const unresolved = [];
   let pa_addressed = false;
+  let had_address_syntax = false;
   if (PA_PREFIX_RE.test(content)) {
+    had_address_syntax = true;
     const pa = sessions.find((s) => s.role === "prime");
     if (pa && pa.session_id !== sender.session_id) {
       targets.add(pa.session_id);
@@ -24066,6 +24068,7 @@ function parseAddressing(content, sender, sessions) {
     }
   }
   for (const match of content.matchAll(ADDRESS_RE)) {
+    had_address_syntax = true;
     const tag = match[1].toLowerCase();
     if (tag === "pa" || tag === "primeagent") {
       const pa = sessions.find((s) => s.role === "prime");
@@ -24091,6 +24094,7 @@ function parseAddressing(content, sender, sessions) {
   return {
     targets: Array.from(targets),
     pa_addressed,
+    had_address_syntax,
     override_command,
     unresolved_addresses: unresolved
   };
@@ -24578,6 +24582,8 @@ function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
       if (addr.targets.includes(receiverId))
         kept.push(unit.text);
       cascade = isColonHeader(unit.text) ? new Set(addr.targets) : null;
+    } else if (addr.had_address_syntax) {
+      cascade = null;
     } else {
       if (cascade && cascade.has(receiverId))
         kept.push(unit.text);

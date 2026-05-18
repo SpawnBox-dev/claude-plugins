@@ -145,4 +145,60 @@ describe("addressing parser", () => {
     expect(result.pa_addressed).toBe(false);
     expect(result.targets).not.toContain(PA.session_id);
   });
+
+  // ===========================================================================
+  // 7ff34714 general-class fix (WI 96798325): `had_address_syntax` marks a
+  // recognized addressing FORM regardless of whether it resolved to a
+  // deliverable target. The agent-channel cascade router relies on this to
+  // treat an empty-resolving addressed paragraph as a directive boundary
+  // (CLOSES the colon-cascade) instead of an unaddressed continuation (RIDES
+  // it - the live-fail leak). These pin all three empty-resolving members of
+  // the class at the unit level (the @all-no-peers member is not end-to-end
+  // expressible, so this is its class-complete lock).
+  // ===========================================================================
+
+  test("had_address_syntax: false for genuinely unaddressed prose", () => {
+    const r = parseAddressing("Just thinking out loud about the API.", SA_A, SESSIONS);
+    expect(r.had_address_syntax).toBe(false);
+    expect(r.targets).toEqual([]);
+  });
+
+  test("had_address_syntax: true for a genuine resolving address", () => {
+    const r = parseAddressing("@SA-d4e5f6a7 please proceed", SA_A, SESSIONS);
+    expect(r.had_address_syntax).toBe(true);
+    expect(r.targets).toEqual([SA_B.session_id]);
+  });
+
+  // Class member 1: prime self-addressing @PA -> self-excluded -> targets=[]
+  test("had_address_syntax: true for prime self-addressing @PA (empty targets)", () => {
+    const r = parseAddressing("@PA reset-check", PA, SESSIONS);
+    expect(r.targets).toEqual([]);
+    expect(r.pa_addressed).toBe(false);
+    expect(r.had_address_syntax).toBe(true);
+  });
+
+  // Class member 2: unresolved @SA-<id8> -> targets=[]
+  test("had_address_syntax: true for an unresolved @SA-<id8> (empty targets)", () => {
+    const r = parseAddressing("@SA-99999999 directive to a ghost", SA_A, SESSIONS);
+    expect(r.targets).toEqual([]);
+    expect(r.unresolved_addresses).toEqual(["99999999"]);
+    expect(r.had_address_syntax).toBe(true);
+  });
+
+  // Class member 3: @all with no peers (sender is the sole session) ->
+  // targets=[]. Not end-to-end expressible (no SA receiver can exist when
+  // @all resolves empty), so this unit test is its class-complete lock.
+  test("had_address_syntax: true for @all with no peers (empty targets)", () => {
+    const r = parseAddressing("@all stand by", PA, [PA]);
+    expect(r.targets).toEqual([]);
+    expect(r.had_address_syntax).toBe(true);
+  });
+
+  // The conversational "PA," prefix is an addressing form even when the
+  // sender IS the prime (self-excluded -> empty targets).
+  test("had_address_syntax: true for 'PA,' prefix sent by the prime itself (empty targets)", () => {
+    const r = parseAddressing("PA, note to self", PA, SESSIONS);
+    expect(r.targets).toEqual([]);
+    expect(r.had_address_syntax).toBe(true);
+  });
 });
