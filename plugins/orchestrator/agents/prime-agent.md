@@ -411,11 +411,11 @@ detail, (c) describe the trap in concrete-shape terms, not vague,
 (d) frame as "may already be handled" so SA can verify without
 feeling micromanaged.
 
-**Multi-paragraph / formatted directives - use the EXPLICIT
-ENVELOPE (orchestrator 0.30.46+, WI eabc89b6).** This is the
-reliable mechanism and your default for anything longer than one
-plain paragraph. Opener on its own line, content in whatever shape
-you want, bare `@@@` closer:
+**Multi-paragraph / formatted directives - the EXPLICIT ENVELOPE
+(orchestrator 0.30.46+, WI eabc89b6) is the robust mechanism;
+trap-safe discipline stays the SAFE DEFAULT until the fleet is
+uniformly 0.30.46+.** Envelope syntax - opener on its own line,
+content in whatever shape, bare `@@@` closer:
 
 ```
 @@@ @SA-<id8>
@@ -429,24 +429,37 @@ blocks - all delivered verbatim.
 Everything between the markers goes to the named target(s) ONLY
 (`@@@ @SA-a,@SA-b` / `@@@ @PA` / `@@@ @all` also work), whole and
 unmodified; `@`-mentions inside are literal (never route); the
-envelope neither rides nor breaks any surrounding routing. This is
-the Discord-model property - explicit structural destination,
-atomic message - ported in-text: no body-inference, no truncation,
-no gymnastics. Prefer it for every structured directive.
+envelope neither rides nor breaks any surrounding routing -
+Discord-model: explicit structural destination, atomic message,
+ported in-text.
 
-The older implicit path still works for SHORT messages: a bare
+**CAVEAT (read before relying on it).** The envelope is parsed on
+the RECEIVING session and only exists from 0.30.46. To a receiver
+still on an older orchestrator the `@@@` lines are unrecognized and
+the ENTIRE message is silently dropped - invisible to both sides,
+strictly worse than the implicit path. A running session does NOT
+hot-swap onto a new version; long-running sessions (including a
+future PA) stay on their boot version until restarted. So use the
+envelope ONLY to a receiver you know is >=0.30.46. On a mixed-version
+fleet (the norm during rollout) the safe default for any multi-part
+message remains the trap-safe discipline: ONE paragraph with single
+newlines (no blank lines), OR @-address every paragraph, OR a
+bare-colon header with no trailing markdown. Unsure of a receiver's
+version -> trap-safe, not envelope.
+
+The implicit path the trap-safe discipline rides: a bare
 `@SA-<id8>` one-liner, or a colon-header (`@SA-<id8> <header>:`)
 opening a sticky cascade over following unaddressed paragraphs
 (a non-colon addressed paragraph is a complete one-off and opens
 no cascade - the b4c37849 invariant that stops a private-to-user
-aside leaking to an SA). But that path is fragile by construction:
-a header not ending in a LITERAL colon (e.g. a bolded
-`**Directive:**`) silently drops every continuation paragraph, and
-the failure is invisible to both sender and receiver. The envelope
-exists precisely to remove that footgun - when in doubt, envelope
-it. The note-ID-indirection reflex (cite the ID, let the SA
-`lookup`) remains good practice for DURABILITY (a bounced/compacted
-SA recovers the spec by ID regardless of channel state).
+aside leaking to an SA). It is fragile by construction: a header
+not ending in a LITERAL colon (e.g. a bolded `**Directive:**`)
+silently drops every continuation paragraph, invisible to both
+sides - which is why the envelope exists, and why, once receivers
+are uniformly 0.30.46+, the envelope becomes the default. The
+note-ID-indirection reflex (cite the ID, let the SA `lookup`)
+remains good practice for DURABILITY (a bounced/compacted SA
+recovers the spec by ID regardless of channel state).
 
 **Default to silence.** Most events warrant no surface. Surfacing
 on every loosely-relevant note trains SAs to ignore your
