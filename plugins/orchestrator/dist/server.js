@@ -23529,7 +23529,7 @@ ${capped}`);
     parts.push('No durable checkpoint found - reconstruct from your task above and a briefing({event:"compact"}) before proceeding.');
   }
   if (livePA) {
-    parts.push("Then post ONE line to the channel (non-blocking - post it and continue, do not wait for a reply): " + `"@PA [post-compact recovery]${currentTask ? ` task=${currentTask};` : ""} <your post-compact state in one line>; peers, flag anything load-bearing compaction may have dropped." ` + "A non-compacted peer can backstop what your summary lost. This is a targeted gap-check - do NOT re-request your full prior context.");
+    parts.push("A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. A non-compacted peer or PA may reply on the channel flagging load-bearing context the lossy summary dropped; fold any such replies in when they arrive. Non-blocking: continue your work. This is a targeted gap-check, not a full context re-request.");
   }
   let systemMessage = parts.join(`
 
@@ -23539,6 +23539,19 @@ ${capped}`);
 ...[post-compact re-orientation truncated to fit the budget - lookup the latest checkpoint and call briefing({event:"compact"}) for the rest]`;
   }
   return systemMessage;
+}
+var POST_COMPACT_RECOVERY_EVENT = "post_compact_recovery";
+function buildPeerBackstopEvent(opts) {
+  const { fromSession, paSession, currentTask, ts } = opts;
+  if (!fromSession || !paSession || paSession === fromSession)
+    return null;
+  return {
+    event_type: POST_COMPACT_RECOVERY_EVENT,
+    from_session: fromSession,
+    to_session: paSession,
+    ts,
+    task: currentTask ?? ""
+  };
 }
 function handleSessionStartCompact(ctx, args) {
   const sid = sanitizeSessionId(args.session_id);
@@ -23553,12 +23566,27 @@ function handleSessionStartCompact(ctx, args) {
     checkpoint = cpRow?.content ?? null;
   } catch {}
   let livePA = false;
+  let paSession = null;
   try {
     const live = getLiveSessions();
-    livePA = !!live && live.some((e) => e.role === "prime");
+    const pa = live?.find((e) => e.role === "prime") ?? null;
+    livePA = !!pa;
+    paSession = pa?.session_id ?? null;
   } catch {
     livePA = false;
+    paSession = null;
   }
+  try {
+    const ev = buildPeerBackstopEvent({
+      fromSession: sid,
+      paSession,
+      currentTask,
+      ts: now()
+    });
+    const stateDir = getAgentChannelStateDir();
+    if (ev && stateDir)
+      appendSystemEvent(stateDir, ev);
+  } catch {}
   return {
     systemMessage: composePostCompactReorientation({
       currentTask,
@@ -24424,6 +24452,30 @@ class AgentChannel {
           if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer_to_human")
             break;
           this.permissionRelay.resolveVerdict(request_id, { verdict, pa_session, pa_reason });
+          break;
+        }
+        case "post_compact_recovery": {
+          const tsMs = new Date(String(ev.ts ?? "")).getTime();
+          const RECOVERY_FRESH_MS = 15 * 60000;
+          if (!Number.isFinite(tsMs) || Date.now() - tsMs > RECOVERY_FRESH_MS) {
+            break;
+          }
+          const fromId8 = ev.from_session.slice(0, 8);
+          const task = String(ev.task ?? "").trim();
+          this.emit({
+            content: `[post-compact recovery] SA-${fromId8} just compacted` + (task ? ` (task: ${task})` : "") + `. The lossy compaction summary may have dropped load-bearing ` + `context this session was carrying. If you (PA) or a non-` + `compacted peer hold context its checkpoint/notes likely don't ` + `capture, surface it to @SA-${fromId8} now. Non-blocking, ` + `advisory - a targeted gap-check, not a full context resend.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: fromId8,
+              from_role: "subordinate",
+              from_name: `<post_compact_recovery>`,
+              from_task: task || null,
+              event_type: "post_compact_recovery",
+              ts: typeof ev.ts === "string" ? ev.ts : new Date().toISOString(),
+              pa_addressed: true,
+              addressed_to: [this.selfSession.session_id]
+            }
+          });
           break;
         }
         default:

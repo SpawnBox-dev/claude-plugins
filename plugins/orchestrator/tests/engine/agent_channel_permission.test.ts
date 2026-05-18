@@ -260,4 +260,108 @@ describe("agent_channel permission routing via system_events bus", () => {
     expect(resolved).toHaveLength(2);
     expect(resolved[1].request_id).toBe("req-6");
   });
+
+  // e4774e4b peer-backstop (5d1c20fc trigger-design fix): the post-compact
+  // hook deterministically writes a post_compact_recovery row addressed to
+  // PA; PA's filewatcher surfaces it as an advisory channel notification -
+  // zero dependence on the just-compacted agent posting anything.
+  test("post_compact_recovery addressed to self (PA) emits an advisory channel notification", () => {
+    const self: SessionEntry = {
+      session_id: "pa-session-uuid",
+      id8: "pa-sessi",
+      role: "prime",
+      name: "PA",
+      started_at: new Date().toISOString(),
+      last_heartbeat_at: new Date().toISOString(),
+      current_task: null,
+    };
+    const emitted: any[] = [];
+    const channel = new AgentChannel(
+      dirs.stateDir,
+      dirs.projectsDir,
+      self,
+      (e) => emitted.push(e),
+    );
+
+    appendSystemEvent(dirs.stateDir, {
+      event_type: "post_compact_recovery",
+      from_session: "sa-aaaaaaaa-bbbb",
+      to_session: "pa-session-uuid",
+      ts: new Date().toISOString(),
+      task: "implementing the widget",
+    });
+
+    (channel as any).processSystemEvents();
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].meta.event_type).toBe("post_compact_recovery");
+    expect(emitted[0].meta.from_session).toBe("sa-aaaaaaaa-bbbb");
+    expect(emitted[0].meta.pa_addressed).toBe(true);
+    expect(emitted[0].content).toContain("[post-compact recovery]");
+    expect(emitted[0].content).toContain("implementing the widget");
+    // Addresses the compacted SA by its id8 so PA can route a reply.
+    expect(emitted[0].content).toContain("SA-sa-aaaaa");
+  });
+
+  test("post_compact_recovery NOT addressed to self is ignored", () => {
+    const self: SessionEntry = {
+      session_id: "other-session-uuid",
+      id8: "other-se",
+      role: "subordinate",
+      name: "Other-SA",
+      started_at: new Date().toISOString(),
+      last_heartbeat_at: new Date().toISOString(),
+      current_task: null,
+    };
+    const emitted: any[] = [];
+    const channel = new AgentChannel(
+      dirs.stateDir,
+      dirs.projectsDir,
+      self,
+      (e) => emitted.push(e),
+    );
+
+    appendSystemEvent(dirs.stateDir, {
+      event_type: "post_compact_recovery",
+      from_session: "sa-uuid",
+      to_session: "pa-session-uuid",
+      ts: new Date().toISOString(),
+      task: "x",
+    });
+
+    (channel as any).processSystemEvents();
+    expect(emitted).toHaveLength(0);
+  });
+
+  test("post_compact_recovery older than the freshness window is dropped (PA-restart full-replay guard)", () => {
+    const self: SessionEntry = {
+      session_id: "pa-session-uuid",
+      id8: "pa-sessi",
+      role: "prime",
+      name: "PA",
+      started_at: new Date().toISOString(),
+      last_heartbeat_at: new Date().toISOString(),
+      current_task: null,
+    };
+    const emitted: any[] = [];
+    const channel = new AgentChannel(
+      dirs.stateDir,
+      dirs.projectsDir,
+      self,
+      (e) => emitted.push(e),
+    );
+
+    // 60 minutes old - well past the 15-min advisory freshness window.
+    const stale = new Date(Date.now() - 60 * 60_000).toISOString();
+    appendSystemEvent(dirs.stateDir, {
+      event_type: "post_compact_recovery",
+      from_session: "sa-uuid",
+      to_session: "pa-session-uuid",
+      ts: stale,
+      task: "stale work",
+    });
+
+    (channel as any).processSystemEvents();
+    expect(emitted).toHaveLength(0);
+  });
 });

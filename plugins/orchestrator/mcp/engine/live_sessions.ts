@@ -18,7 +18,7 @@ import { readSessions, type SessionEntry } from "./agent_channel_state";
  * `readSessions()` (SQLite-backed via agent_channel_state). Same liveness
  * contract, race-free under concurrent MCP writes.
  */
-function getAgentChannelStateDir(): string | null {
+export function getAgentChannelStateDir(): string | null {
   const projectDir =
     process.env.ORCHESTRATOR_PROJECT_ROOT ||
     process.env.CLAUDE_PROJECT_DIR ||

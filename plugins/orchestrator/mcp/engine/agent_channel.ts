@@ -54,7 +54,8 @@ export interface ChannelNotification {
       | "session_departed"
       | "override_set"
       | "override_cleared"
-      | "permission_request_pending";
+      | "permission_request_pending"
+      | "post_compact_recovery";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -446,6 +447,52 @@ export class AgentChannel {
           if (!request_id) break;
           if (verdict !== "allow" && verdict !== "deny" && verdict !== "defer_to_human") break;
           this.permissionRelay.resolveVerdict(request_id, { verdict, pa_session, pa_reason });
+          break;
+        }
+        case "post_compact_recovery": {
+          // e4774e4b: a peer SA just compacted; its post-compact hook
+          // deterministically solicited a backstop addressed to us (PA). The
+          // to_session/from_session guards above already ensure ONLY PA's
+          // instance (never the compacted SA itself) reaches here.
+          //
+          // Freshness guard: system_events has no auto-reaping and
+          // systemEventsLastSeenId resets to 0 on MCP restart (full replay),
+          // so a PA restart would otherwise re-surface every historical
+          // recovery ping at once. A backstop is only actionable while fresh
+          // (the compacted session has long moved on otherwise), so drop
+          // anything older than the window. This is advisory, not a relay -
+          // a missed stale one costs nothing.
+          const tsMs = new Date(String(ev.ts ?? "")).getTime();
+          const RECOVERY_FRESH_MS = 15 * 60_000;
+          if (!Number.isFinite(tsMs) || Date.now() - tsMs > RECOVERY_FRESH_MS) {
+            break;
+          }
+          const fromId8 = ev.from_session.slice(0, 8);
+          const task = String(ev.task ?? "").trim();
+          this.emit({
+            content:
+              `[post-compact recovery] SA-${fromId8} just compacted` +
+              (task ? ` (task: ${task})` : "") +
+              `. The lossy compaction summary may have dropped load-bearing ` +
+              `context this session was carrying. If you (PA) or a non-` +
+              `compacted peer hold context its checkpoint/notes likely don't ` +
+              `capture, surface it to @SA-${fromId8} now. Non-blocking, ` +
+              `advisory - a targeted gap-check, not a full context resend.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: fromId8,
+              from_role: "subordinate",
+              from_name: `<post_compact_recovery>`,
+              from_task: task || null,
+              event_type: "post_compact_recovery",
+              ts:
+                typeof ev.ts === "string"
+                  ? ev.ts
+                  : new Date().toISOString(),
+              pa_addressed: true,
+              addressed_to: [this.selfSession.session_id],
+            },
+          });
           break;
         }
         default:

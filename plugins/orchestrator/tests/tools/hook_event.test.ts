@@ -7,6 +7,8 @@ import {
   handleHookEvent,
   buildHookEnvelope,
   composePostCompactReorientation,
+  buildPeerBackstopEvent,
+  POST_COMPACT_RECOVERY_EVENT,
   HOOK_EVENTS,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
@@ -835,7 +837,7 @@ describe("hook_event dispatcher", () => {
     //     reflects the REAL running fleet - so the live branch is covered
     //     here, not through the impure shell). ---
 
-    test("composer: NO live PA → omits the @PA peer-backstop directive, keeps self-restore", () => {
+    test("composer: NO live PA → no peer-backstop mention at all, keeps self-restore", () => {
       const msg = composePostCompactReorientation({
         currentTask: "task two",
         checkpoint: "checkpoint body two",
@@ -844,18 +846,73 @@ describe("hook_event dispatcher", () => {
       expect(msg.toLowerCase()).toContain("compact");
       expect(msg).toContain("task two");
       expect(msg).toContain("checkpoint body two");
-      expect(msg).not.toContain("[post-compact recovery]");
+      expect(msg.toLowerCase()).not.toContain("peer-backstop");
+      expect(msg.toLowerCase()).not.toContain("post-compact recovery");
     });
 
-    test("composer: live PA → includes the one-shot @PA peer-backstop solicitation", () => {
+    test("composer: live PA → INFORMS that the backstop was auto-emitted on the agent's behalf; never instructs the agent to post (5d1c20fc trigger-design fix)", () => {
       const msg = composePostCompactReorientation({
         currentTask: "wiring the post-compact hook",
         checkpoint: "cp body",
         livePA: true,
       });
-      expect(msg).toContain("[post-compact recovery]");
-      expect(msg).toContain("wiring the post-compact hook");
+      // Informed it happened automatically...
+      expect(msg.toLowerCase()).toContain("on your behalf");
+      expect(msg.toLowerCase()).toContain("automatically");
       expect(msg.toLowerCase()).toContain("non-blocking");
+      // ...and explicitly NOT asked to post the line itself - the exact
+      // soft-compliance ask the 5d1c20fc live evidence proved fails.
+      expect(msg).not.toContain("post ONE line");
+      expect(msg.toLowerCase()).toContain("do not need to post");
+    });
+
+    test("buildPeerBackstopEvent: live PA → well-formed post_compact_recovery row, from compacted SA to PA", () => {
+      const ev = buildPeerBackstopEvent({
+        fromSession: "sa-uuid",
+        paSession: "pa-uuid",
+        currentTask: "doing the thing",
+        ts: "2026-05-18T07:00:00.000Z",
+      });
+      expect(ev).not.toBeNull();
+      expect(ev!.event_type).toBe(POST_COMPACT_RECOVERY_EVENT);
+      expect(ev!.event_type).toBe("post_compact_recovery");
+      expect(ev!.from_session).toBe("sa-uuid");
+      expect(ev!.to_session).toBe("pa-uuid");
+      expect(ev!.ts).toBe("2026-05-18T07:00:00.000Z");
+      expect(ev!.task).toBe("doing the thing");
+    });
+
+    test("buildPeerBackstopEvent: no live PA → null (no oracle/router to solicit)", () => {
+      expect(
+        buildPeerBackstopEvent({
+          fromSession: "sa-uuid",
+          paSession: null,
+          currentTask: "x",
+          ts: "t",
+        })
+      ).toBeNull();
+    });
+
+    test("buildPeerBackstopEvent: PA itself compacted (pa===from) → null (PA-self-backstop out of e4774e4b scope)", () => {
+      expect(
+        buildPeerBackstopEvent({
+          fromSession: "pa-uuid",
+          paSession: "pa-uuid",
+          currentTask: "x",
+          ts: "t",
+        })
+      ).toBeNull();
+    });
+
+    test("buildPeerBackstopEvent: null currentTask → coerced to empty string, still a valid event", () => {
+      const ev = buildPeerBackstopEvent({
+        fromSession: "sa-uuid",
+        paSession: "pa-uuid",
+        currentTask: null,
+        ts: "t",
+      });
+      expect(ev).not.toBeNull();
+      expect(ev!.task).toBe("");
     });
 
     test("composer: huge checkpoint capped with an honest truncation marker, bounded total", () => {

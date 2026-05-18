@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { SessionTracker } from "../engine/session_tracker";
-import { getLiveSessions } from "../engine/live_sessions";
+import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
+import { appendSystemEvent, type SystemEvent } from "../engine/agent_channel_state";
 import { now } from "../utils";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
@@ -385,11 +386,18 @@ function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
 // Delivers a BOUNDED durable-state digest as a top-level systemMessage
 // (SessionStart is not an HSO-valid hookEventName - verified vs
 // hook_envelope.test.ts ALLOWED_HSO_EVENT_NAMES; mirrors handlePreCompact's
-// shape). When a live PrimeAgent exists, also instructs the just-compacted
-// SA to solicit a one-shot, non-blocking PEER backstop (e4774e4b) so a
-// non-compacted peer can flag what the lossy compaction summary dropped -
-// the hook does not emit on the channel itself (that's the SA's output via
-// the filewatcher). Bounded-by-construction (05f072d3 cap discipline:
+// shape). When a live PrimeAgent exists, the handler ALSO emits the
+// e4774e4b peer-backstop solicitation DETERMINISTICALLY onto the
+// system_events bus (the exact mechanism the permission relay uses),
+// addressed to PA, so a non-compacted peer/PA can flag what the lossy
+// compaction summary dropped. This replaced the original agent-driven
+// design (the hook used to merely instruct the just-compacted SA to post
+// the line itself) - that soft instruction was shipped, exercised on a
+// perfect live case, and did nothing: the just-compacted agent is
+// precisely the agent least able to comply with an optional side-
+// instruction (note 5d1c20fc, the trigger-design defect). The composer now
+// only INFORMS the agent it happened automatically. Bounded-by-
+// construction (05f072d3 cap discipline:
 // briefing() proved an unbounded hook payload breaks the session entry).
 const SESSIONSTART_CHECKPOINT_CAP = 4000;
 const SESSIONSTART_TOTAL_CAP = 7000;
@@ -438,10 +446,12 @@ export function composePostCompactReorientation(opts: {
     );
   }
   if (livePA) {
+    // 5d1c20fc trigger-design fix: the hook now emits the peer-backstop
+    // solicitation to PA itself (deterministic, system_events bus). Do NOT
+    // ask the agent to post anything - the just-compacted agent voluntarily
+    // posting an optional line was the exact failure mode. Only INFORM it.
     parts.push(
-      "Then post ONE line to the channel (non-blocking - post it and continue, do not wait for a reply): " +
-        `"@PA [post-compact recovery]${currentTask ? ` task=${currentTask};` : ""} <your post-compact state in one line>; peers, flag anything load-bearing compaction may have dropped." ` +
-        "A non-compacted peer can backstop what your summary lost. This is a targeted gap-check - do NOT re-request your full prior context."
+      "A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. A non-compacted peer or PA may reply on the channel flagging load-bearing context the lossy summary dropped; fold any such replies in when they arrive. Non-blocking: continue your work. This is a targeted gap-check, not a full context re-request."
     );
   }
 
@@ -452,6 +462,39 @@ export function composePostCompactReorientation(opts: {
       '\n...[post-compact re-orientation truncated to fit the budget - lookup the latest checkpoint and call briefing({event:"compact"}) for the rest]';
   }
   return systemMessage;
+}
+
+/** system_events `event_type` for the e4774e4b peer-backstop solicitation.
+ *  Single source of truth - shared by the producer (this file) and the
+ *  consumer (agent_channel.ts processSystemEvents). */
+export const POST_COMPACT_RECOVERY_EVENT = "post_compact_recovery" as const;
+
+/**
+ * PURE builder for the e4774e4b peer-backstop system_events row. Returns the
+ * SystemEvent to append, or `null` when there is no distinct live PA to
+ * address (no oracle/router listening = nothing to solicit; a PA that
+ * compacted is out of scope - PA is the backstop SOURCE in e4774e4b's
+ * design, not a recipient). Kept pure + exported so the payload contract is
+ * unit-tested deterministically; the impure getLiveSessions() /
+ * appendSystemEvent() glue in handleSessionStartCompact stays
+ * untested-for-live exactly like the other getLiveSessions() call site (same
+ * convention as composePostCompactReorientation - note 5d1c20fc).
+ */
+export function buildPeerBackstopEvent(opts: {
+  fromSession: string;
+  paSession: string | null;
+  currentTask: string | null;
+  ts: string;
+}): SystemEvent | null {
+  const { fromSession, paSession, currentTask, ts } = opts;
+  if (!fromSession || !paSession || paSession === fromSession) return null;
+  return {
+    event_type: POST_COMPACT_RECOVERY_EVENT,
+    from_session: fromSession,
+    to_session: paSession,
+    ts,
+    task: currentTask ?? "",
+  };
 }
 
 function handleSessionStartCompact(
@@ -482,11 +525,36 @@ function handleSessionStartCompact(
   }
 
   let livePA = false;
+  let paSession: string | null = null;
   try {
     const live = getLiveSessions();
-    livePA = !!live && live.some((e) => e.role === "prime");
+    const pa = live?.find((e) => e.role === "prime") ?? null;
+    livePA = !!pa;
+    paSession = pa?.session_id ?? null;
   } catch {
     livePA = false;
+    paSession = null;
+  }
+
+  // e4774e4b (5d1c20fc trigger-design fix): emit the peer-backstop
+  // solicitation DETERMINISTICALLY on the system_events bus (the same
+  // mechanism the permission relay uses), addressed to PA. The prior design
+  // relied on the just-compacted agent voluntarily posting a channel line -
+  // shipped, exercised on a perfect live case, did nothing. PA's filewatcher
+  // surfaces this within ~1.5s with zero dependence on the compacted agent.
+  // Strictly non-fatal: the re-orientation systemMessage MUST return whether
+  // or not the bus write succeeds (bus may be absent on non-channel projects).
+  try {
+    const ev = buildPeerBackstopEvent({
+      fromSession: sid,
+      paSession,
+      currentTask,
+      ts: now(),
+    });
+    const stateDir = getAgentChannelStateDir();
+    if (ev && stateDir) appendSystemEvent(stateDir, ev);
+  } catch {
+    /* agent-channel bus unavailable - non-fatal; systemMessage still re-orients */
   }
 
   return {
