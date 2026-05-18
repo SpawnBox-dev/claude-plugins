@@ -720,4 +720,109 @@ describe("agent-channel routing E2E", () => {
     // cascade into SA-target.
     expect(targetContent).not.toContain("does not exist");
   });
+
+  // Test H (2026-05-18 FIELD-FAIL regression lock - WI 7ff34714 REOPENED):
+  // PA's idiomatic directive header is markdown-BOLDED: "**Directive:**". That
+  // paragraph ends in ":**", and the original isColonHeader did
+  // `text.trimEnd().endsWith(":")` - trimEnd strips whitespace, NOT markdown -
+  // so a bolded header's last char is "*", endsWith(":") is false, the sticky
+  // cascade never opened, and every continuation paragraph was silently
+  // dropped. Wire-confirmed from the live PA 6a2cab38 -> FE-AGENT-01 19703445
+  // transcript diff, 2026-05-18 18:30 (FE received the header line ONLY; the
+  // identical content re-sent single-newline at 18:31 delivered in full).
+  // Fixture is the verbatim shape of that dropped message. Fix: isColonHeader
+  // strips a trailing run of markdown emphasis/code/strike markers before the
+  // colon test.
+  test("BOLDED colon-header directive: SA receives ALL continuation paragraphs (2026-05-18 field-fail lock)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const target = makeSession("subordinate", "abc12345", "SA-target");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, target);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    // Verbatim shape of the real dropped message: a markdown-bolded header
+    // ending ":**", then blank-line-separated continuation paragraphs.
+    const msg = [
+      "@SA-abc12345 - **Jarid directive, mandatory in the implementation process:**",
+      "MANDATORY in the implementation process, all three of you:",
+      "(1) Each code-writing agent runs its own review after writing it.",
+      "(2) Do NOT blindly trust the reviewer; verify against the actual code.",
+    ].join("\n\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const targetReceived: ChannelNotification[] = [];
+    const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
+      targetReceived.push(n),
+    );
+    targetChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    targetChan.stop();
+
+    const got = targetReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(got.length).toBe(1);
+    expect(got[0]).toContain("Jarid directive, mandatory");
+    // THE LOCK: every continuation paragraph must reach the SA, not just the
+    // bolded header line.
+    expect(got[0]).toContain("MANDATORY in the implementation process, all three");
+    expect(got[0]).toContain("(1) Each code-writing agent runs its own review");
+    expect(got[0]).toContain("(2) Do NOT blindly trust the reviewer");
+  });
+
+  // Test I (markdown-strip FALSE-POSITIVE lock): stripping trailing markdown
+  // for the colon test must NOT promote a bolded NON-colon directive into a
+  // colon-header. "@SA-x **First directive is complete.**" ends in markdown
+  // but has NO colon - it stays a COMPLETE directive and must open NO cascade,
+  // so the following user-private paragraph is NOT leaked to the SA. Locks the
+  // b4c37849 mixed-audience invariant across the isColonHeader change. Must
+  // hold BOTH before and after the fix.
+  test("bolded NON-colon addressed paragraph still opens NO cascade (markdown-strip false-positive lock)", async () => {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const src = makeSession("subordinate", "50ce0bba", "SA-src");
+    const tA = makeSession("subordinate", "abc12345", "SA-A");
+    const tB = makeSession("subordinate", "deadbe11", "SA-B");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, src);
+    writeSession(stateDir, tA);
+    writeSession(stateDir, tB);
+
+    const srcJsonl = join(projectsHashDir, `${src.session_id}.jsonl`);
+    writeFileSync(srcJsonl, "");
+    const msg = [
+      "@SA-abc12345 **First directive is complete.**",
+      "Private aside to Jarid: the larger architectural pivot is needed.",
+      "@SA-deadbe11 **Second directive for you.**",
+    ].join("\n\n");
+    appendAssistantEvent(srcJsonl, msg);
+
+    const aReceived: ChannelNotification[] = [];
+    const bReceived: ChannelNotification[] = [];
+    const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
+    const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
+    aChan.start();
+    bChan.start();
+    await new Promise((r) => setTimeout(r, 50));
+    aChan.stop();
+    bChan.stop();
+
+    const aContents = aReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(aContents.length).toBe(1);
+    expect(aContents[0]).toContain("First directive is complete");
+    expect(aContents[0]).not.toContain("Private aside");
+    expect(aContents[0]).not.toContain("Second directive");
+
+    const bContents = bReceived
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(bContents.length).toBe(1);
+    expect(bContents[0]).toContain("Second directive for you");
+    expect(bContents[0]).not.toContain("Private aside");
+    expect(bContents[0]).not.toContain("First directive");
+  });
 });

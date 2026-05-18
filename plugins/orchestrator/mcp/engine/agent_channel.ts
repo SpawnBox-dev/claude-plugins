@@ -726,11 +726,29 @@ function splitContentUnits(content: string): ContentUnit[] {
   return units;
 }
 
-/** True when the last non-whitespace character is a colon - the signal that
- *  an addressed paragraph is a HEADER introducing continuation paragraphs
- *  (the documented 7ff34714 trap pattern: "@SA-x directive:"). */
+/** True when the addressed paragraph is a colon-HEADER introducing
+ *  continuation paragraphs (the 7ff34714 trap pattern: "@SA-x directive:").
+ *
+ *  The colon may be wrapped in trailing markdown emphasis/code/strike markers:
+ *  PA's idiomatic directive header is BOLDED - "**Directive:**" - which ends
+ *  in ":**". trimEnd() strips whitespace but NOT markdown, so a naive
+ *  `.endsWith(":")` misreads every bolded header as a non-colon COMPLETE
+ *  directive: the sticky cascade never opens and every continuation paragraph
+ *  is silently dropped. This was the 2026-05-18 field-fail (wire-confirmed,
+ *  PA 6a2cab38 -> FE-AGENT-01 19703445: receiver got the header line only;
+ *  the same content re-sent single-newline delivered in full). The original
+ *  7ff34714 fix only covered a bare trailing colon, never PA's actual idiom.
+ *
+ *  Strip a trailing run of markdown markers (`*` `_` `` ` `` `~`) then re-trim
+ *  before the colon test, so "**...:**", "*...:*", "`...:`", "__...:__",
+ *  "~~...:~~" all register as headers. This only WIDENS recognition: a
+ *  paragraph with no logical trailing colon (e.g. "**done.**" -> "**done.")
+ *  still resolves to non-colon, so a complete directive still opens NO cascade
+ *  and the b4c37849 mixed-audience invariant is preserved (Test I locks this;
+ *  Test H locks the field-fail). */
 function isColonHeader(text: string): boolean {
-  return text.trimEnd().endsWith(":");
+  const stripped = text.trimEnd().replace(/[*_`~]+$/, "").trimEnd();
+  return stripped.endsWith(":");
 }
 
 /**

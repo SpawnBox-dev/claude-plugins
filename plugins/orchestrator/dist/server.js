@@ -24629,7 +24629,8 @@ function splitContentUnits(content) {
   return units;
 }
 function isColonHeader(text) {
-  return text.trimEnd().endsWith(":");
+  const stripped = text.trimEnd().replace(/[*_`~]+$/, "").trimEnd();
+  return stripped.endsWith(":");
 }
 function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
   const units = splitContentUnits(content);
