@@ -6,6 +6,33 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-05-17 - Routing/gate/budget hardening + post-compaction handoff + PA-delegable convention (0.30.39)
+
+**Change.** Seven-workstream release (one commit):
+
+1. **Agent-channel paragraph-routing trap.** `filterParagraphsForReceiver` rewritten as a **colon-gated sticky cascade** + a fenced-code-block-aware tokenizer (`splitContentUnits`, CommonMark closer-length rule). A colon-headed addressed paragraph cascades its continuation paragraphs/code-blocks to the same SA until another address redefines routing; a non-colon addressed paragraph opens NO cascade. `@SA-<id8>` inside a fenced block is literal.
+2. **Type-aware dup-gate.** Flat 0.75 → per-type (`anti_pattern` 0.85; `decision`/`convention` 0.75; genuine dupes ≥0.90 still block all). Sub-threshold near-matches surface a NON-blocking consolidation advisory on the normal AND `accept_new` paths.
+3. **Briefing token budget.** `briefing()` (mandatory first call) overflowed the model tool-output limit and returned an ERROR. Now bounded by construction: hard per-section caps + provably-total `capWithMarker` + a defense-in-depth tail clamp, every truncation honestly signposted.
+4. **Decision-surfacing UI-tool visibility.** `agent_channel_filter` now forwards a bounded summary of `AskUserQuestion`/`ExitPlanMode` (non-mutating `tool_use`, previously dropped) so channel observers (PA) see an SA's question/plan.
+5. **Tag normalization.** `parseTagList`/`normalizeTagString` heal JSON-array-stringified tags at every read+write chokepoint (briefing Neglected/drift no longer char-splits).
+6. **PA-delegable-question convention (pure, no code).** SA-side (`orchestrating` skill): a decision classified PA-delegable per orchestrator-KB note `c90610f1` is addressed to a *live* PA on the channel; no live PA / ambiguous / Jarid-only → native `AskUserQuestion`. PA-side (`prime-agent.md`): may answer as artificial-user only on an independently VERIFIED premise.
+7. **Post-compaction handoff + peer-backstop.** A second `SessionStart` `matcher:"compact"` hook → `_hook_event` (`handleSessionStartCompact`) injects a bounded re-orientation digest (latest checkpoint + current_task) as a top-level `systemMessage`, and — when a live PA exists — instructs the just-compacted SA to post one non-blocking `@PA` peer-backstop solicitation. The universal `SessionStart` stays the bash hook.
+
+**Why.** 1, 4, 5 were live-reproduced cross-session content-loss/observability defects (the routing trap constrained every PA↔SA message; PA was blind to an SA's `AskUserQuestion`, causing a misattributed-silence incident). 3 broke cold-start for the heaviest briefing consumer (reproduced independently by an SA and PA same-day). 2 was a compounding daily friction (over-blocking the granular-by-design `anti_pattern` type). 6 leverages PA-as-artificial-user for delegable decisions while reserving the user's attention. 7 leverages that peers generally don't compact simultaneously, so a non-compacted peer can backstop what a lossy compaction summary dropped — without re-inventing compaction.
+
+**Rejected.**
+- Pure "address sticks until next address" cascade (note `25566c45`'s recommendation) — provably breaks the locked `b4c37849` mixed-audience regression test; the colon-gate is the discriminator that fixes the trap while preserving no-leak.
+- Generic-tool-result interception for #6 — authoritatively verified impossible: Claude Code exposes no surface to inject a built-in tool's result (PreToolUse is input-only; CC `PostToolUse` has no `updatedToolOutput`; `canUseTool` is allow/deny). So #6 is necessarily a plugin convention, not interception.
+- Structural verify-then-answer gate (#6 spectrum #2/#3) — deferred per the KISS/reuse call; #1 leaves verify-then-answer behavioral with the residual recorded (revisit-trigger: any observed propagated-premise PA answer).
+- `SessionStart` as an HSO event — refuted by the plugin's own `hook_envelope.test.ts` `ALLOWED_HSO_EVENT_NAMES` (a recorded-design self-correction); delivers via top-level `systemMessage` like `PreCompact`.
+- Re-inventing compaction in #7 — explicitly out; the digest is a targeted gap-check, not a re-sync.
+
+**Test additions.** TDD throughout. New: `tests/integration/agent_channel_routing.test.ts` (colon-cascade/code-block/b4c37849-lock), `tests/engine/tag-normalization.test.ts`, `tests/engine/agent_channel_filter.test.ts` (UI-tool forwarding), `tests/tools/orient.test.ts` (briefing-budget ACs + c658ce38), `tests/tools/remember.test.ts` (type-aware threshold + advisory), `tests/tools/hook_event.test.ts` (pure `composePostCompactReorientation` livePA branches + hermetic handler + the SessionStart-not-HSO envelope guard). Three independent code-review findings verified+fixed+locked. Full suite 556 pass / 0 fail, typecheck clean. Research (compaction-hook surface + generic-relay feasibility) independently WebFetch-verified; two subagent overclaims caught and corrected.
+
+**Shipped:** v0.30.39 (commit `5bc8049`). Closes work_items `7ff34714`, `fc7fcb0d`, `05f072d3`, `167ffbaf`, `e4774e4b`, `7d689ed7`; `ecbea9ac`/`45be9ba6` closed obsolete; `dd5d81d8`/`c658ce38` resolved in-place.
+
+---
+
 ## 2026-05-11 - Per-PID active-session resolution closes impostor-MCP race (0.30.19)
 
 **Change.** The session-start hook now writes the current session_id to BOTH `active-session-<ppid>` (per-claude-PID) AND `active-session` (legacy single-file fallback). The MCP's `getFallbackSessionId()` walks the process tree (WMIC on Windows, `/proc/<pid>/stat` on Linux) to find the claude.exe ancestor PID, then reads `active-session-<that_pid>` preferentially. Falls back to the legacy single-file with an explicit stderr warning when per-PID is missing.
