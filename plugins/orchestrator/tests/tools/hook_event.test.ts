@@ -12,6 +12,24 @@ import {
   HOOK_EVENTS,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// TEST HERMETICITY (anti_pattern 2fe2e609 / WI per that note): the SessionStart
+// compact handler emits a real post_compact_recovery row via
+// appendSystemEvent(getAgentChannelStateDir(), ...). getAgentChannelStateDir()
+// resolves ORCHESTRATOR_PROJECT_ROOT || CLAUDE_PROJECT_DIR || cwd; left
+// unisolated it hits the REAL project agent-channel DB and leaks fake
+// pa_addressed advisories onto the LIVE channel (PA-observed 2026-05-18:
+// synthetic sessions SC1/SC5/parity-* reaching the live PA). Point the suite's
+// project root at an empty temp dir so getAgentChannelStateDir() finds no
+// .orchestrator-state and returns null -> the compact handler skips the emit.
+// Production-zero (test env only); matches this file's existing hermetic
+// intent ("no livePA-dependent assertion - that'd depend on the real fleet").
+process.env.ORCHESTRATOR_PROJECT_ROOT = mkdtempSync(
+  join(tmpdir(), "hookevt-iso-"),
+);
 
 function freshSetup(): { db: Database; tracker: SessionTracker } {
   const db = new Database(":memory:");
