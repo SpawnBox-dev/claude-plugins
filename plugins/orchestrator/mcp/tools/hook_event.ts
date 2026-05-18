@@ -412,7 +412,19 @@ export function composePostCompactReorientation(opts: {
   const parts: string[] = [
     "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy.",
   ];
-  if (currentTask) parts.push(`Your task: ${currentTask}`);
+  // The currentTask comes verbatim from session_registry.current_task, which
+  // persists indefinitely until the session next calls update_session_task -
+  // so right after a compaction it can be STALE (an old broadcast from before
+  // the work pivoted). Presenting it as a bald "Your task: X" assertion at the
+  // single most context-fragile moment actively misleads. Hedge it to match
+  // this message's own "verify against live reality - the summary is lossy"
+  // spirit (observed 2026-05-18 during the 167ffbaf-xs live-confirm: a months-
+  // old probe task surfaced authoritatively post-compact). Mechanism is
+  // correct; the input is just not guaranteed fresh - say so.
+  if (currentTask)
+    parts.push(
+      `Your last-broadcast task (from session_registry - may be STALE if work moved on since it was set; reconcile against the checkpoint below + live reality before trusting it): ${currentTask}`
+    );
   if (checkpoint) {
     const capped =
       checkpoint.length > SESSIONSTART_CHECKPOINT_CAP

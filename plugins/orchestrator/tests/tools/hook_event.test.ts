@@ -880,6 +880,21 @@ describe("hook_event dispatcher", () => {
       expect(msg).not.toContain("null");
     });
 
+    test("composer: currentTask is hedged as possibly-stale, not asserted authoritatively (167ffbaf-xs cosmetic follow-up)", () => {
+      const msg = composePostCompactReorientation({
+        currentTask: "an old stale probe task",
+        checkpoint: "fresh checkpoint body",
+        livePA: false,
+      });
+      // The task value is still surfaced (it's a useful pointer)...
+      expect(msg).toContain("an old stale probe task");
+      // ...but NOT as a bald authoritative "Your task: X" assertion - the
+      // post-compact moment is the worst time to feed a stale task as fact.
+      expect(msg).not.toContain("Your task: an old stale probe task");
+      expect(msg.toLowerCase()).toContain("stale");
+      expect(msg.toLowerCase()).toMatch(/reconcile|verify/);
+    });
+
     // --- Handler: hermetic integration (DB digest + non-HSO envelope shape).
     //     No livePA-dependent assertion here (that'd depend on the real
     //     fleet); the HSO-trap guard is environment-independent. ---

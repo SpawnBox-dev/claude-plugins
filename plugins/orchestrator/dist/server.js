@@ -23519,7 +23519,7 @@ function composePostCompactReorientation(opts) {
     "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy."
   ];
   if (currentTask)
-    parts.push(`Your task: ${currentTask}`);
+    parts.push(`Your last-broadcast task (from session_registry - may be STALE if work moved on since it was set; reconcile against the checkpoint below + live reality before trusting it): ${currentTask}`);
   if (checkpoint) {
     const capped = checkpoint.length > SESSIONSTART_CHECKPOINT_CAP ? checkpoint.slice(0, SESSIONSTART_CHECKPOINT_CAP) + `
 ...[checkpoint truncated for the post-compact budget - lookup the latest checkpoint note for the full content]` : checkpoint;
