@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { z } from "zod";
 import { applyMigrations } from "../../mcp/db/schema";
 import { SessionTracker } from "../../mcp/engine/session_tracker";
 import {
   handleHookEvent,
   buildHookEnvelope,
   composePostCompactReorientation,
+  HOOK_EVENTS,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
 
@@ -916,5 +918,51 @@ describe("hook_event dispatcher", () => {
       expect(r.systemMessage!.toLowerCase()).toContain("compact");
       expect(r.systemMessage).not.toContain("undefined");
     });
+  });
+});
+
+// 167ffbaf-xs regression. The `_hook_event` MCP tool's RUNTIME Zod `event`
+// enum (server.ts) and the COMPILE-TIME HookEvent type must stay in sync
+// with the dispatcher switch + hooks.json. They drifted in 0.30.41 and
+// earlier: the Zod enum was hand-maintained separately and never got
+// "SessionStart" when 167ffbaf added it everywhere else. Live consequence:
+// CC's SessionStart `matcher:"compact"` hook was rejected
+// `-32602 Invalid arguments for tool _hook_event` AT THE MCP BOUNDARY, the
+// dispatcher never ran, and post-compact re-orientation silently never
+// surfaced. The pre-existing "SessionStart (post-compact re-orientation)"
+// tests pass even WITH the bug because they call handleHookEvent()
+// directly and never cross the Zod schema. These boundary-crossing tests
+// are the ones that would have caught it; both surfaces now derive from
+// the single source HOOK_EVENTS so the class of drift is structurally
+// impossible.
+describe("_hook_event boundary: HOOK_EVENTS <-> Zod schema <-> dispatcher parity (167ffbaf-xs)", () => {
+  // Reconstructs the EXACT expression server.ts uses for the tool's
+  // `event` validator, against the same imported single-source array.
+  const EventEnum = z.enum(HOOK_EVENTS);
+
+  test("the runtime Zod enum accepts every HookEvent - explicitly including SessionStart", () => {
+    expect(HOOK_EVENTS).toContain("SessionStart");
+    for (const e of HOOK_EVENTS) {
+      expect(() => EventEnum.parse(e)).not.toThrow();
+    }
+  });
+
+  test("SessionStart parses at the boundary (the exact 0.30.41 -32602 failure)", () => {
+    // Pre-fix this threw a ZodError, which MCP surfaced to Claude Code as
+    // `-32602 Invalid arguments for tool _hook_event`.
+    expect(EventEnum.parse("SessionStart")).toBe("SessionStart");
+  });
+
+  test("every HOOK_EVENTS member is handled by the dispatcher without throwing", () => {
+    for (const e of HOOK_EVENTS) {
+      const { db, tracker } = freshSetup();
+      expect(() =>
+        handleHookEvent({ db, tracker }, { event: e, session_id: `parity-${e}` })
+      ).not.toThrow();
+    }
+  });
+
+  test("an event NOT in HOOK_EVENTS is rejected by the boundary validator", () => {
+    expect(() => EventEnum.parse("NotARealEvent")).toThrow();
   });
 });

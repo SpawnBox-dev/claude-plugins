@@ -21,23 +21,38 @@ function sanitizeSessionId(sid: string): string {
 // responsible for the entire response shape (additionalContext,
 // permissionDecision, decision:"block", systemMessage) for that event.
 // Returning {} is the fast path - empty JSON to stdout = zero token cost.
-export type HookEvent =
-  | "UserPromptSubmit"
-  | "PreToolUse"
-  | "PostToolUse"
-  | "PostToolUseFailure"
-  | "PreCompact"
+// SINGLE SOURCE OF TRUTH for hook event names. Both the `HookEvent` type
+// (compile-time) AND the `_hook_event` MCP tool's Zod `event` enum
+// (runtime validation in server.ts) derive from THIS array - they MUST
+// stay in lockstep. They drifted in 0.30.41 and earlier: the Zod enum was
+// hand-maintained separately and never got "SessionStart" when 167ffbaf
+// added it to the type/dispatcher/hooks.json. Result: Claude Code's
+// SessionStart `matcher:"compact"` hook hit `-32602 Invalid arguments for
+// tool _hook_event` at the MCP boundary, the dispatcher never ran, and
+// post-compact re-orientation silently never surfaced (167ffbaf-xs).
+// Deriving the type AND the runtime validator from one const makes that
+// class of drift structurally impossible. Order mirrors the dispatcher
+// switch for readability; order is not semantically significant.
+export const HOOK_EVENTS = [
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PreCompact",
   // 167ffbaf: post-compaction SessionStart. Routed via hooks.json
   // `matcher:"compact"` ONLY (the universal SessionStart stays the bash
   // hook), so the dispatcher's "SessionStart" case is unambiguously the
   // post-compact one. NOT added to HSO_EVENTS - SessionStart is not an
   // HSO-valid hookEventName (see hook_envelope.test.ts ALLOWED_HSO_EVENT_
   // NAMES); it delivers via top-level systemMessage like PreCompact.
-  | "SessionStart"
-  | "Stop"
-  | "StopFailure"
-  | "SubagentStop"
-  | "TaskCompleted";
+  "SessionStart",
+  "Stop",
+  "StopFailure",
+  "SubagentStop",
+  "TaskCompleted",
+] as const;
+
+export type HookEvent = (typeof HOOK_EVENTS)[number];
 
 export interface HookEventArgs {
   event: HookEvent;

@@ -45,7 +45,7 @@ const PLUGIN_VERSION: string = (() => {
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
 import { handleUpdateSessionTask } from "./tools/session_task";
-import { handleHookEvent, buildHookEnvelope, type HookEvent } from "./tools/hook_event";
+import { handleHookEvent, buildHookEnvelope, HOOK_EVENTS, type HookEvent } from "./tools/hook_event";
 import { AgentChannel } from "./engine/agent_channel";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
@@ -2059,17 +2059,12 @@ server.tool(
   "_hook_event",
   "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.",
   {
-    event: z.enum([
-      "UserPromptSubmit",
-      "PreToolUse",
-      "PostToolUse",
-      "PostToolUseFailure",
-      "PreCompact",
-      "Stop",
-      "StopFailure",
-      "SubagentStop",
-      "TaskCompleted",
-    ]),
+    // Derived from the single source of truth in hook_event.ts so this
+    // runtime validator can never again drift from the HookEvent type /
+    // dispatcher / hooks.json (the 167ffbaf-xs SessionStart:compact bug:
+    // the old hand-maintained enum here was missing "SessionStart", so CC's
+    // post-compact hook was rejected -32602 at this boundary).
+    event: z.enum(HOOK_EVENTS),
     session_id: z.string(),
     tool_name: z.string().optional(),
     agent_id: z.string().optional(),

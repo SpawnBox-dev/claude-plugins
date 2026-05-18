@@ -23288,6 +23288,18 @@ function handleUpdateSessionTask(tracker, args) {
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
+var HOOK_EVENTS = [
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PreCompact",
+  "SessionStart",
+  "Stop",
+  "StopFailure",
+  "SubagentStop",
+  "TaskCompleted"
+];
 var HSO_EVENTS = new Set([
   "UserPromptSubmit",
   "PreToolUse",
@@ -26247,17 +26259,7 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
   return { content: [{ type: "text", text }] };
 });
 server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.", {
-  event: exports_external.enum([
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "PreCompact",
-    "Stop",
-    "StopFailure",
-    "SubagentStop",
-    "TaskCompleted"
-  ]),
+  event: exports_external.enum(HOOK_EVENTS),
   session_id: exports_external.string(),
   tool_name: exports_external.string().optional(),
   agent_id: exports_external.string().optional(),
