@@ -98,10 +98,12 @@ Related tables:
 - ~~`session_messages`~~ - **dropped in migration 20 (R8, 0.29.0)**. Was R6 inter-session messaging payloads; replaced by agent-channel real-time notifications.
 - ~~`session_message_reads`~~ - **dropped in migration 20 (R8, 0.29.0)**. Was R6 per-recipient read tracking.
 
-**Agent-channel state (R8, 0.29.0)** - lives in the filesystem, not the DB, because it's per-instance and per-session-lifetime:
-- `<project>/.orchestrator-state/agent-channel/sessions.json` - registry of currently-active sessions (PA + SAs) with role, name, heartbeat. Each MCP instance writes its own entry on startup, touches it on a 30s heartbeat, removes it on clean shutdown.
-- `<project>/.orchestrator-state/agent-channel/state.json` - override state: `pa_global_pause` + per-SA pauses set by `/pa-pause` skills.
-- `<project>/.orchestrator-state/agent-channel/offsets-<receiver_id8>.json` - per-instance JSONL byte offsets so the filewatcher can resume reads without replaying.
+**Agent-channel state (R8 0.29.0; migrated to SQLite in 0.30.35)** - lives in the filesystem (not the project DB) because it's per-instance and per-session-lifetime. Originally three flat JSON files written via a temp-file+rename atomicWrite; **0.30.35 consolidated all of it into ONE SQLite DB** `<project>/.orchestrator-state/agent-channel/agent_channel.db` (WAL mode) to kill a concurrent read-modify-write stomping race (N MCPs heartbeating + per-tick offset writes could clobber each other, making a live MCP invisible to the fleet for 60-120s). Tables (authoritative DDL in `agent_channel_state.ts`):
+- `sessions` - registry of active sessions (PA + SAs): `session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind`. Each MCP upserts its own row on startup, touches it on a 30s heartbeat, deletes it on clean shutdown.
+- `global_pause` (singleton `id=1`) + `sa_pause` - override state (`/pa-pause`): global pause + per-SA pauses.
+- `offsets` (`receiver_id8, jsonl_path, offset_bytes`) - per-receiver JSONL byte offsets so the filewatcher resumes without replaying.
+- `system_events` (0.30.36+) - cross-MCP event bus (permission request/verdict, post-compact peer-backstop); auto-increment `id`, receivers track `lastSeenId` in memory.
+The retired flat `sessions.json` / `state.json` / `offsets-*.json` are migrated-then-deleted on first access (idempotent, mixed-version-tolerant); their pre-0.30.35 `*.tmp.*` atomicWrite debris is reclaimed by a one-time best-effort age-gated sweep added in 0.30.50.
 
 Global-only tables:
 
@@ -161,6 +163,8 @@ Twenty-three tools registered in `mcp/server.ts` (22 agent-callable + 1 internal
 The orchestrator MCP server declares the `experimental: { 'claude/channel': {} }` capability. Cross-session events are routed in real-time via `notifications/claude/channel` - the same primitive the official Discord channels plugin uses.
 
 There is **no `send_message` / `read_messages` tool** (deleted in R8). Communication happens by typing `@PA` / `@SA-<id8>` / `@all` in your terminal output. The `agent_channel.ts` filewatcher in each session's MCP instance watches every active JSONL transcript, parses the addressing, and fires channel notifications targeted at the session that should receive each event.
+
+**Multi-part messages: the EXPLICIT ENVELOPE is the default (0.30.51).** Routing/splitting is parsed RECEIVER-side. A bare `@SA-<id8>` one-liner needs nothing special. For ANY multi-paragraph / markdown message, wrap it: a line `@@@ @SA-<id8>` (or `@@@ @PA` / `@@@ @SA-a,@SA-b` / `@@@ @all`), the content in any shape (blank lines, bold/colon headers, bullets, ``` fences), then a bare `@@@` closer - delivered whole and verbatim to those targets only, inner `@`-mentions literal, cascade-transparent. The envelope tokenizer (`splitContentUnits`) shipped 0.30.46 (WI eabc89b6); it became the documented default in 0.30.51 once the fleet was uniformly >=0.30.46 and the markdown-aware colon-header fix (0.30.45, WI 7ff34714) was bilaterally live-confirmed. The legacy implicit path - a bare one-liner, or a colon-header (`@SA-<id8> ...:`) opening a sticky cascade over following unaddressed paragraphs (a non-colon addressed paragraph opens NO cascade: the b4c37849 mixed-audience invariant) - is retained only as the fallback for a positively-known-pre-0.30.46 receiver. Full rationale: `DECISIONS.md` 0.30.51; canonical convention orchestrator-KB `872e0f2d`.
 
 | Tool | Purpose |
 |---|---|
@@ -271,7 +275,7 @@ Descriptive mentions in mid-prose ("my warm tick addresses @SA-95e6890e every 50
 
 **`agent_channel_filter.ts`** - pure filter. Decides which JSONL events warrant cross-session forwarding. Forwards: user input, assistant text, mutating tool calls (Edit/Write/Bash/MultiEdit/git_*), summaries. Drops: tool_result bodies (too noisy; PA can read JSONL ad-hoc if it cares), system messages, read-only tool calls. Walks all blocks of a multi-block assistant message and prefers text over tool-use for forwarding, so a Read-then-text pattern doesn't lose the text.
 
-**`agent_channel_state.ts`** - atomic-write helpers for the three filesystem state files (`sessions.json`, `state.json`, `offsets-<receiver_id8>.json`). Uses temp-file + rename pattern so concurrent reads from sibling instances see either the old or new state, never a torn write. Tolerant readers - parse failure returns empty/default rather than throwing.
+**`agent_channel_state.ts`** - SQLite-backed state layer (0.30.35+) over the single `agent_channel.db` (WAL): `sessions` / `global_pause` / `sa_pause` / `offsets` / `system_events` (0.30.36). WAL + `INSERT OR REPLACE` upserts give atomic, race-free concurrent access by N MCPs (no read-modify-write window) - this replaced the prior temp-file+rename atomicWrite over flat JSON, whose stomping race + orphaned `*.tmp.*` debris were the reason for the migration. Legacy flat files are migrated-then-unlinked on first access; a one-time age-gated best-effort `*.tmp.*` sweep (0.30.50) reclaims the pre-migration debris. Tolerant readers - failure returns empty/default rather than throwing.
 
 The shared filesystem state replaces the per-process `inboxCounters` Map and the SQLite `session_messages` table that the R6/R7 architecture relied on. No counter drift, no per-session inbox, no polling - notifications fire in real-time as soon as the filewatcher sees the JSONL line written.
 

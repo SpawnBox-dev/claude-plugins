@@ -6,6 +6,36 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-05-19 - Cross-agent messaging default flipped to the explicit envelope (0.30.51)
+
+**Change.** The EXPLICIT ENVELOPE (`@@@ @SA-<id8>` ... bare `@@@`; WI `eabc89b6`, shipped 0.30.46/0.30.47) is now the DOCUMENTED DEFAULT for any multi-paragraph/markdown cross-agent message, flipped across all three steering surfaces: `mcp/server.ts` MCP instructions, `agents/prime-agent.md`, and orchestrator-KB canonical convention `872e0f2d`. The prior "trap-safe single-paragraph is the safe default until the fleet is uniformly >=0.30.46" posture is RETIRED; "unsure -> use the envelope" (the old "unsure -> trap-safe" is inverted). The version concern is demoted to a narrow "only if you positively know a specific receiver is pre-0.30.46" edge-case backstop. WI `81903c51` re-scoped: its item-2 (standing-instruction bake-in) is fulfilled by this flip; item-1 (sender-side loud truncation warning) demoted to optional.
+
+**Why.** The envelope existed and worked since 0.30.46 but was gated behind a conservative mixed-version-rollout hedge. Both un-gate conditions are now met + verified: (a) the live fleet is uniformly >=0.30.46 - per-session MCPs each boot from the installed version, enumerated all 0.30.49 (topology note `70d2f7a0`); (b) the markdown-aware `isColonHeader` fix (0.30.45, WI `7ff34714`) is shipped AND bilaterally live-confirmed (PROBE-1). First-hand evidence that the steering, not any code, was the sole constraint: a PA operated trap-safe an entire session and never used the envelope purely because the doc said so, though the envelope was provably safe fleet-wide the whole time.
+
+**Rejected.** Deleting the version caveat entirely - a future breaking envelope change or a very-long-lived pre-0.30.46 session reintroduces mixed-version risk, so the edge-case backstop (item-1) is retained, just demoted. Building item-1's sender-side warning now - deferred (low value once the envelope is the default; it only guards hand-rolled non-envelope multi-part messages), left as an optional Jarid-gated item.
+
+**Test additions.** None - the flip is doc/instruction/convention text only (`server.ts` instructions string, `prime-agent.md`, KB note); no test asserts on the wording (verified by grep). Full suite 590 pass / 0 fail unchanged.
+
+**Shipped:** v0.30.51 (commit `c1f0758`). Re-scopes WI `81903c51`. Supersedes the re-instated trap-safe mandate in KB convention `872e0f2d` (recorded via the dated-trail update fallback - `supersede_note` fails on that heavily-linked note; that tooling defect is tracked as WI `0d060c1f`).
+
+---
+
+## 2026-05-19 - Skill/doc reconciliation with post-0.30.35 SQLite reality + tmp-debris sweep (0.30.50)
+
+**Change.** (1) `skills/pa-bootstrap/SKILL.md` (steps 2/3/4/6 + frontmatter + hard-rules + idempotency) and `skills/getting-started/SKILL.md` step-3 rewritten: the primary signal for role/roster/pause is now the always-present version-independent evidence (env `ORCHESTRATOR_AGENT_ROLE` + the injected `[orch] sibling sessions` block + live `<channel>` events), with `sqlite3 agent_channel.db` as the authoritative *optional* confirm; the retired flat `sessions.json`/`state.json` `cat` reads are removed. Step-4's abort clause re-keyed off ABSENCE of live channel evidence (never flat-file absence). (2) `pa-bootstrap` steps 5.5/5.6 add `output_mode:"summary"` to the type-only enumeration lookups. (3) `mcp/engine/agent_channel_state.ts` gained a one-time-per-process, age-gated (>5min), best-effort sweep of pre-0.30.35 `*.tmp.*` atomicWrite debris.
+
+**Why.** The 0.30.35 SQLite migration retired the flat state files, but the skill/doc layer still instructed `cat sessions.json`/`state.json` - a literal-following fresh PA hits dead reads, and step-4's abort clause would make it wrongly ABORT a healthy session (the exact hazard a fresh PA hit at bootstrap this session; insight `86cc8894`). The type-only enumeration lookups returned 80-124K-char payloads exceeding the tool-output cap. The `*.tmp.*` debris (~30 files) was pre-0.30.35 atomicWrite residue the SQLite path never produces but nothing reclaimed.
+
+**Rejected.** Swapping the flat-file read for a *mandatory* `sqlite3` read - that just trades one fragile dependency for another (exact DB schema); primary signal is the always-injected harness evidence, DB query is the optional backstop. A "GC guard in the atomic-write path" (original WI framing) - corrected after reading the producer: there is NO atomic-write path post-0.30.35, so the fix is a one-time debris sweep, not an ongoing guard.
+
+**Test additions.** 3 new lock tests in `tests/engine/agent_channel_state.test.ts` (sweep deletes stale `*.tmp.*` >5min, preserves fresh tmp + the SQLite DB files, once-per-process guard). Full suite 590 pass / 0 fail. Schema producer-verified against `agent_channel_state.ts` CREATE TABLE DDL.
+
+**Shipped:** v0.30.50 (commit `bd877e5`). Source: orchestrator-KB insight `86cc8894` (PA-relayed). Closes WI `603dc765` at the shipped level (live-confirm pending a fresh PA bootstrapping on >=0.30.50).
+
+> **Log-completeness note:** DECISIONS.md has a backlog gap - versions **0.30.40 through 0.30.49** (prior sessions) are not yet logged here. This entry and the 0.30.51 entry cover only this session's first-hand ships; the 0.30.40-0.30.49 backfill is tracked separately (WI noted in the orchestrator KB), NOT silently absorbed.
+
+---
+
 ## 2026-05-17 - Routing/gate/budget hardening + post-compaction handoff + PA-delegable convention (0.30.39)
 
 **Change.** Seven-workstream release (one commit):
