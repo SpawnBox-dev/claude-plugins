@@ -6,7 +6,14 @@
 process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readdirSync,
+  existsSync,
+  utimesSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -130,6 +137,62 @@ describe("state.json (overrides)", () => {
     expect(readOverrideState(stateDir).pa_global_pause.active).toBe(true);
     clearGlobalPause(stateDir);
     expect(readOverrideState(stateDir).pa_global_pause.active).toBe(false);
+  });
+});
+
+describe("stale *.tmp.* atomic-write debris sweep (WI 603dc765)", () => {
+  // The sweep is internal (not exported); it runs once per process per
+  // stateDir off the getDb first-open path. readSessions() triggers getDb,
+  // so it is the test vehicle. Each test gets a unique mkdtemp stateDir, so
+  // the module-level once-per-process guard never collides across tests.
+  const TEN_MIN_AGO = new Date(Date.now() - 10 * 60_000);
+
+  test("sweeps pre-0.30.35 *.tmp.* older than the age floor, preserves fresh tmp + the SQLite DB files", () => {
+    // Stale debris (mtime 10 min ago - older than the 5-min floor).
+    const staleA = join(stateDir, "sessions.json.tmp.a1b2c3");
+    const staleB = join(stateDir, "offsets-abc12345.json.tmp.d4e5f6");
+    writeFileSync(staleA, "stale");
+    writeFileSync(staleB, "stale");
+    utimesSync(staleA, TEN_MIN_AGO, TEN_MIN_AGO);
+    utimesSync(staleB, TEN_MIN_AGO, TEN_MIN_AGO);
+    // A fresh tmp (just written - inside the age floor) must NOT be swept:
+    // it could be a legitimate in-flight write from an old-version MCP.
+    const freshTmp = join(stateDir, "sessions.json.tmp.fresh99");
+    writeFileSync(freshTmp, "fresh");
+    // Decoys that do NOT contain ".tmp." must never be touched - the live
+    // SQLite DB + its WAL/SHM siblings.
+    const dbFile = join(stateDir, "agent_channel.db");
+    const walFile = join(stateDir, "agent_channel.db-wal");
+    writeFileSync(dbFile, "db");
+    writeFileSync(walFile, "wal");
+
+    // Trigger getDb -> first-open -> sweepStaleTmpArtifacts.
+    readSessions(stateDir);
+
+    expect(existsSync(staleA)).toBe(false);
+    expect(existsSync(staleB)).toBe(false);
+    expect(existsSync(freshTmp)).toBe(true);
+    expect(existsSync(dbFile)).toBe(true);
+    expect(existsSync(walFile)).toBe(true);
+  });
+
+  test("runs once per process per stateDir - debris created AFTER first open is not swept again", () => {
+    // First open: no tmp files -> nothing to sweep, guard now armed.
+    expect(readSessions(stateDir)).toEqual([]);
+    // Stale debris appears AFTER the guard armed (e.g. an old-version MCP
+    // raced one in). The once-per-process guard short-circuits, so a later
+    // state call does NOT re-sweep - acceptable: next process start reclaims
+    // it, and we never pay a readdir on the hot path.
+    const lateStale = join(stateDir, "offsets-x.json.tmp.late01");
+    writeFileSync(lateStale, "late");
+    utimesSync(lateStale, TEN_MIN_AGO, TEN_MIN_AGO);
+    readSessions(stateDir);
+    expect(existsSync(lateStale)).toBe(true);
+  });
+
+  test("sweep is safe on a dir with no tmp artifacts (no throw)", () => {
+    expect(() => readSessions(stateDir)).not.toThrow();
+    expect(readSessions(stateDir)).toEqual([]);
   });
 });
 

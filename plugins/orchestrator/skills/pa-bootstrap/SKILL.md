@@ -1,6 +1,6 @@
 ---
 name: pa-bootstrap
-description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Sets model/effort, confirms role=prime, reads active sessions from sessions.json, verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
+description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Sets model/effort, confirms role=prime, reads active sessions from the SQLite agent-channel registry (agent_channel.db), verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
 ---
 
 # Bootstrap the PrimeAgent
@@ -21,14 +21,32 @@ These are per-session slash commands; the launcher .bat cannot pre-set them.
 
 ### 2. Confirm role and identity
 
-Read `$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/sessions.json`:
+**Primary signal (always present, version-independent): the role env var.**
+`process.env.ORCHESTRATOR_AGENT_ROLE` (or the legacy `SPAWNBOX_AGENT_ROLE`)
+is `prime` for a PA launched via `pa-start.bat`. The SessionStart context
+and `getting-started` step 2 already surface this. You do NOT need to read
+any file to know your role.
+
+> NOTE: the pre-0.30.35 flat files `sessions.json` / `state.json` were
+> RETIRED by the 0.30.35 SQLite migration. All agent-channel state now
+> lives in the single SQLite DB
+> `$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/agent_channel.db`
+> (WAL mode). Their **absence is expected and is NOT a failure** - do not
+> `cat` them and do not treat "file does not exist" as a problem.
+
+**Authoritative confirmation (optional - use when role looks wrong or you
+suspect an impostor):** query the SQLite registry directly. `sqlite3` is
+available on the host:
 
 ```bash
-cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/sessions.json"
+sqlite3 "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/agent_channel.db" \
+  "SELECT session_id,id8,role,name,current_task FROM sessions
+   WHERE (julianday('now')-julianday(last_heartbeat_at))*86400 < 90
+   ORDER BY last_heartbeat_at DESC;"
 ```
 
-Find your own session entry (matches `$CLAUDE_SESSION_ID` env var, or the
-session_id you can see in your environment). Verify `role` is `prime`.
+Your role = the `role` of the row whose `session_id` equals
+`$CLAUDE_SESSION_ID`. It should be `prime`.
 
 **If role is `subordinate` despite env being correct**, you're likely
 fighting an impostor MCP — another orphaned bun process from a prior
@@ -41,23 +59,27 @@ Get-CimInstance Win32_Process -Filter "Name = 'bun.exe'" |
 ```
 
 For each `bun`, walk the parent chain to find the host `claude.exe`. If a
-bun's `started_at` in sessions.json matches your session_id but its
-ancestor `claude.exe` is launching a DIFFERENT session (e.g., the wrong
-`--resume <uuid>`), kill that bun — it's an impostor. Your legitimate
-MCP's next heartbeat (~30s) restores the correct entry.
+bun's `sessions` row matches your session_id but its ancestor `claude.exe`
+is launching a DIFFERENT session (e.g., the wrong `--resume <uuid>`), kill
+that bun — it's an impostor. Your legitimate MCP's next heartbeat (~30s)
+restores the correct entry.
 
 Reference: anti-pattern note `120b8e59-fbef-4847-8c04-6bc7aa3ad378`
 (orchestrator KB) documents the race in detail.
 
 If no impostor exists and role is still wrong, abort and surface the
 env-propagation failure (something between `pa-start.ps1` setting
-`SPAWNBOX_AGENT_ROLE=prime` and the bun process actually reading it is
+`ORCHESTRATOR_AGENT_ROLE=prime` and the bun process actually reading it is
 broken).
 
 ### 3. Read active subordinates
 
-From sessions.json, list every session with `role=subordinate` whose
-`last_heartbeat_at` is within the last 90 seconds.
+The injected `[orch] N sibling sessions active` block (UserPromptSubmit
+context, every turn) and the live `<channel source="plugin:orchestrator:core">`
+events already surface the active roster - read those first. For an
+authoritative enumeration, reuse the step-2 query: every row from that
+`sessions` SELECT with `role=subordinate` is an active SA (the
+`< 90`-second heartbeat filter is already in the query).
 
 Output a status block to terminal:
 
@@ -71,13 +93,25 @@ If zero SAs active, output `No SAs currently active. Run sa-start.bat to spin on
 
 ### 4. Verify agent-channel is wired
 
-The MCP server should have logged `agent-channel: started as prime ...`
-to its stderr when this session started. Check by tailing the orchestrator
-plugin's recent log output OR by confirming sessions.json contains your
-own entry with role=prime + a fresh heartbeat (< 60s old).
+Agent-channel liveness is proven by **live evidence**, not a file read:
 
-If you can't confirm agent-channel is running, surface the failure
-verbatim and abort - PA without agent-channel is useless.
+- Continuous `<channel source="plugin:orchestrator:core">` events arriving
+  inline each turn (peer chatter, session join/depart, addressed messages).
+- The injected `[orch] N sibling sessions active` block in your turn context.
+- A successful `@`-addressing round-trip (you address a peer, they respond).
+
+If any of those are present, agent-channel is functional. For a deeper
+check, the step-2 `sessions` query shows your own row with a fresh
+`last_heartbeat_at` (< 60s old).
+
+**Abort ONLY if there is genuinely no agent-channel:** no inline channel
+events at all AND the `sessions` query returns no self row (or `sqlite3` /
+the DB file itself is missing). Do NOT abort merely because the legacy
+`sessions.json` / `state.json` are absent - that absence is the EXPECTED
+post-0.30.35 state, not a failure. (A literal "the flat file is gone, so
+abort" reading is the exact stale-skill hazard this rewrite removes -
+insight `86cc8894`.) When you do abort, surface the failure verbatim - PA
+without agent-channel is useless.
 
 ### 5. Load PA's operating contract
 
@@ -115,8 +149,15 @@ into your working context:
 lookup({
   type: "user_pattern",
   limit: 25,
+  output_mode: "summary",
 })
 ```
+
+> `output_mode: "summary"` is REQUIRED here. A raw type-only enumeration
+> at this limit returns an 80-124K-char payload that exceeds the
+> tool-output cap and forces a file-spill; summary mode keeps it in-band
+> (id8 + truncated content per row), which is all you need to know WHAT
+> exists - deep-dive a specific one later with `lookup({id})`.
 
 Skim the returned notes and internalize them. They're the rules of
 engagement for how you act on this user's behalf. The briefing's
@@ -139,32 +180,17 @@ forest. Load the project's architecture + recent decisions into
 working context so you can apply them during SA coordination.
 
 ```
-lookup({
-  type: "architecture",
-  limit: 15,
-})
+lookup({ type: "architecture", limit: 15, output_mode: "summary" })
+lookup({ type: "decision",     limit: 15, output_mode: "summary" })
+lookup({ type: "convention",   limit: 10, output_mode: "summary" })
+lookup({ type: "anti_pattern", limit: 15, output_mode: "summary" })
 ```
 
-```
-lookup({
-  type: "decision",
-  limit: 15,
-})
-```
-
-```
-lookup({
-  type: "convention",
-  limit: 10,
-})
-```
-
-```
-lookup({
-  type: "anti_pattern",
-  limit: 15,
-})
-```
+> `output_mode: "summary"` is REQUIRED on each (same reason as 5.5): a raw
+> type-only enumeration at these limits exceeds the tool-output cap and
+> forces a file-spill. Summary mode gives you id8 + truncated content per
+> row - enough to know WHAT exists; pull a specific note in full with
+> `lookup({id})` when an SA's work intersects it.
 
 Skim each. You don't need to memorize content - you need to know WHAT
 exists so you can surface specific notes by ID when an SA's work
@@ -237,15 +263,22 @@ and apply it proactively.
 
 ### 6. Check for any existing global pause
 
-Read `state.json` (same dir as sessions.json):
+Pause state lives in the SQLite DB (the `global_pause` singleton row +
+the `sa_pause` table), not the retired `state.json`. Also: every channel
+notification carries `pa_global_pause` / `sa_paused` meta flags, so an
+active pause is visible in live evidence too. Query authoritatively:
 
 ```bash
-cat "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/state.json"
+sqlite3 "$CLAUDE_PROJECT_DIR/.orchestrator-state/agent-channel/agent_channel.db" \
+  "SELECT active,since,set_by_session FROM global_pause WHERE id=1;
+   SELECT sa_session_id FROM sa_pause;"
 ```
 
-If `pa_global_pause.active` is true, mention it explicitly in the
-readiness output and ask the user if you should clear it. Typically yes
-(they just spawned a fresh PA), but their call.
+No `active=1` row in `global_pause` (or no row at all) = no global pause.
+Any `sa_pause` rows = those specific SAs are paused. If a global pause is
+active, mention it explicitly in the readiness output and ask the user if
+you should clear it. Typically yes (they just spawned a fresh PA), but
+their call.
 
 ### 7. Output readiness
 
@@ -264,14 +297,18 @@ Override state: <none|paused-on-X|global-pause>.
 - Do NOT call any messaging tool. `send_message`, `read_messages`,
   `peek_inbox` were deleted in 0.29.0. Cross-session communication is via
   terminal output + agent-channel notifications.
-- Do NOT silently recover from a missing/malformed sessions.json. If the
-  state isn't sane at startup, surface the problem to the user and ask.
-  PA's job depends on accurate visibility into the project's session graph.
+- Do NOT silently recover from a genuinely insane registry. "Insane" =
+  no live channel evidence AND the `agent_channel.db` `sessions` query
+  returns no self row (or the DB / `sqlite3` is missing). A *missing
+  legacy `sessions.json` / `state.json`* is NOT insane - it is the
+  expected post-0.30.35 state. If the registry is genuinely insane,
+  surface the problem to the user and ask. PA's job depends on accurate
+  visibility into the project's session graph.
 
 ## On idempotency
 
 Re-running `/pa-bootstrap` mid-session is safe:
 - `/model` and `/effort` calls are no-ops if already at the target.
-- sessions.json read is read-only at this stage.
-- state.json is only modified if you choose to clear an existing global
-  pause (the user's call).
+- The `agent_channel.db` queries in steps 2/3/6 are read-only SELECTs.
+- Pause state is only modified if you choose to clear an existing global
+  pause (the user's call) - never as a side effect of bootstrap.

@@ -50,7 +50,7 @@ Check `process.env.ORCHESTRATOR_AGENT_ROLE` (or the legacy `SPAWNBOX_AGENT_ROLE`
 
 ## Step 3 — Broadcast your task to peers
 
-If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` (and into `sessions.json` for the agent-channel filewatcher) so:
+If your briefing showed any active sibling sessions, OR if the user's request touches code that's likely to overlap with parallel work, call `update_session_task("<one-line task description>")` now. This writes your `current_task` into `session_registry` (and into the SQLite agent-channel registry `agent_channel.db` that the filewatcher reads - the legacy `sessions.json` was retired in 0.30.35) so:
 
 - Peer sessions see what you're working on as the `from_task` field on every channel notification you generate.
 - Their next briefing's Cross-Session Activity surfaces your task.

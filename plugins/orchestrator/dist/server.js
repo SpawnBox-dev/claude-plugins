@@ -22668,7 +22668,14 @@ import { existsSync as existsSync4 } from "fs";
 import { join as join3 } from "path";
 
 // mcp/engine/agent_channel_state.ts
-import { readFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, unlinkSync } from "fs";
+import {
+  readFileSync,
+  existsSync as existsSync3,
+  mkdirSync as mkdirSync2,
+  unlinkSync,
+  readdirSync,
+  statSync
+} from "fs";
 import { join as join2 } from "path";
 import { Database as Database2 } from "bun:sqlite";
 var SESSIONS_FILE = "sessions.json";
@@ -22677,6 +22684,30 @@ var AGENT_CHANNEL_DB_FILE = "agent_channel.db";
 function ensureDir(dir) {
   if (!existsSync3(dir))
     mkdirSync2(dir, { recursive: true });
+}
+var tmpSweptDirs = new Set;
+var TMP_SWEEP_MIN_AGE_MS = 5 * 60000;
+function sweepStaleTmpArtifacts(stateDir) {
+  if (tmpSweptDirs.has(stateDir))
+    return;
+  tmpSweptDirs.add(stateDir);
+  let entries;
+  try {
+    entries = readdirSync(stateDir);
+  } catch {
+    return;
+  }
+  const now3 = Date.now();
+  for (const name of entries) {
+    if (!name.includes(".tmp."))
+      continue;
+    const full = join2(stateDir, name);
+    try {
+      if (now3 - statSync(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
+        continue;
+      unlinkSync(full);
+    } catch {}
+  }
 }
 var dbCache = new Map;
 var stmtCache = new WeakMap;
@@ -22698,6 +22729,7 @@ function getDb(stateDir) {
   if (cached2)
     return cached2;
   ensureDir(stateDir);
+  sweepStaleTmpArtifacts(stateDir);
   const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
   if (useInMemory && false) {}
   const dbPath = useInMemory ? ":memory:" : join2(stateDir, AGENT_CHANNEL_DB_FILE);
@@ -24079,7 +24111,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { readFileSync as readFileSync2, existsSync as existsSync5, statSync, readdirSync } from "fs";
+import { readFileSync as readFileSync2, existsSync as existsSync5, statSync as statSync2, readdirSync as readdirSync2 } from "fs";
 import { join as join4 } from "path";
 
 // mcp/engine/addressing.ts
@@ -24381,7 +24413,7 @@ class AgentChannel {
   listJsonlFiles() {
     if (!existsSync5(this.projectsHashDir))
       return [];
-    return readdirSync(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join4(this.projectsHashDir, f));
+    return readdirSync2(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join4(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -24488,7 +24520,7 @@ class AgentChannel {
     const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
-      stat = statSync(file);
+      stat = statSync2(file);
     } catch {
       return false;
     }

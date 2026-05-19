@@ -42,7 +42,14 @@
  * legacy files stop being recreated and disappear after their next migration.
  */
 
-import { readFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  readdirSync,
+  statSync,
+} from "fs";
 import { join } from "path";
 import { Database } from "bun:sqlite";
 
@@ -98,6 +105,61 @@ const AGENT_CHANNEL_DB_FILE = "agent_channel.db";
 
 function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+// One-time-per-process stale-tmp sweep guard, keyed by stateDir.
+const tmpSweptDirs = new Set<string>();
+
+// Minimum age before a `*.tmp.*` artifact is eligible for sweeping. Atomic
+// writes (the retired pre-0.30.35 path) completed in milliseconds, so a
+// 5-minute floor is an enormous safety margin: it can never race a write
+// that's legitimately in flight, while still reclaiming true debris.
+const TMP_SWEEP_MIN_AGE_MS = 5 * 60_000;
+
+/**
+ * Best-effort sweep of orphaned `*.tmp.*` atomic-write artifacts in the
+ * agent-channel state dir (WI 603dc765).
+ *
+ * Pre-0.30.35 the file-based design wrote `sessions.json` / `state.json` /
+ * `offsets-<id8>.json` via an atomicWrite (write `<name>.tmp.<rand>` then
+ * rename). Under Windows EBUSY / AV / OneDrive locks the rename could fail
+ * after the temp was written, leaking `*.tmp.*` files that nothing ever
+ * reaped - dozens accumulated (see the module header + readSessions/offsets
+ * notes). The 0.30.35 SQLite migration removed the atomicWrite path
+ * entirely ("the shared .tmp.* artifact class disappears entirely"), so the
+ * CURRENT code creates none of these - but it never cleaned up the existing
+ * debris, and an old-version MCP in a mixed-version fleet could still add
+ * more until it upgrades. This sweep makes the cleanup complete and
+ * self-healing: age-gated (only files older than TMP_SWEEP_MIN_AGE_MS, so
+ * never an in-flight write), best-effort (every failure swallowed - another
+ * process may race the unlink), and run ONCE per process per stateDir (off
+ * the getDb first-open path, not the hot loop). It deliberately matches only
+ * the `.tmp.` atomic-write infix - the live SQLite `agent_channel.db` and
+ * its `-wal`/`-shm`/`-journal` siblings never contain `.tmp.` so they are
+ * structurally excluded.
+ */
+function sweepStaleTmpArtifacts(stateDir: string): void {
+  if (tmpSweptDirs.has(stateDir)) return;
+  tmpSweptDirs.add(stateDir);
+  let entries: string[];
+  try {
+    entries = readdirSync(stateDir);
+  } catch {
+    return; // dir not readable yet - nothing to sweep
+  }
+  const now = Date.now();
+  for (const name of entries) {
+    if (!name.includes(".tmp.")) continue;
+    const full = join(stateDir, name);
+    try {
+      if (now - statSync(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS) continue;
+      unlinkSync(full);
+    } catch {
+      // race-tolerant / best-effort: another MCP may have unlinked it, or
+      // it's momentarily locked. A missed one costs nothing - next process
+      // start retries.
+    }
+  }
 }
 
 // === SQLite connection cache ===
@@ -166,6 +228,10 @@ function getDb(stateDir: string): Database {
   const cached = dbCache.get(stateDir);
   if (cached) return cached;
   ensureDir(stateDir);
+  // Reclaim pre-0.30.35 atomic-write debris once per process per stateDir
+  // (WI 603dc765). Off the cached fast-path so it never touches the hot
+  // loop. Best-effort + age-gated - see sweepStaleTmpArtifacts.
+  sweepStaleTmpArtifacts(stateDir);
   // Path resolution: defaults to `<stateDir>/agent_channel.db` for production.
   // Tests set ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY=":memory:" because
   // bun:sqlite on Windows holds file handles for the .db (and WAL/SHM) for an
