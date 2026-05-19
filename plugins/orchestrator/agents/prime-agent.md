@@ -412,9 +412,14 @@ detail, (c) describe the trap in concrete-shape terms, not vague,
 feeling micromanaged.
 
 **Multi-paragraph / formatted directives - the EXPLICIT ENVELOPE
-(orchestrator 0.30.46+, WI eabc89b6) is the robust mechanism;
-trap-safe discipline stays the SAFE DEFAULT until the fleet is
-uniformly 0.30.46+.** Envelope syntax - opener on its own line,
+(orchestrator 0.30.46+, WI eabc89b6) is the DEFAULT for any
+multi-part or formatted directive. Both conditions that gated it
+are met + verified 2026-05-19: the live fleet is uniformly
+>=0.30.46 (per-session MCPs boot from the installed version;
+topology note 70d2f7a0) and the bolded-header routing fix is
+shipped + bilaterally live-confirmed (WI 7ff34714, PROBE-1, note
+b2cb010d). The prior "trap-safe is the safe default until
+uniform" posture is RETIRED.** Envelope syntax - opener on its own line,
 content in whatever shape, bare `@@@` closer:
 
 ```
@@ -433,19 +438,16 @@ envelope neither rides nor breaks any surrounding routing -
 Discord-model: explicit structural destination, atomic message,
 ported in-text.
 
-**CAVEAT (read before relying on it).** The envelope is parsed on
-the RECEIVING session and only exists from 0.30.46. To a receiver
-still on an older orchestrator the `@@@` lines are unrecognized and
-the ENTIRE message is silently dropped - invisible to both sides,
-strictly worse than the implicit path. A running session does NOT
-hot-swap onto a new version; long-running sessions (including a
-future PA) stay on their boot version until restarted. So use the
-envelope ONLY to a receiver you know is >=0.30.46. On a mixed-version
-fleet (the norm during rollout) the safe default for any multi-part
-message remains the trap-safe discipline: ONE paragraph with single
-newlines (no blank lines), OR @-address every paragraph, OR a
-bare-colon header with no trailing markdown. Unsure of a receiver's
-version -> trap-safe, not envelope.
+**EDGE CASE (rarely applies - do not over-weight).** The envelope
+is parsed on the RECEIVING session and only exists from 0.30.46. A
+receiver running a pre-0.30.46 orchestrator would not recognize the
+`@@@` lines and the message would be silently dropped. Per-session
+MCPs boot from the installed version, so on a current fleet this
+does not happen and the envelope is the correct default. ONLY if
+you positively know a specific receiver is pre-0.30.46 do you fall
+back, for that one message, to the trap-safe form (ONE paragraph
+single newlines, OR @-address every paragraph). Unsure = use the
+envelope, NOT trap-safe - the old default is inverted.
 
 The implicit path the trap-safe discipline rides: a bare
 `@SA-<id8>` one-liner, or a colon-header (`@SA-<id8> <header>:`)
@@ -455,8 +457,9 @@ no cascade - the b4c37849 invariant that stops a private-to-user
 aside leaking to an SA). It is fragile by construction: a header
 not ending in a LITERAL colon (e.g. a bolded `**Directive:**`)
 silently drops every continuation paragraph, invisible to both
-sides - which is why the envelope exists, and why, once receivers
-are uniformly 0.30.46+, the envelope becomes the default. The
+sides - which is why the envelope is now the DEFAULT and this
+legacy path is reserved for the positively-known-pre-0.30.46
+receiver edge case only. The
 note-ID-indirection reflex (cite the ID, let the SA `lookup`)
 remains good practice for DURABILITY (a bounced/compacted SA
 recovers the spec by ID regardless of channel state).
