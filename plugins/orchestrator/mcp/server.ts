@@ -50,6 +50,7 @@ import { AgentChannel } from "./engine/agent_channel";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
 import { appendSystemEvent } from "./engine/agent_channel_state";
+import { getLiveSessions } from "./engine/live_sessions";
 import { handleRespondToPermission, RespondToPermissionInputSchema } from "./tools/permission";
 import { homedir } from "node:os";
 
@@ -2340,18 +2341,25 @@ function startAgentChannel(): void {
               return;
             }
             const params = parsed.data;
-            // 1. Resolve PA's session_id from sessions.json so we can target
-            //    the bus event correctly. Read it fresh each request - PA
-            //    may have started after this SA.
+            // 1. Resolve the live PA's session_id from the agent-channel
+            //    registry (agent_channel.db) so we can target the bus event
+            //    correctly. Read it fresh each request - PA may have started
+            //    after this SA, and only a heartbeat-fresh PA should receive
+            //    the relay.
+            //
+            //    MUST use getLiveSessions() (SQLite), NOT the legacy
+            //    `sessions.json`: the 0.30.35 migration retired and DELETES
+            //    that file (migrateSessionsLegacy -> unlinkSync), so the old
+            //    readFileSync(sessions.json) path always resolved to null on
+            //    any 0.30.35+ build. Result: every inbound permission_request
+            //    silently bailed at "no PA active" and dead-ended at the SA
+            //    terminal instead of routing to PA. (Fix: WI 0936e25d /
+            //    686db7dc; mirrors the post-compact PA-recovery lookup.)
             let paSessionId: string | null = null;
             try {
-              const sessionsFile = join(stateDir, "sessions.json");
-              if (existsSync(sessionsFile)) {
-                const data = JSON.parse(readFileSync(sessionsFile, "utf8"));
-                const entries: Array<{ session_id?: string; role?: string }> =
-                  Array.isArray(data) ? data : data?.sessions ?? [];
-                paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
-              }
+              const live = getLiveSessions();
+              paSessionId =
+                live?.find((e) => e.role === "prime")?.session_id ?? null;
             } catch {
               // Fall through to terminal prompt
             }

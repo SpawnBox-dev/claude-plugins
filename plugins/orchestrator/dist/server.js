@@ -26510,12 +26510,8 @@ function startAgentChannel() {
           const params = parsed.data;
           let paSessionId = null;
           try {
-            const sessionsFile = join5(stateDir, "sessions.json");
-            if (existsSync6(sessionsFile)) {
-              const data = JSON.parse(readFileSync3(sessionsFile, "utf8"));
-              const entries = Array.isArray(data) ? data : data?.sessions ?? [];
-              paSessionId = entries.find((e) => e.role === "prime")?.session_id ?? null;
-            }
+            const live = getLiveSessions();
+            paSessionId = live?.find((e) => e.role === "prime")?.session_id ?? null;
           } catch {}
           if (!paSessionId) {
             process.stderr.write(`permission-relay: no PA active; deferring request ${params.request_id} to human
