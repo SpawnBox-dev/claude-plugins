@@ -93,7 +93,7 @@ When multiple Claude Code sessions run against the same project, the orchestrato
 - Free-form text without an `@` prefix is private dialogue with the user. PA still observes it (PA observes everything by default), but no SA receives it.
 
 **Authority model:**
-- PA's directives addressed to an SA are treated as if the user said them - SAs execute, then continue their own work.
+- PA's directives addressed to an SA are treated as if the user said them - they carry the user's authority AND permission for routine work. SAs execute directly without re-litigating PA's authority or pulling the user in for permission he has effectively already granted, then continue their own work. (Carve-out: genuinely destructive/irreversible ops still warrant an explicit confirm; the harness-gated prod ops - worker deploy, `wrangler d1 execute --remote` - are a separate layer needing the user's own in-window authorization, never PA's grant.)
 - SA-to-SA messages are peer-level, not authoritative. Use judgment.
 - Override: `/pa-pause` in an SA terminal pauses PA's posture toward that SA only. `/pa-pause` in PA's terminal sets a global pause across all SAs. Resume with `/pa-resume`. Natural language ("PA, back off") also recognized.
 - Singleton conflict: if `pa-start.bat` refuses to launch a new PA because another is fresh, run `/pa-takeover` in the new PA's window to forcibly claim primacy.
