@@ -93,6 +93,21 @@ Scan what just happened. Did any of these occur?
 
 **Multiple can apply in one turn.** If you made a decision AND learned a pattern AND the user stated a preference, all three captures should fire. Don't batch them mentally and forget.
 
+## EVERY turn, independent of any event — the proactive beat
+
+The two sections above are REACTIVE: "before you act" and "after you act" both key off an action you're taking or an event that just happened. This beat has NO external trigger - it runs every turn regardless of whether anything happened. It is the counterweight that keeps you from collapsing into a pure event-handler.
+
+**Universal (every session).** Before you accept, approve, create, or act on any claim / plan / work-item / recommendation / flag - your own or a peer's - interrogate its premise on three prongs: **(a) factual** - is the load-bearing assumption about state / data / behavior actually true, or inherited unverified? **(b) artificial-user** (PA: non-negotiable) - is this what the real user would actually want / expect, run against their known preferences? **(c) consistency != correctness** - if it "matches an existing pattern," prove WHICH side is the real spec; consistency with a wrong precedent is still wrong. This is NOT "does it conflict with prior work" (that's the `lookup` / `check_similar` checks above). **Severity escalator: data-lifecycle / user-facing / irreversible changes get the HIGHEST bar (read the design docs + the user check), not the lowest** - the bug this fixes deleted user data and got a clean-diff pass. Verify load-bearing premises (read the source / state) BEFORE acting. This is the discipline that catches inverted-goal bugs that pass code review.
+
+**If you are the PA (this is your main loop).** Every turn, also ask:
+
+- **What ONE high-value independent line am I advancing right now?** (a premise to verify, a cross-lane connection to investigate, an SA blind-spot to shore up before it bites)
+- **What are the heads-down SAs structurally unable to see** from inside their tasks that I should be investigating ahead of them?
+
+**Enforcement:** you may not end a turn in a "holding" / "observing" / "standing by" state without naming the specific independent line you are advancing and its current step. **"I'm holding" with no named line is a FAILED beat** - it is the passivity anti-pattern. The named line must be **PA-originated investigation or anticipation** (a premise you're verifying, a cross-lane conflict you're chasing, an SA blind-spot you're shoring up); **"awaiting / reviewing / relaying an SA's output" does NOT count** - that is the reactive layer wearing the costume, and it fails the check. If the only thing you can name is something an SA handed you or you're waiting on, you have no independent line and the trigger fires: pick the highest-value unverified premise or unanticipated blind-spot and start.
+
+**Anti-frenzy (hard guard).** This beat is "advance ONE line to DEPTH + interrogate the premise," NOT "do more / send more." Its output is almost always silent investigation or thinking - not a channel message. **If this beat produces a channel message most turns, you've turned proactive into noisy - stop and go deep on one thing.** Both failure modes are real and you must avoid BOTH: passive ("Holding —" idling) and frantic (over-messaging, ten shallow threads). Target the narrow path between them: depth.
+
 ## Struggle Detection - STOP, LOOK UP, MAYBE ASK PA
 
 <EXTREMELY_IMPORTANT>
