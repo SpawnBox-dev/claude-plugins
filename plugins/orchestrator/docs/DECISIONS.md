@@ -18,6 +18,8 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 **Shipped:** v0.30.55 (commits `0938cf3` launcher hardening, `58e0c71` relay default-off, `2abd357` turn-final rule + suite + bump). Spawnbox project-root launcher mirrored (`91dbd9ff`, `b68ce656`). Operational protocol until all fleets run >=0.30.55: PA seeds SAs with the turn-final rule explicitly; rich dispatches go note-ID-indirect (content in an orchestrator note, one-paragraph turn-final `@SA-<id8> lookup <id8> and execute`).
 
+> **Precision correction (2026-06-11, same session, post-ship):** the turn-final persistence limit is MODEL/SESSION-SCOPED, not universal to CC 2.1.172. Verified on a Fable 5 session (interleaved thinking): mid-turn text never persists. DISCONFIRMED on Opus 4.8: an SA emitted three texts within one turn and all persisted + routed. So Opus-model SAs are unconstrained (PA sees everything they write); the rule is load-bearing for Fable-like sessions and remains the documented universal practice because it costs nothing where unneeded. The 2026-05-23 muted-SA attribution is correspondingly softened back to plausible-not-proven (that SA was likely Opus). KB matrix `77c5d231` carries the corrected statement; the boot-instruction wording ships as-is and gets the scoping nuance at the next code version.
+
 > **Log-completeness note:** versions **0.30.52 through 0.30.54** (shipped earlier 2026-06-10 by a prior session: permission-relay PA-lookup fix via agent_channel.db; PA proactive-mandate contract; anti-gating contract) are not yet logged here - first-hand entries belong to their authoring sessions' commits (`187fc17`, `543911a`, `d62cbe9`). Not silently absorbed; backfill remains open.
 
 ---
