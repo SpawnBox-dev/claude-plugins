@@ -59,19 +59,52 @@ if ($Resume) {
     # directory uses.
     $projectHash = $ProjectDir -replace '[\\/:]', '-' -replace '^-+', '' -replace '-+$', ''
     $jsonlDir = Join-Path $env:USERPROFILE ".claude\projects\$projectHash"
-    if (-not (Test-Path $jsonlDir)) {
-      Write-Host "ERROR: Projects dir not found: $jsonlDir" -ForegroundColor Red
+    $resolvedUuid = ''
+
+    # Layer 1 (original, unchanged): transcript grep for the /rename stdout
+    # line. `$matches` is a PowerShell automatic variable - use custom name.
+    if (Test-Path $jsonlDir) {
+      $foundSessions = Get-ChildItem -Path $jsonlDir -Filter '*.jsonl' -File | Where-Object {
+        Select-String -Path $_.FullName -SimpleMatch "Session renamed to: $Resume" -Quiet
+      }
+      if ($foundSessions) {
+        $resolvedUuid = ($foundSessions | Sort-Object LastWriteTime -Descending | Select-Object -First 1).BaseName
+      }
+    }
+
+    # Layer 2 (0.30.56, WI f0d66029 follow-up): the session-start hook's
+    # append-only launch-name map - covers LAUNCH-TIME names (--name), which
+    # CC records nowhere durable. Multiple distinct ids for one name = list
+    # candidates and refuse to guess.
+    if (-not $resolvedUuid) {
+      $nameMap = Join-Path $ProjectDir ".orchestrator-state\session-names.tsv"
+      if (Test-Path $nameMap) {
+        $entries = @(Get-Content $nameMap -ErrorAction SilentlyContinue | ForEach-Object {
+          $f = $_ -split "`t"
+          if ($f.Count -ge 3 -and $f[1] -match $uuidRegex -and $f[2] -eq $Resume) {
+            [pscustomobject]@{ Ts = $f[0]; Uuid = $f[1] }
+          }
+        })
+        if ($entries.Count -gt 0) {
+          $distinct = @($entries | Select-Object -ExpandProperty Uuid -Unique)
+          if ($distinct.Count -eq 1) {
+            $resolvedUuid = $distinct[0]
+          } else {
+            Write-Host "ERROR: name '$Resume' maps to multiple sessions - resume by UUID instead:" -ForegroundColor Red
+            foreach ($u in $distinct) {
+              $last = ($entries | Where-Object { $_.Uuid -eq $u } | Select-Object -Last 1).Ts
+              Write-Host "  $u  (last seen $last)"
+            }
+            exit 1
+          }
+        }
+      }
+    }
+
+    if (-not $resolvedUuid) {
+      Write-Host "ERROR: no session named '$Resume' found via /rename history ($jsonlDir) or the launch-name map (.orchestrator-state\session-names.tsv). Resume by UUID, or /rename the session once to make its name durable." -ForegroundColor Red
       exit 1
     }
-    # `$matches` is a PowerShell automatic variable - use custom name.
-    $foundSessions = Get-ChildItem -Path $jsonlDir -Filter '*.jsonl' -File | Where-Object {
-      Select-String -Path $_.FullName -SimpleMatch "Session renamed to: $Resume" -Quiet
-    }
-    if (-not $foundSessions) {
-      Write-Host "ERROR: No session in $jsonlDir has been renamed to: $Resume" -ForegroundColor Red
-      exit 1
-    }
-    $resolvedUuid = ($foundSessions | Sort-Object LastWriteTime -Descending | Select-Object -First 1).BaseName
     Write-Host " Resolved display name to session: $resolvedUuid"
     $Resume = $resolvedUuid
   }

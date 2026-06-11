@@ -25,6 +25,34 @@ if [ -n "$INPUT" ]; then
   esac
 fi
 
+# 0.30.56 (WI f0d66029 follow-up): durable name -> session_id map so the
+# launchers' -Resume <name> resolves LAUNCH-TIME names (--name flag), not
+# only in-app /rename'd ones. The SessionStart payload carries the live
+# session title in `session_title`; CC records launch names NOWHERE durable
+# (live sessions/<pid>.json dies with the process; the transcript only gets
+# "Session renamed to:" lines from /rename). APPEND-ONLY tsv - concurrent
+# booting sessions just append (no read-modify-write race); resumes
+# (source:"resume") re-stamp their current name+id so the map stays fresh;
+# resolver semantics are latest-entry-wins with loud multi-id disambiguation.
+# Best-effort like every write in this hook: failure never breaks a boot.
+# Names containing tabs, quotes or backslashes are SKIPPED rather than
+# written mangled (launcher-given names never contain them).
+NAME_TITLE=""
+if [ -n "$INPUT" ]; then
+  NAME_TITLE=$(printf '%s' "$INPUT" | grep -o '"session_title":"[^"\\]*"' | head -1 | cut -d'"' -f4 || printf '')
+fi
+if [ -n "$SID" ] && [ -n "$NAME_TITLE" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  case "$NAME_TITLE" in
+    *"$(printf '\t')"*|*'"'*|*'\'*) : ;; # unsafe chars - skip, keep map clean
+    *)
+      NAME_DIR="$CLAUDE_PROJECT_DIR/.orchestrator-state"
+      mkdir -p "$NAME_DIR" 2>/dev/null || true
+      printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '0')" "$SID" "$NAME_TITLE" \
+        >> "$NAME_DIR/session-names.tsv" 2>/dev/null || true
+      ;;
+  esac
+fi
+
 # Persist to fallback file - the MCP server reads this when an agent forgets
 # to pass session_id. Path matches getFallbackSessionId in mcp/server.ts.
 #
