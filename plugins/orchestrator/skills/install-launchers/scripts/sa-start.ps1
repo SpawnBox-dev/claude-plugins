@@ -57,6 +57,9 @@ param(
   # the PA permission relay gets no permission_request notifications from
   # CC 2.1.17x (WI f0d66029) - without it they hang at the first gated tool.
   [switch]$BypassPermissions,
+  # Opt back into the PA-gated permission relay capability (default OFF
+  # since 2026-06-11 - see the relay block below, WI f0d66029).
+  [switch]$PermissionRelay,
   [switch]$NoWindowsTerminal
 )
 
@@ -139,11 +142,18 @@ $env:SPAWNBOX_AGENT_ROLE = 'subordinate'
 $env:ORCHESTRATOR_SESSION_KIND = 'subordinate'
 $env:SPAWNBOX_SESSION_KIND = 'subordinate'
 
-# Opt into the PA-gated permission relay (0.30.17+). When set, this SA's MCP
-# declares the `claude/channel/permission` capability so tool permission
-# requests route through agent-channel to PA for authorization instead of
-# falling back to in-terminal prompts.
-$env:ORCHESTRATOR_PA_PERMISSION_RELAY = '1'
+# PA-gated permission relay (0.30.17+) - now OPT-IN via -PermissionRelay.
+# DEFAULT OFF since 2026-06-11 (WI f0d66029): on CC 2.1.17x, declaring the
+# `claude/channel/permission` capability kills the MCP's ENTIRE channel-
+# injection path (SA receives no <channel> events at all - verified by A/B
+# test COMMS-TEST-3 vs COMMS-TEST-4), and CC no longer delivers
+# permission_request notifications anyway. Use -BypassPermissions for
+# unattended SAs until the relay is re-validated on a fixed CC build.
+if ($PermissionRelay) {
+  $env:ORCHESTRATOR_PA_PERMISSION_RELAY = '1'
+} else {
+  Remove-Item Env:ORCHESTRATOR_PA_PERMISSION_RELAY -ErrorAction SilentlyContinue
+}
 # Only set the NAME env when we have an explicit name. On --resume without an
 # explicit name, leave NAME unset so the existing session's name is preserved.
 if ($sessionName) {
