@@ -49,10 +49,29 @@ param(
   [string]$ProjectDir = '',
   [ValidateSet('', 'low', 'medium', 'high', 'xhigh', 'max')]
   [string]$Effort = '',
+  # Seed prompt submitted as the session's first turn. Without one, a freshly
+  # spawned SA idles forever: agent-channel injection needs an existing
+  # conversation, and nothing else starts one (WI f0d66029).
+  [string]$Seed = '',
+  # Pass --dangerously-skip-permissions. Required for unattended SAs while
+  # the PA permission relay gets no permission_request notifications from
+  # CC 2.1.17x (WI f0d66029) - without it they hang at the first gated tool.
+  [switch]$BypassPermissions,
   [switch]$NoWindowsTerminal
 )
 
 $ErrorActionPreference = 'Stop'
+
+# CC 2.1.x nested-session guard: a claude spawned with inherited CLAUDECODE /
+# CLAUDE_CODE_* env is treated as a nested/child session - it runs but writes
+# NO transcript and NO ~/.claude/sessions/<pid>.json entry, which kills
+# agent-channel outbound routing, console visibility, and resume. Scrub the
+# markers so the SA boots top-level even when launched from another claude
+# session (PA /sa-launch). WI f0d66029, 2026-06-11.
+Get-ChildItem Env: | Where-Object {
+  $_.Name -eq 'CLAUDECODE' -or $_.Name -like 'CLAUDE_CODE_*' -or
+  $_.Name -eq 'CLAUDE_EFFORT' -or $_.Name -eq 'AI_AGENT'
+} | ForEach-Object { Remove-Item "Env:$($_.Name)" -ErrorAction SilentlyContinue }
 
 if (-not $ProjectDir) {
   $ProjectDir = (Get-Location).Path
@@ -155,6 +174,14 @@ if ($Effort) {
 if ($Resume) {
   $claudeArgs += '--resume'
   $claudeArgs += $Resume
+}
+if ($BypassPermissions) {
+  $claudeArgs += '--dangerously-skip-permissions'
+}
+# Positional seed prompt LAST (claude treats the trailing positional arg as
+# the initial prompt and starts the conversation with it).
+if ($Seed) {
+  $claudeArgs += $Seed
 }
 
 # ---------------------------------------------------------------------------
