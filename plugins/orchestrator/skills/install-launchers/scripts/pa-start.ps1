@@ -101,8 +101,40 @@ if ($Resume) {
       }
     }
 
+    # Layer 3 (Claude Desktop tab rename): the Windows app's "rename tab"
+    # writes a {"type":"custom-title","customTitle":"<name>","sessionId":"<uuid>"}
+    # record into the session's OWN transcript jsonl. CC persists these nowhere
+    # else (not the /rename stdout line, not the launch-name map), so a session
+    # renamed only via the Desktop tab is otherwise resumable only by raw UUID.
+    # Take the LAST custom-title per transcript (= that tab's current name). The
+    # sessionId==filename guard rejects message text that merely quotes an event.
+    if (-not $resolvedUuid -and (Test-Path $jsonlDir)) {
+      $titleHits = @(Get-ChildItem -Path $jsonlDir -Filter '*.jsonl' -File | ForEach-Object {
+        $file = $_
+        $last = Select-String -Path $file.FullName -SimpleMatch '"type":"custom-title"' | Select-Object -Last 1
+        if ($last -and
+            $last.Line -match '"customTitle":"([^"]*)".*?"sessionId":"([^"]*)"' -and
+            $matches[2] -eq $file.BaseName -and
+            $matches[1] -eq $Resume) {
+          [pscustomobject]@{ Uuid = $file.BaseName; Ts = $file.LastWriteTimeUtc }
+        }
+      })
+      if ($titleHits.Count -gt 0) {
+        $distinct = @($titleHits | Select-Object -ExpandProperty Uuid -Unique)
+        if ($distinct.Count -eq 1) {
+          $resolvedUuid = $distinct[0]
+        } else {
+          Write-Host "ERROR: tab name '$Resume' maps to multiple sessions - resume by UUID instead:" -ForegroundColor Red
+          foreach ($h in ($titleHits | Sort-Object Ts -Descending)) {
+            Write-Host "  $($h.Uuid)  (last active $($h.Ts.ToString('u')))"
+          }
+          exit 1
+        }
+      }
+    }
+
     if (-not $resolvedUuid) {
-      Write-Host "ERROR: no session named '$Resume' found via /rename history ($jsonlDir) or the launch-name map (.orchestrator-state\session-names.tsv). Resume by UUID, or /rename the session once to make its name durable." -ForegroundColor Red
+      Write-Host "ERROR: no session named '$Resume' found via /rename history, the launch-name map (.orchestrator-state\session-names.tsv), or Claude Desktop tab titles ($jsonlDir). Resume by raw UUID instead." -ForegroundColor Red
       exit 1
     }
     Write-Host " Resolved display name to session: $resolvedUuid"
