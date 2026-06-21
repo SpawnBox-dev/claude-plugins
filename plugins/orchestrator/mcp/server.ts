@@ -2187,8 +2187,11 @@ function startAgentChannel(): void {
 
   // Project hash dir under ~/.claude/projects/. Hash mirrors how Claude Code
   // names the per-project directory: replace path separators + drive colons
-  // with hyphens, leading hyphens trimmed.
-  const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+  // with hyphens. Leading hyphens are preserved — CC retains the leading
+  // dash that comes from a leading slash on POSIX absolute paths (e.g.
+  // /home/foo -> -home-foo). Stripping them caused a silent path mismatch
+  // and broke the JSONL filewatcher entirely (see anti_pattern 6dfc7ae1).
+  const projectHash = projectDir.replace(/[\\/:]/g, "-");
   const projectsHashDir = join(homedir(), ".claude", "projects", projectHash);
 
   // Role/name env vars: ORCHESTRATOR_AGENT_* is the canonical form (set by
