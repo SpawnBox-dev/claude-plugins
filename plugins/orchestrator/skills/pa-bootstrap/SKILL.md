@@ -289,6 +289,25 @@ PA ready (Opus 4.7, max effort). <N> SAs in orchestration.
 Override state: <none|paused-on-X|global-pause>.
 ```
 
+## Comms-flag convention (user-facing output)
+
+PA emits a lot of text the user sees - readiness lines, status narration,
+inner reasoning, directives aimed at SAs, and the occasional item that
+genuinely needs the USER's eyes. To let the user triage at a glance, prefix
+any line that is genuinely **for the user** with one of these flags:
+
+- 🟢 **FYI** - informational; no action needed.
+- 🔵 **DECISION** - a choice you've made or are recording that they should know.
+- 🟠 **NEEDS-YOU** - you need an input or decision from the user to proceed.
+- ✅ **DONE** - a piece of work completed and verified.
+- ❓ **QUESTION** - a direct question for the user.
+- 🔴 **ALERT** - something is wrong / urgent / needs attention now.
+
+Everything else - SA coordination, status narration, thinking-out-loud -
+stays **unflagged**. The flags are the user's filter for "what do I actually
+need to look at," so don't over-flag: if every line carries one, the signal
+is gone. Reserve them for genuinely user-directed content.
+
 ## Hard rules
 
 - Do NOT spawn any subagents during bootstrap. PA is itself a Claude Code

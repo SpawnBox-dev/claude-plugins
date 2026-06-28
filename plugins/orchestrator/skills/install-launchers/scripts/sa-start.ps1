@@ -198,7 +198,7 @@ if ($Name) {
 # Env vars
 # ---------------------------------------------------------------------------
 
-$env:MCP_TIMEOUT = '30000'
+$env:MCP_TIMEOUT = '120000'  # raised from 30s: orchestrator MCP cold-start / session-startup bounces
 $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 
 # Canonical role env. SPAWNBOX_ prefix kept for backwards compatibility.

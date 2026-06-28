@@ -194,10 +194,11 @@ if (-not $Resume) {
 # Env vars (inherited by child claude.exe -> MCP server)
 # ---------------------------------------------------------------------------
 
-# Bump MCP startup timeout from the 5s default to 30s. The orchestrator
-# MCP server's `npx -y bun` cold-start can exceed 5s on first invocation.
-# Stdio MCP servers get ONE chance per Claude Code docs.
-$env:MCP_TIMEOUT = '30000'
+# Bump MCP startup timeout from the 5s default to 120s. The orchestrator
+# MCP server's `npx -y bun` cold-start can exceed the smaller timeouts on
+# first invocation (sessions were bouncing on the prior 30s value), and stdio
+# MCP servers get ONE chance per Claude Code docs.
+$env:MCP_TIMEOUT = '120000'
 
 # Tell the MCP which project root we're operating in (helps when CC's
 # CLAUDE_PROJECT_DIR isn't reliably set in the spawned subprocess env).

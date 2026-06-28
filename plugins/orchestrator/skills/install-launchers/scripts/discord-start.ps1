@@ -50,7 +50,7 @@ $sessionName = "DISCORD-LIVE-$(Get-Date -Format 'yyyy-MM-dd-HH-mm-ss')"
 # Env vars (inherited by child claude.exe -> MCP server)
 # ---------------------------------------------------------------------------
 
-$env:MCP_TIMEOUT = '30000'
+$env:MCP_TIMEOUT = '120000'  # raised from 30s: orchestrator MCP cold-start / session-startup bounces
 $env:ORCHESTRATOR_PROJECT_ROOT = $ProjectDir
 
 # Discord-ops sessions register as subordinate in the agent-channel.
