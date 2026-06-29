@@ -6,6 +6,22 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-06-29 - sa-start launches in --dangerously-skip-permissions BY DEFAULT (0.30.59)
+
+**Change.** `sa-start.ps1` now emits `--dangerously-skip-permissions` for every SA by default - bare `sa-start` = full bypass, matching `pa-start`. New `-Gated` switch opts OUT (no permission flag, normal gating). Precedence: `-Gated` (no flag) > `-AllowBypassPermissions` (`--allow-dangerously-skip-permissions`, start gated + Shift+Tab to escalate) > default/`-BypassPermissions` (`--dangerously-skip-permissions`). `-BypassPermissions` is now redundant, kept for back-compat.
+
+**Why.** Jarid's explicit directive 2026-06-29. Every in-band CC permission lever is regressed on 2.1.x: bypass (#36168, last-good 2.1.77), auto-mode (classifier denies SpawnBox's infra workload -> 3-strike fallback resumes prompting), the `PreToolUse` hook `allow` path (#52822, last-good 2.1.59), and the acceptEdits "Yes, allow all edits during this session" per-prompt flag (#22122/#30034 - doesn't persist, re-prompts every edit). SAs do the bulk of the editing and were getting per-edit prompts that no in-band option could suppress. Bypass is the only path the community confirms still reliably suppresses prompts, so it becomes the SA default. Full landscape in spawnbox `.claude/known-issues.md`.
+
+**Rejected.** Default to `acceptEdits` - the "allow all edits this session" flag is the exact thing that's broken (#22122), and 2.1.160 made acceptEdits prompt MORE (build-tool config writes). Default to `auto` - hostile to SpawnBox infra work; denial-fallback puts you back in per-edit prompting. A `PreToolUse` allow-hook - itself regressed in interactive mode (#52822); can't be promised on 2.1.195.
+
+**Caveat (honest).** Bypass ITSELF is reported regressed on some setups (#36168, Desktop/macOS-skewed; Windows CLI untested). If bypass is broken on this machine, SAs may STILL prompt on edits - the only confirmation is observing a freshly-launched SA after this change. This picks the best-available lever, not a proven fix.
+
+**Test additions.** All four ps1 launchers parser-validated. No suite coverage for ps1 launchers.
+
+**Shipped:** v0.30.59. Spawnbox project-root `sa-start.ps1` mirrored same-change. `pa-start.ps1` already hard-bypassed (unchanged).
+
+---
+
 ## 2026-06-29 - sa-start gains -AllowBypassPermissions: start gated, escalate to bypass mid-session (0.30.58)
 
 **Change.** `sa-start.ps1` gains a `-AllowBypassPermissions` switch that emits `--allow-dangerously-skip-permissions` (the unlock-but-don't-start-in-it form) instead of the hard `--dangerously-skip-permissions` that `-BypassPermissions` emits. An SA launched with it boots under NORMAL permission gating but can be escalated to full bypass mid-session via Shift+Tab, no relaunch. `-BypassPermissions` takes precedence when both are passed. Defaults unchanged: a bare `sa-start` is still fully gated and cannot reach bypass via Shift+Tab (no enabling flag). `pa-start.ps1` untouched - PA already hard-bypasses unconditionally.

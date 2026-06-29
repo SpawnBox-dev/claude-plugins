@@ -45,6 +45,10 @@ is doing complex/judgment-heavy work that benefits from deeper reasoning
 .EXAMPLE
 .\sa-start.ps1 -Name "SA-frontend" -AllowBypassPermissions
   Start under normal prompts; Shift+Tab into full bypass later, no relaunch
+
+.EXAMPLE
+.\sa-start.ps1 -Name "SA-sensitive" -Gated
+  Opt OUT of bypass-by-default; launch under normal permission gating
 #>
 
 param(
@@ -57,16 +61,22 @@ param(
   # spawned SA idles forever: agent-channel injection needs an existing
   # conversation, and nothing else starts one (WI f0d66029).
   [string]$Seed = '',
-  # Pass --dangerously-skip-permissions. Required for unattended SAs while
-  # the PA permission relay gets no permission_request notifications from
-  # CC 2.1.17x (WI f0d66029) - without it they hang at the first gated tool.
+  # DEFAULT (2026-06-29, Jarid's explicit directive): SAs now launch with
+  # --dangerously-skip-permissions BY DEFAULT - bare sa-start = full bypass,
+  # matching PA. Rationale: every in-band permission lever in CC 2.1.x is
+  # regressed (acceptEdits "allow all edits this session" doesn't persist;
+  # auto-mode denial-fallback resumes prompting), so bypass is the only
+  # reliable zero-prompt path for unattended SAs. See .claude/known-issues.md.
+  # NOTE: every SA then runs fully unsandboxed - only explicit deny rules and
+  # the rm -rf / ~ circuit breakers still bite. -BypassPermissions is now
+  # redundant, kept for back-compat / explicitness.
   [switch]$BypassPermissions,
-  # Pass --allow-dangerously-skip-permissions: start the SA under NORMAL
-  # permission gating but UNLOCK bypass as a Shift+Tab-reachable mode, so an
-  # attended SA can escalate to full autonomy mid-session without relaunching.
-  # (Plain CC sessions can't enter bypass via Shift+Tab unless launched with
-  # an enabling flag.) Ignored when -BypassPermissions is also set - that
-  # starts the session in bypass outright.
+  # Opt OUT of the dangerous default: launch under NORMAL permission gating
+  # (default mode) for a sensitive SA you want to supervise.
+  [switch]$Gated,
+  # Pass --allow-dangerously-skip-permissions instead: start gated but UNLOCK
+  # bypass as a Shift+Tab-reachable mode (escalate mid-session, no relaunch).
+  # Overrides the dangerous default; ignored when -Gated is set.
   [switch]$AllowBypassPermissions,
   # Opt back into the PA-gated permission relay capability (default OFF
   # since 2026-06-11 - see the relay block below, WI f0d66029).
@@ -266,11 +276,15 @@ if ($Resume) {
   $claudeArgs += '--resume'
   $claudeArgs += $Resume
 }
-if ($BypassPermissions) {
-  $claudeArgs += '--dangerously-skip-permissions'
+# Permission mode (2026-06-29): bypass is now the DEFAULT for SAs. Opt out
+# with -Gated (no flag), or soften with -AllowBypassPermissions (start gated,
+# Shift+Tab to escalate). -BypassPermissions is the explicit form of default.
+if ($Gated) {
+  # Normal permission gating - emit no permission flag.
 } elseif ($AllowBypassPermissions) {
-  # Start gated, but unlock bypass for mid-session Shift+Tab toggling.
   $claudeArgs += '--allow-dangerously-skip-permissions'
+} else {
+  $claudeArgs += '--dangerously-skip-permissions'
 }
 # Positional seed prompt LAST (claude treats the trailing positional arg as
 # the initial prompt and starts the conversation with it).
