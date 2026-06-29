@@ -41,6 +41,10 @@ is doing complex/judgment-heavy work that benefits from deeper reasoning
 .EXAMPLE
 .\sa-start.ps1 -Name "SA-architecture" -Effort max
   Fresh session at max effort for a heavy reasoning task
+
+.EXAMPLE
+.\sa-start.ps1 -Name "SA-frontend" -AllowBypassPermissions
+  Start under normal prompts; Shift+Tab into full bypass later, no relaunch
 #>
 
 param(
@@ -57,6 +61,13 @@ param(
   # the PA permission relay gets no permission_request notifications from
   # CC 2.1.17x (WI f0d66029) - without it they hang at the first gated tool.
   [switch]$BypassPermissions,
+  # Pass --allow-dangerously-skip-permissions: start the SA under NORMAL
+  # permission gating but UNLOCK bypass as a Shift+Tab-reachable mode, so an
+  # attended SA can escalate to full autonomy mid-session without relaunching.
+  # (Plain CC sessions can't enter bypass via Shift+Tab unless launched with
+  # an enabling flag.) Ignored when -BypassPermissions is also set - that
+  # starts the session in bypass outright.
+  [switch]$AllowBypassPermissions,
   # Opt back into the PA-gated permission relay capability (default OFF
   # since 2026-06-11 - see the relay block below, WI f0d66029).
   [switch]$PermissionRelay,
@@ -257,6 +268,9 @@ if ($Resume) {
 }
 if ($BypassPermissions) {
   $claudeArgs += '--dangerously-skip-permissions'
+} elseif ($AllowBypassPermissions) {
+  # Start gated, but unlock bypass for mid-session Shift+Tab toggling.
+  $claudeArgs += '--allow-dangerously-skip-permissions'
 }
 # Positional seed prompt LAST (claude treats the trailing positional arg as
 # the initial prompt and starts the conversation with it).

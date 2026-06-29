@@ -6,6 +6,20 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-06-29 - sa-start gains -AllowBypassPermissions: start gated, escalate to bypass mid-session (0.30.58)
+
+**Change.** `sa-start.ps1` gains a `-AllowBypassPermissions` switch that emits `--allow-dangerously-skip-permissions` (the unlock-but-don't-start-in-it form) instead of the hard `--dangerously-skip-permissions` that `-BypassPermissions` emits. An SA launched with it boots under NORMAL permission gating but can be escalated to full bypass mid-session via Shift+Tab, no relaunch. `-BypassPermissions` takes precedence when both are passed. Defaults unchanged: a bare `sa-start` is still fully gated and cannot reach bypass via Shift+Tab (no enabling flag). `pa-start.ps1` untouched - PA already hard-bypasses unconditionally.
+
+**Why.** Claude Code only lets a session enter `bypassPermissions` via Shift+Tab if it was launched with an enabling flag; bypass is not in the default Shift+Tab cycle (CC issues #6265, #21062). Previously an SA was all-or-nothing: bare = stuck with prompts and no escalation path, or `-BypassPermissions` = unsandboxed from keystroke one. The middle ground - boot cautious, watch it work, then grant autonomy without losing the session - was unreachable. `--allow-dangerously-skip-permissions` is the documented flag for exactly that and was simply never wired into the launcher.
+
+**Rejected.** Making any bypass the default for bare `sa-start` - silently unsandboxing every spawned SA is a footgun; opt-in stays opt-in. Adding the flag to `pa-start.ps1` - moot, PA is unconditionally bypassed already.
+
+**Test additions.** All four ps1 launchers parser-validated (`[Parser]::ParseFile`). No suite coverage exists for ps1 launchers.
+
+**Shipped:** v0.30.58. Spawnbox project-root `sa-start.ps1` mirrored same-change. PLUGIN_VERSION is runtime-read from package.json, so no dist rebuild.
+
+---
+
 ## 2026-06-11 - Durable launch-name map: -Resume resolves --name'd sessions (0.30.56)
 
 **Change.** (1) `hooks/session-start` appends `<utc-ts> TAB <session_id> TAB <name>` to `.orchestrator-state/session-names.tsv` on every SessionStart that carries a `session_title` (startup AND resume - resumed sessions re-stamp their current name+id). Names containing tabs/quotes/backslashes are skipped rather than written mangled; writes are best-effort and can never break a boot. (2) `sa-start.ps1` + `pa-start.ps1` resolvers gain layered name resolution: Layer 1 is the original transcript grep for the `/rename` stdout line, byte-identical and tried first; Layer 2 (only where Layer 1 finds nothing - today's hard-error path) consults the name map, resolving a single distinct id or, when one name maps to MULTIPLE session ids, listing candidates with last-seen timestamps and refusing to guess. The not-found error now names both sources and the workarounds.
