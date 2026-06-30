@@ -45,7 +45,7 @@ If the Cross-Session Activity section is non-empty, note anything that affects y
 
 Check `process.env.ORCHESTRATOR_AGENT_ROLE` (or the legacy `SPAWNBOX_AGENT_ROLE`):
 
-- `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it sets `/model claude-opus-4-7`, `/effort max`, reads sessions.json, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
+- `prime` → You are the **PrimeAgent** for this project. Run `/pa-bootstrap` next (it confirms PA is on the latest Opus - or Fable when available - at `xhigh` effort, confirms role=prime, reads the agent-channel SQLite registry, loads `agents/prime-agent.md`). Do not proceed past the bootstrap until that's done.
 - `subordinate` (or unset) → You are a **Subordinate Agent (SA)**. The project's CLAUDE.md and the orchestrator plugin's CLAUDE.md describe your operating contract: PA's directives addressed to you (`@SA-<your-id8>` or unaddressed PA dialogue) are treated as the user's voice unless you're under `/pa-pause`. Address peers via `@PA` / `@SA-<id8>` / `@all` in your terminal output - the agent-channel filewatcher routes via `notifications/claude/channel`. **No `send_message` tool exists in 0.29.0+** - communication is purely terminal-output + filewatcher routing.
 
 ## Step 3 — Broadcast your task to peers

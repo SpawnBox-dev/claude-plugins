@@ -388,7 +388,7 @@ Capture skills (single-purpose nudges):
 - `what-was-decided` - pre-change lookup for prior decisions.
 
 PrimeAgent skills (R8, 0.29.0+):
-- `pa-bootstrap` - first-action skill PA runs after `pa-start.bat` launches. Sets `/model claude-opus-4-7` + `/effort max`, confirms role=prime, reads sessions.json, loads `agents/prime-agent.md`, outputs readiness status. Idempotent.
+- `pa-bootstrap` - first-action skill PA runs after `pa-start.bat` launches. Confirms PA is on the latest Opus (or Fable when available) + `/effort xhigh`, confirms role=prime, reads the agent-channel SQLite registry, loads `agents/prime-agent.md`, outputs readiness status. Idempotent.
 - `pa-pause` - override. In an SA terminal: pauses PA's posture toward THIS SA only. In PA's terminal: global pause across all SAs. Atomic-writes `state.json`.
 - `pa-resume` - inverse of pa-pause. Clears the appropriate scope.
 - `pa-takeover` - force-claim PA primacy from an orphaned previous PA. Updates sessions.json roles atomically; expects `/pa-bootstrap` to follow.

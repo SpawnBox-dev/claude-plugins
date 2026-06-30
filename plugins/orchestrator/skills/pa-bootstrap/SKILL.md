@@ -1,6 +1,6 @@
 ---
 name: pa-bootstrap
-description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Sets model/effort, confirms role=prime, reads active sessions from the SQLite agent-channel registry (agent_channel.db), verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
+description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Confirms PA is on the latest Opus (or Fable when available) + xhigh effort, confirms role=prime, reads active sessions from the SQLite agent-channel registry (agent_channel.db), verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
 ---
 
 # Bootstrap the PrimeAgent
@@ -11,13 +11,24 @@ to re-run.
 
 ## Steps
 
-### 1. Set runtime config (the .bat cannot)
+### 1. Confirm runtime config (model + effort)
 
-Run these two commands in this PA session:
-- `/model claude-opus-4-7` - ensure Opus 4.7, the most capable model family for orchestration judgment.
-- `/effort max` - deepest reasoning per turn.
+**Effort** is already handled by the launcher: `pa-start.ps1` starts PA at
+`--effort xhigh`, the standing default as of 2026-06-30 (changed from
+`max` - max over-analyzes and is too slow for orchestration cadence). No
+action needed. For a one-off deeper pass you may `/effort max` for that
+single turn, but do NOT make it the session default.
 
-These are per-session slash commands; the launcher .bat cannot pre-set them.
+**Model** is intentionally NOT pinned by the launcher, so PA inherits your
+Claude Code default. Confirm PA is on the LATEST / most-capable model:
+- the newest Opus available (as of 2026-06-30 `claude-opus-4-8` - prefer
+  its 1M-context variant for the macro view), OR Fable (`claude-fable-5`)
+  if/when it is available again;
+- NEVER pin a stale id (e.g. the retired `claude-opus-4-7`).
+
+`/model` and `/effort` are user-typed slash commands - the agent cannot
+self-run them. If PA launched on an older model, surface it and ask the
+user to `/model <latest>`.
 
 ### 2. Confirm role and identity
 

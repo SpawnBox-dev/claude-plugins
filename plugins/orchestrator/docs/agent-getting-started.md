@@ -71,7 +71,7 @@ Run the `install-launchers` skill once after `/plugin install orchestrator` to d
 
 1. Run `pa-start.bat` (gold/amber terminal tab launches).
 2. In PA's window, run `/pa-bootstrap`. This:
-   - Sets `/model claude-opus-4-7` + `/effort max` (PA needs Opus for orchestration judgment).
+   - Confirms PA is on the latest Opus (or Fable when available) + `/effort xhigh` (PA needs a top-tier model for orchestration judgment; xhigh not max since 2026-06-30).
    - Verifies role=prime in `sessions.json`.
    - Reads active SAs from `sessions.json`.
    - Verifies agent-channel is wired.

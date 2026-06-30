@@ -81,7 +81,7 @@ Just use the tools. The bridge takes care of itself.
 When multiple Claude Code sessions run against the same project, the orchestrator plugin's agent-channel MCP capability delivers cross-session events as `<channel source="agent-channel" ...>content</channel>` tags injected inline at every model turn - same primitive the official Discord plugin uses for real-time message delivery.
 
 **Roles:**
-- **PrimeAgent (PA)**: persistent orchestrator session, role=prime, runs Opus at max effort. Singleton per project. Launched via `pa-start.bat`.
+- **PrimeAgent (PA)**: persistent orchestrator session, role=prime, runs the latest Opus (or Fable when available) at xhigh effort. Singleton per project. Launched via `pa-start.bat`.
 - **Subordinate Agent (SA)**: any other Claude Code session in the project, role=subordinate. Launched via `sa-start.bat` (or any `claude --channels plugin:orchestrator@...` invocation with `SPAWNBOX_AGENT_ROLE=subordinate`).
 
 **Communication is via terminal output, not a tool:**

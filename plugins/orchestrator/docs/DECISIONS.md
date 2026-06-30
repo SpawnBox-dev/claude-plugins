@@ -6,6 +6,20 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-06-30 - PA defaults to xhigh effort (not max) + latest-Opus/Fable model policy (0.30.60)
+
+**Change.** `pa-start.ps1` now launches PA at `--effort xhigh` instead of `--effort max`. The `pa-bootstrap`, `pa-takeover`, and `getting-started` skills plus the docs (ARCHITECTURE, DECISIONS, agent-getting-started) and `prime-agent.md` / `CLAUDE.md` no longer instruct `/model claude-opus-4-7` + `/effort max`; they now state the standing policy: PA runs the LATEST / most-capable model (newest Opus - currently `claude-opus-4-8`, prefer its 1M-context variant - or Fable when/if available again) at `xhigh` effort.
+
+**Why.** Jarid, 2026-06-30: "default to xhigh instead of max in all cases now. max over-analyzes and takes too long." Separately, the hardcoded `claude-opus-4-7` had gone stale (Opus 4.8 shipped and is more capable) - a recurring footgun, since a literal reading of the old skill would DOWNGRADE PA.
+
+**Rejected.** Pinning a concrete `--model` in the launcher: it would (a) re-create the exact staleness bug being removed (the next Opus would again be wrong), and (b) likely drop PA from the 1M-context Opus variant to 200K, since the launcher can't safely express the `[1m]` long-context suffix. Instead the launcher stays model-agnostic (inherits the CC default) and the policy lives in docs/skill text. SA effort is unchanged (SAs already inherit the session default, which is now xhigh).
+
+**Test additions.** None - launcher arg + skill/doc text only; no MCP/TS code changed, so no rebuild and no suite impact. pa-start.ps1 parser-validated.
+
+**Shipped:** v0.30.60. Spawnbox project-root `pa-start.ps1` mirrored the same effort change so it takes effect for the next PA launch without re-running `/orchestrator:install-launchers`.
+
+---
+
 ## 2026-06-29 - sa-start launches in --dangerously-skip-permissions BY DEFAULT (0.30.59)
 
 **Change.** `sa-start.ps1` now emits `--dangerously-skip-permissions` for every SA by default - bare `sa-start` = full bypass, matching `pa-start`. New `-Gated` switch opts OUT (no permission flag, normal gating). Precedence: `-Gated` (no flag) > `-AllowBypassPermissions` (`--allow-dangerously-skip-permissions`, start gated + Shift+Tab to escalate) > default/`-BypassPermissions` (`--dangerously-skip-permissions`). `-BypassPermissions` is now redundant, kept for back-compat.
@@ -879,7 +893,7 @@ Reference design: `docs/superpowers/specs/2026-05-09-prime-agent-channel-archite
 - `mcp/engine/agent_channel.ts` - filewatcher subsystem. Watches `~/.claude/projects/<project_hash>/*.jsonl`, maintains per-file offsets, polls every 1-2s, reads new events, applies filter rules, parses addressing, emits `mcp.notification(...)` to its owning session.
 - `mcp/engine/addressing.ts` - pure addressing parser. Rules: slash-command override (`/pa-pause`, `/pa-resume`), natural-language override (`PA, back off` / `PA, come back`), explicit `@PA` / `@SA-<id8>` / `@all`, conversational `PA,` prefix, default fanout (PA observes everything).
 - State files under `<project>/.orchestrator-state/agent-channel/`: `offsets.json` (per-file last-read), `sessions.json` (session registry with id8, role, name, heartbeats), `state.json` (override flags - `pa_global_pause` and per-SA `sa_pauses`).
-- Skills: `pa-bootstrap` (sets `/model claude-opus-4-7` and `/effort max`, prints active SA roster, verifies filewatcher), `pa-pause`, `pa-resume`, `pa-takeover`.
+- Skills: `pa-bootstrap` (confirms latest Opus/Fable + `/effort xhigh`, prints active SA roster, verifies filewatcher), `pa-pause`, `pa-resume`, `pa-takeover`.
 - `agents/prime-agent.md` - PA's operating contract (when to act vs observe, how to address SAs, override etiquette, how to use `note()` and `create_work_item()` for self-improvement tagged `area:orchestrator-plugin` + `agent-channel-improvement`).
 - Bootstrap launchers (live in the consuming project): `pa-start.bat` (gold/amber tab, singleton-enforced, refuses with takeover hint if PA already running), `sa-start.bat` (default tab, auto-generates `SA-YYYY-MM-DD-HH-MM-SS` name if `--name` not supplied, both pass `--channels plugin:orchestrator@spawnbox-dev-claude-plugins`).
 - Project-level CLAUDE.md addendum describing the SA contract (treat PA-addressed messages as if Jarid said them, observe-don't-execute during pause, `@`-syntax for addressing peers).

@@ -241,10 +241,18 @@ if ($sessionName) {
 $claudeArgs = @(
   '--dangerously-load-development-channels',
   'plugin:orchestrator@__ORCH_MARKETPLACE__',
-  # 0.30.28+: PA always launches at max effort. PA is the singleton
-  # orchestration session - judgment calls, cross-cutting coordination,
-  # holding the macro view. Token cost is the right tradeoff for the role.
-  '--effort', 'max'
+  # PA launches at xhigh effort (0.30.60, Jarid 2026-06-30: changed from
+  # 'max' - max over-analyzes and is too slow for orchestration cadence;
+  # xhigh is the standing default). PA is the singleton orchestration
+  # session - judgment calls, cross-cutting coordination, macro view.
+  #
+  # MODEL: intentionally NOT pinned. The launcher passes no --model, so PA
+  # inherits your Claude Code default. Keep that default on the LATEST /
+  # most-capable model - the newest Opus (as of 2026-06-30 claude-opus-4-8,
+  # prefer its 1M-context variant), or Fable when/if it is available again.
+  # Pinning a concrete id here would re-create the staleness it caused at
+  # claude-opus-4-7 and could silently drop the 1M context window.
+  '--effort', 'xhigh'
 )
 if ($sessionName) {
   $claudeArgs += '--name'

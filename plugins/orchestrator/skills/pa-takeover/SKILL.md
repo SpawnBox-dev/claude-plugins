@@ -67,7 +67,7 @@ and that it's yours.
 ### 5. Run /pa-bootstrap
 
 The takeover only changes the role flag. You still need full priming:
-`/model claude-opus-4-7`, `/effort max`, contract-loading. Run
+latest-Opus-or-Fable model confirmation, `xhigh` effort, and contract-loading. Run
 `/pa-bootstrap` now to complete.
 
 ## Notes
