@@ -57,6 +57,11 @@ param(
   [string]$ProjectDir = '',
   [ValidateSet('', 'low', 'medium', 'high', 'xhigh', 'max')]
   [string]$Effort = '',
+  # 0.30.61: optional model override (e.g. claude-fable-5). Only emitted when
+  # explicitly set - no baked-in default, so nothing breaks when a pinned model
+  # is retired. Motivation: SAs otherwise inherit the CC default silently
+  # (user_pattern 05c57bde - days-on-Opus surprise while Fable was available).
+  [string]$Model = '',
   # Seed prompt submitted as the session's first turn. Without one, a freshly
   # spawned SA idles forever: agent-channel injection needs an existing
   # conversation, and nothing else starts one (WI f0d66029).
@@ -271,6 +276,11 @@ if ($sessionName) {
 if ($Effort) {
   $claudeArgs += '--effort'
   $claudeArgs += $Effort
+}
+# 0.30.61: optional model override (see -Model param note above).
+if ($Model) {
+  $claudeArgs += '--model'
+  $claudeArgs += $Model
 }
 if ($Resume) {
   $claudeArgs += '--resume'
