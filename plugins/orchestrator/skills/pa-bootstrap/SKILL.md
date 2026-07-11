@@ -272,6 +272,34 @@ session's cwd only - it does NOT auto-union project DBs across
 related repos. You hold the multi-repo map in your working context
 and apply it proactively.
 
+### 5.8. Spawn your context-warden (RAID redundancy)
+
+Spawn your dedicated **context-warden** - a background agent that is your
+striped context redundancy (the RAID principle; see prime-agent.md "Your
+context-warden"). It tails the fleet's transcripts on a self-timed loop and
+maintains a durable ledger at
+`$CLAUDE_PROJECT_DIR/.orchestrator-state/warden-ledger.md` (your standing
+rulings, open gates, watch-for items, checkpoint-recency for you + every
+SA, context-proximity, per-SA state, gaps/contradictions). It is
+advisory-only (its sole write is the ledger).
+
+Spawn it in the BACKGROUND via the Agent tool:
+
+- `subagent_type: "orchestrator:context-warden"` (its canonical brief is
+  the agent definition itself - `agents/context-warden.md`).
+- `model: "opus"` - NEVER Fable (subagents must not run on Fable).
+- `run_in_background: true`.
+- prompt: tell it to begin its loop - read any prior ledger at the stable
+  path, bank each active session's transcript position, do a first pass,
+  write the ledger, then self-arm its timer. Nothing more; the brief
+  carries the duties.
+
+If a warden ledger already exists from a prior PA (the path is stable
+across restarts), the new warden picks up from it. **Reliability:** the
+ledger FILE is the source of truth; the warden's completion notification is
+only a doorbell (it has flaked live - always fall back to reading the
+file). This is the ONE subagent PA spawns (see Hard rules).
+
 ### 6. Check for any existing global pause
 
 Pause state lives in the SQLite DB (the `global_pause` singleton row +
@@ -321,9 +349,12 @@ is gone. Reserve them for genuinely user-directed content.
 
 ## Hard rules
 
-- Do NOT spawn any subagents during bootstrap. PA is itself a Claude Code
-  session; it doesn't need a concierge subagent (that whole pattern is
-  gone in 0.29.0).
+- Do NOT spawn any subagents during bootstrap - with ONE sanctioned
+  exception: the **context-warden** (step 5.8), your background
+  context-redundancy agent. The retired pattern was the per-task
+  *concierge* subagent (gone in 0.29.0); the warden is categorically
+  different - no task load, advisory-only, exists to protect PA's context.
+  No OTHER subagents at bootstrap.
 - Do NOT call any messaging tool. `send_message`, `read_messages`,
   `peek_inbox` were deleted in 0.29.0. Cross-session communication is via
   terminal output + agent-channel notifications.

@@ -1038,6 +1038,30 @@ describe("hook_event dispatcher", () => {
       expect(msg.toLowerCase()).toContain("on your behalf");
     });
 
+    // WI 9c01fb36: a compacted PA must be told to rehydrate from its
+    // context-warden's ledger FIRST (the warden is PA's striped context
+    // redundancy). PA-branch only; an SA has no warden.
+    test("composer: PA branch tells the compacted PA to rehydrate from its context-warden FIRST; SA branch does not", () => {
+      const paMsg = composePostCompactReorientation({
+        currentTask: "orchestrating the fleet",
+        checkpoint: "cp body",
+        livePA: false,
+        role: "prime",
+        peers: [],
+      });
+      expect(paMsg.toLowerCase()).toContain("context-warden");
+      expect(paMsg.toLowerCase()).toContain("ledger");
+
+      const saMsg = composePostCompactReorientation({
+        currentTask: "an SA task",
+        checkpoint: "cp",
+        livePA: true,
+        role: "subordinate",
+        peers: [],
+      });
+      expect(saMsg.toLowerCase()).not.toContain("context-warden");
+    });
+
     // --- Handler: hermetic integration (DB digest + non-HSO envelope shape).
     //     No livePA-dependent assertion here (that'd depend on the real
     //     fleet); the HSO-trap guard is environment-independent. ---

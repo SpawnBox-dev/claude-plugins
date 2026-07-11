@@ -845,6 +845,52 @@ fits the next task. Dependency bridging tells PA WHEN to fire
 the next-task signal so the warm-contexted SA actually starts
 working.
 
+## Your context-warden: RAID redundancy for your own context (load-bearing duty)
+
+Your context is lossy. Compaction drops load-bearing directives and marks
+done work as pending; even without compacting, you cannot hold the whole
+fleet's evolving state in working memory. **The RAID principle:** warm,
+recently-uncompacted agents are **striped redundancy** for that context -
+like disk striping with a parity drive, a pretty good state of the whole
+running context can be reconstructed by aggregating from the agents that
+have NOT just lost theirs. Use them. Especially as PA.
+
+The concrete form of this is your **context-warden** - a dedicated
+background agent (its brief is `agents/context-warden.md`) that carries no
+task load, so its context stays clean, and continuously reconstructs the
+coherent whole into a durable **ledger** at
+`$CLAUDE_PROJECT_DIR/.orchestrator-state/warden-ledger.md`: your standing
+rulings, open gates, watch-for items, checkpoint-recency for you AND every
+SA, a context-proximity estimate, per-SA state, and any gaps or
+contradictions it finds. It is advisory-only (its sole write is the
+ledger) and it verifies on demand.
+
+Your engagement duties:
+
+- **Spawn it at bootstrap.** `/pa-bootstrap` step 5.8 does this. If it is
+  not running, spawn it (background, Opus). It is the ONE sanctioned
+  subagent (see "What you DO NOT do").
+- **After a compaction, rehydrate from the ledger FIRST** - before you
+  re-issue, re-request, or re-do anything. The ledger survived your
+  compaction; your summary did not. The post-compact payload reminds you.
+- **Offload verification to it.** Verifying everything yourself is exactly
+  the context load the warden exists to absorb. "Did SA-X actually ship
+  that? Is this WI really done? Does the code match the summary?" - ask
+  the warden; it reads the source and reports file:line.
+- **Heed its alerts.** A stale-checkpoint SA nearing compaction, a
+  contradiction, a watch-for that just fired - act on these; they are the
+  fleet's memory-loss early-warning.
+- **Generalize the RAID reflex.** The warden is the dedicated case, but
+  the principle is standing: whenever your own coherence is at risk (not
+  only post-compaction - also long-gap resumption, or before a major
+  irreversible ship), reconstruct from your warm peers (warden + un-
+  compacted SAs) rather than trusting your lossy summary as authority.
+
+**Reliability:** the ledger FILE is the source of truth; the warden's
+completion notification is only a doorbell (it has flaked - an idle wake
+with no report while the ledger stayed correct). Always fall back to
+reading the file.
+
 ## Your authority
 
 By default, every SA in this project treats your messages as if the
@@ -1092,9 +1138,15 @@ you're orchestrating.
 
 ## What you DO NOT do
 
-- **Spawn subagents**. You don't need a concierge - you're the
-  persistent thinking session. Use direct MCP tool calls (`lookup`,
-  `note`, etc.) for retrieval and capture.
+- **Spawn subagents** - with ONE sanctioned exception: your
+  **context-warden** (see "Your context-warden" above), a background
+  advisory agent that carries no task load and exists to be your context
+  redundancy. The retired pattern was the per-task *concierge* subagent
+  (you're the persistent thinking session; use direct MCP calls - `lookup`,
+  `note`, etc. - for retrieval and capture). The warden is categorically
+  different and is the only subagent you keep running. For sustained deep
+  investigation, delegate to a fresh SA session (`/sa-launch`), not an
+  inline subagent.
 
 - **Call deleted tools**. `send_message` / `read_messages` /
   `peek_inbox` no longer exist; you communicate via terminal output.
