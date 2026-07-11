@@ -71,6 +71,17 @@ export type EmitFn = (n: ChannelNotification) => void;
 const POLL_INTERVAL_MS = 1500;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 90_000;
+// DEFENSE-C (WI 8522c487): consecutive stale-observation ticks a peer must be
+// absent from the fresh roster before its session_departed is announced (and
+// its row reaped). ~one heartbeat interval (30s) at the 1.5s nominal tick rate:
+// a starved-but-alive victim refreshes within one 30s beat of the stall
+// clearing, so this grace absorbs the recovery and suppresses depart<->rejoin
+// flaps; under load the observer's own ticks dilate, lengthening the wall-clock
+// grace exactly when it is needed. Trade: genuine-departure announcement
+// latency rises from 90s to ~120s. Basis: measured ~72x tick-I/O reduction from
+// A+B (1099ms -> 15ms at 6x20MB) removes self-inflicted starvation, leaving only
+// bounded external-CPU stalls, so a modest fixed grace suffices.
+export const DEPART_GRACE_TICKS = 20;
 
 /**
  * Decorate the channel-content body — but only when the decoration is
@@ -148,6 +159,17 @@ export class AgentChannel {
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private knownSessions = new Map<string, SessionEntry>();
+  /** DEFENSE-C (WI 8522c487): per-peer consecutive stale-observation tick
+   *  count. A known peer absent from the fresh roster accrues misses; its
+   *  departure is announced (and its row reaped) only at DEPART_GRACE_TICKS,
+   *  and a reappearance before then clears it - suppressing depart<->rejoin
+   *  flaps. Observer-side only; the flapping victim never runs this for itself. */
+  private pendingMisses = new Map<string, number>();
+  /** The fresh roster (self + heartbeat-fresh peers) computed by the last
+   *  detectSessionChanges; consumed by tick() for sender/addressing resolution.
+   *  Distinct from knownSessions, which now also holds peers being held through
+   *  the departure grace. */
+  private currentRoster = new Map<string, SessionEntry>();
   /** Last `system_events.id` we've processed (auto-increment id in
    *  agent_channel.db's system_events table, 0.30.36+; pre-0.30.36 this
    *  was a byte offset into system_events.jsonl). In-memory only - reset
@@ -279,39 +301,34 @@ export class AgentChannel {
   }
 
   private detectSessionChanges(): void {
-    const current = new Map(
-      readSessions(this.projectStateDir).map((s) => [s.session_id, s]),
-    );
     const now = Date.now();
 
-    // Reap stale.
-    //
-    // 0.30.32 (ghost-session fix): NEVER reap self even if our own
-    // heartbeat_at appears stale in sessions.json. A stale-self entry
-    // means OUR heartbeat() failed to write recently - but our filewatcher
-    // tick is still running (we're literally executing this code), so the
-    // remedy is to let the NEXT heartbeat tick recover, not to self-destruct.
-    // Without this check, a transient GC pause / IO stall that delayed
-    // heartbeat past 90s would cause our own tick to remove our own entry,
-    // then the next heartbeat would re-add - but in the meantime any peer
-    // session's tick that landed in the gap would see us as departed and
-    // emit a session_departed event. Source of half the ghost-session false
-    // positives. See open_thread 6fb3b978 for the incident.
-    for (const [sid, entry] of current) {
-      if (sid === this.selfSession.session_id) continue;
-      const last = new Date(entry.last_heartbeat_at).getTime();
-      if (now - last > STALE_THRESHOLD_MS) {
-        current.delete(sid);
-        removeSession(this.projectStateDir, sid);
+    // Fresh roster. Self is ALWAYS kept (0.30.32 - never self-reap: our tick is
+    // literally executing, so a stale-looking self entry only means our own
+    // heartbeat write is momentarily behind and will recover; self-reaping would
+    // let a peer see us departed). Other sessions are kept only while
+    // heartbeat-fresh (<= 90s). This is both the routing roster (sender +
+    // addressing resolution, consumed by tick()) and the liveness signal for
+    // join/depart derivation below.
+    const current = new Map<string, SessionEntry>();
+    for (const s of readSessions(this.projectStateDir)) {
+      if (s.session_id === this.selfSession.session_id) {
+        current.set(s.session_id, s);
+        continue;
+      }
+      const last = new Date(s.last_heartbeat_at).getTime();
+      if (Number.isFinite(last) && now - last <= STALE_THRESHOLD_MS) {
+        current.set(s.session_id, s);
       }
     }
+    this.currentRoster = current;
 
-    // Joined: in current, not in known
+    // Joined: a peer present now and not already known. Peers held through the
+    // departure grace stay in knownSessions, so a reappearance is NOT a new
+    // join. Adopt genuinely-new peers into known.
     for (const [sid, entry] of current) {
-      if (
-        !this.knownSessions.has(sid) &&
-        sid !== this.selfSession.session_id
-      ) {
+      if (sid === this.selfSession.session_id) continue;
+      if (!this.knownSessions.has(sid)) {
         this.emit({
           content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
           meta: {
@@ -324,12 +341,28 @@ export class AgentChannel {
             ts: new Date().toISOString(),
           },
         });
+        this.knownSessions.set(sid, entry);
       }
+      // Present again -> clear any accrued miss. Combined with "held in known"
+      // above, a peer that flapped (left then returned within the grace)
+      // produces NEITHER a session_departed NOR a re-join.
+      this.pendingMisses.delete(sid);
     }
 
-    // Departed: in known, not in current
+    // Departed WITH hysteresis (DEFENSE-C, WI 8522c487) - OBSERVER-SIDE ONLY.
+    // The flapping victim is blocked (starved event loop) and cannot defend
+    // itself; self is never in this loop (self is always in `current`). A known
+    // peer absent from the fresh roster accrues consecutive-miss ticks; only at
+    // DEPART_GRACE_TICKS is it announced departed and its row reaped (the reap
+    // is thus deferred from the old immediate-90s reap). The grace is uniform
+    // for both the stale-but-present and row-absent cases, which keeps it safe
+    // in a mixed-version fleet where an older peer may still immediately reap a
+    // merely-stalled victim's row.
     for (const [sid, entry] of this.knownSessions) {
-      if (!current.has(sid) && sid !== this.selfSession.session_id) {
+      if (sid === this.selfSession.session_id) continue;
+      if (current.has(sid)) continue;
+      const misses = (this.pendingMisses.get(sid) ?? 0) + 1;
+      if (misses >= DEPART_GRACE_TICKS) {
         this.emit({
           content: `[session_departed] ${entry.name} (${entry.id8})`,
           meta: {
@@ -342,10 +375,13 @@ export class AgentChannel {
             ts: new Date().toISOString(),
           },
         });
+        this.knownSessions.delete(sid);
+        this.pendingMisses.delete(sid);
+        removeSession(this.projectStateDir, sid);
+      } else {
+        this.pendingMisses.set(sid, misses);
       }
     }
-
-    this.knownSessions = current;
   }
 
   private listJsonlFiles(): string[] {
@@ -358,7 +394,10 @@ export class AgentChannel {
   private tick(): void {
     try {
       this.detectSessionChanges();
-      const sessions = Array.from(this.knownSessions.values());
+      // Route on the FRESH roster (self + heartbeat-fresh peers), NOT
+      // knownSessions - which now also holds peers held through the departure
+      // grace (DEFENSE-C). detectSessionChanges refreshes currentRoster first.
+      const sessions = Array.from(this.currentRoster.values());
       const overrideState = readOverrideState(this.projectStateDir);
 
       // Read offsets ONCE at tick start; mutate in memory; write ONCE at end.

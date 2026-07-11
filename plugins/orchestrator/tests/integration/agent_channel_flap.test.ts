@@ -12,9 +12,10 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { AgentChannel, type ChannelNotification } from "../../mcp/engine/agent_channel";
+import { AgentChannel, DEPART_GRACE_TICKS, type ChannelNotification } from "../../mcp/engine/agent_channel";
 import {
   writeSession,
+  removeSession,
   closeAgentChannelDb,
   type SessionEntry,
 } from "../../mcp/engine/agent_channel_state";
@@ -138,5 +139,60 @@ describe("flap fix ROOT-A: positional read (byte-offset, multibyte-safe, partial
     (paChan as any).tick();
     const partialHits = assistantContents(received).filter((c) => c.includes("PARTIAL-LINE"));
     expect(partialHits.length).toBe(1);
+  });
+});
+
+function eventsOfType(
+  received: ChannelNotification[],
+  type: string,
+  id8: string,
+): ChannelNotification[] {
+  return received.filter((n) => n.meta.event_type === type && n.meta.from_id8 === id8);
+}
+
+describe("flap fix DEFENSE-C: observer-side departure hysteresis + depart<->rejoin debounce", () => {
+  // The observer (PA here) holds a peer through the grace window. A peer that
+  // leaves the fresh roster (row removed / heartbeat stale) is not announced
+  // departed until DEPART_GRACE_TICKS consecutive misses; a reappearance before
+  // then cancels the pair (no depart, no re-join). This lives entirely on the
+  // OBSERVER side - the flapping victim is blocked and cannot act for itself.
+  function setup() {
+    const pa = makeSession("prime", "f5b8708d", "PA");
+    const peer = makeSession("subordinate", "abc12345", "SA-peer");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, peer);
+    const received: ChannelNotification[] = [];
+    const chan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => received.push(n));
+    (chan as any).tick(); // establish `peer` as a known, present session (emits its join)
+    return { peer, received, chan };
+  }
+
+  test("a departure is NOT announced within the grace window", () => {
+    const { peer, received, chan } = setup();
+    removeSession(stateDir, peer.session_id); // peer leaves the fresh roster
+    for (let i = 0; i < DEPART_GRACE_TICKS - 1; i++) (chan as any).tick();
+    expect(eventsOfType(received, "session_departed", peer.id8).length).toBe(0);
+  });
+
+  test("a genuine departure IS announced once the grace elapses", () => {
+    const { peer, received, chan } = setup();
+    removeSession(stateDir, peer.session_id);
+    for (let i = 0; i < DEPART_GRACE_TICKS - 1; i++) (chan as any).tick();
+    expect(eventsOfType(received, "session_departed", peer.id8).length).toBe(0); // not yet
+    (chan as any).tick(); // the DEPART_GRACE_TICKS-th consecutive miss
+    expect(eventsOfType(received, "session_departed", peer.id8).length).toBe(1);
+  });
+
+  test("a peer that leaves then rejoins within grace triggers NEITHER a departed NOR a re-join (flap debounced)", () => {
+    const { peer, received, chan } = setup();
+    const joinsAfterSetup = eventsOfType(received, "session_joined", peer.id8).length; // 1
+    removeSession(stateDir, peer.session_id);
+    for (let i = 0; i < 3; i++) (chan as any).tick(); // a few misses, well within grace
+    writeSession(stateDir, peer); // peer recovers (re-registers, fresh heartbeat)
+    for (let i = 0; i < 4; i++) (chan as any).tick(); // recovery tick + keep observing
+    expect(eventsOfType(received, "session_departed", peer.id8).length).toBe(0);
+    // No SECOND join: the peer was held in `known` through the grace, so its
+    // reappearance is not a new join.
+    expect(eventsOfType(received, "session_joined", peer.id8).length).toBe(joinsAfterSetup);
   });
 });
