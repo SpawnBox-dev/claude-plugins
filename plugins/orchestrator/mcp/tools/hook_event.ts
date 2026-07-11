@@ -884,15 +884,27 @@ function handleSessionStartCompact(
   if (syntheticFresh) {
     checkpoint = synthetic!.text;
   } else {
-    // Fallback: latest checkpoint NOTE (global-latest by created_at - may be
-    // cross-session/stale; the composer hedges the surfaced value accordingly).
+    // Fallback (no fresh synthetic). Prefer THIS session's OWN latest checkpoint
+    // (notes.source_session == sid), so another session's newer global-latest
+    // checkpoint cannot shadow this session's boundary state - the same
+    // cross-session shadow the synthetic-first-class design fixes, which must not
+    // reappear in the degraded path (WI 2ad3240e P2 review). source_session holds
+    // the full session_id and sid is the identity-preserving sanitize of it, so
+    // they match. Only when this session has NO checkpoint of its own do we
+    // surface the global-latest as a last resort; the composer hedges that value.
     let realCp: { content: string } | null = null;
     try {
-      realCp = ctx.db
-        .query(
-          `SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
-        )
-        .get() as { content: string } | null;
+      realCp =
+        (ctx.db
+          .query(
+            `SELECT content FROM notes WHERE type = 'checkpoint' AND source_session = ? ORDER BY created_at DESC LIMIT 1`
+          )
+          .get(sid) as { content: string } | null) ??
+        (ctx.db
+          .query(
+            `SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
+          )
+          .get() as { content: string } | null);
     } catch {
       /* notes missing - non-fatal */
     }

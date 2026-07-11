@@ -1076,6 +1076,34 @@ describe("hook_event dispatcher", () => {
       expect(r.systemMessage!.toLowerCase()).toContain("compact");
       expect(r.systemMessage).not.toContain("undefined");
     });
+
+    // WI 2ad3240e review (P2, SA-0c230dcf): the no-fresh-synthetic fallback must
+    // prefer THIS session's own latest checkpoint over another session's newer
+    // one - otherwise the cross-session shadow the change claims to fix reappears
+    // in the degraded path. notes.source_session provides the attribution.
+    test("handler: post-compact fallback prefers THIS session's own checkpoint over another session's newer one", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("SCme");
+      // This session's OWN checkpoint (older).
+      db.run(
+        `INSERT INTO notes (id, type, content, source_session, created_at, updated_at) VALUES (?, 'checkpoint', ?, ?, ?, ?)`,
+        ["cp-mine", "MY-OWN-STATE: implemented the widget", "SCme", "2026-07-11T10:00:00.000Z", "2026-07-11T10:00:00.000Z"]
+      );
+      // Another session's NEWER checkpoint (wins a naive global-latest ORDER BY).
+      db.run(
+        `INSERT INTO notes (id, type, content, source_session, created_at, updated_at) VALUES (?, 'checkpoint', ?, ?, ?, ?)`,
+        ["cp-other", "OTHER-SESSION-STATE: unrelated work", "SCother", "2026-07-11T18:00:00.000Z", "2026-07-11T18:00:00.000Z"]
+      );
+
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "SCme" }
+      );
+
+      expect(r.systemMessage).toBeDefined();
+      expect(r.systemMessage).toContain("MY-OWN-STATE");
+      expect(r.systemMessage).not.toContain("OTHER-SESSION-STATE");
+    });
   });
 });
 
