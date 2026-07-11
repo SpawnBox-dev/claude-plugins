@@ -55,6 +55,17 @@ function appendAssistantEvent(jsonl: string, text: string): void {
   appendFileSync(jsonl, assistantEventLine(text));
 }
 
+// ROOT-B (WI 8522c487): receivers EOF-init on first sight, so deliverable
+// content is appended AFTER first-sight, not before start. First-sight tick
+// EOF-inits the empty jsonl, then the caller's appends land, then a second
+// tick processes them as post-join content. (Same helper as the routing E2E
+// suite; drives deterministically via the `(chan as any).tick()` seam.)
+function deliver(channels: AgentChannel[], appends: () => void): void {
+  for (const c of channels) (c as any).tick(); // first-sight -> EOF-init empty files
+  appends();
+  for (const c of channels) (c as any).tick(); // process the appended bytes
+}
+
 // The live MOOSE-742 multi-paragraph payload (structurally exact): leading
 // user-facing prose paragraph ending in a colon, blank line, then the
 // addressed directive paragraph containing colons + double quotes.
@@ -96,10 +107,12 @@ describe("WI f0d66029 regression repros", () => {
 
     const paJsonl = join(projectsHashDir, `${pa.session_id}.jsonl`);
     writeFileSync(paJsonl, "");
-    appendAssistantEvent(paJsonl, MULTI_PARA_PAYLOAD);
 
     const received: ChannelNotification[] = [];
-    const chan = await runWatcherOnce(sa, received);
+    const chan = new AgentChannel(stateDir, projectsHashDir, sa, (n) => received.push(n));
+    deliver([chan], () => {
+      appendAssistantEvent(paJsonl, MULTI_PARA_PAYLOAD);
+    });
     chan.stop();
 
     const contents = received
@@ -122,10 +135,12 @@ describe("WI f0d66029 regression repros", () => {
 
     const paJsonl = join(projectsHashDir, `${pa.session_id}.jsonl`);
     writeFileSync(paJsonl, "");
-    appendAssistantEvent(paJsonl, ENVELOPE_PAYLOAD);
 
     const received: ChannelNotification[] = [];
-    const chan = await runWatcherOnce(sa, received);
+    const chan = new AgentChannel(stateDir, projectsHashDir, sa, (n) => received.push(n));
+    deliver([chan], () => {
+      appendAssistantEvent(paJsonl, ENVELOPE_PAYLOAD);
+    });
     chan.stop();
 
     const contents = received

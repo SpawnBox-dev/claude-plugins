@@ -17,7 +17,7 @@
  * event is emitted.
  */
 
-import { readFileSync, existsSync, statSync, readdirSync } from "fs";
+import { openSync, readSync, closeSync, existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
 import { parseAddressing } from "./addressing";
 import { filterEvent, type FilteredEvent } from "./agent_channel_filter";
@@ -563,31 +563,62 @@ export class AgentChannel {
     overrideState: ReturnType<typeof readOverrideState>,
     offsets: Record<string, number>,
   ): boolean {
-    const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
       stat = statSync(file);
     } catch {
       return false;
     }
+    // ROOT-B (WI 8522c487): first sight of this transcript by this receiver.
+    // A newly-joined / restarted session must NOT replay the fleet's pre-join
+    // backlog. Reading gigabytes of history synchronously per tick starved the
+    // 30s heartbeat timer (one event loop shared with this tick) past the 90s
+    // stale threshold -> peers reaped a live session -> false session_departed
+    // then session_joined flap. It also re-injects historical @all traffic to
+    // the joiner. Init to current EOF and skip the backlog. `undefined` (no
+    // offset row) is the genuine first-sight signal, distinct from a real 0.
+    if (offsets[file] === undefined) {
+      offsets[file] = stat.size;
+      return true; // persist EOF offset; nothing to process this tick
+    }
+    const lastOffset = offsets[file];
     if (stat.size === lastOffset) return false;
     if (stat.size < lastOffset) {
-      // File truncated - reset offset
+      // File truncated/rotated - reset offset
       offsets[file] = 0;
       return true;
     }
 
-    // Slice by BYTE offset, then decode UTF-8. Doing readFileSync(file, "utf8")
-    // followed by string.slice(lastOffset) is a UTF-8 corruption hazard:
-    // lastOffset is a byte count (Buffer.byteLength was used to advance it),
-    // but String.slice is index-based - any multibyte char (emoji, non-ASCII
-    // user text) that straddles the offset would produce invalid JSON.
+    // ROOT-A (WI 8522c487): read ONLY the new bytes [lastOffset, size) with a
+    // positional read, instead of readFileSync-ing the whole (often 100MB+)
+    // transcript every tick. The prior full-file read of every actively-growing
+    // peer transcript per 1.5s tick was ~N^2 x file-size synchronous I/O that
+    // blocked the single bun event loop and starved the co-resident 30s
+    // heartbeat timer past the 90s stale threshold -> a peer reaped a live
+    // session -> false session_departed then session_joined flap under load.
+    //
+    // The read stays BYTE-positional on purpose (preserves the prior fix's
+    // rationale): lastOffset is a byte count (Buffer.byteLength advances it
+    // below), so reading at that byte offset - and byte-based line accounting -
+    // avoids the UTF-8 corruption hazard a string-index slice (String.slice at
+    // a byte offset) would cause for any multibyte char (emoji, non-ASCII user
+    // text) straddling the offset. lastOffset always lands just past a '\n' (a
+    // single byte, never mid-codepoint), so the read never starts mid-character;
+    // a partial trailing line is carried to the next tick by the consumed-
+    // accounting below, and decoding a buffer that ends mid-codepoint only
+    // affects that unprocessed trailing line.
     let buf: string;
+    let fd: number | undefined;
     try {
-      const raw = readFileSync(file);
-      buf = raw.subarray(lastOffset).toString("utf8");
+      fd = openSync(file, "r");
+      const length = stat.size - lastOffset;
+      const chunk = Buffer.allocUnsafe(length);
+      const bytesRead = readSync(fd, chunk, 0, length, lastOffset);
+      buf = chunk.subarray(0, bytesRead).toString("utf8");
     } catch {
       return false;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
 
     const lines = buf.split("\n");

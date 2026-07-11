@@ -55,6 +55,20 @@ function appendAssistantEvent(jsonl: string, text: string): void {
   appendFileSync(jsonl, JSON.stringify(ev) + "\n");
 }
 
+// ROOT-B (WI 8522c487): receivers EOF-init on first sight of a transcript, so
+// deliverable content must be appended AFTER each receiver has first-seen the
+// (empty) source file - not before start (that pre-join content is now skipped
+// by design). This helper drives that deterministically via the established
+// `(chan as any).tick()` seam: first-sight tick EOF-inits the empty jsonls,
+// then the caller's appends land, then a second tick processes them as
+// post-join content. Replaces the old append-before-start + first-tick-reads
+// pattern that ROOT-B intentionally ends.
+function deliver(channels: AgentChannel[], appends: () => void): void {
+  for (const c of channels) (c as any).tick(); // first-sight -> EOF-init empty files
+  appends();
+  for (const c of channels) (c as any).tick(); // process the appended bytes
+}
+
 describe("agent-channel routing E2E", () => {
   test("PA receives all events; SA only sees addressed events", async () => {
     const pa = makeSession("prime", "f5b8708d", "PA-test");
@@ -72,12 +86,6 @@ describe("agent-channel routing E2E", () => {
     writeFileSync(saAJsonl, "");
     writeFileSync(saBJsonl, "");
 
-    // Pre-populate JSONL events BEFORE starting filewatchers so the first tick
-    // sees them. (The filewatcher's first read happens during start().)
-    appendAssistantEvent(saAJsonl, "@SA-d4e5f6a7 want to coordinate?");
-    appendAssistantEvent(saAJsonl, "Just edited foo.ts");
-    appendAssistantEvent(paJsonl, "@SA-abc12345 update the migration");
-
     const paReceived: ChannelNotification[] = [];
     const saAReceived: ChannelNotification[] = [];
     const saBReceived: ChannelNotification[] = [];
@@ -86,13 +94,11 @@ describe("agent-channel routing E2E", () => {
     const saAChan = new AgentChannel(stateDir, projectsHashDir, saA, (n) => saAReceived.push(n));
     const saBChan = new AgentChannel(stateDir, projectsHashDir, saB, (n) => saBReceived.push(n));
 
-    paChan.start();
-    saAChan.start();
-    saBChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    paChan.stop();
-    saAChan.stop();
-    saBChan.stop();
+    deliver([paChan, saAChan, saBChan], () => {
+      appendAssistantEvent(saAJsonl, "@SA-d4e5f6a7 want to coordinate?");
+      appendAssistantEvent(saAJsonl, "Just edited foo.ts");
+      appendAssistantEvent(paJsonl, "@SA-abc12345 update the migration");
+    });
 
     // PA: gets all SA-A events (it's the default observer) + PA's own event
     // is filtered by self-event suppression. So PA gets 2 events: both SA-A's.
@@ -229,8 +235,6 @@ describe("agent-channel routing E2E", () => {
       "Back to you Jarid - I think the larger architectural pivot is needed.",
       "@SA-deadbe11 Standby for next assignment.",
     ].join("\n\n");
-    appendAssistantEvent(sourceJsonl, mixed);
-
     const paReceived: ChannelNotification[] = [];
     const targetAReceived: ChannelNotification[] = [];
     const targetBReceived: ChannelNotification[] = [];
@@ -239,13 +243,9 @@ describe("agent-channel routing E2E", () => {
     const targetAChan = new AgentChannel(stateDir, projectsHashDir, targetA, (n) => targetAReceived.push(n));
     const targetBChan = new AgentChannel(stateDir, projectsHashDir, targetB, (n) => targetBReceived.push(n));
 
-    paChan.start();
-    targetAChan.start();
-    targetBChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    paChan.stop();
-    targetAChan.stop();
-    targetBChan.stop();
+    deliver([paChan, targetAChan, targetBChan], () => {
+      appendAssistantEvent(sourceJsonl, mixed);
+    });
 
     // PA observes the FULL content (PA is the project observer).
     const paAssistantContents = paReceived
@@ -298,17 +298,13 @@ describe("agent-channel routing E2E", () => {
     writeFileSync(sourceJsonl, "");
 
     const unaddressed = "Just thinking out loud about how the API should evolve.";
-    appendAssistantEvent(sourceJsonl, unaddressed);
-
     const paReceived: ChannelNotification[] = [];
     const otherReceived: ChannelNotification[] = [];
     const paChan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => paReceived.push(n));
     const otherChan = new AgentChannel(stateDir, projectsHashDir, otherSa, (n) => otherReceived.push(n));
-    paChan.start();
-    otherChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    paChan.stop();
-    otherChan.stop();
+    deliver([paChan, otherChan], () => {
+      appendAssistantEvent(sourceJsonl, unaddressed);
+    });
 
     // PA observes
     expect(
@@ -351,15 +347,13 @@ describe("agent-channel routing E2E", () => {
       "Do step X now and capture the output.",
       "Then report Y back when complete.",
     ].join("\n\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const targetReceived: ChannelNotification[] = [];
     const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
       targetReceived.push(n),
     );
-    targetChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    targetChan.stop();
+    deliver([targetChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const got = targetReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -390,17 +384,13 @@ describe("agent-channel routing E2E", () => {
       "Private aside to Jarid: the larger architectural pivot is needed.",
       "@SA-deadbe11 Second directive for you.",
     ].join("\n\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContents = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -441,17 +431,13 @@ describe("agent-channel routing E2E", () => {
       "@SA-deadbe11 your unrelated task.",
       "a trailing note addressed to nobody",
     ].join("\n\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContent = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -503,17 +489,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "confirm when complete",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContent = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -563,17 +545,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "ship it when ready",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContent = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -631,8 +609,6 @@ describe("agent-channel routing E2E", () => {
       "",
       "@PA reset-check",
     ].join("\n");
-    appendAssistantEvent(paJsonl, msg);
-
     const targetReceived: ChannelNotification[] = [];
     const otherReceived: ChannelNotification[] = [];
     const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
@@ -641,11 +617,9 @@ describe("agent-channel routing E2E", () => {
     const otherChan = new AgentChannel(stateDir, projectsHashDir, other, (n) =>
       otherReceived.push(n),
     );
-    targetChan.start();
-    otherChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    targetChan.stop();
-    otherChan.stop();
+    deliver([targetChan, otherChan], () => {
+      appendAssistantEvent(paJsonl, msg);
+    });
 
     const targetContent = targetReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -699,15 +673,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "@SA-99999999 directive to a session that does not exist",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const targetReceived: ChannelNotification[] = [];
     const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
       targetReceived.push(n),
     );
-    targetChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    targetChan.stop();
+    deliver([targetChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const targetContent = targetReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -751,15 +723,13 @@ describe("agent-channel routing E2E", () => {
       "(1) Each code-writing agent runs its own review after writing it.",
       "(2) Do NOT blindly trust the reviewer; verify against the actual code.",
     ].join("\n\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const targetReceived: ChannelNotification[] = [];
     const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
       targetReceived.push(n),
     );
-    targetChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    targetChan.stop();
+    deliver([targetChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const got = targetReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -797,17 +767,13 @@ describe("agent-channel routing E2E", () => {
       "Private aside to Jarid: the larger architectural pivot is needed.",
       "@SA-deadbe11 **Second directive for you.**",
     ].join("\n\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContents = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -870,8 +836,6 @@ describe("agent-channel routing E2E", () => {
       "Final paragraph - ship it.",
       "@@@",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const targetReceived: ChannelNotification[] = [];
     const otherReceived: ChannelNotification[] = [];
     const targetChan = new AgentChannel(stateDir, projectsHashDir, target, (n) =>
@@ -880,11 +844,9 @@ describe("agent-channel routing E2E", () => {
     const otherChan = new AgentChannel(stateDir, projectsHashDir, other, (n) =>
       otherReceived.push(n),
     );
-    targetChan.start();
-    otherChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    targetChan.stop();
-    otherChan.stop();
+    deliver([targetChan, otherChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const got = targetReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -932,17 +894,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "@SA-deadbe11 Real directive for B, outside the envelope.",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContents = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -985,17 +943,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "Unclosed envelope body line two - swallows to end.",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContents = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
@@ -1039,17 +993,13 @@ describe("agent-channel routing E2E", () => {
       "",
       "step two for A - still in A's cascade, envelope was transparent",
     ].join("\n");
-    appendAssistantEvent(srcJsonl, msg);
-
     const aReceived: ChannelNotification[] = [];
     const bReceived: ChannelNotification[] = [];
     const aChan = new AgentChannel(stateDir, projectsHashDir, tA, (n) => aReceived.push(n));
     const bChan = new AgentChannel(stateDir, projectsHashDir, tB, (n) => bReceived.push(n));
-    aChan.start();
-    bChan.start();
-    await new Promise((r) => setTimeout(r, 50));
-    aChan.stop();
-    bChan.stop();
+    deliver([aChan, bChan], () => {
+      appendAssistantEvent(srcJsonl, msg);
+    });
 
     const aContents = aReceived
       .filter((n) => n.meta.event_type === "assistant_text")
