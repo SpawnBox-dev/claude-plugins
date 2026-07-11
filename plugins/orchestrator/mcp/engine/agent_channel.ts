@@ -311,6 +311,14 @@ export class AgentChannel {
     // addressing resolution, consumed by tick()) and the liveness signal for
     // join/depart derivation below.
     const current = new Map<string, SessionEntry>();
+    // Enforce the self-always-present invariant unconditionally, BEFORE reading
+    // the DB. Routing (sender/addressing resolution) consumes currentRoster, and
+    // self must resolve even when self's own row is transiently ABSENT - e.g. an
+    // old-version peer reaped self after a >90s stall (mixed-version fleet)
+    // before self's next heartbeat re-registers it. Without this, a recovering
+    // SA silently drops @SA-<selfid8> and @all traffic. The DB row (if present)
+    // overwrites this seed below with the fresher name/current_task.
+    current.set(this.selfSession.session_id, this.selfSession);
     for (const s of readSessions(this.projectStateDir)) {
       if (s.session_id === this.selfSession.session_id) {
         current.set(s.session_id, s);

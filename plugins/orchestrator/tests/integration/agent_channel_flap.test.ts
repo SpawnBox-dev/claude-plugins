@@ -196,3 +196,39 @@ describe("flap fix DEFENSE-C: observer-side departure hysteresis + depart<->rejo
     expect(eventsOfType(received, "session_joined", peer.id8).length).toBe(joinsAfterSetup);
   });
 });
+
+describe("flap fix: self-routing robustness (self always in the routing roster)", () => {
+  // Regression lock (code-review Finding 1): routing resolves addressing from
+  // the fresh roster (currentRoster). If self's own DB row is transiently
+  // missing - e.g. an old-version peer reaped self after a >90s stall in a
+  // mixed-version fleet, before self's next heartbeat re-registers it - self
+  // MUST still be in the routing roster, or a recovering SA silently drops
+  // messages addressed to it (@SA-<selfid8>) and @all broadcasts.
+  test("a receiver still delivers @self and @all traffic when its own DB row is transiently gone", () => {
+    const self = makeSession("subordinate", "abc12345", "SA-self");
+    const peer = makeSession("prime", "f5b8708d", "PA");
+    writeSession(stateDir, self);
+    writeSession(stateDir, peer);
+
+    const peerJsonl = join(projectsHashDir, `${peer.session_id}.jsonl`);
+    writeFileSync(peerJsonl, "");
+
+    const received: ChannelNotification[] = [];
+    const chan = new AgentChannel(stateDir, projectsHashDir, self, (n) => received.push(n));
+    (chan as any).tick(); // EOF-init peerJsonl, establish roster
+
+    // Self's row is reaped out from under it (old-version peer, post-stall).
+    removeSession(stateDir, self.session_id);
+
+    // A peer addresses self directly and broadcasts to @all.
+    appendAssistantEvent(peerJsonl, "@SA-abc12345 directive meant for the recovering SA");
+    appendAssistantEvent(peerJsonl, "@all broadcast that must reach everyone");
+    (chan as any).tick();
+
+    const contents = received
+      .filter((n) => n.meta.event_type === "assistant_text")
+      .map((n) => n.content);
+    expect(contents.some((c) => c.includes("directive meant for the recovering SA"))).toBe(true);
+    expect(contents.some((c) => c.includes("broadcast that must reach everyone"))).toBe(true);
+  });
+});
