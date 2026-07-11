@@ -211,10 +211,21 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   // R7 loop-closure + user-signal escalation.
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
 
+  // WI 2ad3240e (Jarid override 2026-07-11): cadence-aware regular-checkpoint
+  // nudge. Point-of-compaction capture cannot work (no model turn), so the
+  // only real protection against context loss is checkpointing DURING normal
+  // operation. This is deliberately NOT an every-turn nudge (that trains
+  // agents to ignore it - the 5d1c20fc trigger-design defect); it fires only
+  // when turns-since-save AND uncaptured-activity BOTH cross role-aware,
+  // per-level-widening thresholds, with escalating wording. Resets on
+  // save_progress.
+  const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
+
   const parts: string[] = [reminder];
   if (bridge) parts.push(`Last turn bridge: ${bridge}`);
   if (siblingLine) parts.push(siblingLine);
   if (loopClose) parts.push(loopClose);
+  if (checkpointNudge) parts.push(checkpointNudge);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -280,6 +291,20 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
       const id = args.payload?.tool_input_id as string | undefined;
       if (id) markWorkItemTouched(ctx.db, args.session_id, id);
     }
+  }
+  // WI 2ad3240e checkpoint-cadence tracking (Jarid override 2026-07-11). A
+  // save_progress RESETS the cadence state (the loop just closed); any other
+  // substantive action (edits / knowledge captures) BUMPS the uncaptured-work
+  // counter that, together with turns-since-save, gates the escalating
+  // regular-checkpointing nudge in handleUserPromptSubmit.
+  if (args.tool_name === "mcp__plugin_orchestrator_core__save_progress") {
+    recordCheckpointSaved(
+      ctx.db,
+      args.session_id,
+      ctx.tracker.getCurrentTurn(args.session_id)
+    );
+  } else if (isSubstantiveActivity(args.tool_name)) {
+    bumpActivitySinceSave(ctx.db, args.session_id);
   }
   // Reset struggle counter on any successful tool call.
   resetStruggleCounter(ctx.db, args.session_id);
@@ -526,15 +551,25 @@ function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
       /* best-effort deterministic capture - never block compaction */
     }
   }
-  return {
-    // Softened (WI 2ad3240e): capture is now GUARANTEED by the synthetic
-    // snapshot above, so this drops from a load-bearing "capture NOW" (which
-    // the agent can't act on - no model turn) to a best-effort "richer if you
-    // have room". Keeps the compaction-imminent framing + save_progress/note()
-    // pointers (also what the R7.7 marker test asserts on).
-    systemMessage:
-      "Context compaction imminent. A durable snapshot of your current task, recent notes, and in-flight work_items has just been banked automatically, so post-compaction re-orientation is guaranteed even if you do nothing further. Best-effort only, if you still have room before your window shrinks: save_progress writes a richer checkpoint and note() persists any decisions/gotchas/patterns not yet captured (the auto-snapshot stores pointers, not your full narrative). After compaction the orchestrator re-orients automatically.",
-  };
+  // WI 2ad3240e (Jarid override 2026-07-11): NO systemMessage. The former
+  // "capture your knowledge NOW via save_progress" prompt is deleted, not
+  // softened. Two reasons, both decisive:
+  //  (1) Non-actionable: PreCompact is a synchronous decision point with no
+  //      model turn before compaction (code.claude.com/docs/en/hooks,
+  //      2026-07-11) - the agent can never act on it pre-compaction. Shipping
+  //      code that looks functional but structurally cannot fire is exactly
+  //      what future agents must not inherit (5d1c20fc trigger-design defect).
+  //  (2) ACTIVELY HARMFUL: because there is no pre-compaction turn, any
+  //      systemMessage this hook returns can only reach the model on the NEXT
+  //      turn - which is AFTER compaction. An instruction to "save_progress
+  //      now" delivered post-compaction induces the agent to checkpoint the
+  //      already-degraded, incomplete post-compaction context, poisoning the
+  //      durable state with a lossy rollup. Removing it eliminates that trap.
+  // Deterministic capture is fully handled by the synthetic snapshot banked
+  // above (now the first-class pre-compact capture mechanism) + the
+  // cadence-aware regular-checkpointing nudge in handleUserPromptSubmit. The
+  // compacting_<sid> Stop-suppression marker (written above) is UNCHANGED.
+  return {};
 }
 
 // 167ffbaf + e4774e4b: post-compaction re-orientation. Fires ONLY via
@@ -683,7 +718,7 @@ export function composePostCompactReorientation(opts: {
   // agent what will happen and what it should do.
   if (role === "prime") {
     parts.push(
-      "You are the PrimeAgent and your context was just compacted. Beyond re-orienting yourself, run a FLEET CHECK-IN now: poll every active subordinate (SA) and have each reply with (a) its current task/state, (b) recent completions with their IDs, and (c) anything it would bet you just lost from the summary - especially work already DONE or directives you already sent it, so you do not re-drive them. Advisories were ALSO emitted to each active SA automatically on your behalf (system bus), so they already know you compacted and will surface dropped context; aggregate their replies as they arrive. Non-blocking - continue, but treat the fleet's replies as the authoritative correction to your summary, not the summary as authority over them."
+      "You are the PrimeAgent and your context was just compacted. Beyond re-orienting yourself, run a FLEET CHECK-IN now: poll every active subordinate (SA) and have each reply with (a) its current task/state, (b) recent completions with their IDs, and (c) anything it would bet you just lost from the summary - especially work already DONE or directives you already sent it, so you do not re-drive them. Advisories were ALSO emitted to each active SA automatically on your behalf (system bus), so they already know you compacted and will surface dropped context; aggregate their replies as they arrive. RAID principle: your warm, recently-uncompacted SAs are striped redundancy for the context your summary lost - reconstruct coherence by aggregating from them, do not treat your lossy summary as authority over their intact memory. Non-blocking - continue meanwhile."
     );
     const roster = renderCompactRoster(peers);
     if (roster) parts.push(`Active subordinates to poll:\n${roster}`);
@@ -696,7 +731,7 @@ export function composePostCompactReorientation(opts: {
     // proactively check in with PA, which sees the whole fleet.
     if (livePA) {
       parts.push(
-        "A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. Beyond that passive backstop, proactively CHECK IN with PA now: tell it you just compacted and ask it to aggregate for you - what you were working on, what PA is currently driving, and any in-flight material from other subordinates that bears on your task. PA sees the whole fleet, so it is your fastest path back to full context. A non-compacted peer or PA may also reply flagging load-bearing context the lossy summary dropped; fold any such replies in as they arrive. Non-blocking: continue your work meanwhile. This is a targeted gap-check, not a full context re-request."
+        "A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. Beyond that passive backstop, proactively CHECK IN with PA now: tell it you just compacted and ask it to aggregate for you - what you were working on, what PA is currently driving, and any in-flight material from other subordinates that bears on your task. RAID principle: a warm PA (and any uncompacted peer) is striped redundancy for what your summary dropped - the fastest rebuild is aggregating coherence from them rather than trusting your lossy summary. A reply may also flag load-bearing context the summary lost; fold it in as it arrives. Non-blocking: continue meanwhile. This is a targeted gap-check, not a full context re-request."
       );
     }
     // WI 2ad3240e req 2b: the lateral roster is useful whenever there are peer
@@ -826,33 +861,41 @@ function handleSessionStartCompact(
     /* registry missing - non-fatal */
   }
 
-  // Latest checkpoint NOTE (global-latest by created_at - may be cross-session
-  // and stale; the composer hedges the surfaced value accordingly).
-  let realCp: { content: string; created_at: string } | null = null;
-  try {
-    realCp = ctx.db
-      .query(
-        `SELECT content, created_at FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
-      )
-      .get() as { content: string; created_at: string } | null;
-  } catch {
-    /* notes missing - non-fatal */
-  }
-
-  // WI 2ad3240e requirement 4: the PreCompact handler deterministically banks
-  // a synthetic mini-checkpoint (the pre-compact model turn provably cannot
-  // run tools, so save_progress there never fires - verified vs the CC hook
-  // lifecycle 2026-07-11). Prefer whichever durable state is FRESHER: a real
-  // save_progress checkpoint the agent wrote, or the synthetic snapshot. Both
-  // created_at and the snapshot ts are ISO-8601 UTC (now()), so a lexical
-  // compare is a valid time compare. Guarantees the digest is never empty and
-  // never surfaces a months-old cross-session checkpoint when a fresh
-  // synthetic exists.
+  // WI 2ad3240e requirement 4 (Jarid override 2026-07-11): the synthetic
+  // snapshot banked at PreCompact is now the FIRST-CLASS pre-compact capture
+  // mechanism, not a fallback. It represents THIS session's own state captured
+  // at the compaction boundary (seconds before this handler runs), so when it
+  // exists and is fresh, prefer it outright - do NOT weigh it against the
+  // global-latest checkpoint note, which may belong to a DIFFERENT session and
+  // would otherwise shadow this session's own state (the original cross-session
+  // staleness bug). A real checkpoint note is used ONLY when there is no fresh
+  // synthetic (PreCompact didn't fire, banking failed, or a lingering snapshot
+  // from a prior compaction is too old to trust). Freshness bound guards that
+  // lingering-snapshot edge; snapshot ts is ISO-8601 UTC (now()).
+  const SYNTHETIC_FRESH_MS = 30 * 60_000;
   const synthetic = readPrecompactSnapshot(ctx.db, sid);
+  const syntheticMs = synthetic ? Date.parse(synthetic.ts) : NaN;
+  const syntheticFresh =
+    !!synthetic &&
+    Number.isFinite(syntheticMs) &&
+    Date.now() - syntheticMs <= SYNTHETIC_FRESH_MS;
+
   let checkpoint: string | null;
-  if (synthetic && (!realCp || synthetic.ts >= realCp.created_at)) {
-    checkpoint = synthetic.text;
+  if (syntheticFresh) {
+    checkpoint = synthetic!.text;
   } else {
+    // Fallback: latest checkpoint NOTE (global-latest by created_at - may be
+    // cross-session/stale; the composer hedges the surfaced value accordingly).
+    let realCp: { content: string } | null = null;
+    try {
+      realCp = ctx.db
+        .query(
+          `SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
+        )
+        .get() as { content: string } | null;
+    } catch {
+      /* notes missing - non-fatal */
+    }
     checkpoint = realCp?.content ?? null;
   }
 
@@ -1054,6 +1097,167 @@ function listFreshSurfacedNotes(
        LIMIT ?`
     )
     .all(sessionId, limit) as FreshSurfacedNote[];
+}
+
+// ── WI 2ad3240e: regular-checkpoint cadence nudge ───────────────────────────
+//
+// Point-of-compaction capture is impossible (PreCompact has no model turn), so
+// the durable defense against context loss is checkpointing DURING normal work.
+// This nudge must NOT be an every-turn nag (that trains the agent to tune it
+// out - the 5d1c20fc trigger-design defect). It fires only when BOTH gates are
+// crossed - turns since the last save_progress AND substantive uncaptured
+// actions since then - and each time it fires it raises its own bar (level), so
+// successive nudges are spaced further apart and worded more urgently.
+// save_progress resets everything. Thresholds are role-aware: a PA's context
+// loss is the worst case (it holds the whole fleet's coherence), so PA is
+// nudged sooner and escalates faster than an SA. Numbers are initial + tunable;
+// the invariants (both-gates, per-level widening, reset-on-save, PA-tighter)
+// are the load-bearing design, not the exact constants.
+interface CadenceThresholds {
+  turnBase: number;
+  turnStep: number;
+  actBase: number;
+  actStep: number;
+}
+const CADENCE_PA: CadenceThresholds = {
+  turnBase: 6,
+  turnStep: 5,
+  actBase: 5,
+  actStep: 5,
+};
+const CADENCE_SA: CadenceThresholds = {
+  turnBase: 10,
+  turnStep: 6,
+  actBase: 12,
+  actStep: 8,
+};
+
+/** Tools that represent "work that would be lost if not checkpointed": file
+ *  mutations + orchestrator knowledge captures. Reads (Read/Grep/Glob, most
+ *  Bash) are deliberately excluded - they don't accrue uncaptured state. Note
+ *  lookups/briefings are also excluded (they create no unsaved work). */
+function isSubstantiveActivity(toolName?: string): boolean {
+  if (!toolName) return false;
+  if (
+    toolName === "Edit" ||
+    toolName === "Write" ||
+    toolName === "MultiEdit" ||
+    toolName === "NotebookEdit"
+  ) {
+    return true;
+  }
+  return (
+    toolName === "mcp__plugin_orchestrator_core__note" ||
+    toolName === "mcp__plugin_orchestrator_core__create_work_item" ||
+    toolName === "mcp__plugin_orchestrator_core__update_work_item" ||
+    toolName === "mcp__plugin_orchestrator_core__update_note" ||
+    toolName === "mcp__plugin_orchestrator_core__supersede_note"
+  );
+}
+
+function readIntState(db: Database, key: string): number {
+  const row = db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | null;
+  if (!row) return 0;
+  const n = parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** save_progress just fired: reset the cadence state (loop closed). */
+function recordCheckpointSaved(
+  db: Database,
+  sessionId: string,
+  turn: number
+): void {
+  const sid = sanitizeSessionId(sessionId);
+  db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [`last_save_turn_${sid}`, String(turn), now()]
+  );
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [
+    `activity_since_save_${sid}`,
+  ]);
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [`ckpt_nudge_level_${sid}`]);
+}
+
+/** A substantive action happened: bump the uncaptured-work counter. */
+function bumpActivitySinceSave(db: Database, sessionId: string): void {
+  const sid = sanitizeSessionId(sessionId);
+  const key = `activity_since_save_${sid}`;
+  const next = readIntState(db, key) + 1;
+  db.run(
+    `INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, String(next), now()]
+  );
+}
+
+/** Best-effort self-role from the agent-channel registry. Defaults to
+ *  "subordinate" when the registry is absent / self not found (non-channel +
+ *  single-session projects still get the SA-cadence nudge). */
+function getSelfRole(sid: string): "prime" | "subordinate" {
+  try {
+    const live = getLiveSessions();
+    const self = live?.find((e) => e.session_id === sid) ?? null;
+    return self?.role === "prime" ? "prime" : "subordinate";
+  } catch {
+    return "subordinate";
+  }
+}
+
+/**
+ * Cadence-aware regular-checkpoint nudge. Returns "" (silent) unless BOTH
+ * turns-since-save and substantive-activity-since-save cross the current
+ * level's role-aware bar - then it fires, raises the bar (escalation +
+ * spacing), and returns escalating wording. Reset by save_progress via
+ * recordCheckpointSaved.
+ */
+function composeCheckpointCadenceNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  turn: number
+): string {
+  const sid = sanitizeSessionId(sessionId);
+  const lastSaveTurn = readIntState(ctx.db, `last_save_turn_${sid}`);
+  // Absent last_save_turn (0) = never saved this session -> gap is the turn no.
+  const turnsSinceSave = lastSaveTurn > 0 ? turn - lastSaveTurn : turn;
+  const activity = readIntState(ctx.db, `activity_since_save_${sid}`);
+  if (turnsSinceSave <= 0 || activity <= 0) return "";
+
+  // Pre-gate with the SMALLEST possible bar (PA base) before the registry read,
+  // so getSelfRole only runs when a nudge is plausibly due. PA is the tighter
+  // role, so this never suppresses a legitimate fire.
+  if (turnsSinceSave < CADENCE_PA.turnBase || activity < CADENCE_PA.actBase) {
+    return "";
+  }
+
+  const role = getSelfRole(sid);
+  const t = role === "prime" ? CADENCE_PA : CADENCE_SA;
+  const level = readIntState(ctx.db, `ckpt_nudge_level_${sid}`);
+
+  // Both gates must clear THIS level's (widening) bar.
+  const turnBar = t.turnBase + level * t.turnStep;
+  const actBar = t.actBase + level * t.actStep;
+  if (turnsSinceSave < turnBar || activity < actBar) return "";
+
+  // Fire. Raise the bar for next time (escalation + spacing).
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [`ckpt_nudge_level_${sid}`, String(level + 1), now()]
+  );
+
+  const paTag =
+    role === "prime"
+      ? " As PA your context is the fleet's shared memory - your loss is the worst case; checkpoint more often than feels necessary."
+      : "";
+  if (level === 0) {
+    return `[orch] Checkpoint hygiene: ${turnsSinceSave} turns and ${activity} substantive actions since your last save_progress. Point-of-compaction capture does NOT work (no model turn before a compaction fires), so REGULAR save_progress is the only real protection against losing this stretch of work. A 10-second save now is cheap insurance.${paTag}`;
+  }
+  if (level === 1) {
+    return `[orch] Still uncheckpointed: ${turnsSinceSave} turns / ${activity} substantive actions of work not yet saved. Call save_progress THIS turn - re-deriving lost context after a compaction or crash costs far more than the save.${paTag}`;
+  }
+  return `[orch] URGENT checkpoint gap: ${turnsSinceSave} turns / ${activity} substantive actions since your last save_progress. You are one compaction away from losing all of it. Call save_progress NOW, before more work.${paTag}`;
 }
 
 function handleSubagentStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {

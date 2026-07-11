@@ -13,6 +13,7 @@ import {
   POST_COMPACT_RECOVERY_EVENT,
   PA_COMPACT_RECOVERY_EVENT,
   HOOK_EVENTS,
+  type HookEventResponse,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
 import { mkdtempSync } from "node:fs";
@@ -331,7 +332,14 @@ describe("hook_event dispatcher", () => {
       // suppression marker that handleStop honors.
       const { db, tracker } = freshSetup();
       const pre = handleHookEvent({ db, tracker }, { event: "PreCompact", session_id: "CMP" });
-      expect(pre.systemMessage).toContain("Context compaction imminent");
+      // WI 2ad3240e (Jarid override): PreCompact returns NO systemMessage now
+      // (the marker + synthetic bank are pure side effects). The Stop
+      // suppression must still work off the marker.
+      expect(pre.systemMessage).toBeUndefined();
+      const marker = db
+        .query(`SELECT value FROM plugin_state WHERE key = 'compacting_CMP'`)
+        .get();
+      expect(marker).not.toBeNull();
 
       const stop = handleHookEvent({ db, tracker }, { event: "Stop", session_id: "CMP" });
       // The compaction-driven Stop must NOT block.
@@ -374,16 +382,25 @@ describe("hook_event dispatcher", () => {
       expect(stop.decision).toBe("block");
     });
 
-    test("R7.7: PreCompact still emits its capture systemMessage", () => {
-      // The marker is a side-effect; the systemMessage to the agent must
-      // continue to land (it's the ONE remaining capture nudge at /compact).
+    test("WI 2ad3240e: PreCompact returns NO systemMessage (dead non-actionable + post-compaction-harmful prompt removed)", () => {
+      // The former "capture NOW via save_progress" prompt is DELETED, not
+      // softened (Jarid override 2026-07-11). PreCompact has no model turn
+      // before compaction, so any systemMessage it returns can only reach the
+      // model post-compaction, where "save_progress now" would checkpoint the
+      // already-degraded context. Capture is handled deterministically by the
+      // synthetic snapshot bank + the cadence nudge instead.
       const { db, tracker } = freshSetup();
       const r = handleHookEvent(
         { db, tracker },
         { event: "PreCompact", session_id: "PC" }
       );
-      expect(r.systemMessage).toContain("save_progress");
-      expect(r.systemMessage).toContain("note()");
+      expect(r.systemMessage).toBeUndefined();
+      expect(r.decision).toBeUndefined();
+      expect(r.additionalContext).toBeUndefined();
+      // The envelope is the empty fast-path (zero token cost).
+      const env = buildHookEnvelope("PreCompact", r);
+      expect(env.systemMessage).toBeUndefined();
+      expect(env.hookSpecificOutput).toBeUndefined();
     });
 
     test("R7: SubagentStop prompt instructs subagent NOT to call save_progress (parent's job)", () => {
@@ -1361,7 +1378,7 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
   });
 
   describe("handlePreCompact - deterministic snapshot bank", () => {
-    test("banks a synthetic checkpoint into plugin_state and keeps the Stop-suppression marker + softened systemMessage", () => {
+    test("banks a synthetic checkpoint into plugin_state, keeps the Stop-suppression marker, and returns NO systemMessage", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("PCB");
       tracker.updateCurrentTask("PCB", "banked task");
@@ -1382,11 +1399,8 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
         { db, tracker },
         { event: "PreCompact", session_id: "PCB" }
       );
-      // Softened message still names the compaction + the capture pointers.
-      expect(r.systemMessage).toContain("Context compaction imminent");
-      expect(r.systemMessage).toContain("save_progress");
-      expect(r.systemMessage).toContain("note()");
-      expect(r.systemMessage!.toLowerCase()).toContain("banked automatically");
+      // No systemMessage - the dead prompt is gone; capture is the side effect.
+      expect(r.systemMessage).toBeUndefined();
 
       // Stop-suppression marker preserved (numeric epoch ms).
       const marker = db
@@ -1409,69 +1423,68 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
     });
   });
 
-  describe("handleSessionStartCompact - synthetic vs real checkpoint freshness", () => {
-    test("uses the synthetic snapshot when it is fresher than the newest real checkpoint", () => {
+  describe("handleSessionStartCompact - synthetic snapshot is first-class", () => {
+    test("a FRESH synthetic snapshot is preferred outright, even when a real checkpoint note exists (first-class, not a fallback)", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("FRSH");
-      // A real checkpoint from the past.
+      // A real (possibly cross-session) checkpoint note.
       db.run(
-        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-old', 'checkpoint', 'OLD REAL CHECKPOINT', '2026-07-10T00:00:00.000Z', '2026-07-10T00:00:00.000Z')`
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-any', 'checkpoint', 'SOME REAL CHECKPOINT', ?, ?)`,
+        [now(), now()]
       );
-      // A synthetic snapshot banked NOW (fresher).
+      // A synthetic snapshot banked NOW (fresh) -> wins regardless.
       db.run(
         `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_FRSH', ?, ?)`,
-        [
-          JSON.stringify({
-            text: "SYNTHETIC FRESH SNAPSHOT",
-            ts: "2026-07-11T00:00:00.000Z",
-          }),
-          now(),
-        ]
+        [JSON.stringify({ text: "SYNTHETIC FRESH SNAPSHOT", ts: now() }), now()]
       );
       const r = handleHookEvent(
         { db, tracker },
         { event: "SessionStart", session_id: "FRSH" }
       );
       expect(r.systemMessage).toContain("SYNTHETIC FRESH SNAPSHOT");
-      expect(r.systemMessage).not.toContain("OLD REAL CHECKPOINT");
+      expect(r.systemMessage).not.toContain("SOME REAL CHECKPOINT");
     });
 
-    test("uses the real checkpoint when it is fresher than the synthetic snapshot", () => {
+    test("a STALE synthetic snapshot (banked >30min ago) is NOT used; the real checkpoint fallback wins (lingering-snapshot guard)", () => {
       const { db, tracker } = freshSetup();
-      tracker.registerSession("REAL");
+      tracker.registerSession("STALESYN");
       db.run(
-        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-new', 'checkpoint', 'NEW REAL CHECKPOINT', '2026-07-11T12:00:00.000Z', '2026-07-11T12:00:00.000Z')`
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-fallback', 'checkpoint', 'REAL FALLBACK CHECKPOINT', ?, ?)`,
+        [now(), now()]
       );
+      const stale = new Date(Date.now() - 60 * 60_000).toISOString(); // 1h ago
       db.run(
-        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_REAL', ?, ?)`,
-        [
-          JSON.stringify({
-            text: "STALE SYNTHETIC SNAPSHOT",
-            ts: "2026-07-11T06:00:00.000Z",
-          }),
-          now(),
-        ]
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_STALESYN', ?, ?)`,
+        [JSON.stringify({ text: "STALE SYNTHETIC SNAPSHOT", ts: stale }), stale]
       );
       const r = handleHookEvent(
         { db, tracker },
-        { event: "SessionStart", session_id: "REAL" }
+        { event: "SessionStart", session_id: "STALESYN" }
       );
-      expect(r.systemMessage).toContain("NEW REAL CHECKPOINT");
+      expect(r.systemMessage).toContain("REAL FALLBACK CHECKPOINT");
       expect(r.systemMessage).not.toContain("STALE SYNTHETIC SNAPSHOT");
     });
 
-    test("no real checkpoint at all -> synthetic snapshot fills the digest (never the empty 'No durable checkpoint' branch)", () => {
+    test("no synthetic at all -> falls back to the latest real checkpoint note", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("NOSYN");
+      db.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-only', 'checkpoint', 'ONLY REAL CHECKPOINT', ?, ?)`,
+        [now(), now()]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "NOSYN" }
+      );
+      expect(r.systemMessage).toContain("ONLY REAL CHECKPOINT");
+    });
+
+    test("no real checkpoint and a fresh synthetic -> synthetic fills the digest (never the empty 'No durable checkpoint' branch)", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("SYNONLY");
       db.run(
         `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_SYNONLY', ?, ?)`,
-        [
-          JSON.stringify({
-            text: "ONLY SYNTHETIC AVAILABLE",
-            ts: "2026-07-11T00:00:00.000Z",
-          }),
-          now(),
-        ]
+        [JSON.stringify({ text: "ONLY SYNTHETIC AVAILABLE", ts: now() }), now()]
       );
       const r = handleHookEvent(
         { db, tracker },
@@ -1500,6 +1513,129 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
       expect(r.systemMessage).toContain("e2e task");
       expect(r.systemMessage).toContain("e2e work item");
       expect(r.systemMessage).not.toContain("No durable checkpoint found");
+    });
+  });
+
+  describe("RAID framing (peers as striped redundancy) in both payloads", () => {
+    test("both PA and SA post-compact payloads frame warm peers as striped redundancy", () => {
+      const pa = composePostCompactReorientation({
+        role: "prime",
+        currentTask: "t",
+        checkpoint: null,
+        livePA: false,
+        peers: [{ id8: "aaaaaaaa", current_task: "x" }],
+      });
+      const sa = composePostCompactReorientation({
+        role: "subordinate",
+        currentTask: "t",
+        checkpoint: null,
+        livePA: true,
+        peers: [{ id8: "bbbbbbbb", current_task: "y" }],
+      });
+      expect(pa.toLowerCase()).toContain("raid");
+      expect(pa.toLowerCase()).toContain("striped redundancy");
+      expect(sa.toLowerCase()).toContain("raid");
+      expect(sa.toLowerCase()).toContain("striped redundancy");
+    });
+  });
+
+  describe("regular-checkpoint cadence nudge (UserPromptSubmit)", () => {
+    // Helper: one turn = a UserPromptSubmit followed by a substantive PostToolUse.
+    function workTurn(
+      db: any,
+      tracker: any,
+      sid: string,
+      tool = "Edit"
+    ): HookEventResponse {
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: sid, payload: { user_prompt: "w" } }
+      );
+      handleHookEvent(
+        { db, tracker },
+        { event: "PostToolUse", session_id: sid, tool_name: tool, payload: { file_path: "f.ts" } }
+      );
+      return r;
+    }
+
+    test("stays silent until BOTH turns-since-save and activity cross the SA bar, then fires level-0 wording", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CAD");
+      // Turn 6 / activity 5 clears the PA pre-gate but not the SA bar (10/12).
+      let r: HookEventResponse = {};
+      for (let i = 0; i < 9; i++) r = workTurn(db, tracker, "CAD");
+      // After 9 work-turns: turn 9, activity 8 (from 8 prior edits) - still silent.
+      expect(r.additionalContext ?? "").not.toContain("Checkpoint hygiene");
+      // Push through the SA bar (turn>=10 AND activity>=12).
+      let last: HookEventResponse = {};
+      for (let i = 0; i < 4; i++) last = workTurn(db, tracker, "CAD");
+      expect(last.additionalContext).toContain("Checkpoint hygiene");
+      expect(last.additionalContext).toContain("save_progress");
+    });
+
+    test("read-only / lookup turns never accrue cadence activity (no nudge across many turns)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("RO");
+      let last: HookEventResponse = {};
+      for (let i = 0; i < 20; i++) {
+        last = handleHookEvent(
+          { db, tracker },
+          { event: "UserPromptSubmit", session_id: "RO", payload: { user_prompt: "w" } }
+        );
+        handleHookEvent({ db, tracker }, { event: "PostToolUse", session_id: "RO", tool_name: "Read" });
+        handleHookEvent(
+          { db, tracker },
+          { event: "PostToolUse", session_id: "RO", tool_name: "mcp__plugin_orchestrator_core__lookup" }
+        );
+      }
+      expect(last.additionalContext ?? "").not.toContain("Checkpoint hygiene");
+      expect(last.additionalContext ?? "").not.toContain("checkpoint gap");
+    });
+
+    test("save_progress resets the cadence; subsequent turns go silent until work re-accumulates", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("RST");
+      let fired: HookEventResponse = {};
+      for (let i = 0; i < 13; i++) fired = workTurn(db, tracker, "RST");
+      expect(fired.additionalContext).toContain("Checkpoint hygiene");
+      // Agent checkpoints.
+      handleHookEvent(
+        { db, tracker },
+        { event: "PostToolUse", session_id: "RST", tool_name: "mcp__plugin_orchestrator_core__save_progress" }
+      );
+      // Next turn: gap + activity reset -> silent.
+      const after = handleHookEvent(
+        { db, tracker },
+        { event: "UserPromptSubmit", session_id: "RST", payload: { user_prompt: "w" } }
+      );
+      expect(after.additionalContext ?? "").not.toContain("Checkpoint hygiene");
+      expect(after.additionalContext ?? "").not.toContain("checkpoint gap");
+    });
+
+    test("spaced (not every-turn) + escalates to URGENT over a long uncheckpointed run", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("ESC");
+      const nudges: string[] = [];
+      for (let i = 0; i < 40; i++) {
+        const r = handleHookEvent(
+          { db, tracker },
+          { event: "UserPromptSubmit", session_id: "ESC", payload: { user_prompt: "w" } }
+        );
+        const ac = r.additionalContext ?? "";
+        if (/Checkpoint hygiene|Still uncheckpointed|URGENT checkpoint gap/.test(ac)) {
+          nudges.push(ac);
+        }
+        handleHookEvent(
+          { db, tracker },
+          { event: "PostToolUse", session_id: "ESC", tool_name: "Edit", payload: { file_path: "f.ts" } }
+        );
+      }
+      // Anti-noise invariant: a handful of nudges over 40 turns, NOT one per turn.
+      expect(nudges.length).toBeGreaterThanOrEqual(2);
+      expect(nudges.length).toBeLessThanOrEqual(8);
+      // First is the gentle tier; escalates to URGENT later.
+      expect(nudges[0]).toContain("Checkpoint hygiene");
+      expect(nudges.some((n) => n.includes("URGENT"))).toBe(true);
     });
   });
 });
