@@ -55,7 +55,8 @@ export interface ChannelNotification {
       | "override_set"
       | "override_cleared"
       | "permission_request_pending"
-      | "post_compact_recovery";
+      | "post_compact_recovery"
+      | "pa_compact_recovery";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -490,6 +491,55 @@ export class AgentChannel {
                   ? ev.ts
                   : new Date().toISOString(),
               pa_addressed: true,
+              addressed_to: [this.selfSession.session_id],
+            },
+          });
+          break;
+        }
+        case "pa_compact_recovery": {
+          // WI 2ad3240e: the symmetric, reversed-direction counterpart of
+          // post_compact_recovery. PA just compacted and its post-compact hook
+          // deterministically advised each active SA (us). The
+          // to_session/from_session guards above already ensure ONLY the
+          // addressed SA's instance (never PA itself) reaches here.
+          //
+          // Same freshness guard rationale as post_compact_recovery: no
+          // auto-reaping + systemEventsLastSeenId resets to 0 on MCP restart
+          // (full replay), so drop anything older than the window to avoid
+          // re-surfacing every historical ping after an SA restart. Advisory,
+          // not a relay - a missed stale one costs nothing.
+          const tsMs = new Date(String(ev.ts ?? "")).getTime();
+          const RECOVERY_FRESH_MS = 15 * 60_000;
+          if (!Number.isFinite(tsMs) || Date.now() - tsMs > RECOVERY_FRESH_MS) {
+            break;
+          }
+          const fromId8 = ev.from_session.slice(0, 8);
+          const task = String(ev.task ?? "").trim();
+          this.emit({
+            content:
+              `[PA compacted] The PrimeAgent (PA-${fromId8}) just compacted its ` +
+              `context` +
+              (task ? ` (its last task: ${task})` : "") +
+              `. Its summary is lossy and likely dropped load-bearing context ` +
+              `it was holding about the fleet. Surface what PA will need to ` +
+              `re-establish: what you are working on, your recent completions ` +
+              `WITH IDs, and - critically - flag anything already DONE or any ` +
+              `directive PA already sent you, so it does not re-request or ` +
+              `re-drive it. The final minutes before PA compacted are the ` +
+              `highest-loss zone (directives it sent you then may be missing ` +
+              `from its summary; items it thinks are pending may already be ` +
+              `done). Reply to PA now; non-blocking, advisory.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: fromId8,
+              from_role: "prime",
+              from_name: `<pa_compact_recovery>`,
+              from_task: task || null,
+              event_type: "pa_compact_recovery",
+              ts:
+                typeof ev.ts === "string"
+                  ? ev.ts
+                  : new Date().toISOString(),
               addressed_to: [this.selfSession.session_id],
             },
           });

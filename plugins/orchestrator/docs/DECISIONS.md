@@ -6,6 +6,26 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-07-11 - Role-aware + symmetric post-compact recovery + deterministic pre-compact capture (WI 2ad3240e)
+
+**Change.** Post-compaction recovery in `mcp/tools/hook_event.ts` is now tuned to the compacted session's own `role` (read from `sessions.role` in the agent-channel registry via `getLiveSessions()`), and is symmetric across PA and SA:
+- **SA compacts** (unchanged core + additions): keeps the deterministic SA->PA peer-backstop solicitation (`post_compact_recovery`), and the digest now also (a) instructs the SA to proactively CHECK IN with PA (PA aggregates), and (b) carries a bounded lateral roster of the other active SAs + their `current_task`.
+- **PA compacts** (new): the digest becomes a FLEET CHECK-IN directive (poll every active SA for state / recent completions-with-IDs / "what you'd bet I lost"), and the handler deterministically emits a new `pa_compact_recovery` advisory to EVERY active SA (reversed-direction counterpart of the peer-backstop, same `system_events` bus). `agent_channel.ts` `processSystemEvents` renders it to each addressed SA.
+- **Both directions** carry a highest-loss-zone warning: the final minutes before compaction are where directives received (stale queue -> missing from summary) and completions (summary lists done work as pending) are most lost - so neither side re-issues/re-does without reconciling.
+- **PreCompact made deterministic.** `handlePreCompact` now banks a synthetic mini-checkpoint (`current_task` + recent notes + in-flight work_items, ISO-ts) into `plugin_state` (`precompact_cp_<sid>`); `handleSessionStartCompact` prefers whichever of {real checkpoint note, synthetic snapshot} is fresher, so the digest always has fresh durable state. The `compacting_<sid>` Stop-suppression marker is untouched; the PreCompact `systemMessage` is softened to best-effort (capture is now guaranteed server-side).
+
+**Why.** Jarid-ratified. Pre-existing gap: when PA compacted, nothing fleet-ward fired and the just-compacted agent got SA-tuned guidance (it was even told a peer-backstop was emitted "on its behalf" when `buildPeerBackstopEvent` had returned null for the PA-self case). The server already knows each session's role - use it. PreCompact's long-standing "call save_progress NOW" `systemMessage` was structurally non-actionable: Claude Code's PreCompact hook is a synchronous decision point with **no model turn between it and compaction** (verified 2026-07-11 vs code.claude.com/docs/en/hooks - "no model turn between the hook firing and compaction"; matches the never-observed compliance). Same trigger-design defect class the post-compact side already fixed by going deterministic (5d1c20fc) - so pre-compact capture is now deterministic too.
+
+**Rejected.** (a) Reusing `post_compact_recovery` with a role flag for the PA direction - the existing consumer hard-assumes compacted=SA, recipient=PA; a distinct `pa_compact_recovery` keeps the proven SA->PA path byte-identical. (b) Always overwriting the checkpoint with the synthetic snapshot - would shadow a genuinely richer, fresher real `save_progress`; freshness comparison (lexical on ISO-8601 `now()` timestamps, valid since both use `toISOString()`) picks the better one. (c) Making `role`/`peers` required composer params - would break every existing caller/test; they default to the pre-2ad3240e subordinate behavior instead. (d) Keeping PreCompact's hard "capture NOW" - non-actionable, so softened to a best-effort extra now that capture is guaranteed.
+
+**Bounded-payload discipline (05f072d3).** New roster caps (8 peers, 70-char task lines) + a 3500-char synthetic-snapshot cap that fits under the composer's existing 4000 checkpoint cap and 7000 total cap. Load-bearing blocks (operating contract, high-loss-zone, role action) sit ahead of the elastic checkpoint/roster so the final budget slice yields the recoverable parts first.
+
+**Test additions.** ~30 new tests in `tests/tools/hook_event.test.ts` (prime fleet-check-in + roster, SA check-in + lateral roster, high-loss-zone both directions, roster bounding, `buildPaCompactAdvisoryEvent` payload, `composePrecompactSnapshot` bounding/safety, `handlePreCompact` snapshot bank, synthetic-vs-real freshness selection, PreCompact->SessionStart end-to-end). Full suite: 612 pass, 0 fail; `tsc --noEmit` clean. Existing `hook_envelope.test.ts` `ALLOWED_HSO_EVENT_NAMES` semantics unchanged (SessionStart still non-HSO, delivers via top-level `systemMessage`).
+
+**Shipped:** unreleased - pending PrimeAgent diff review; no version bump / no publish per the WI. Delivery mechanism (top-level `systemMessage` for SessionStart, proven live 2026-07-11) unchanged.
+
+---
+
 ## 2026-06-30 - PA defaults to xhigh effort (not max) + latest-Opus/Fable model policy (0.30.60)
 
 **Change.** `pa-start.ps1` now launches PA at `--effort xhigh` instead of `--effort max`. The `pa-bootstrap`, `pa-takeover`, and `getting-started` skills plus the docs (ARCHITECTURE, DECISIONS, agent-getting-started) and `prime-agent.md` / `CLAUDE.md` no longer instruct `/model claude-opus-4-7` + `/effort max`; they now state the standing policy: PA runs the LATEST / most-capable model (newest Opus - currently `claude-opus-4-8`, prefer its 1M-context variant - or Fable when/if available again) at `xhigh` effort.

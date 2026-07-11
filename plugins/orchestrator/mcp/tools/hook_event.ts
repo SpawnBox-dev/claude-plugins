@@ -364,19 +364,176 @@ function handlePostToolUseFailure(ctx: HookCtx, args: HookEventArgs): HookEventR
 // skip its block. 60s window is generous; real Stop-after-PreCompact is sub-second.
 const COMPACT_STOP_SUPPRESS_WINDOW_MS = 60_000;
 
+// WI 2ad3240e synthetic-snapshot caps. The banked snapshot lands in the
+// checkpoint slot, which composePostCompactReorientation independently caps at
+// SESSIONSTART_CHECKPOINT_CAP (4000) - keep the snapshot under that so it is
+// surfaced whole rather than double-truncated.
+const PRECOMPACT_SNAPSHOT_ROW_CAP = 6;
+const PRECOMPACT_SNAPSHOT_SNIPPET_CAP = 100;
+const PRECOMPACT_SNAPSHOT_TOTAL_CAP = 3500;
+
+/**
+ * PURE composer for the deterministic pre-compact snapshot (WI 2ad3240e).
+ * Turns the session's durable pointers (last-broadcast task, recent notes,
+ * in-flight work_items) into a bounded checkpoint-shaped text banked at
+ * PreCompact. Pure + exported so the payload is unit-tested without the DB
+ * reads; the impure gather in handlePreCompact stays thin. Never emits the
+ * literal "null"/"undefined" (the post-compact composer's no-checkpoint test
+ * guards against those leaking through).
+ */
+export function composePrecompactSnapshot(opts: {
+  currentTask: string | null;
+  recentNotes: Array<{ id: string; type: string; snippet: string }>;
+  workItems: Array<{ id: string; status: string; content: string }>;
+  ts: string;
+}): string {
+  const { currentTask, recentNotes, workItems, ts } = opts;
+  const sections: string[] = [
+    `[Auto-captured durable snapshot, banked deterministically at compaction (${ts}). The pre-compact model turn cannot run tools, so the orchestrator wrote this for you; it captures POINTERS, not full narrative. A fresher real save_progress checkpoint supersedes it.]`,
+    `Last-broadcast task: ${
+      currentTask && currentTask.trim() ? currentTask : "(none set)"
+    }`,
+  ];
+  if (workItems.length > 0) {
+    const wl = workItems
+      .slice(0, PRECOMPACT_SNAPSHOT_ROW_CAP)
+      .map(
+        (w) =>
+          `  - ${w.id.slice(0, 8)} [${w.status}] ${w.content.slice(0, PRECOMPACT_SNAPSHOT_SNIPPET_CAP)}`
+      )
+      .join("\n");
+    sections.push(`In-flight work_items in your scope:\n${wl}`);
+  }
+  if (recentNotes.length > 0) {
+    const nl = recentNotes
+      .slice(0, PRECOMPACT_SNAPSHOT_ROW_CAP)
+      .map(
+        (n) =>
+          `  - ${n.id.slice(0, 8)} [${n.type}] ${n.snippet.slice(0, PRECOMPACT_SNAPSHOT_SNIPPET_CAP)}`
+      )
+      .join("\n");
+    sections.push(`Recent notes you captured this session:\n${nl}`);
+  }
+  if (workItems.length === 0 && recentNotes.length === 0) {
+    sections.push(
+      'No notes or work_items captured this session yet - reconstruct from the task above and briefing({event:"compact"}).'
+    );
+  }
+  let text = sections.join("\n\n");
+  if (text.length > PRECOMPACT_SNAPSHOT_TOTAL_CAP) {
+    text = text.slice(0, PRECOMPACT_SNAPSHOT_TOTAL_CAP) + "\n...[snapshot truncated]";
+  }
+  return text;
+}
+
+/** Read the WI 2ad3240e synthetic pre-compact snapshot for a session, or null
+ *  if none was banked / the row is corrupt. Stored as JSON {text, ts} in
+ *  plugin_state under `precompact_cp_<sid>`; ts is the ISO time it was banked,
+ *  used to compare freshness against a real checkpoint note's created_at. */
+function readPrecompactSnapshot(
+  db: Database,
+  sid: string
+): { text: string; ts: string } | null {
+  const row = db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(`precompact_cp_${sid}`) as { value: string } | null;
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    if (
+      parsed &&
+      typeof parsed.text === "string" &&
+      typeof parsed.ts === "string"
+    ) {
+      return { text: parsed.text, ts: parsed.ts };
+    }
+  } catch {
+    /* corrupt row - treat as absent */
+  }
+  return null;
+}
+
+/** Recent non-checkpoint notes this session authored, newest first, for the
+ *  synthetic snapshot. Snippet is single-lined + length-bounded in SQL. */
+function listRecentSessionNotes(
+  db: Database,
+  sessionId: string,
+  limit: number
+): Array<{ id: string; type: string; snippet: string }> {
+  return db
+    .query(
+      `SELECT id, type, substr(replace(replace(content, char(10), ' '), char(13), ' '), 1, 100) as snippet
+       FROM notes
+       WHERE source_session = ? AND type != 'checkpoint'
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    )
+    .all(sessionId, limit) as Array<{
+    id: string;
+    type: string;
+    snippet: string;
+  }>;
+}
+
 function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   const sid = sanitizeSessionId(args.session_id);
   if (sid) {
     // Store numeric epoch ms (not the ISO string from now()) so the
-    // suppression-window check in handleStop can compare directly.
+    // suppression-window check in handleStop can compare directly. KEPT
+    // EXACTLY AS-IS - the Stop-suppression window depends on it.
     ctx.db.run(
       `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
       [`compacting_${sid}`, String(Date.now()), now()]
     );
+
+    // WI 2ad3240e requirement 4: DETERMINISTIC pre-compact capture. Claude
+    // Code's PreCompact hook is a synchronous decision point with NO model
+    // turn between it and compaction (verified vs code.claude.com/docs/en/
+    // hooks 2026-07-11), so the long-standing "call save_progress NOW"
+    // systemMessage was structurally non-actionable - the same trigger-design
+    // defect class the post-compact side already fixed by going deterministic
+    // (5d1c20fc). Bank a synthetic mini-checkpoint server-side so the digest
+    // ALWAYS has fresh durable state even when the agent never checkpointed.
+    // Best-effort + fully guarded: a failure here must never block compaction.
+    try {
+      const ts = now();
+      let currentTask: string | null = null;
+      try {
+        const taskRow = ctx.db
+          .query(`SELECT current_task FROM session_registry WHERE session_id = ?`)
+          .get(sid) as { current_task: string | null } | null;
+        currentTask = taskRow?.current_task ?? null;
+      } catch {
+        /* registry missing - non-fatal */
+      }
+      const workItems = listInFlightWorkItemsForSession(ctx.db, sid);
+      const recentNotes = listRecentSessionNotes(
+        ctx.db,
+        sid,
+        PRECOMPACT_SNAPSHOT_ROW_CAP
+      );
+      const text = composePrecompactSnapshot({
+        currentTask,
+        recentNotes,
+        workItems,
+        ts,
+      });
+      ctx.db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+        [`precompact_cp_${sid}`, JSON.stringify({ text, ts }), ts]
+      );
+    } catch {
+      /* best-effort deterministic capture - never block compaction */
+    }
   }
   return {
+    // Softened (WI 2ad3240e): capture is now GUARANTEED by the synthetic
+    // snapshot above, so this drops from a load-bearing "capture NOW" (which
+    // the agent can't act on - no model turn) to a best-effort "richer if you
+    // have room". Keeps the compaction-imminent framing + save_progress/note()
+    // pointers (also what the R7.7 marker test asserts on).
     systemMessage:
-      "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost.",
+      "Context compaction imminent. A durable snapshot of your current task, recent notes, and in-flight work_items has just been banked automatically, so post-compaction re-orientation is guaranteed even if you do nothing further. Best-effort only, if you still have room before your window shrinks: save_progress writes a richer checkpoint and note() persists any decisions/gotchas/patterns not yet captured (the auto-snapshot stores pointers, not your full narrative). After compaction the orchestrator re-orients automatically.",
   };
 }
 
@@ -399,24 +556,92 @@ function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
 // only INFORMS the agent it happened automatically. Bounded-by-
 // construction (05f072d3 cap discipline:
 // briefing() proved an unbounded hook payload breaks the session entry).
+//
+// WI 2ad3240e made this ROLE-AWARE + SYMMETRIC using sessions.role from the
+// agent-channel registry: when the compacted session is itself the PA, the
+// digest becomes a FLEET CHECK-IN and the handler deterministically emits a
+// pa_compact_recovery advisory to EVERY active SA (the reversed-direction
+// counterpart of the SA->PA peer-backstop). When it's an SA, the existing
+// PA-backstop is kept and augmented with a proactive PA check-in + a bounded
+// lateral roster. Both directions carry the highest-loss-zone warning (the
+// final minutes before compaction are where directives/completions are most
+// likely lost or mis-stated).
 const SESSIONSTART_CHECKPOINT_CAP = 4000;
 const SESSIONSTART_TOTAL_CAP = 7000;
 
 /**
- * PURE post-compact re-orientation composer (167ffbaf + e4774e4b). Separated
- * from the DB/disk reads so the `livePA` branch is deterministically
- * testable - `getLiveSessions()` is a non-hermetic disk read (it reflects
- * the real running fleet), so the impure shell stays untested for the live
- * branch exactly like the other `getLiveSessions()` call site, and this pure
- * core carries the test coverage. Bounded-by-construction (05f072d3 cap
- * discipline: briefing() proved an unbounded hook payload breaks the entry).
+ * A bounded roster entry for a fleet peer surfaced in the post-compact
+ * digest (WI 2ad3240e). `id8` is the 8-char session prefix used for
+ * @SA-<id8> addressing; `current_task` is the session's last-broadcast task
+ * (may be null / stale - it's a pointer, not authority).
+ */
+export interface CompactPeer {
+  id8: string;
+  current_task: string | null;
+}
+
+// WI 2ad3240e roster caps. The whole systemMessage is still bounded by
+// SESSIONSTART_TOTAL_CAP; these keep the roster itself from dominating the
+// budget before the total slice runs (an unbounded hook payload once broke
+// session entry - 05f072d3).
+const COMPACT_ROSTER_MAX_PEERS = 8;
+const COMPACT_ROSTER_TASK_CAP = 70;
+
+/**
+ * PURE render of a bounded fleet roster block. Returns "" for an empty
+ * roster so callers can skip the surrounding label. Null tasks render as an
+ * explicit "(no task set)" - never the literal "null"/"undefined" (the
+ * post-compact composer's no-checkpoint test guards against those leaking).
+ */
+function renderCompactRoster(peers: CompactPeer[]): string {
+  if (!peers || peers.length === 0) return "";
+  const shown = peers.slice(0, COMPACT_ROSTER_MAX_PEERS);
+  const lines = shown.map((p) => {
+    const task =
+      p.current_task && p.current_task.trim()
+        ? `: ${p.current_task.slice(0, COMPACT_ROSTER_TASK_CAP)}`
+        : ": (no task set)";
+    return `  - SA-${p.id8}${task}`;
+  });
+  const more =
+    peers.length > shown.length
+      ? `\n  ...and ${peers.length - shown.length} more.`
+      : "";
+  return lines.join("\n") + more;
+}
+
+/**
+ * PURE post-compact re-orientation composer (167ffbaf + e4774e4b + WI
+ * 2ad3240e role-awareness). Separated from the DB/disk reads so the role /
+ * livePA / roster branches are deterministically testable - `getLiveSessions()`
+ * is a non-hermetic disk read (it reflects the real running fleet), so the
+ * impure shell stays untested for the live branch exactly like the other
+ * `getLiveSessions()` call site, and this pure core carries the test coverage.
+ * Bounded-by-construction (05f072d3 cap discipline: briefing() proved an
+ * unbounded hook payload breaks the entry).
+ *
+ * ROLE-AWARE + SYMMETRIC (WI 2ad3240e): the guidance is tuned to the
+ * compacted session's own role (from sessions.role in the agent-channel
+ * registry).
+ *   - subordinate (SA): existing digest + PA-backstop inform, PLUS a
+ *     proactive "check in with PA" instruction and a bounded roster of the
+ *     other active SAs so the SA knows who holds what and keeps lateral comms.
+ *   - prime (PA): the SA branches are replaced by a FLEET CHECK-IN directive
+ *     (poll every active SA) + the roster of SAs to poll. The advisories to
+ *     the SAs are emitted deterministically by the impure handler, not here.
+ * `role`/`peers` are optional and default to the pre-2ad3240e subordinate
+ * behavior so existing callers/tests are unaffected.
  */
 export function composePostCompactReorientation(opts: {
   currentTask: string | null;
   checkpoint: string | null;
   livePA: boolean;
+  role?: "prime" | "subordinate";
+  peers?: CompactPeer[];
 }): string {
   const { currentTask, checkpoint, livePA } = opts;
+  const role = opts.role ?? "subordinate";
+  const peers = opts.peers ?? [];
   const parts: string[] = [
     "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy.",
   ];
@@ -442,6 +667,47 @@ export function composePostCompactReorientation(opts: {
       "(4) Cross-agent messages stay trap-safe / explicit-envelope; honor no-false-close (shipped != live-confirmed). " +
       "(5) You operate under a role contract (prime or subordinate) - reload it via orchestrator:getting-started (PA also: /pa-bootstrap + prime-agent.md); do not infer your role/contract from the lossy summary."
   );
+  // WI 2ad3240e requirement 3: the last minutes before a compaction are the
+  // highest-loss zone in BOTH directions. Warn the compacted agent that its
+  // summary may be missing directives it received right before compacting
+  // (stale queue) AND may list already-DONE items as still-pending. Placed
+  // before the role action block + task/checkpoint so it survives the final
+  // budget slice (load-bearing, role-independent).
+  parts.push(
+    "Highest-loss zone: the final minutes before this compaction are where the most context was lost. Directives you received right before compacting may be ABSENT from your summary (they were still in the queue when it was written), and items your summary lists as still-pending may in fact already be DONE. Before you re-issue, re-request, or re-do anything, reconcile against live reality (and the fleet below, if you have peers) - do not act off the stale queue."
+  );
+  // WI 2ad3240e role-aware action block. Kept above task/checkpoint so the
+  // load-bearing directive survives truncation while the elastic checkpoint
+  // yields. The advisory EMISSION to peers is deterministic in the impure
+  // handler (handleSessionStartCompact) - here we only tell the compacted
+  // agent what will happen and what it should do.
+  if (role === "prime") {
+    parts.push(
+      "You are the PrimeAgent and your context was just compacted. Beyond re-orienting yourself, run a FLEET CHECK-IN now: poll every active subordinate (SA) and have each reply with (a) its current task/state, (b) recent completions with their IDs, and (c) anything it would bet you just lost from the summary - especially work already DONE or directives you already sent it, so you do not re-drive them. Advisories were ALSO emitted to each active SA automatically on your behalf (system bus), so they already know you compacted and will surface dropped context; aggregate their replies as they arrive. Non-blocking - continue, but treat the fleet's replies as the authoritative correction to your summary, not the summary as authority over them."
+    );
+    const roster = renderCompactRoster(peers);
+    if (roster) parts.push(`Active subordinates to poll:\n${roster}`);
+  } else {
+    // Subordinate. When a distinct live PA exists: 5d1c20fc trigger-design
+    // fix - the hook already emitted the peer-backstop solicitation to PA
+    // itself (deterministic, system_events bus), so do NOT ask the agent to
+    // post the solicitation (that voluntary post was the exact failure mode).
+    // INFORM it of the passive backstop AND (WI 2ad3240e req 2a) instruct it to
+    // proactively check in with PA, which sees the whole fleet.
+    if (livePA) {
+      parts.push(
+        "A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. Beyond that passive backstop, proactively CHECK IN with PA now: tell it you just compacted and ask it to aggregate for you - what you were working on, what PA is currently driving, and any in-flight material from other subordinates that bears on your task. PA sees the whole fleet, so it is your fastest path back to full context. A non-compacted peer or PA may also reply flagging load-bearing context the lossy summary dropped; fold any such replies in as they arrive. Non-blocking: continue your work meanwhile. This is a targeted gap-check, not a full context re-request."
+      );
+    }
+    // WI 2ad3240e req 2b: the lateral roster is useful whenever there are peer
+    // SAs, PA or not - it's what keeps lateral coordination alive across the
+    // compaction. Gated on peers, not livePA.
+    const roster = renderCompactRoster(peers);
+    if (roster)
+      parts.push(
+        `Other active subordinates (who holds what - coordinate laterally via @SA-<id8>, and flag anything already done/received so no one re-does it):\n${roster}`
+      );
+  }
   // The currentTask comes verbatim from session_registry.current_task, which
   // persists indefinitely until the session next calls update_session_task -
   // so right after a compaction it can be STALE (an old broadcast from before
@@ -465,15 +731,6 @@ export function composePostCompactReorientation(opts: {
   } else {
     parts.push(
       'No durable checkpoint found - reconstruct from your task above and a briefing({event:"compact"}) before proceeding.'
-    );
-  }
-  if (livePA) {
-    // 5d1c20fc trigger-design fix: the hook now emits the peer-backstop
-    // solicitation to PA itself (deterministic, system_events bus). Do NOT
-    // ask the agent to post anything - the just-compacted agent voluntarily
-    // posting an optional line was the exact failure mode. Only INFORM it.
-    parts.push(
-      "A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. A non-compacted peer or PA may reply on the channel flagging load-bearing context the lossy summary dropped; fold any such replies in when they arrive. Non-blocking: continue your work. This is a targeted gap-check, not a full context re-request."
     );
   }
 
@@ -519,6 +776,40 @@ export function buildPeerBackstopEvent(opts: {
   };
 }
 
+/** system_events `event_type` for the WI 2ad3240e PA-compacted advisory - the
+ *  symmetric, reversed-direction counterpart of POST_COMPACT_RECOVERY_EVENT.
+ *  Single source of truth - shared by the producer (this file) and the
+ *  consumer (agent_channel.ts processSystemEvents). */
+export const PA_COMPACT_RECOVERY_EVENT = "pa_compact_recovery" as const;
+
+/**
+ * PURE builder for the WI 2ad3240e PA-compacted advisory system_events row,
+ * one per active SA. Returns the SystemEvent to append, or `null` when there
+ * is no distinct SA to address (fromSession === toSession, or either empty).
+ * Mirror of buildPeerBackstopEvent but reversed: PA (fromSession) advises each
+ * active SA (toSession) that PA just compacted and its summary is lossy. Kept
+ * pure + exported so the payload contract is unit-tested deterministically;
+ * the impure getLiveSessions() / appendSystemEvent() glue in
+ * handleSessionStartCompact stays untested-for-live exactly like the other
+ * getLiveSessions() call site.
+ */
+export function buildPaCompactAdvisoryEvent(opts: {
+  fromSession: string;
+  toSession: string;
+  currentTask: string | null;
+  ts: string;
+}): SystemEvent | null {
+  const { fromSession, toSession, currentTask, ts } = opts;
+  if (!fromSession || !toSession || fromSession === toSession) return null;
+  return {
+    event_type: PA_COMPACT_RECOVERY_EVENT,
+    from_session: fromSession,
+    to_session: toSession,
+    ts,
+    task: currentTask ?? "",
+  };
+}
+
 function handleSessionStartCompact(
   ctx: HookCtx,
   args: HookEventArgs
@@ -526,7 +817,6 @@ function handleSessionStartCompact(
   const sid = sanitizeSessionId(args.session_id);
 
   let currentTask: string | null = null;
-  let checkpoint: string | null = null;
   try {
     const taskRow = ctx.db
       .query(`SELECT current_task FROM session_registry WHERE session_id = ?`)
@@ -535,55 +825,119 @@ function handleSessionStartCompact(
   } catch {
     /* registry missing - non-fatal */
   }
+
+  // Latest checkpoint NOTE (global-latest by created_at - may be cross-session
+  // and stale; the composer hedges the surfaced value accordingly).
+  let realCp: { content: string; created_at: string } | null = null;
   try {
-    const cpRow = ctx.db
+    realCp = ctx.db
       .query(
-        `SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
+        `SELECT content, created_at FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`
       )
-      .get() as { content: string } | null;
-    checkpoint = cpRow?.content ?? null;
+      .get() as { content: string; created_at: string } | null;
   } catch {
     /* notes missing - non-fatal */
   }
 
+  // WI 2ad3240e requirement 4: the PreCompact handler deterministically banks
+  // a synthetic mini-checkpoint (the pre-compact model turn provably cannot
+  // run tools, so save_progress there never fires - verified vs the CC hook
+  // lifecycle 2026-07-11). Prefer whichever durable state is FRESHER: a real
+  // save_progress checkpoint the agent wrote, or the synthetic snapshot. Both
+  // created_at and the snapshot ts are ISO-8601 UTC (now()), so a lexical
+  // compare is a valid time compare. Guarantees the digest is never empty and
+  // never surfaces a months-old cross-session checkpoint when a fresh
+  // synthetic exists.
+  const synthetic = readPrecompactSnapshot(ctx.db, sid);
+  let checkpoint: string | null;
+  if (synthetic && (!realCp || synthetic.ts >= realCp.created_at)) {
+    checkpoint = synthetic.text;
+  } else {
+    checkpoint = realCp?.content ?? null;
+  }
+
+  // Role detection + fleet snapshot from the agent-channel registry
+  // (sessions.role). Non-channel / single-session projects: getLiveSessions()
+  // returns null -> role defaults to subordinate, livePA false, empty peers -
+  // exactly the pre-2ad3240e behavior, so nothing regresses there.
+  let selfRole: "prime" | "subordinate" = "subordinate";
   let livePA = false;
   let paSession: string | null = null;
+  let peers: CompactPeer[] = [];
+  let activeSAs: Array<{ session_id: string; id8: string }> = [];
   try {
     const live = getLiveSessions();
-    const pa = live?.find((e) => e.role === "prime") ?? null;
-    livePA = !!pa;
-    paSession = pa?.session_id ?? null;
+    if (live) {
+      const self = live.find((e) => e.session_id === sid) ?? null;
+      if (self?.role === "prime") selfRole = "prime";
+      const pa = live.find((e) => e.role === "prime") ?? null;
+      const distinctPA = pa && pa.session_id !== sid ? pa : null;
+      livePA = !!distinctPA;
+      paSession = distinctPA?.session_id ?? null;
+      const otherSubs = live.filter(
+        (e) => e.role === "subordinate" && e.session_id !== sid
+      );
+      peers = otherSubs.map((e) => ({
+        id8: e.id8,
+        current_task: e.current_task ?? null,
+      }));
+      activeSAs = otherSubs.map((e) => ({
+        session_id: e.session_id,
+        id8: e.id8,
+      }));
+    }
   } catch {
     livePA = false;
     paSession = null;
   }
 
-  // e4774e4b (5d1c20fc trigger-design fix): emit the peer-backstop
-  // solicitation DETERMINISTICALLY on the system_events bus (the same
-  // mechanism the permission relay uses), addressed to PA. The prior design
-  // relied on the just-compacted agent voluntarily posting a channel line -
-  // shipped, exercised on a perfect live case, did nothing. PA's filewatcher
-  // surfaces this within ~1.5s with zero dependence on the compacted agent.
-  // Strictly non-fatal: the re-orientation systemMessage MUST return whether
-  // or not the bus write succeeds (bus may be absent on non-channel projects).
+  // WI 2ad3240e: DETERMINISTIC, role-aware, symmetric emission on the
+  // system_events bus (the same mechanism the permission relay + e4774e4b
+  // peer-backstop use). The prior design relied on the just-compacted agent
+  // voluntarily posting a channel line - shipped, exercised on a perfect live
+  // case, did nothing (5d1c20fc). A non-compacted peer's filewatcher surfaces
+  // these within ~1.5s with zero dependence on the compacted agent. Strictly
+  // non-fatal: the re-orientation systemMessage MUST return whether or not the
+  // bus write succeeds (bus may be absent on non-channel projects).
   try {
-    const ev = buildPeerBackstopEvent({
-      fromSession: sid,
-      paSession,
-      currentTask,
-      ts: now(),
-    });
     const stateDir = getAgentChannelStateDir();
-    if (ev && stateDir) appendSystemEvent(stateDir, ev);
+    if (stateDir) {
+      const ts = now();
+      if (selfRole === "prime") {
+        // PA compacted: advise EVERY active SA that PA's summary is lossy so
+        // they surface dropped fleet context (and flag already-done/received
+        // items) back to PA. One row per SA, same bus.
+        for (const sa of activeSAs) {
+          const ev = buildPaCompactAdvisoryEvent({
+            fromSession: sid,
+            toSession: sa.session_id,
+            currentTask,
+            ts,
+          });
+          if (ev) appendSystemEvent(stateDir, ev);
+        }
+      } else {
+        // SA compacted: solicit the PA backstop (existing e4774e4b mechanism).
+        const ev = buildPeerBackstopEvent({
+          fromSession: sid,
+          paSession,
+          currentTask,
+          ts,
+        });
+        if (ev) appendSystemEvent(stateDir, ev);
+      }
+    }
   } catch {
     /* agent-channel bus unavailable - non-fatal; systemMessage still re-orients */
   }
 
   return {
     systemMessage: composePostCompactReorientation({
+      role: selfRole,
       currentTask,
       checkpoint,
       livePA,
+      peers,
     }),
   };
 }

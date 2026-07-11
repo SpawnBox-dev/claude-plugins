@@ -7,8 +7,11 @@ import {
   handleHookEvent,
   buildHookEnvelope,
   composePostCompactReorientation,
+  composePrecompactSnapshot,
   buildPeerBackstopEvent,
+  buildPaCompactAdvisoryEvent,
   POST_COMPACT_RECOVERY_EVENT,
+  PA_COMPACT_RECOVERY_EVENT,
   HOOK_EVENTS,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
@@ -1102,5 +1105,401 @@ describe("_hook_event boundary: HOOK_EVENTS <-> Zod schema <-> dispatcher parity
 
   test("an event NOT in HOOK_EVENTS is rejected by the boundary validator", () => {
     expect(() => EventEnum.parse("NotARealEvent")).toThrow();
+  });
+});
+
+// WI 2ad3240e: role-aware + symmetric post-compact recovery. When the
+// compacted agent is the PA the guidance becomes a FLEET CHECK-IN + the hook
+// deterministically advises every SA; when it's an SA the existing PA-backstop
+// is kept and augmented with a proactive check-in + a bounded lateral roster.
+// PreCompact capture is made deterministic (synthetic snapshot) because the
+// pre-compact model turn cannot run tools. Pure composers/builders carry the
+// coverage; the impure getLiveSessions()/appendSystemEvent() glue stays
+// untested-for-live (same convention as e4774e4b).
+describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
+  describe("composer - PA (prime) branch", () => {
+    test("prime: FLEET CHECK-IN directive + roster of SAs to poll; PA is the backstop SOURCE, never told to 'check in with PA'", () => {
+      const msg = composePostCompactReorientation({
+        role: "prime",
+        currentTask: "orchestrating the fleet",
+        checkpoint: "pa checkpoint body",
+        livePA: false,
+        peers: [
+          { id8: "aaaaaaaa", current_task: "backend lows sweep" },
+          { id8: "bbbbbbbb", current_task: null },
+        ],
+      });
+      const lc = msg.toLowerCase();
+      expect(lc).toContain("fleet check-in");
+      expect(lc).toContain("poll every active subordinate");
+      // (b) recent completions WITH ids requested
+      expect(lc).toContain("recent completions");
+      // roster with both SAs; null task rendered safely
+      expect(msg).toContain("SA-aaaaaaaa: backend lows sweep");
+      expect(msg).toContain("SA-bbbbbbbb: (no task set)");
+      expect(msg).not.toContain("null");
+      expect(msg).not.toContain("undefined");
+      // PA is the source of the advisory, not a recipient of "check in with PA"
+      expect(lc).not.toContain("check in with pa");
+      // informs PA the SA advisories were auto-emitted on its behalf
+      expect(lc).toContain("on your behalf");
+      // still carries the state
+      expect(msg).toContain("orchestrating the fleet");
+      expect(msg).toContain("pa checkpoint body");
+    });
+
+    test("prime: high-loss-zone warning present (requirement 3, both directions)", () => {
+      const msg = composePostCompactReorientation({
+        role: "prime",
+        currentTask: "t",
+        checkpoint: null,
+        livePA: false,
+        peers: [],
+      });
+      const lc = msg.toLowerCase();
+      expect(lc).toContain("highest-loss zone");
+      expect(lc).toContain("already"); // "already DONE"
+      expect(lc).toContain("stale queue");
+    });
+  });
+
+  describe("composer - SA (subordinate) branch additions", () => {
+    test("subordinate + livePA: proactive CHECK IN with PA + lateral roster, keeps the passive backstop inform (5d1c20fc)", () => {
+      const msg = composePostCompactReorientation({
+        role: "subordinate",
+        currentTask: "fixing the DNS lease reaper",
+        checkpoint: "cp",
+        livePA: true,
+        peers: [{ id8: "cccccccc", current_task: "writing telemetry tests" }],
+      });
+      const lc = msg.toLowerCase();
+      // passive backstop inform preserved
+      expect(lc).toContain("on your behalf");
+      expect(lc).toContain("do not need to post");
+      expect(lc).toContain("non-blocking");
+      expect(msg).not.toContain("post ONE line");
+      // NEW (req 2a): proactive check-in with PA
+      expect(lc).toContain("check in with pa");
+      // NEW (req 2b): bounded lateral roster with @SA addressing
+      expect(msg).toContain("SA-cccccccc: writing telemetry tests");
+      expect(lc).toContain("@sa-<id8>");
+      // req 3 high-loss-zone
+      expect(lc).toContain("highest-loss zone");
+    });
+
+    test("subordinate + NO livePA: no check-in-with-PA and no peer-backstop wording, but lateral roster still shows for peer coordination + high-loss-zone present", () => {
+      const msg = composePostCompactReorientation({
+        role: "subordinate",
+        currentTask: "solo-ish work",
+        checkpoint: "cp",
+        livePA: false,
+        peers: [{ id8: "dddddddd", current_task: "map pipeline" }],
+      });
+      const lc = msg.toLowerCase();
+      expect(lc).not.toContain("check in with pa");
+      expect(lc).not.toContain("on your behalf");
+      expect(lc).not.toContain("peer-backstop");
+      // req 2b: roster is gated on peers, not livePA - lateral comms survive
+      expect(msg).toContain("SA-dddddddd: map pipeline");
+      expect(lc).toContain("highest-loss zone");
+    });
+
+    test("subordinate with no peers and no PA: clean solo digest, no roster, no undefined/null (backward-compatible default)", () => {
+      const msg = composePostCompactReorientation({
+        role: "subordinate",
+        currentTask: "solo",
+        checkpoint: "cp",
+        livePA: false,
+        peers: [],
+      });
+      expect(msg).not.toContain("Other active subordinates");
+      expect(msg).not.toContain("undefined");
+      expect(msg).not.toContain("null");
+      expect(msg.toLowerCase()).toContain("highest-loss zone");
+    });
+
+    test("roster is bounded: >8 peers truncate with an 'and N more' marker", () => {
+      const peers = Array.from({ length: 11 }, (_, i) => ({
+        id8: `id${i}`.padEnd(8, "0"),
+        current_task: `task ${i}`,
+      }));
+      const msg = composePostCompactReorientation({
+        role: "prime",
+        currentTask: "t",
+        checkpoint: null,
+        livePA: false,
+        peers,
+      });
+      expect(msg).toContain("and 3 more"); // 11 - 8 shown
+    });
+
+    test("roster truncates long task lines to the cap", () => {
+      const longTask = "x".repeat(200);
+      const msg = composePostCompactReorientation({
+        role: "prime",
+        currentTask: "t",
+        checkpoint: null,
+        livePA: false,
+        peers: [{ id8: "eeeeeeee", current_task: longTask }],
+      });
+      // 70-char cap on the task slice - the full 200-char line must NOT appear
+      expect(msg).not.toContain(longTask);
+      expect(msg).toContain("SA-eeeeeeee: " + "x".repeat(70));
+    });
+  });
+
+  describe("buildPaCompactAdvisoryEvent (PA -> each SA)", () => {
+    test("well-formed pa_compact_recovery row from PA to an SA", () => {
+      const ev = buildPaCompactAdvisoryEvent({
+        fromSession: "pa-uuid",
+        toSession: "sa-uuid",
+        currentTask: "orchestrating",
+        ts: "2026-07-11T07:00:00.000Z",
+      });
+      expect(ev).not.toBeNull();
+      expect(ev!.event_type).toBe(PA_COMPACT_RECOVERY_EVENT);
+      expect(ev!.event_type).toBe("pa_compact_recovery");
+      expect(ev!.from_session).toBe("pa-uuid");
+      expect(ev!.to_session).toBe("sa-uuid");
+      expect(ev!.ts).toBe("2026-07-11T07:00:00.000Z");
+      expect(ev!.task).toBe("orchestrating");
+    });
+
+    test("null currentTask coerced to empty string, still valid", () => {
+      const ev = buildPaCompactAdvisoryEvent({
+        fromSession: "pa-uuid",
+        toSession: "sa-uuid",
+        currentTask: null,
+        ts: "t",
+      });
+      expect(ev).not.toBeNull();
+      expect(ev!.task).toBe("");
+    });
+
+    test("self-addressed (from === to) returns null - never advise yourself", () => {
+      expect(
+        buildPaCompactAdvisoryEvent({
+          fromSession: "same",
+          toSession: "same",
+          currentTask: "x",
+          ts: "t",
+        })
+      ).toBeNull();
+    });
+
+    test("empty from/to returns null", () => {
+      expect(
+        buildPaCompactAdvisoryEvent({
+          fromSession: "",
+          toSession: "sa",
+          currentTask: "x",
+          ts: "t",
+        })
+      ).toBeNull();
+      expect(
+        buildPaCompactAdvisoryEvent({
+          fromSession: "pa",
+          toSession: "",
+          currentTask: "x",
+          ts: "t",
+        })
+      ).toBeNull();
+    });
+  });
+
+  describe("composePrecompactSnapshot (deterministic pre-compact capture)", () => {
+    test("includes task + work_items + recent notes as bounded pointers", () => {
+      const text = composePrecompactSnapshot({
+        currentTask: "wire the recovery hook",
+        recentNotes: [
+          { id: "note1234abcd", type: "decision", snippet: "went with X over Y" },
+          { id: "note5678efgh", type: "gotcha", snippet: "beware the Z race" },
+        ],
+        workItems: [
+          { id: "wiabcdef00", status: "in_progress", content: "build the thing" },
+        ],
+        ts: "2026-07-11T07:00:00.000Z",
+      });
+      expect(text).toContain("Auto-captured");
+      expect(text).toContain("wire the recovery hook");
+      expect(text).toContain("wiabcdef"); // work_item id8
+      expect(text).toContain("build the thing");
+      expect(text).toContain("note1234"); // note id8
+      expect(text).toContain("went with X over Y");
+      expect(text).toContain("2026-07-11T07:00:00.000Z");
+    });
+
+    test("null task and empty notes/work_items -> safe reconstruct prompt, no literal null/undefined", () => {
+      const text = composePrecompactSnapshot({
+        currentTask: null,
+        recentNotes: [],
+        workItems: [],
+        ts: "t",
+      });
+      expect(text).toContain("(none set)");
+      expect(text.toLowerCase()).toContain("reconstruct");
+      expect(text).not.toContain("undefined");
+      // no bare "null" token
+      expect(text).not.toMatch(/\bnull\b/);
+    });
+
+    test("bounded: a huge work_item list is truncated under the snapshot cap", () => {
+      const workItems = Array.from({ length: 50 }, (_, i) => ({
+        id: `wi${i}`.padEnd(8, "0"),
+        status: "in_progress",
+        content: "y".repeat(300),
+      }));
+      const text = composePrecompactSnapshot({
+        currentTask: "t",
+        recentNotes: [],
+        workItems,
+        ts: "t",
+      });
+      // Well under the composer's 4000 checkpoint cap so it surfaces whole.
+      expect(text.length).toBeLessThanOrEqual(3600);
+    });
+  });
+
+  describe("handlePreCompact - deterministic snapshot bank", () => {
+    test("banks a synthetic checkpoint into plugin_state and keeps the Stop-suppression marker + softened systemMessage", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("PCB");
+      tracker.updateCurrentTask("PCB", "banked task");
+      const ts = now();
+      // Seed an in-flight work_item + a recent note for this session.
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-pcb', 'work_item', 'the in-flight thing', 'in_progress', 'PCB', ?, ?)`,
+        [ts, ts]
+      );
+      db.run(
+        `INSERT INTO notes (id, type, content, source_session, created_at, updated_at)
+         VALUES ('note-pcb', 'decision', 'a fresh decision', 'PCB', ?, ?)`,
+        [ts, ts]
+      );
+
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "PreCompact", session_id: "PCB" }
+      );
+      // Softened message still names the compaction + the capture pointers.
+      expect(r.systemMessage).toContain("Context compaction imminent");
+      expect(r.systemMessage).toContain("save_progress");
+      expect(r.systemMessage).toContain("note()");
+      expect(r.systemMessage!.toLowerCase()).toContain("banked automatically");
+
+      // Stop-suppression marker preserved (numeric epoch ms).
+      const marker = db
+        .query(`SELECT value FROM plugin_state WHERE key = 'compacting_PCB'`)
+        .get() as { value: string } | null;
+      expect(marker).not.toBeNull();
+      expect(Number.isFinite(parseInt(marker!.value, 10))).toBe(true);
+
+      // Synthetic snapshot banked as JSON {text, ts}.
+      const snap = db
+        .query(`SELECT value FROM plugin_state WHERE key = 'precompact_cp_PCB'`)
+        .get() as { value: string } | null;
+      expect(snap).not.toBeNull();
+      const parsed = JSON.parse(snap!.value);
+      expect(typeof parsed.text).toBe("string");
+      expect(typeof parsed.ts).toBe("string");
+      expect(parsed.text).toContain("banked task");
+      expect(parsed.text).toContain("the in-flight thing");
+      expect(parsed.text).toContain("a fresh decision");
+    });
+  });
+
+  describe("handleSessionStartCompact - synthetic vs real checkpoint freshness", () => {
+    test("uses the synthetic snapshot when it is fresher than the newest real checkpoint", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("FRSH");
+      // A real checkpoint from the past.
+      db.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-old', 'checkpoint', 'OLD REAL CHECKPOINT', '2026-07-10T00:00:00.000Z', '2026-07-10T00:00:00.000Z')`
+      );
+      // A synthetic snapshot banked NOW (fresher).
+      db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_FRSH', ?, ?)`,
+        [
+          JSON.stringify({
+            text: "SYNTHETIC FRESH SNAPSHOT",
+            ts: "2026-07-11T00:00:00.000Z",
+          }),
+          now(),
+        ]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "FRSH" }
+      );
+      expect(r.systemMessage).toContain("SYNTHETIC FRESH SNAPSHOT");
+      expect(r.systemMessage).not.toContain("OLD REAL CHECKPOINT");
+    });
+
+    test("uses the real checkpoint when it is fresher than the synthetic snapshot", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("REAL");
+      db.run(
+        `INSERT INTO notes (id, type, content, created_at, updated_at) VALUES ('cp-new', 'checkpoint', 'NEW REAL CHECKPOINT', '2026-07-11T12:00:00.000Z', '2026-07-11T12:00:00.000Z')`
+      );
+      db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_REAL', ?, ?)`,
+        [
+          JSON.stringify({
+            text: "STALE SYNTHETIC SNAPSHOT",
+            ts: "2026-07-11T06:00:00.000Z",
+          }),
+          now(),
+        ]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "REAL" }
+      );
+      expect(r.systemMessage).toContain("NEW REAL CHECKPOINT");
+      expect(r.systemMessage).not.toContain("STALE SYNTHETIC SNAPSHOT");
+    });
+
+    test("no real checkpoint at all -> synthetic snapshot fills the digest (never the empty 'No durable checkpoint' branch)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("SYNONLY");
+      db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES ('precompact_cp_SYNONLY', ?, ?)`,
+        [
+          JSON.stringify({
+            text: "ONLY SYNTHETIC AVAILABLE",
+            ts: "2026-07-11T00:00:00.000Z",
+          }),
+          now(),
+        ]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "SYNONLY" }
+      );
+      expect(r.systemMessage).toContain("ONLY SYNTHETIC AVAILABLE");
+      expect(r.systemMessage).not.toContain("No durable checkpoint found");
+    });
+
+    test("end-to-end: PreCompact bank then SessionStart surfaces the banked snapshot (deterministic capture, no agent action)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("E2E");
+      tracker.updateCurrentTask("E2E", "e2e task");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-e2e', 'work_item', 'e2e work item', 'in_progress', 'E2E', ?, ?)`,
+        [ts, ts]
+      );
+      // Agent takes NO capture action - only the hooks fire.
+      handleHookEvent({ db, tracker }, { event: "PreCompact", session_id: "E2E" });
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "E2E" }
+      );
+      expect(r.systemMessage).toContain("e2e task");
+      expect(r.systemMessage).toContain("e2e work item");
+      expect(r.systemMessage).not.toContain("No durable checkpoint found");
+    });
   });
 });
