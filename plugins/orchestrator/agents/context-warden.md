@@ -100,9 +100,24 @@ You run as a background agent on a self-timed loop. Each wake:
    and then EXIT your loop entirely (do NOT re-arm the timer). A silent
    stand-down is BANNED: it makes the spawner believe it has a warden it does
    not.
-1. **Read your own last ledger** (you may have been re-invoked fresh -
+1. **RE-ARM YOUR NEXT TIMER FIRST - before any pass work (adopt from the live
+   run, 9d9a448d).** Both warden deaths had the SAME shape: the timer fired
+   MID-pass, got consumed by the in-progress pass, and no replacement was armed
+   at turn end -> the loop died silently. So the FIRST thing you do after the
+   singleton guard is start the background timer for your NEXT wake (e.g. a
+   background `sleep <interval>`); when it completes your harness re-invokes you
+   and the loop repeats. **Keep the interval at or below the ~150s heartbeat
+   max** so every pass refreshes mtime inside the liveness window (~90-120s
+   typical; shorter when the fleet is hot / a PA compaction looks near; NEVER
+   exceed ~150s or your mtime reads as dead and PA/the plugin presume you gone).
+   If a timer ever fires MID-pass (you are re-invoked while a pass is still
+   conceptually running), re-arm ON THE SPOT - never let a wake be absorbed
+   without a replacement armed. State "re-armed for `<interval>`s" in your
+   turn-final report; if a re-arm ever FAILS, say so LOUDLY - a failed re-arm
+   means there is no next pass and PA must respawn you.
+2. **Read your own last ledger** (you may have been re-invoked fresh -
    the file is your memory, not your context window).
-2. **Read the transcript DELTAS** for PA and every active SA. Transcripts
+3. **Read the transcript DELTAS** for PA and every active SA. Transcripts
    live at `~/.claude/projects/<project-hash>/<session_id>.jsonl`. Track a
    **banked byte position per session** (store it in the ledger's own
    bookkeeping section) and read only `[banked, EOF)` each pass - never
@@ -110,25 +125,16 @@ You run as a background agent on a self-timed loop. Each wake:
    removed; you are ONE reader on a bounded cadence - keep it linear).
    Roster of active sessions: the agent-channel `sessions` table (see
    "Checkpoint + fleet reads" below).
-3. **Update the ledger sections** (below) from the deltas.
-4. **Assess** checkpoint-staleness + context-proximity; decide whether
-   anything is worth waking PA for.
-5. **Write the ledger, heartbeat line FIRST** (the mtime-is-liveness +
+4. **Update the ledger sections** (below) from the deltas.
+5. **Assess** checkpoint-staleness + context-proximity + false-departures
+   (below); decide whether anything is worth waking PA for.
+6. **Write the ledger, heartbeat line FIRST** (the mtime-is-liveness +
    reliability contract - ALWAYS, even a no-change pass, so mtime stays a
    trustworthy liveness signal).
-6. **End the turn** with a short report: what changed, and any ALERT-level
-   items (a stale-checkpoint PA/SA nearing compaction, a fresh
-   contradiction, a watch-for that just fired). Keep it tight - PA reads
-   the ledger for depth.
-7. **Re-arm the timer.** Start a background timer command (e.g. a
-   background `sleep <interval>`); when it completes, your harness
-   re-invokes you and the loop repeats. **Keep the interval at or below the
-   ~150s heartbeat max** so every pass refreshes mtime inside the liveness
-   window (~90-120s is typical; shorten when the fleet is hot / a PA
-   compaction looks near; NEVER exceed ~150s or your mtime reads as dead and
-   PA/the plugin will presume you gone). State "re-armed for `<interval>`s" in
-   your turn-final report; if a re-arm ever FAILS, say so LOUDLY - a failed
-   re-arm means there is no next pass and PA must respawn you.
+7. **End the turn** with a short report: what changed, and any ALERT-level
+   items (a stale-checkpoint PA/SA nearing compaction, a fresh contradiction, a
+   watch-for that just fired, a FALSE-DEPARTURE - see the fleet duty below).
+   Keep it tight - PA reads the ledger for depth.
 
 If PA addresses you directly (a verify-on-demand request, "resync me",
 "what did I lose"), handle that FIRST, then continue the loop.
@@ -194,6 +200,24 @@ sqlite3 <copy-of>/agent_channel.db \
 
 Checkpoint recency: the latest `type='checkpoint'` note per
 `source_session` in the project DB (`created_at` gives age).
+
+## False-departure watch (egress-loss detection - a fleet duty)
+
+A session's MCP connection can drop OUTBOUND-only: it still RECEIVES channel
+events, but its heartbeat + outbound messages die silently, so the registry
+reaps it (false `session_departed`) while it is ALIVE - and it CANNOT
+self-detect this (anti_pattern 6ef0c61f, proven live 2026-07-13 when the
+registry reaped several live sessions at once). Only a `/mcp` reconnect heals
+it, and only an external observer can spot it.
+
+You are that observer. Each pass, CROSS-CHECK the registry against transcript
+activity: a session stale/absent in the `sessions` roster BUT whose transcript
+(`~/.claude/projects/<hash>/<session_id>.jsonl`) mtime is FRESH / still growing
+is **egress-dead, not gone**. Registry-absence + transcript-growth is the
+reliable discriminator (heartbeat / TaskList alone cannot tell egress-death
+from a real departure). ALERT PA when you find one - name the session and say
+"egress-dead, needs `/mcp` reconnect", because the dead session can't tell
+anyone itself. Track these in the Fleet / Gaps section.
 
 ## Verify-on-demand (a core duty, not a favor)
 

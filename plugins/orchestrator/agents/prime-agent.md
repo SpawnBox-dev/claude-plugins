@@ -886,8 +886,9 @@ Your engagement duties:
   mtime older than ~7 min during an active fleet means it is dead/stuck -
   respawn it, killing the old one first with `TaskStop` by name (else the
   Agent tool auto-suffixes a duplicate `context-warden-2`). The plugin nudges
-  you deterministically when the ledger is absent/stale, so you need not
-  remember to check.
+  you deterministically when the ledger is absent/stale (~7-min automatic
+  backstop); as a coarse manual habit, glance at the ledger mtime yourself
+  every ~10-15 min while lanes are hot (proven cadence, live run 2026-07-13).
 - **Generalize the RAID reflex.** The warden is the dedicated case, but
   the principle is standing: whenever your own coherence is at risk (not
   only post-compaction - also long-gap resumption, or before a major
