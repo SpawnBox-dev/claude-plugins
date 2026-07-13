@@ -24622,6 +24622,64 @@ function classifyAbsence(opts) {
     return "departed";
   return "pending";
 }
+var INGRESS_STALE_THRESHOLD_MS = 180000;
+var INGRESS_TAIL_BYTES = 131072;
+var INGRESS_CHECK_INTERVAL_MS = 30000;
+function classifyIngress(opts) {
+  if (!opts.heartbeatFresh)
+    return "healthy";
+  if (opts.lastRealIsMidTurn)
+    return "healthy";
+  if (opts.oldestOrphanEnqueueTs == null)
+    return "healthy";
+  if (opts.now - opts.oldestOrphanEnqueueTs >= opts.thresholdMs)
+    return "ingress_suspect";
+  return "pending";
+}
+function parseIngressTail(tail) {
+  let lastRealTs = null;
+  let lastRealIsMidTurn = false;
+  let enqueueTs = [];
+  let dequeueCount = 0;
+  for (const raw of tail.split(`
+`)) {
+    const line = raw.trim();
+    if (!line)
+      continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const t = typeof o?.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+    if (o?.type === "queue-operation") {
+      if (o?.operation === "enqueue") {
+        if (Number.isFinite(t))
+          enqueueTs.push(t);
+      } else if (o?.operation === "dequeue") {
+        dequeueCount++;
+      }
+      continue;
+    }
+    if (Number.isFinite(t))
+      lastRealTs = t;
+    if (o?.type === "user") {
+      lastRealIsMidTurn = true;
+    } else {
+      const content = o?.message?.content;
+      lastRealIsMidTurn = Array.isArray(content) && content.some((b) => b?.type === "tool_use");
+    }
+    enqueueTs = [];
+    dequeueCount = 0;
+  }
+  const oldestOrphan = enqueueTs.length > dequeueCount ? enqueueTs[dequeueCount] : null;
+  return {
+    lastRealActivityTs: lastRealTs,
+    oldestOrphanEnqueueTs: oldestOrphan,
+    lastRealIsMidTurn
+  };
+}
 function decorateChannelContent(content, sender, eventType, addrTargets, paAddressed, sessions) {
   if (!paAddressed && addrTargets.length === 0) {
     return content;
@@ -24656,6 +24714,8 @@ class AgentChannel {
   currentRoster = new Map;
   sizeAtStale = new Map;
   egressEmitted = new Set;
+  ingressEmitted = new Set;
+  lastIngressCheckAt = 0;
   systemEventsLastSeenId = 0;
   heartbeatFailures = 0;
   constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
@@ -24755,6 +24815,7 @@ class AgentChannel {
         continue;
       if (current.has(sid))
         continue;
+      this.ingressEmitted.delete(sid);
       const size = this.peerTranscriptSize(sid);
       if (!this.sizeAtStale.has(sid) && size != null) {
         this.sizeAtStale.set(sid, size);
@@ -24800,6 +24861,7 @@ class AgentChannel {
         this.pendingMisses.delete(sid);
         this.sizeAtStale.delete(sid);
         this.egressEmitted.delete(sid);
+        this.ingressEmitted.delete(sid);
         removeSession(this.projectStateDir, sid);
       } else {
         this.pendingMisses.set(sid, misses);
@@ -24813,6 +24875,63 @@ class AgentChannel {
       return null;
     }
   }
+  readTranscriptTail(sid) {
+    let fd;
+    try {
+      const path2 = join5(this.projectsHashDir, `${sid}.jsonl`);
+      const size = statSync3(path2).size;
+      const start = Math.max(0, size - INGRESS_TAIL_BYTES);
+      const length = size - start;
+      if (length <= 0)
+        return "";
+      fd = openSync(path2, "r");
+      const chunk = Buffer.allocUnsafe(length);
+      const n = readSync(fd, chunk, 0, length, start);
+      return chunk.subarray(0, n).toString("utf8");
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined)
+        closeSync(fd);
+    }
+  }
+  detectIngress(current, now3) {
+    for (const [sid, entry] of current) {
+      if (sid === this.selfSession.session_id)
+        continue;
+      const tail = this.readTranscriptTail(sid);
+      if (tail == null)
+        continue;
+      const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
+      const verdict = classifyIngress({
+        heartbeatFresh: true,
+        oldestOrphanEnqueueTs,
+        lastRealIsMidTurn,
+        now: now3,
+        thresholdMs: INGRESS_STALE_THRESHOLD_MS
+      });
+      if (verdict === "ingress_suspect") {
+        if (!this.ingressEmitted.has(sid)) {
+          const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60000);
+          this.emit({
+            content: `[ingress_suspect] ${entry.name} (${entry.id8}) - heartbeat fresh ` + `but a channel delivery has sat unprocessed for >${mins}min = the ` + `session loop is PARKED (an open menu/prompt is the confirmed cause; ` + `other causes possible). It cannot see this. Fix: check that terminal ` + `for an open menu/prompt - Enter/Escape, then /mcp if still dead.`,
+            meta: {
+              from_session: entry.session_id,
+              from_id8: entry.id8,
+              from_role: entry.role,
+              from_name: entry.name,
+              from_task: entry.current_task ?? null,
+              event_type: "ingress_suspect",
+              ts: new Date().toISOString()
+            }
+          });
+          this.ingressEmitted.add(sid);
+        }
+      } else {
+        this.ingressEmitted.delete(sid);
+      }
+    }
+  }
   listJsonlFiles() {
     if (!existsSync5(this.projectsHashDir))
       return [];
@@ -24821,6 +24940,11 @@ class AgentChannel {
   tick() {
     try {
       this.detectSessionChanges();
+      const ingressNow = Date.now();
+      if (ingressNow - this.lastIngressCheckAt >= INGRESS_CHECK_INTERVAL_MS) {
+        this.lastIngressCheckAt = ingressNow;
+        this.detectIngress(this.currentRoster, ingressNow);
+      }
       const sessions = Array.from(this.currentRoster.values());
       const overrideState = readOverrideState(this.projectStateDir);
       const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);

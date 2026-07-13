@@ -57,7 +57,8 @@ export interface ChannelNotification {
       | "permission_request_pending"
       | "post_compact_recovery"
       | "pa_compact_recovery"
-      | "egress_suspect";
+      | "egress_suspect"
+      | "ingress_suspect";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -107,6 +108,129 @@ export function classifyAbsence(opts: {
   // No growth yet, still inside the grace window - wait (a real reconnect or a
   // first post-stale turn may still arrive).
   return "pending";
+}
+
+// Ingress-death detection (WI 19294811) - the INVERSE of egress. A session
+// PRESENT in the fresh roster (heartbeat fresh) whose event loop is PARKED
+// keeps heartbeating (its bun ticks) and keeps ENQUEUEing channel deliveries
+// into its transcript, but runs no turn to DEQUEUE them. Confirmed cause: an
+// interactive menu/prompt left open (an open /mcp menu parks the loop, verified
+// live 2026-07-13); other parking causes possible. Both false-negatives - fresh
+// heartbeat AND transcript growth - so the only truthful signal is a delivery
+// that has been enqueued-but-never-dequeued since the last real activity. PEER-
+// SIDE ONLY: a self-emit rides server.server.notification() -> the parked local
+// harness, which cannot drain the MCP transport until the park clears, so it
+// could never escape its own park. Advisory-only; never reaps a live session.
+export const INGRESS_STALE_THRESHOLD_MS = 180_000; // 3 min unprocessed => parked
+// Tail bytes scanned per peer for the enqueue/dequeue balance. Comfortably holds
+// dozens of enqueued channel payloads; if real activity has scrolled entirely
+// out of the window (nothing but queue-ops), that is itself a strong parked
+// signal and the window's oldest enqueue is used as a lower-bound orphan age.
+export const INGRESS_TAIL_BYTES = 131_072; // 128 KB
+// The tail read is heavier than the egress statSync, so the scan is throttled to
+// run every ~30s (in tick()) rather than every 1.5s tick. Detection latency of
+// tens of seconds is irrelevant against the 3-min threshold, and this keeps the
+// per-tick I/O near the post-flap-fix floor (WI 8522c487).
+export const INGRESS_CHECK_INTERVAL_MS = 30_000;
+
+// Classify a PRESENT peer's liveness from its transcript ingress signal. PURE
+// for TDD; the tail read + emit glue in detectIngress stays untested-for-live.
+export function classifyIngress(opts: {
+  heartbeatFresh: boolean;
+  oldestOrphanEnqueueTs: number | null;
+  lastRealIsMidTurn: boolean;
+  now: number;
+  thresholdMs: number;
+}): "ingress_suspect" | "healthy" | "pending" {
+  // Only present (heartbeat-fresh) sessions are ingress candidates; an absent
+  // peer is egress/departed territory (classifyAbsence owns it).
+  if (!opts.heartbeatFresh) return "healthy";
+  // The session is MID-TURN (a tool running, or the model owes a response /
+  // is extended-thinking) -> blocked-but-alive, NOT parked. This is the
+  // confirmed false-positive guard: both a long build/deploy and a multi-minute
+  // thinking span append nothing while a channel delivery sits enqueued, looking
+  // exactly like a park - but the session is healthy and working.
+  if (opts.lastRealIsMidTurn) return "healthy";
+  // No delivery has been enqueued-but-unprocessed since the last real activity
+  // -> the loop is draining normally.
+  if (opts.oldestOrphanEnqueueTs == null) return "healthy";
+  // A delivery has sat unprocessed; once it passes the threshold the loop is
+  // parked (open menu/prompt, or other cause).
+  if (opts.now - opts.oldestOrphanEnqueueTs >= opts.thresholdMs) return "ingress_suspect";
+  // Enqueued but still recent -> a normal dequeue may be imminent; wait.
+  return "pending";
+}
+
+// Parse a transcript tail for the ingress signal: the timestamp (ms) of the
+// oldest enqueue that remains UNMATCHED by a dequeue since the last real
+// (non-queue-operation) transcript entry, or null if the loop is draining
+// normally. A real entry RESETS the accounting - anything before it was
+// processed. Dequeues are FIFO-matched to earlier enqueues so an interleaved
+// partial drain does not overstate the orphan age. PURE for TDD.
+export function parseIngressTail(tail: string): {
+  lastRealActivityTs: number | null;
+  oldestOrphanEnqueueTs: number | null;
+  lastRealIsMidTurn: boolean;
+} {
+  let lastRealTs: number | null = null;
+  let lastRealIsMidTurn = false;
+  let enqueueTs: number[] = [];
+  let dequeueCount = 0;
+  for (const raw of tail.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    let o: any;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      // Partial leading line (the byte-window can land mid-line) or non-JSON -
+      // skip, never fatal.
+      continue;
+    }
+    const t = typeof o?.timestamp === "string" ? Date.parse(o.timestamp) : NaN;
+    if (o?.type === "queue-operation") {
+      if (o?.operation === "enqueue") {
+        if (Number.isFinite(t)) enqueueTs.push(t);
+      } else if (o?.operation === "dequeue") {
+        dequeueCount++;
+      }
+      continue;
+    }
+    // A real (non-queue-op) entry: the loop was running here, so anything queued
+    // before it is drained - reset the orphan accounting to what follows.
+    if (Number.isFinite(t)) lastRealTs = t;
+    // ...and (re)compute whether the session is MID-TURN as of THIS entry.
+    // Mid-turn = blocked-but-alive, NOT parked. Two verified shapes, both of
+    // which append nothing further until they resolve (so they masquerade as a
+    // park). Scoped to the LAST real entry so a stale unmatched tool_use earlier
+    // in the window can't mask a later genuine park (code-review finding).
+    //  - a `user` entry: the model owes a response - a human input or a
+    //    tool_result it is about to process - INCLUDING a multi-minute extended-
+    //    thinking span (verified: a silent think always follows a `user` entry
+    //    and appends nothing until it resolves).
+    //  - an `assistant` entry carrying a `tool_use` block: a tool is running now
+    //    (its `tool_result` arrives later as a `user` entry; verified: a real
+    //    180s gap where the last entry stayed the tool_use assistant).
+    // A completed assistant turn (text, no tool_use) or a trailing `system`
+    // entry = idle => park-eligible.
+    if (o?.type === "user") {
+      lastRealIsMidTurn = true;
+    } else {
+      const content = o?.message?.content;
+      lastRealIsMidTurn =
+        Array.isArray(content) && content.some((b: any) => b?.type === "tool_use");
+    }
+    enqueueTs = [];
+    dequeueCount = 0;
+  }
+  // Oldest UNMATCHED enqueue: FIFO-skip dequeueCount matched enqueues.
+  const oldestOrphan =
+    enqueueTs.length > dequeueCount ? enqueueTs[dequeueCount] : null;
+  return {
+    lastRealActivityTs: lastRealTs,
+    oldestOrphanEnqueueTs: oldestOrphan,
+    lastRealIsMidTurn,
+  };
 }
 
 /**
@@ -202,6 +326,13 @@ export class AgentChannel {
   private sizeAtStale = new Map<string, number>();
   /** Peers we've already emitted an egress_suspect for (emit once per episode). */
   private egressEmitted = new Set<string>();
+  /** Ingress-death detection (WI 19294811): present peers we've already emitted
+   *  an ingress_suspect for (emit once per parked episode; cleared when the peer
+   *  drains its queue / produces a real turn, or departs). */
+  private ingressEmitted = new Set<string>();
+  /** Wall-clock ms of the last ingress scan; throttles the tail reads to
+   *  INGRESS_CHECK_INTERVAL_MS (the scan is heavier than the egress statSync). */
+  private lastIngressCheckAt = 0;
   /** Last `system_events.id` we've processed (auto-increment id in
    *  agent_channel.db's system_events table, 0.30.36+; pre-0.30.36 this
    *  was a byte offset into system_events.jsonl). In-memory only - reset
@@ -404,6 +535,12 @@ export class AgentChannel {
     for (const [sid, entry] of this.knownSessions) {
       if (sid === this.selfSession.session_id) continue;
       if (current.has(sid)) continue;
+      // Absent -> not an ingress candidate (ingress is present-only). Clear any
+      // ingress dedup flag now, so if this peer returns PRESENT-and-still-parked
+      // its next episode re-emits. Done here (absent peers only) rather than in
+      // the present-again branch, which runs every tick and would race the
+      // throttled ingress scan into re-emitting each interval.
+      this.ingressEmitted.delete(sid);
       // Egress-death detection (WI 0f9dcd95). Capture the peer's transcript size
       // the FIRST tick it goes absent; growth beyond that while its heartbeat
       // stays down = alive-but-unreachable (egress-dead), NOT gone.
@@ -473,6 +610,7 @@ export class AgentChannel {
         this.pendingMisses.delete(sid);
         this.sizeAtStale.delete(sid);
         this.egressEmitted.delete(sid);
+        this.ingressEmitted.delete(sid);
         removeSession(this.projectStateDir, sid);
       } else {
         this.pendingMisses.set(sid, misses);
@@ -491,6 +629,82 @@ export class AgentChannel {
     }
   }
 
+  /** Read the last INGRESS_TAIL_BYTES of a session's transcript, or null if
+   *  absent/unreadable. Byte-positional read from (size - window); a partial
+   *  leading line is tolerated by parseIngressTail's JSON.parse skip. */
+  private readTranscriptTail(sid: string): string | null {
+    let fd: number | undefined;
+    try {
+      const path = join(this.projectsHashDir, `${sid}.jsonl`);
+      const size = statSync(path).size;
+      const start = Math.max(0, size - INGRESS_TAIL_BYTES);
+      const length = size - start;
+      if (length <= 0) return "";
+      fd = openSync(path, "r");
+      const chunk = Buffer.allocUnsafe(length);
+      const n = readSync(fd, chunk, 0, length, start);
+      return chunk.subarray(0, n).toString("utf8");
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
+  /** Ingress-death detection (WI 19294811), PEER-SIDE. For each PRESENT peer
+   *  (heartbeat fresh, so it's in `current`), scan its transcript tail for a
+   *  channel delivery enqueued-but-never-dequeued since the peer's last real
+   *  activity; if the oldest such delivery has been parked past
+   *  INGRESS_STALE_THRESHOLD_MS, its event loop is parked (open menu/prompt, or
+   *  other cause). Emit ingress_suspect ONCE per episode; advisory, never reaps.
+   *  Self is skipped: a self-emit rides the parked local harness transport and
+   *  can never escape its own park, so only a healthy peer can raise the alarm. */
+  private detectIngress(current: Map<string, SessionEntry>, now: number): void {
+    for (const [sid, entry] of current) {
+      if (sid === this.selfSession.session_id) continue; // peer-side only
+      const tail = this.readTranscriptTail(sid);
+      // Transient read failure (file lock / I/O blip): skip WITHOUT clearing the
+      // dedup flag, so a momentary blip can't re-arm and double-emit the same
+      // episode. Genuine departure clears the flag in the departed loop.
+      if (tail == null) continue;
+      const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
+      const verdict = classifyIngress({
+        heartbeatFresh: true, // membership in `current` == heartbeat fresh
+        oldestOrphanEnqueueTs,
+        lastRealIsMidTurn,
+        now,
+        thresholdMs: INGRESS_STALE_THRESHOLD_MS,
+      });
+      if (verdict === "ingress_suspect") {
+        if (!this.ingressEmitted.has(sid)) {
+          const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60_000);
+          this.emit({
+            content:
+              `[ingress_suspect] ${entry.name} (${entry.id8}) - heartbeat fresh ` +
+              `but a channel delivery has sat unprocessed for >${mins}min = the ` +
+              `session loop is PARKED (an open menu/prompt is the confirmed cause; ` +
+              `other causes possible). It cannot see this. Fix: check that terminal ` +
+              `for an open menu/prompt - Enter/Escape, then /mcp if still dead.`,
+            meta: {
+              from_session: entry.session_id,
+              from_id8: entry.id8,
+              from_role: entry.role,
+              from_name: entry.name,
+              from_task: entry.current_task ?? null,
+              event_type: "ingress_suspect",
+              ts: new Date().toISOString(),
+            },
+          });
+          this.ingressEmitted.add(sid);
+        }
+      } else {
+        // healthy (queue drained / no orphan) or pending (too recent) -> not
+        // parked; clear so a future parked episode re-arms and re-emits.
+        this.ingressEmitted.delete(sid);
+      }
+    }
+  }
+
   private listJsonlFiles(): string[] {
     if (!existsSync(this.projectsHashDir)) return [];
     return readdirSync(this.projectsHashDir)
@@ -501,6 +715,14 @@ export class AgentChannel {
   private tick(): void {
     try {
       this.detectSessionChanges();
+      // Ingress-death scan (WI 19294811), throttled to INGRESS_CHECK_INTERVAL_MS
+      // since its tail reads are heavier than the per-tick routing. Runs on the
+      // fresh roster detectSessionChanges just computed.
+      const ingressNow = Date.now();
+      if (ingressNow - this.lastIngressCheckAt >= INGRESS_CHECK_INTERVAL_MS) {
+        this.lastIngressCheckAt = ingressNow;
+        this.detectIngress(this.currentRoster, ingressNow);
+      }
       // Route on the FRESH roster (self + heartbeat-fresh peers), NOT
       // knownSessions - which now also holds peers held through the departure
       // grace (DEFENSE-C). detectSessionChanges refreshes currentRoster first.
