@@ -461,6 +461,29 @@ describe("hook_event dispatcher", () => {
       expect(r.additionalContext).toContain("wi-x");
     });
 
+    test("R7.7: a PROPOSED (not-started/deferred) work_item does NOT trigger the loop-close nudge", () => {
+      // Finding #3 (note c8d00f21): proposed/planned items are queued, not
+      // in-flight - they must not nag every turn as "loops to close".
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("P");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, status, source_session, created_at, updated_at)
+         VALUES ('wi-prop', 'work_item', 'deferred child', 'proposed', 'P', ?, ?)`,
+        [ts, ts]
+      );
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "UserPromptSubmit",
+          session_id: "P",
+          payload: { user_prompt: "what's next?" },
+        }
+      );
+      expect(r.additionalContext ?? "").not.toContain("Loop-close check");
+      expect(r.additionalContext ?? "").not.toContain("wi-prop");
+    });
+
     test("approval signal in user prompt escalates to 'Close loops NOW'", () => {
       const { db, tracker } = freshSetup();
       tracker.registerSession("A");
@@ -1194,7 +1217,7 @@ describe("WI 6430ebf6: context-warden liveness nudge (composeWardenNudgeText)", 
     expect(r.text).toContain("TaskList");
   });
 
-  test("prime + active fleet + STALE ledger -> fires with instance + presumed-dead framing", () => {
+  test("prime + active fleet + STALE ledger -> fires with instance + POKE-FIRST (not presumed-dead) framing", () => {
     const r = composeWardenNudgeText({
       role: "prime",
       fleetSize: 4,
@@ -1202,7 +1225,12 @@ describe("WI 6430ebf6: context-warden liveness nudge (composeWardenNudgeText)", 
       turnsSinceLastNudge: null,
     });
     expect(r.fired).toBe(true);
-    expect(r.text.toUpperCase()).toContain("PRESUMED DEAD");
+    // Finding #2 (note c8d00f21): the nudge no longer presumes death - a stale
+    // mtime may be a slow-but-live warden mid-big-delta-pass, so it advises
+    // poke-first + check for a mid-pass signal, respawn only if truly frozen.
+    expect(r.text.toUpperCase()).not.toContain("PRESUMED DEAD");
+    expect(r.text.toUpperCase()).toContain("POKE");
+    expect(r.text).toContain("mid-pass signal");
     expect(r.text).toContain("abc12345");
     expect(r.text).toContain("step 5.8");
   });

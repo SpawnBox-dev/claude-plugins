@@ -1305,7 +1305,13 @@ function composeCheckpointCadenceNudge(
 // is stale (a healthy warden writes every <=WARDEN_HEARTBEAT_MAX_INTERVAL_S),
 // nudge PA to (re)spawn it. De-duped so it is never an every-turn nag.
 const WARDEN_HEARTBEAT_MAX_INTERVAL_S = 150;
-const WARDEN_STALE_THRESHOLD_MS = 420_000; // ~2.8x the max interval
+// ~15 min (6x the max interval). Raised from 420_000 (~7 min) after that fired
+// repeatedly on an alive-but-slow warden and pushed PA into 3 premature respawns
+// this session (note f41f21bf / c8d00f21): a big-delta pass reads the whole
+// fleet's transcripts for ~9 min BEFORE it writes, so mtime stays frozen mid-
+// pass. Without a pass-in-progress marker (finding #1, TODO) the signal can't
+// distinguish slow-from-dead, so err toward NOT false-killing a live warden.
+const WARDEN_STALE_THRESHOLD_MS = 900_000;
 const WARDEN_NUDGE_MIN_GAP_TURNS = 10;
 
 export interface WardenLedgerState {
@@ -1358,9 +1364,12 @@ export function composeWardenNudgeText(opts: {
       `you have NO context redundancy. Spawn one: /pa-bootstrap step 5.8 (background, Opus).` +
       tail;
   } else {
-    // stale: a stale ledger ALWAYS means the last live WRITER stopped - a
-    // duplicate that STOOD DOWN never writes here (it reports to its spawner),
-    // so this is "presumed dead/stuck", never a stand-down artifact.
+    // stale: the last live WRITER stopped writing here (a stood-down duplicate
+    // never writes to the canonical ledger - it reports to its spawner). BUT a
+    // stale mtime is NOT proof of death: a big-delta pass reads the whole fleet's
+    // transcripts for ~9 min BEFORE it writes, so a slow-but-LIVE warden looks
+    // frozen mid-pass (note f41f21bf - this ambiguity caused repeated premature
+    // respawns). So the nudge advises POKE-FIRST, not presume-dead.
     const who = opts.ledger.instance
       ? `instance ${opts.ledger.instance}`
       : "the last warden";
@@ -1371,8 +1380,11 @@ export function composeWardenNudgeText(opts: {
         : "";
     text =
       `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` +
-      `sessions are active - a healthy warden writes every <=${WARDEN_HEARTBEAT_MAX_INTERVAL_S}s, ` +
-      `so it is PRESUMED DEAD/STUCK. Respawn: /pa-bootstrap step 5.8.` +
+      `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` +
+      `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` +
+      `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` +
+      `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` +
+      `mid-pass signal.` +
       tail;
   }
   return { text, fired: true, clearDedup: false };
@@ -1764,12 +1776,22 @@ function listInFlightWorkItemsForSession(
   // loses signal for "work I picked up but didn't author and didn't edit
   // this session" - acceptable: agents reading about work_items in
   // briefings shouldn't be told to close them.
+  // R7.7 (note c8d00f21, PA finding #3): EXCLUDE the not-started + terminal
+  // statuses so only GENUINELY in-flight work surfaces. The old filter ("NOT
+  // done/cancelled/completed") swept in 'proposed'/'planned' items (queued,
+  // not-yet-started) - those over-fired the nudge every turn with work an agent
+  // had authored-but-DEFERRED (deferred children aren't loops to close), and
+  // read as "your scope" for work that never started. Excluding by name (rather
+  // than IN ('active','blocked')) keeps any real working-status robust while
+  // dropping the queued + terminal ones. In-flight means IN FLIGHT, not merely
+  // not-yet-done.
   return db
     .query(
       `SELECT DISTINCT n.id, n.status, n.content
        FROM notes n
        WHERE n.type = 'work_item'
-         AND COALESCE(n.status, '') NOT IN ('done', 'cancelled', 'completed')
+         AND COALESCE(n.status, '') NOT IN
+             ('proposed', 'planned', 'done', 'cancelled', 'completed', '')
          AND (
            n.source_session = ?
            OR EXISTS (

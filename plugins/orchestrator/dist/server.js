@@ -23992,8 +23992,7 @@ function composeCheckpointCadenceNudge(ctx, sessionId, turn) {
   }
   return `[orch] URGENT checkpoint gap: ${turnsSinceSave} turns / ${activity} substantive actions since your last save_progress. You are one compaction away from losing all of it. Call save_progress NOW, before more work.${paTag}`;
 }
-var WARDEN_HEARTBEAT_MAX_INTERVAL_S = 150;
-var WARDEN_STALE_THRESHOLD_MS = 420000;
+var WARDEN_STALE_THRESHOLD_MS = 900000;
 var WARDEN_NUDGE_MIN_GAP_TURNS = 10;
 function composeWardenNudgeText(opts) {
   const NONE = { text: "", fired: false, clearDedup: false };
@@ -24016,7 +24015,7 @@ function composeWardenNudgeText(opts) {
     const who = opts.ledger.instance ? `instance ${opts.ledger.instance}` : "the last warden";
     const when = opts.ledger.ts ? ` at ${opts.ledger.ts}` : "";
     const age = opts.ledger.ageMs != null ? ` (${Math.round(opts.ledger.ageMs / 1000)}s ago)` : "";
-    text = `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` + `sessions are active - a healthy warden writes every <=${WARDEN_HEARTBEAT_MAX_INTERVAL_S}s, ` + `so it is PRESUMED DEAD/STUCK. Respawn: /pa-bootstrap step 5.8.` + tail;
+    text = `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` + `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` + `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` + `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` + `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` + `mid-pass signal.` + tail;
   }
   return { text, fired: true, clearDedup: false };
 }
@@ -24446,7 +24445,8 @@ function listInFlightWorkItemsForSession(db, sessionId) {
   return db.query(`SELECT DISTINCT n.id, n.status, n.content
        FROM notes n
        WHERE n.type = 'work_item'
-         AND COALESCE(n.status, '') NOT IN ('done', 'cancelled', 'completed')
+         AND COALESCE(n.status, '') NOT IN
+             ('proposed', 'planned', 'done', 'cancelled', 'completed', '')
          AND (
            n.source_session = ?
            OR EXISTS (
