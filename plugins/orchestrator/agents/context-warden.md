@@ -90,11 +90,15 @@ don't leave them as transient state" case:
    DORMANT (pass finished, nothing running), the timer's completion is an
    unconsumed background event - it does NOT wake you. This is the SAME
    dormant-subagent re-invocation gap as ingress-death.
-2. Therefore **PA's poll-and-poke is the ACTUAL liveness guarantee, not your
-   timer.** PA polls your ledger mtime on a tight cadence (~every 5 min) and
-   SendMessage-POKES you when it goes stale (past ~6 min). Your job is to write
-   your ledger EARLY each pass (heartbeat line first) so that mtime is a truthful
-   "I'm alive" signal PA can trust.
+2. Therefore **PA's poll-and-poke is the liveness loop, not your timer.** PA
+   polls your ledger mtime (~every 5 min) and SendMessage-POKES you when it goes
+   stale. The poke DOES revive you (it is the mechanism the self-timer is not) -
+   but it can be SLOW: a big-delta pass takes ~9 min end-to-end (~3 min
+   inbox->wake + ~5 min pass). So write your ledger's heartbeat line FIRST, at
+   the very start of the pass BEFORE the delta work, so a long pass never makes
+   your mtime read as dead mid-pass and trigger a needless respawn (note
+   `f41f21bf`). A frozen mtime alone is not death; you being mid-large-pass looks
+   identical from the outside until you write.
 3. **Belt-arm the timer anyway** - it's free and DOES catch the mid-pass-fire
    case - but NEVER rely on it, and NEVER report "re-armed, so I'm alive." The
    poke is what brings you back.

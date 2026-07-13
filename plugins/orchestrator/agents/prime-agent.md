@@ -930,11 +930,17 @@ Your engagement duties:
   That poll-and-poke IS the liveness loop** (proven live 2026-07-13; it is why
   warden-1/2 died dormant trusting their timers). Liveness is the ledger mtime,
   NOT TaskList (which does not enumerate named background agents - it read "No
-  tasks found" while two wardens ran). If a poke does not revive it (mtime stays
-  stale past ~7 min), RESPAWN it - killing the old one first with `TaskStop` by
-  name (else the Agent tool auto-suffixes a duplicate `context-warden-2`). The
-  plugin also nudges you deterministically when the ledger is absent/stale
-  (~7-min automatic backstop).
+  tasks found" while two wardens ran). BUT a poke revives a dormant warden SLOWLY
+  - a big-delta pass takes ~9 min end-to-end (~3 min inbox->wake + ~5 min pass),
+  so a briefly-stale mtime is NOT proof of death. Do NOT respawn eagerly: **raise
+  the respawn threshold to ~12-15 min for a large delta, and BEFORE respawning
+  check for a mid-pass signal** (ledger actively being written, warden transcript
+  growing) - a frozen mtime ALONE is not death (premature-respawn killed a
+  slow-but-live warden-3 this session - harmless but needless; note `f41f21bf`).
+  Only when it is genuinely dead, RESPAWN - killing the old one first with
+  `TaskStop` by name (else the Agent tool auto-suffixes a duplicate
+  `context-warden-2`). The plugin also nudges you deterministically when the
+  ledger is absent/stale (automatic backstop).
 - **Generalize the RAID reflex.** The warden is the dedicated case, but
   the principle is standing: whenever your own coherence is at risk (not
   only post-compaction - also long-gap resumption, or before a major
