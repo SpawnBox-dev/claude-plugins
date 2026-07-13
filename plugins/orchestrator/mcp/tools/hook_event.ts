@@ -4,7 +4,7 @@ import { join } from "path";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
 import { appendSystemEvent, type SystemEvent } from "../engine/agent_channel_state";
-import { now } from "../utils";
+import { now, normalizeCodeRef } from "../utils";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
 // Cross-session communication is now via agent-channel notifications -
@@ -274,15 +274,16 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
   }
   markWarnedThisTurn(ctx.db, args.session_id, turn);
 
-  if (turn >= 4) {
-    const reason = codeRefsHint
-      ? `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. ${codeRefsHint} Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup({code_ref:'<path>'}) first.`
-      : `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup / briefing first to check for relevant decisions, conventions, or anti-patterns.`;
-    return { permissionDecision: "ask", permissionDecisionReason: reason };
-  }
+  // R7.7 (note 3d7099db): RETIRED the turn>=4 approve/deny permission-gate. It
+  // was an inherited legacy escalation ("preserved from the legacy bash hook")
+  // and the closest thing in the codebase to the sacrosanct-lockout shape - a
+  // hard prompt agents surrender judgment to. Now a single firm NON-BLOCKING
+  // hint for turn>=2 with no orch tool this turn: keep the fact, drop the gate.
+  // The file-specific code_refs hint carries the real signal; the no-file case
+  // stays a soft prod, never an interactive ask.
   const ctx_msg = codeRefsHint
     ? `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. ${codeRefsHint}`
-    : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup can save 20 minutes of rework. From turn 4 this becomes an interactive approval prompt.`;
+    : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup({code_ref:'<path>'}) / briefing can surface a relevant decision, convention, or anti-pattern before you operate.`;
   return { permissionDecision: "allow", additionalContext: ctx_msg };
 }
 
@@ -1858,32 +1859,43 @@ function composeCodeRefsHint(
   sessionId: string,
   filePath: string
 ): string {
-  // Cheap LIKE query against the JSON-encoded code_refs column. We need at
-  // least one note tagged with this exact path. Track per-session+file
-  // surfacing via plugin_state to avoid repeating the same hint within a
-  // single session.
-  const stateKey = `code_refs_hint_${sessionId}_${filePath}`;
-  const seen = db
-    .query(`SELECT 1 FROM plugin_state WHERE key = ?`)
-    .get(stateKey);
-  if (seen) return "";
+  // R7.7: normalize the edited path to the SAME form notes store code_refs in
+  // (normalizeCodeRef). Without this the LIKE matched a RAW backslash/`./` path
+  // against normalized stored refs, so the hint silently no-op'd on the Windows
+  // fleet (note c8d00f21). All code_ref sites now route through the one helper.
+  const norm = normalizeCodeRef(filePath);
 
-  // Sample by exact-path containment in the JSON array. No wildcards.
-  const needle = JSON.stringify(filePath);
+  // Sample by exact-path containment in the JSON array (+ the note-set's newest
+  // updated_at, for the staleness rule below). No wildcards.
+  const needle = JSON.stringify(norm);
   const row = db
     .query(
-      `SELECT COUNT(*) as cnt FROM notes
+      `SELECT COUNT(*) as cnt, MAX(updated_at) as maxu FROM notes
        WHERE code_refs IS NOT NULL AND code_refs LIKE ?`
     )
-    .get(`%${needle}%`) as { cnt: number } | null;
+    .get(`%${needle}%`) as { cnt: number; maxu: string | null } | null;
   const cnt = row?.cnt ?? 0;
   if (cnt === 0) return "";
+  const currentVersion = row?.maxu ?? "";
 
-  // Mark as seen so we don't re-nudge for this file this session.
+  // Version-keyed dedup with a STALENESS rule (replaces the old fire-once-
+  // forever boolean): the fired-marker stores the note-set's max(updated_at) at
+  // the last fire. Suppress if we already hinted at a version >= the current one
+  // (don't repeat the same context every edit); RE-FIRE when a note on this file
+  // is newer than the last hint (new context the agent hasn't been pointed at).
+  // ISO-8601 timestamps compare lexicographically = chronologically. An old
+  // boolean '1' marker is < any ISO version, so it self-heals to a version on
+  // the next fire (no migration).
+  const stateKey = `code_refs_hint_${sessionId}_${norm}`;
+  const prior = db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(stateKey) as { value: string } | null;
+  if (prior && prior.value >= currentVersion) return "";
+
   db.run(
-    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
-    [stateKey, now()]
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [stateKey, currentVersion, now()]
   );
 
-  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${filePath}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
+  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
 }

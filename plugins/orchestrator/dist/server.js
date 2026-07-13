@@ -20283,16 +20283,16 @@ function parseCodeRefs(raw) {
     return null;
   }
 }
+function normalizeCodeRef(path) {
+  let p = path.trim().replace(/\\/g, "/");
+  if (p.startsWith("./"))
+    p = p.slice(2);
+  return p;
+}
 function stringifyCodeRefs(refs) {
   if (!refs || refs.length === 0)
     return null;
-  const cleaned = Array.from(new Set(refs.map((r) => {
-    let p = r.trim();
-    p = p.replace(/\\/g, "/");
-    if (p.startsWith("./"))
-      p = p.slice(2);
-    return p;
-  }).filter((r) => r.length > 0)));
+  const cleaned = Array.from(new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0)));
   return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
 }
 function formatAge(iso, now2 = new Date) {
@@ -23529,11 +23529,7 @@ function handlePreToolUse(ctx, args) {
     return {};
   }
   markWarnedThisTurn(ctx.db, args.session_id, turn);
-  if (turn >= 4) {
-    const reason = codeRefsHint ? `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. ${codeRefsHint} Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup({code_ref:'<path>'}) first.` : `Orchestrator discipline check: turn ${turn}, no orchestrator tool called this turn. Approve to proceed (explicit choice to skip orch this turn) or deny and run lookup / briefing first to check for relevant decisions, conventions, or anti-patterns.`;
-    return { permissionDecision: "ask", permissionDecisionReason: reason };
-  }
-  const ctx_msg = codeRefsHint ? `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. ${codeRefsHint}` : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup can save 20 minutes of rework. From turn 4 this becomes an interactive approval prompt.`;
+  const ctx_msg = codeRefsHint ? `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. ${codeRefsHint}` : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup({code_ref:'<path>'}) / briefing can surface a relevant decision, convention, or anti-pattern before you operate.`;
   return { permissionDecision: "allow", additionalContext: ctx_msg };
 }
 function handlePostToolUse(ctx, args) {
@@ -24495,18 +24491,20 @@ function composeLoopCloseNudge(ctx, sessionId, userPrompt) {
   return `[orch] Loop-close check: in-flight work_items in your scope: ${ids}. Did any just complete? Mark done. If unsure whether the user considers it done, ASK in your reply rather than carry forward silently.`;
 }
 function composeCodeRefsHint(db, sessionId, filePath) {
-  const stateKey = `code_refs_hint_${sessionId}_${filePath}`;
-  const seen = db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(stateKey);
-  if (seen)
-    return "";
-  const needle = JSON.stringify(filePath);
-  const row = db.query(`SELECT COUNT(*) as cnt FROM notes
+  const norm = normalizeCodeRef(filePath);
+  const needle = JSON.stringify(norm);
+  const row = db.query(`SELECT COUNT(*) as cnt, MAX(updated_at) as maxu FROM notes
        WHERE code_refs IS NOT NULL AND code_refs LIKE ?`).get(`%${needle}%`);
   const cnt = row?.cnt ?? 0;
   if (cnt === 0)
     return "";
-  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [stateKey, now()]);
-  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${filePath}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
+  const currentVersion = row?.maxu ?? "";
+  const stateKey = `code_refs_hint_${sessionId}_${norm}`;
+  const prior = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(stateKey);
+  if (prior && prior.value >= currentVersion)
+    return "";
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [stateKey, currentVersion, now()]);
+  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
 }
 
 // mcp/engine/agent_channel.ts

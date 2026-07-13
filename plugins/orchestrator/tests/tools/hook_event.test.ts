@@ -133,7 +133,7 @@ describe("hook_event dispatcher", () => {
       expect(r.additionalContext).toContain("orchestrator tool");
     });
 
-    test("turn 4+ with no orch activity: escalates to permissionDecision ask", () => {
+    test("R7.7: turn 4+ with no orch activity stays NON-BLOCKING (soft-gate retired, no permissionDecision:ask)", () => {
       const { db, tracker } = freshSetup();
       for (let i = 0; i < 4; i++) {
         handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "P4" });
@@ -142,8 +142,12 @@ describe("hook_event dispatcher", () => {
         { db, tracker },
         { event: "PreToolUse", session_id: "P4", tool_name: "Edit" }
       );
-      expect(r.permissionDecision).toBe("ask");
-      expect(r.permissionDecisionReason).toContain("turn 4");
+      // The approve/deny gate (the one sacrosanct-lockout-shaped thing) is gone:
+      // it's now a firm but non-blocking hint (note 3d7099db).
+      expect(r.permissionDecision).toBe("allow");
+      expect(r.permissionDecision).not.toBe("ask");
+      expect(r.additionalContext).toContain("Turn 4");
+      expect(r.additionalContext).toContain("orchestrator tool");
     });
 
     test("orch tool call this turn defangs the nag", () => {
@@ -769,6 +773,56 @@ describe("hook_event dispatcher", () => {
       );
       // Turn 1, no orch activity, would normally be silent. No hint either.
       expect(r.additionalContext).toBeUndefined();
+    });
+
+    test("R7.7: a RAW backslash edit path matches a normalized stored code_ref (was a silent Windows no-op, note c8d00f21)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CRnorm");
+      const ts = now();
+      db.run(
+        `INSERT INTO notes (id, type, content, code_refs, created_at, updated_at)
+         VALUES ('hn', 'convention', 'x', '["mcp/server.ts"]', ?, ?)`,
+        [ts, ts]
+      );
+      handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "CRnorm" });
+      const r = handleHookEvent(
+        { db, tracker },
+        {
+          event: "PreToolUse",
+          session_id: "CRnorm",
+          tool_name: "Edit",
+          payload: { file_path: "mcp\\server.ts" }, // raw Windows path as CC delivers it
+        }
+      );
+      // Pre-fix this silently never matched the normalized stored ref.
+      expect(r.additionalContext).toContain("note");
+      expect(r.additionalContext).toContain("mcp/server.ts"); // points at the normalized path
+    });
+
+    test("R7.7: staleness - re-fires only when a NEWER note appears on the file, not on repeat edits of the same version", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("CRstale");
+      db.run(
+        `INSERT INTO notes (id, type, content, code_refs, created_at, updated_at)
+         VALUES ('s1', 'convention', 'x', '["src/y.ts"]', ?, ?)`,
+        ["2026-07-13T10:00:00.000Z", "2026-07-13T10:00:00.000Z"]
+      );
+      handleHookEvent({ db, tracker }, { event: "UserPromptSubmit", session_id: "CRstale" });
+      const edit = () =>
+        handleHookEvent(
+          { db, tracker },
+          { event: "PreToolUse", session_id: "CRstale", tool_name: "Edit", payload: { file_path: "src/y.ts" } }
+        );
+      expect(edit().additionalContext).toContain("note"); // first fire
+      const r2 = edit();
+      if (r2.additionalContext) expect(r2.additionalContext).not.toContain("note"); // same version -> silent
+      // A NEWER note lands on the same file:
+      db.run(
+        `INSERT INTO notes (id, type, content, code_refs, created_at, updated_at)
+         VALUES ('s2', 'insight', 'y', '["src/y.ts"]', ?, ?)`,
+        ["2026-07-13T11:00:00.000Z", "2026-07-13T11:00:00.000Z"]
+      );
+      expect(edit().additionalContext).toContain("note"); // re-fires on new context
     });
   });
 

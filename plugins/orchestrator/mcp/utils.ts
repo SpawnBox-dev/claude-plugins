@@ -185,19 +185,27 @@ export function parseCodeRefs(raw: string | null): string[] | null {
  * and "mcp/server.ts" all store identically. Trailing slashes are preserved
  * so a directory-ref ("src/") remains distinct from a file-ref ("src").
  */
+/**
+ * R7.7: single source of truth for code_ref path normalization, so every site
+ * that stores, matches, or keys on a code_ref path produces IDENTICAL output.
+ * Drift between sites is exactly what silently broke the PreToolUse code_refs
+ * hint on the Windows fleet - it matched a raw backslash path against
+ * normalized stored refs, so the hint was a no-op there (note c8d00f21). Any
+ * new site that touches a code_ref path MUST route through this.
+ * Ops: trim, backslashes -> forward slashes, strip a single leading "./".
+ * Trailing slashes are preserved (a dir-ref "src/" stays distinct from a
+ * file-ref "src").
+ */
+export function normalizeCodeRef(path: string): string {
+  let p = path.trim().replace(/\\/g, "/");
+  if (p.startsWith("./")) p = p.slice(2);
+  return p;
+}
+
 export function stringifyCodeRefs(refs: string[] | null | undefined): string | null {
   if (!refs || refs.length === 0) return null;
   const cleaned = Array.from(
-    new Set(
-      refs
-        .map((r) => {
-          let p = r.trim();
-          p = p.replace(/\\/g, "/");
-          if (p.startsWith("./")) p = p.slice(2);
-          return p;
-        })
-        .filter((r) => r.length > 0)
-    )
+    new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0))
   );
   return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
 }
