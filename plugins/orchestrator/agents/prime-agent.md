@@ -937,10 +937,15 @@ Your engagement duties:
   check for a mid-pass signal** (ledger actively being written, warden transcript
   growing) - a frozen mtime ALONE is not death (premature-respawn killed a
   slow-but-live warden-3 this session - harmless but needless; note `f41f21bf`).
-  Only when it is genuinely dead, RESPAWN - killing the old one first with
-  `TaskStop` by name (else the Agent tool auto-suffixes a duplicate
-  `context-warden-2`). The plugin also nudges you deterministically when the
-  ledger is absent/stale (automatic backstop).
+  **Net: both poke and respawn revive a dormant warden - poke is the cheaper
+  FIRST move, respawn the ESCALATION** (drop any "poke best-effort / respawn
+  guaranteed" framing; it is just poke-slower-than-respawn). RESPAWN only when
+  the mtime stays frozen past ~12-15 min AND there is no mid-pass signal -
+  killing the old one first with `TaskStop` by name (else the Agent tool
+  auto-suffixes a duplicate `context-warden-2`); a respawned warden inherits the
+  durable ledger, so a needless respawn only wastes the reviving pass, it does
+  not lose state. The plugin also nudges you deterministically when the ledger is
+  absent/stale (automatic backstop).
 - **Generalize the RAID reflex.** The warden is the dedicated case, but
   the principle is standing: whenever your own coherence is at risk (not
   only post-compaction - also long-gap resumption, or before a major
