@@ -1226,6 +1226,18 @@ function getSelfRole(sid: string): "prime" | "subordinate" {
   }
 }
 
+/** Turns since a persisted marker (e.g. last_save_turn), computed against the
+ *  in-memory per-turn counter. PURE + exported for testing. Robust to an
+ *  in-memory turn-counter reset (MCP restart): if the counter is BELOW the
+ *  persisted marker, the counter reset, so return the counter itself (treat as
+ *  "fresh since this process started") rather than a negative gap that would
+ *  silence a cadence/liveness nudge until the counter catches back up. */
+export function turnsSinceMarker(turn: number, marker: number): number {
+  if (marker <= 0) return turn; // never marked -> the whole counter is the gap
+  if (turn < marker) return turn; // counter reset below marker (MCP restart)
+  return turn - marker;
+}
+
 /**
  * Cadence-aware regular-checkpoint nudge. Returns "" (silent) unless BOTH
  * turns-since-save and substantive-activity-since-save cross the current
@@ -1241,7 +1253,12 @@ function composeCheckpointCadenceNudge(
   const sid = sanitizeSessionId(sessionId);
   const lastSaveTurn = readIntState(ctx.db, `last_save_turn_${sid}`);
   // Absent last_save_turn (0) = never saved this session -> gap is the turn no.
-  const turnsSinceSave = lastSaveTurn > 0 ? turn - lastSaveTurn : turn;
+  // turnsSinceMarker is counter-reset-robust (PA ruling, parallel to the warden
+  // FIX 4): an MCP restart resets the in-memory `turn` below the persisted
+  // last_save_turn, which would otherwise go negative and silence this nudge
+  // until the counter caught back up - the exact restart-silencing defect the
+  // warden batch exists to prevent, in a sibling nudge.
+  const turnsSinceSave = turnsSinceMarker(turn, lastSaveTurn);
   const activity = readIntState(ctx.db, `activity_since_save_${sid}`);
   if (turnsSinceSave <= 0 || activity <= 0) return "";
 

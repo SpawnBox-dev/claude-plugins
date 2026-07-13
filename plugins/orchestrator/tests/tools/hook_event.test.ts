@@ -14,6 +14,7 @@ import {
   PA_COMPACT_RECOVERY_EVENT,
   HOOK_EVENTS,
   composeWardenNudgeText,
+  turnsSinceMarker,
   type WardenLedgerState,
   type HookEventResponse,
 } from "../../mcp/tools/hook_event";
@@ -1236,6 +1237,23 @@ describe("WI 6430ebf6: context-warden liveness nudge (composeWardenNudgeText)", 
       turnsSinceLastNudge: -49,
     });
     expect(r.fired).toBe(true);
+  });
+});
+
+// WI 6430ebf6 (parallel fix, PA ruling): turnsSinceMarker must be
+// counter-reset-robust - the checkpoint-cadence AND warden nudges both silence
+// themselves after an MCP restart if a persisted marker exceeds the reset
+// in-memory turn counter (negative gap).
+describe("turnsSinceMarker: counter-reset robustness", () => {
+  test("normal: turn above marker -> difference", () => {
+    expect(turnsSinceMarker(60, 50)).toBe(10);
+  });
+  test("never marked (0) -> the whole counter is the gap", () => {
+    expect(turnsSinceMarker(7, 0)).toBe(7);
+  });
+  test("RESET: counter below the persisted marker (MCP restart) -> the counter, NEVER a negative", () => {
+    expect(turnsSinceMarker(3, 50)).toBe(3);
+    expect(turnsSinceMarker(3, 50)).toBeGreaterThanOrEqual(0);
   });
 });
 
