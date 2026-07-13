@@ -56,7 +56,8 @@ export interface ChannelNotification {
       | "override_cleared"
       | "permission_request_pending"
       | "post_compact_recovery"
-      | "pa_compact_recovery";
+      | "pa_compact_recovery"
+      | "egress_suspect";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -82,6 +83,31 @@ const STALE_THRESHOLD_MS = 90_000;
 // A+B (1099ms -> 15ms at 6x20MB) removes self-inflicted starvation, leaving only
 // bounded external-CPU stalls, so a modest fixed grace suffices.
 export const DEPART_GRACE_TICKS = 20;
+
+// Egress-death detection (WI 0f9dcd95): a peer absent from the fresh roster is
+// EITHER genuinely gone (its transcript FROZE at exit) OR egress-dead (alive,
+// still appending turns while its heartbeat/outbound is down - anti_pattern
+// 6ef0c61f, proven live 2026-07-13). Byte-size growth AFTER going stale is the
+// discriminator: a dead process appends nothing, and transcript size is
+// monotonic, so growth-since-stale => alive-but-unreachable. PURE for TDD; the
+// statSync/emit glue in detectSessionChanges stays untested-for-live.
+export function classifyAbsence(opts: {
+  grewSinceStale: boolean;
+  missCount: number;
+  graceTicks: number;
+}): "egress_suspect" | "departed" | "pending" {
+  // Growth after going stale = the process is alive and still taking turns
+  // while unreachable -> egress-dead (hold, do not reap; needs /mcp reconnect).
+  // Dominates the miss count: a growing transcript is alive no matter how long
+  // its heartbeat has been down.
+  if (opts.grewSinceStale) return "egress_suspect";
+  // No growth: frozen transcript = a dead process. Once the depart grace
+  // elapses, it is genuinely gone.
+  if (opts.missCount >= opts.graceTicks) return "departed";
+  // No growth yet, still inside the grace window - wait (a real reconnect or a
+  // first post-stale turn may still arrive).
+  return "pending";
+}
 
 /**
  * Decorate the channel-content body — but only when the decoration is
@@ -170,6 +196,12 @@ export class AgentChannel {
    *  Distinct from knownSessions, which now also holds peers being held through
    *  the departure grace. */
   private currentRoster = new Map<string, SessionEntry>();
+  /** Egress-death detection (WI 0f9dcd95): per-absent-peer transcript byte-size
+   *  captured the first tick it left the fresh roster. Growth beyond this while
+   *  its heartbeat stays down => alive-but-unreachable (egress-dead), not gone. */
+  private sizeAtStale = new Map<string, number>();
+  /** Peers we've already emitted an egress_suspect for (emit once per episode). */
+  private egressEmitted = new Set<string>();
   /** Last `system_events.id` we've processed (auto-increment id in
    *  agent_channel.db's system_events table, 0.30.36+; pre-0.30.36 this
    *  was a byte offset into system_events.jsonl). In-memory only - reset
@@ -351,10 +383,13 @@ export class AgentChannel {
         });
         this.knownSessions.set(sid, entry);
       }
-      // Present again -> clear any accrued miss. Combined with "held in known"
-      // above, a peer that flapped (left then returned within the grace)
-      // produces NEITHER a session_departed NOR a re-join.
+      // Present again -> clear any accrued miss + egress-tracking. Combined with
+      // "held in known" above, a peer that flapped (left then returned within
+      // the grace) OR reconnected produces NEITHER a session_departed NOR a
+      // re-join, and drops any egress-suspect state (it is reachable again).
       this.pendingMisses.delete(sid);
+      this.sizeAtStale.delete(sid);
+      this.egressEmitted.delete(sid);
     }
 
     // Departed WITH hysteresis (DEFENSE-C, WI 8522c487) - OBSERVER-SIDE ONLY.
@@ -369,8 +404,59 @@ export class AgentChannel {
     for (const [sid, entry] of this.knownSessions) {
       if (sid === this.selfSession.session_id) continue;
       if (current.has(sid)) continue;
+      // Egress-death detection (WI 0f9dcd95). Capture the peer's transcript size
+      // the FIRST tick it goes absent; growth beyond that while its heartbeat
+      // stays down = alive-but-unreachable (egress-dead), NOT gone.
+      const size = this.peerTranscriptSize(sid);
+      if (!this.sizeAtStale.has(sid) && size != null) {
+        this.sizeAtStale.set(sid, size);
+      }
+      const baseSize = this.sizeAtStale.get(sid);
+      const grewSinceStale =
+        size != null && baseSize != null && size > baseSize;
       const misses = (this.pendingMisses.get(sid) ?? 0) + 1;
-      if (misses >= DEPART_GRACE_TICKS) {
+      const verdict = classifyAbsence({
+        grewSinceStale,
+        missCount: misses,
+        graceTicks: DEPART_GRACE_TICKS,
+      });
+      if (verdict === "egress_suspect") {
+        // Alive but unreachable - HOLD (never reap), and alert PA/warden ONCE.
+        // The victim cannot self-detect (its own hook is an MCP call, likely
+        // also dead), so a peer-emitted alert is the only surface for a /mcp
+        // reconnect (anti_pattern 6ef0c61f). NOT a hard session_departed - a
+        // false-depart is exactly what this fix removes.
+        //
+        // ACCEPTED FALSE-POSITIVE (review finding #2, 0.30.66): a RECOVERABLE
+        // MCP wedge (transient stall >90s where the process kept taking turns,
+        // then the MCP self-heals) also grows-while-stale and trips this once.
+        // Deliberately tolerated: this is ADVISORY and NEVER reaps, and the
+        // present-branch above clears egress state the moment the peer returns
+        // to the fresh roster - so a self-heal produces exactly one stale
+        // advisory then silence, no departed, no re-join. A one-off "check on
+        // X" nudge for a session that recovers on its own is a benign cost;
+        // suppressing it would risk muting a real egress-death. The self-heal
+        // path is covered by tests (agent_channel_flap egress self-heal case).
+        if (!this.egressEmitted.has(sid)) {
+          this.emit({
+            content:
+              `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat down ` +
+              `but its transcript is still growing = ALIVE but unreachable ` +
+              `(MCP egress dropped). It cannot see this; it needs a /mcp reconnect.`,
+            meta: {
+              from_session: entry.session_id,
+              from_id8: entry.id8,
+              from_role: entry.role,
+              from_name: entry.name,
+              from_task: entry.current_task ?? null,
+              event_type: "egress_suspect",
+              ts: new Date().toISOString(),
+            },
+          });
+          this.egressEmitted.add(sid);
+        }
+        // Held: keep in knownSessions, do NOT reap, do NOT accrue toward depart.
+      } else if (verdict === "departed") {
         this.emit({
           content: `[session_departed] ${entry.name} (${entry.id8})`,
           meta: {
@@ -385,10 +471,23 @@ export class AgentChannel {
         });
         this.knownSessions.delete(sid);
         this.pendingMisses.delete(sid);
+        this.sizeAtStale.delete(sid);
+        this.egressEmitted.delete(sid);
         removeSession(this.projectStateDir, sid);
       } else {
         this.pendingMisses.set(sid, misses);
       }
+    }
+  }
+
+  /** Byte-size of a peer's transcript (`<projectsHashDir>/<sid>.jsonl`), or null
+   *  if absent/unreadable. Egress-death check (WI 0f9dcd95): growth = alive.
+   *  Cheap statSync, only for peers already in the pending-departed path. */
+  private peerTranscriptSize(sid: string): number | null {
+    try {
+      return statSync(join(this.projectsHashDir, `${sid}.jsonl`)).size;
+    } catch {
+      return null;
     }
   }
 

@@ -6518,7 +6518,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join5 } from "path";
+import { resolve, join as join6 } from "path";
 import { existsSync as existsSync6, readFileSync as readFileSync3, writeFileSync } from "fs";
 import { execSync } from "child_process";
 
@@ -23317,6 +23317,8 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
+import { statSync as statSync2, readFileSync as readFileSync2 } from "fs";
+import { join as join4 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -23422,6 +23424,8 @@ function handleUserPromptSubmit(ctx, args) {
   const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
+  const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
+  const wardenNudge = composeWardenLivenessNudge(ctx, args.session_id, turn);
   const parts = [reminder];
   if (bridge)
     parts.push(`Last turn bridge: ${bridge}`);
@@ -23429,6 +23433,10 @@ function handleUserPromptSubmit(ctx, args) {
     parts.push(siblingLine);
   if (loopClose)
     parts.push(loopClose);
+  if (checkpointNudge)
+    parts.push(checkpointNudge);
+  if (wardenNudge)
+    parts.push(wardenNudge);
   return { additionalContext: parts.join(`
 
 `) };
@@ -23475,6 +23483,11 @@ function handlePostToolUse(ctx, args) {
       if (id)
         markWorkItemTouched(ctx.db, args.session_id, id);
     }
+  }
+  if (args.tool_name === "mcp__plugin_orchestrator_core__save_progress") {
+    recordCheckpointSaved(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
+  } else if (isSubstantiveActivity(args.tool_name)) {
+    bumpActivitySinceSave(ctx.db, args.session_id);
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
@@ -23534,23 +23547,123 @@ function handlePostToolUseFailure(ctx, args) {
   };
 }
 var COMPACT_STOP_SUPPRESS_WINDOW_MS = 60000;
+var PRECOMPACT_SNAPSHOT_ROW_CAP = 6;
+var PRECOMPACT_SNAPSHOT_SNIPPET_CAP = 100;
+var PRECOMPACT_SNAPSHOT_TOTAL_CAP = 3500;
+function composePrecompactSnapshot(opts) {
+  const { currentTask, recentNotes, workItems, ts } = opts;
+  const sections = [
+    `[Auto-captured durable snapshot, banked deterministically at compaction (${ts}). The pre-compact model turn cannot run tools, so the orchestrator wrote this for you; it captures POINTERS, not full narrative. A fresher real save_progress checkpoint supersedes it.]`,
+    `Last-broadcast task: ${currentTask && currentTask.trim() ? currentTask : "(none set)"}`
+  ];
+  if (workItems.length > 0) {
+    const wl = workItems.slice(0, PRECOMPACT_SNAPSHOT_ROW_CAP).map((w) => `  - ${w.id.slice(0, 8)} [${w.status}] ${w.content.slice(0, PRECOMPACT_SNAPSHOT_SNIPPET_CAP)}`).join(`
+`);
+    sections.push(`In-flight work_items in your scope:
+${wl}`);
+  }
+  if (recentNotes.length > 0) {
+    const nl = recentNotes.slice(0, PRECOMPACT_SNAPSHOT_ROW_CAP).map((n) => `  - ${n.id.slice(0, 8)} [${n.type}] ${n.snippet.slice(0, PRECOMPACT_SNAPSHOT_SNIPPET_CAP)}`).join(`
+`);
+    sections.push(`Recent notes you captured this session:
+${nl}`);
+  }
+  if (workItems.length === 0 && recentNotes.length === 0) {
+    sections.push('No notes or work_items captured this session yet - reconstruct from the task above and briefing({event:"compact"}).');
+  }
+  let text = sections.join(`
+
+`);
+  if (text.length > PRECOMPACT_SNAPSHOT_TOTAL_CAP) {
+    text = text.slice(0, PRECOMPACT_SNAPSHOT_TOTAL_CAP) + `
+...[snapshot truncated]`;
+  }
+  return text;
+}
+function readPrecompactSnapshot(db, sid) {
+  const row = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(`precompact_cp_${sid}`);
+  if (!row?.value)
+    return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    if (parsed && typeof parsed.text === "string" && typeof parsed.ts === "string") {
+      return { text: parsed.text, ts: parsed.ts };
+    }
+  } catch {}
+  return null;
+}
+function listRecentSessionNotes(db, sessionId, limit) {
+  return db.query(`SELECT id, type, substr(replace(replace(content, char(10), ' '), char(13), ' '), 1, 100) as snippet
+       FROM notes
+       WHERE source_session = ? AND type != 'checkpoint'
+       ORDER BY updated_at DESC
+       LIMIT ?`).all(sessionId, limit);
+}
 function handlePreCompact(ctx, args) {
   const sid = sanitizeSessionId(args.session_id);
   if (sid) {
     ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`compacting_${sid}`, String(Date.now()), now()]);
+    try {
+      const ts = now();
+      let currentTask = null;
+      try {
+        const taskRow = ctx.db.query(`SELECT current_task FROM session_registry WHERE session_id = ?`).get(sid);
+        currentTask = taskRow?.current_task ?? null;
+      } catch {}
+      const workItems = listInFlightWorkItemsForSession(ctx.db, sid);
+      const recentNotes = listRecentSessionNotes(ctx.db, sid, PRECOMPACT_SNAPSHOT_ROW_CAP);
+      const text = composePrecompactSnapshot({
+        currentTask,
+        recentNotes,
+        workItems,
+        ts
+      });
+      ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`precompact_cp_${sid}`, JSON.stringify({ text, ts }), ts]);
+    } catch {}
   }
-  return {
-    systemMessage: "Context compaction imminent. Before your window shrinks, capture any uncaptured knowledge NOW: call save_progress for current state, note() for decisions/gotchas/patterns discovered this session, update_note / supersede_note for corrections to notes this session read and found wanting, close_thread for resolved open threads. After compaction the orchestrator will re-orient via briefing() automatically - but anything not persisted to the knowledge base is lost."
-  };
+  return {};
 }
 var SESSIONSTART_CHECKPOINT_CAP = 4000;
 var SESSIONSTART_TOTAL_CAP = 7000;
+var COMPACT_ROSTER_MAX_PEERS = 8;
+var COMPACT_ROSTER_TASK_CAP = 70;
+function renderCompactRoster(peers) {
+  if (!peers || peers.length === 0)
+    return "";
+  const shown = peers.slice(0, COMPACT_ROSTER_MAX_PEERS);
+  const lines = shown.map((p) => {
+    const task = p.current_task && p.current_task.trim() ? `: ${p.current_task.slice(0, COMPACT_ROSTER_TASK_CAP)}` : ": (no task set)";
+    return `  - SA-${p.id8}${task}`;
+  });
+  const more = peers.length > shown.length ? `
+  ...and ${peers.length - shown.length} more.` : "";
+  return lines.join(`
+`) + more;
+}
 function composePostCompactReorientation(opts) {
   const { currentTask, checkpoint, livePA } = opts;
+  const role = opts.role ?? "subordinate";
+  const peers = opts.peers ?? [];
   const parts = [
     "Context was just compacted. Re-orient from this durable state, then verify it against live reality (read the actual code/notes) before acting - the compaction summary is lossy."
   ];
   parts.push("Operating contract - the compaction summary preserves task narrative but DROPS these behavioral reflexes; they are NOT optional and you have most likely been running degraded. Re-establish now: " + "(1) The orchestrator every-turn loop (capture/lookup scan) is mandatory EVERY turn - the keystone reflex compaction most degrades; run it this turn and every turn hereafter, do not assume it survived the summary. " + "(2) Capture knowledge the moment it appears via note()/update_note - never defer ('capture later' is the top cause of loss), and never substitute file/.md memory for orchestrator note(). " + "(3) Verify before asserting: this summary + the KB = what WAS; current source/code/docs = what IS - no 'maybe/probably', check. " + "(4) Cross-agent messages stay trap-safe / explicit-envelope; honor no-false-close (shipped != live-confirmed). " + "(5) You operate under a role contract (prime or subordinate) - reload it via orchestrator:getting-started (PA also: /pa-bootstrap + prime-agent.md); do not infer your role/contract from the lossy summary.");
+  parts.push("Highest-loss zone: the final minutes before this compaction are where the most context was lost. Directives you received right before compacting may be ABSENT from your summary (they were still in the queue when it was written), and items your summary lists as still-pending may in fact already be DONE. Before you re-issue, re-request, or re-do anything, reconcile against live reality (and the fleet below, if you have peers) - do not act off the stale queue.");
+  if (role === "prime") {
+    parts.push("You are the PrimeAgent and your context was just compacted. FIRST, rehydrate from your context-warden: read its ledger at $CLAUDE_PROJECT_DIR/.orchestrator-state/warden-ledger.md - the warden is your striped context redundancy (a parity drive that did NOT just compact), and its ledger holds the standing rulings, open gates, watch-for items, checkpoint-recency, and per-SA state your summary most likely dropped; if no warden is running, spawn one (see /pa-bootstrap). THEN run a FLEET CHECK-IN: poll every active subordinate (SA) and have each reply with (a) its current task/state, (b) recent completions with their IDs, and (c) anything it would bet you just lost from the summary - especially work already DONE or directives you already sent it, so you do not re-drive them. Advisories were ALSO emitted to each active SA automatically on your behalf (system bus), so they already know you compacted and will surface dropped context; aggregate their replies as they arrive. RAID principle: your context-warden AND your warm, recently-uncompacted SAs are striped redundancy for the context your summary lost - reconstruct coherence by aggregating from them, do not treat your lossy summary as authority over their intact memory. Non-blocking - continue meanwhile.");
+    const roster = renderCompactRoster(peers);
+    if (roster)
+      parts.push(`Active subordinates to poll:
+${roster}`);
+  } else {
+    if (livePA) {
+      parts.push("A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. Beyond that passive backstop, proactively CHECK IN with PA now: tell it you just compacted and ask it to aggregate for you - what you were working on, what PA is currently driving, and any in-flight material from other subordinates that bears on your task. RAID principle: a warm PA (and any uncompacted peer) is striped redundancy for what your summary dropped - the fastest rebuild is aggregating coherence from them rather than trusting your lossy summary. A reply may also flag load-bearing context the summary lost; fold it in as it arrives. Non-blocking: continue meanwhile. This is a targeted gap-check, not a full context re-request.");
+    }
+    const roster = renderCompactRoster(peers);
+    if (roster)
+      parts.push(`Other active subordinates (who holds what - coordinate laterally via @SA-<id8>, and flag anything already done/received so no one re-does it):
+${roster}`);
+  }
   if (currentTask)
     parts.push(`Your last-broadcast task (from session_registry - may be STALE if work moved on since it was set; reconcile against the checkpoint below + live reality before trusting it): ${currentTask}`);
   if (checkpoint) {
@@ -23560,9 +23673,6 @@ function composePostCompactReorientation(opts) {
 ${capped}`);
   } else {
     parts.push('No durable checkpoint found - reconstruct from your task above and a briefing({event:"compact"}) before proceeding.');
-  }
-  if (livePA) {
-    parts.push("A peer-backstop request was just emitted to PA on your behalf automatically - you do NOT need to post anything for it. A non-compacted peer or PA may reply on the channel flagging load-bearing context the lossy summary dropped; fold any such replies in when they arrive. Non-blocking: continue your work. This is a targeted gap-check, not a full context re-request.");
   }
   let systemMessage = parts.join(`
 
@@ -23586,45 +23696,103 @@ function buildPeerBackstopEvent(opts) {
     task: currentTask ?? ""
   };
 }
+var PA_COMPACT_RECOVERY_EVENT = "pa_compact_recovery";
+function buildPaCompactAdvisoryEvent(opts) {
+  const { fromSession, toSession, currentTask, ts } = opts;
+  if (!fromSession || !toSession || fromSession === toSession)
+    return null;
+  return {
+    event_type: PA_COMPACT_RECOVERY_EVENT,
+    from_session: fromSession,
+    to_session: toSession,
+    ts,
+    task: currentTask ?? ""
+  };
+}
 function handleSessionStartCompact(ctx, args) {
   const sid = sanitizeSessionId(args.session_id);
   let currentTask = null;
-  let checkpoint = null;
   try {
     const taskRow = ctx.db.query(`SELECT current_task FROM session_registry WHERE session_id = ?`).get(sid);
     currentTask = taskRow?.current_task ?? null;
   } catch {}
-  try {
-    const cpRow = ctx.db.query(`SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`).get();
-    checkpoint = cpRow?.content ?? null;
-  } catch {}
+  const SYNTHETIC_FRESH_MS = 30 * 60000;
+  const synthetic = readPrecompactSnapshot(ctx.db, sid);
+  const syntheticMs = synthetic ? Date.parse(synthetic.ts) : NaN;
+  const syntheticFresh = !!synthetic && Number.isFinite(syntheticMs) && Date.now() - syntheticMs <= SYNTHETIC_FRESH_MS;
+  let checkpoint;
+  if (syntheticFresh) {
+    checkpoint = synthetic.text;
+  } else {
+    let realCp = null;
+    try {
+      realCp = ctx.db.query(`SELECT content FROM notes WHERE type = 'checkpoint' AND source_session = ? ORDER BY created_at DESC LIMIT 1`).get(sid) ?? ctx.db.query(`SELECT content FROM notes WHERE type = 'checkpoint' ORDER BY created_at DESC LIMIT 1`).get();
+    } catch {}
+    checkpoint = realCp?.content ?? null;
+  }
+  let selfRole = "subordinate";
   let livePA = false;
   let paSession = null;
+  let peers = [];
+  let activeSAs = [];
   try {
     const live = getLiveSessions();
-    const pa = live?.find((e) => e.role === "prime") ?? null;
-    livePA = !!pa;
-    paSession = pa?.session_id ?? null;
+    if (live) {
+      const self = live.find((e) => e.session_id === sid) ?? null;
+      if (self?.role === "prime")
+        selfRole = "prime";
+      const pa = live.find((e) => e.role === "prime") ?? null;
+      const distinctPA = pa && pa.session_id !== sid ? pa : null;
+      livePA = !!distinctPA;
+      paSession = distinctPA?.session_id ?? null;
+      const otherSubs = live.filter((e) => e.role === "subordinate" && e.session_id !== sid);
+      peers = otherSubs.map((e) => ({
+        id8: e.id8,
+        current_task: e.current_task ?? null
+      }));
+      activeSAs = otherSubs.map((e) => ({
+        session_id: e.session_id,
+        id8: e.id8
+      }));
+    }
   } catch {
     livePA = false;
     paSession = null;
   }
   try {
-    const ev = buildPeerBackstopEvent({
-      fromSession: sid,
-      paSession,
-      currentTask,
-      ts: now()
-    });
     const stateDir = getAgentChannelStateDir();
-    if (ev && stateDir)
-      appendSystemEvent(stateDir, ev);
+    if (stateDir) {
+      const ts = now();
+      if (selfRole === "prime") {
+        for (const sa of activeSAs) {
+          const ev = buildPaCompactAdvisoryEvent({
+            fromSession: sid,
+            toSession: sa.session_id,
+            currentTask,
+            ts
+          });
+          if (ev)
+            appendSystemEvent(stateDir, ev);
+        }
+      } else {
+        const ev = buildPeerBackstopEvent({
+          fromSession: sid,
+          paSession,
+          currentTask,
+          ts
+        });
+        if (ev)
+          appendSystemEvent(stateDir, ev);
+      }
+    }
   } catch {}
   return {
     systemMessage: composePostCompactReorientation({
+      role: selfRole,
       currentTask,
       checkpoint,
-      livePA
+      livePA,
+      peers
     })
   };
 }
@@ -23688,6 +23856,175 @@ function listFreshSurfacedNotes(db, sessionId, limit) {
        GROUP BY n.id
        ORDER BY n.updated_at ASC
        LIMIT ?`).all(sessionId, limit);
+}
+var CADENCE_PA = {
+  turnBase: 6,
+  turnStep: 5,
+  actBase: 5,
+  actStep: 5
+};
+var CADENCE_SA = {
+  turnBase: 10,
+  turnStep: 6,
+  actBase: 12,
+  actStep: 8
+};
+function isSubstantiveActivity(toolName) {
+  if (!toolName)
+    return false;
+  if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit" || toolName === "NotebookEdit") {
+    return true;
+  }
+  return toolName === "mcp__plugin_orchestrator_core__note" || toolName === "mcp__plugin_orchestrator_core__create_work_item" || toolName === "mcp__plugin_orchestrator_core__update_work_item" || toolName === "mcp__plugin_orchestrator_core__update_note" || toolName === "mcp__plugin_orchestrator_core__supersede_note";
+}
+function readIntState(db, key) {
+  const row = db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  if (!row)
+    return 0;
+  const n = parseInt(row.value, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+function recordCheckpointSaved(db, sessionId, turn) {
+  const sid = sanitizeSessionId(sessionId);
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`last_save_turn_${sid}`, String(turn), now()]);
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [
+    `activity_since_save_${sid}`
+  ]);
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [`ckpt_nudge_level_${sid}`]);
+}
+function bumpActivitySinceSave(db, sessionId) {
+  const sid = sanitizeSessionId(sessionId);
+  const key = `activity_since_save_${sid}`;
+  const next = readIntState(db, key) + 1;
+  db.run(`INSERT INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, [key, String(next), now()]);
+}
+function getSelfRole(sid) {
+  try {
+    const live = getLiveSessions();
+    const self = live?.find((e) => e.session_id === sid) ?? null;
+    return self?.role === "prime" ? "prime" : "subordinate";
+  } catch {
+    return "subordinate";
+  }
+}
+function turnsSinceMarker(turn, marker) {
+  if (marker <= 0)
+    return turn;
+  if (turn < marker)
+    return turn;
+  return turn - marker;
+}
+function composeCheckpointCadenceNudge(ctx, sessionId, turn) {
+  const sid = sanitizeSessionId(sessionId);
+  const lastSaveTurn = readIntState(ctx.db, `last_save_turn_${sid}`);
+  const turnsSinceSave = turnsSinceMarker(turn, lastSaveTurn);
+  const activity = readIntState(ctx.db, `activity_since_save_${sid}`);
+  if (turnsSinceSave <= 0 || activity <= 0)
+    return "";
+  if (turnsSinceSave < CADENCE_PA.turnBase || activity < CADENCE_PA.actBase) {
+    return "";
+  }
+  const role = getSelfRole(sid);
+  const t = role === "prime" ? CADENCE_PA : CADENCE_SA;
+  const level = readIntState(ctx.db, `ckpt_nudge_level_${sid}`);
+  const turnBar = t.turnBase + level * t.turnStep;
+  const actBar = t.actBase + level * t.actStep;
+  if (turnsSinceSave < turnBar || activity < actBar)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`ckpt_nudge_level_${sid}`, String(level + 1), now()]);
+  const paTag = role === "prime" ? " As PA your context is the fleet's shared memory - your loss is the worst case; checkpoint more often than feels necessary." : "";
+  if (level === 0) {
+    return `[orch] Checkpoint hygiene: ${turnsSinceSave} turns and ${activity} substantive actions since your last save_progress. Point-of-compaction capture does NOT work (no model turn before a compaction fires), so REGULAR save_progress is the only real protection against losing this stretch of work. A 10-second save now is cheap insurance.${paTag}`;
+  }
+  if (level === 1) {
+    return `[orch] Still uncheckpointed: ${turnsSinceSave} turns / ${activity} substantive actions of work not yet saved. Call save_progress THIS turn - re-deriving lost context after a compaction or crash costs far more than the save.${paTag}`;
+  }
+  return `[orch] URGENT checkpoint gap: ${turnsSinceSave} turns / ${activity} substantive actions since your last save_progress. You are one compaction away from losing all of it. Call save_progress NOW, before more work.${paTag}`;
+}
+var WARDEN_HEARTBEAT_MAX_INTERVAL_S = 150;
+var WARDEN_STALE_THRESHOLD_MS = 420000;
+var WARDEN_NUDGE_MIN_GAP_TURNS = 10;
+function composeWardenNudgeText(opts) {
+  const NONE = { text: "", fired: false, clearDedup: false };
+  if (opts.role !== "prime")
+    return NONE;
+  if (opts.fleetSize < 2)
+    return NONE;
+  if (opts.ledger.status === "fresh") {
+    return { text: "", fired: false, clearDedup: true };
+  }
+  if (opts.turnsSinceLastNudge !== null && opts.turnsSinceLastNudge >= 0 && opts.turnsSinceLastNudge < WARDEN_NUDGE_MIN_GAP_TURNS) {
+    return NONE;
+  }
+  const n = opts.fleetSize;
+  const tail = " TaskList does NOT list background agents; the ledger mtime IS the liveness signal.";
+  let text;
+  if (opts.ledger.status === "absent") {
+    text = `[orch] No context-warden ledger at the canonical path while ${n} sessions are active - ` + `you have NO context redundancy. Spawn one: /pa-bootstrap step 5.8 (background, Opus).` + tail;
+  } else {
+    const who = opts.ledger.instance ? `instance ${opts.ledger.instance}` : "the last warden";
+    const when = opts.ledger.ts ? ` at ${opts.ledger.ts}` : "";
+    const age = opts.ledger.ageMs != null ? ` (${Math.round(opts.ledger.ageMs / 1000)}s ago)` : "";
+    text = `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` + `sessions are active - a healthy warden writes every <=${WARDEN_HEARTBEAT_MAX_INTERVAL_S}s, ` + `so it is PRESUMED DEAD/STUCK. Respawn: /pa-bootstrap step 5.8.` + tail;
+  }
+  return { text, fired: true, clearDedup: false };
+}
+function wardenLedgerPath() {
+  const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  if (!root)
+    return null;
+  return join4(root, ".orchestrator-state", "warden-ledger.md");
+}
+function wardenLedgerLiveness(ledgerPath) {
+  let st;
+  try {
+    st = statSync2(ledgerPath);
+  } catch {
+    return { status: "absent" };
+  }
+  const ageMs = Date.now() - st.mtimeMs;
+  if (ageMs <= WARDEN_STALE_THRESHOLD_MS)
+    return { status: "fresh", ageMs };
+  let instance;
+  let ts;
+  try {
+    const head = readFileSync2(ledgerPath).subarray(0, 512).toString("utf8");
+    const mi = head.match(/instance=([^\s|]+)/i);
+    const mt = head.match(/\bts=([^\s|]+)/i);
+    if (mi)
+      instance = mi[1];
+    if (mt)
+      ts = mt[1];
+  } catch {}
+  return { status: "stale", ageMs, instance, ts };
+}
+function composeWardenLivenessNudge(ctx, sessionId, turn) {
+  const sid = sanitizeSessionId(sessionId);
+  const live = getLiveSessions();
+  if (!live)
+    return "";
+  const self = live.find((e) => e.session_id === sid) ?? null;
+  const role = self?.role === "prime" ? "prime" : "subordinate";
+  const ledgerPath = wardenLedgerPath();
+  if (!ledgerPath)
+    return "";
+  const ledger = wardenLedgerLiveness(ledgerPath);
+  const key = `warden_nudge_turn_${sid}`;
+  const last = readIntState(ctx.db, key);
+  const turnsSince = last > 0 ? turn - last : null;
+  const r = composeWardenNudgeText({
+    role,
+    fleetSize: live.length,
+    ledger,
+    turnsSinceLastNudge: turnsSince
+  });
+  if (r.clearDedup)
+    ctx.db.run(`DELETE FROM plugin_state WHERE key = ?`, [key]);
+  if (r.fired) {
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  }
+  return r.text;
 }
 function handleSubagentStop(ctx, args) {
   const key = `subagent_stop_${args.session_id}`;
@@ -24111,8 +24448,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { readFileSync as readFileSync2, existsSync as existsSync5, statSync as statSync2, readdirSync as readdirSync2 } from "fs";
-import { join as join4 } from "path";
+import { openSync, readSync, closeSync, existsSync as existsSync5, statSync as statSync3, readdirSync as readdirSync2 } from "fs";
+import { join as join5 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -24277,6 +24614,14 @@ ${decisionSummary}` : decisionSummary
 var POLL_INTERVAL_MS = 1500;
 var HEARTBEAT_INTERVAL_MS = 30000;
 var STALE_THRESHOLD_MS = 90000;
+var DEPART_GRACE_TICKS = 20;
+function classifyAbsence(opts) {
+  if (opts.grewSinceStale)
+    return "egress_suspect";
+  if (opts.missCount >= opts.graceTicks)
+    return "departed";
+  return "pending";
+}
 function decorateChannelContent(content, sender, eventType, addrTargets, paAddressed, sessions) {
   if (!paAddressed && addrTargets.length === 0) {
     return content;
@@ -24307,6 +24652,10 @@ class AgentChannel {
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
+  pendingMisses = new Map;
+  currentRoster = new Map;
+  sizeAtStale = new Map;
+  egressEmitted = new Set;
   systemEventsLastSeenId = 0;
   heartbeatFailures = 0;
   constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
@@ -24365,19 +24714,24 @@ class AgentChannel {
     }
   }
   detectSessionChanges() {
-    const current = new Map(readSessions(this.projectStateDir).map((s) => [s.session_id, s]));
     const now3 = Date.now();
+    const current = new Map;
+    current.set(this.selfSession.session_id, this.selfSession);
+    for (const s of readSessions(this.projectStateDir)) {
+      if (s.session_id === this.selfSession.session_id) {
+        current.set(s.session_id, s);
+        continue;
+      }
+      const last = new Date(s.last_heartbeat_at).getTime();
+      if (Number.isFinite(last) && now3 - last <= STALE_THRESHOLD_MS) {
+        current.set(s.session_id, s);
+      }
+    }
+    this.currentRoster = current;
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id)
         continue;
-      const last = new Date(entry.last_heartbeat_at).getTime();
-      if (now3 - last > STALE_THRESHOLD_MS) {
-        current.delete(sid);
-        removeSession(this.projectStateDir, sid);
-      }
-    }
-    for (const [sid, entry] of current) {
-      if (!this.knownSessions.has(sid) && sid !== this.selfSession.session_id) {
+      if (!this.knownSessions.has(sid)) {
         this.emit({
           content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
           meta: {
@@ -24390,10 +24744,46 @@ class AgentChannel {
             ts: new Date().toISOString()
           }
         });
+        this.knownSessions.set(sid, entry);
       }
+      this.pendingMisses.delete(sid);
+      this.sizeAtStale.delete(sid);
+      this.egressEmitted.delete(sid);
     }
     for (const [sid, entry] of this.knownSessions) {
-      if (!current.has(sid) && sid !== this.selfSession.session_id) {
+      if (sid === this.selfSession.session_id)
+        continue;
+      if (current.has(sid))
+        continue;
+      const size = this.peerTranscriptSize(sid);
+      if (!this.sizeAtStale.has(sid) && size != null) {
+        this.sizeAtStale.set(sid, size);
+      }
+      const baseSize = this.sizeAtStale.get(sid);
+      const grewSinceStale = size != null && baseSize != null && size > baseSize;
+      const misses = (this.pendingMisses.get(sid) ?? 0) + 1;
+      const verdict = classifyAbsence({
+        grewSinceStale,
+        missCount: misses,
+        graceTicks: DEPART_GRACE_TICKS
+      });
+      if (verdict === "egress_suspect") {
+        if (!this.egressEmitted.has(sid)) {
+          this.emit({
+            content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat down ` + `but its transcript is still growing = ALIVE but unreachable ` + `(MCP egress dropped). It cannot see this; it needs a /mcp reconnect.`,
+            meta: {
+              from_session: entry.session_id,
+              from_id8: entry.id8,
+              from_role: entry.role,
+              from_name: entry.name,
+              from_task: entry.current_task ?? null,
+              event_type: "egress_suspect",
+              ts: new Date().toISOString()
+            }
+          });
+          this.egressEmitted.add(sid);
+        }
+      } else if (verdict === "departed") {
         this.emit({
           content: `[session_departed] ${entry.name} (${entry.id8})`,
           meta: {
@@ -24406,19 +24796,32 @@ class AgentChannel {
             ts: new Date().toISOString()
           }
         });
+        this.knownSessions.delete(sid);
+        this.pendingMisses.delete(sid);
+        this.sizeAtStale.delete(sid);
+        this.egressEmitted.delete(sid);
+        removeSession(this.projectStateDir, sid);
+      } else {
+        this.pendingMisses.set(sid, misses);
       }
     }
-    this.knownSessions = current;
+  }
+  peerTranscriptSize(sid) {
+    try {
+      return statSync3(join5(this.projectsHashDir, `${sid}.jsonl`)).size;
+    } catch {
+      return null;
+    }
   }
   listJsonlFiles() {
     if (!existsSync5(this.projectsHashDir))
       return [];
-    return readdirSync2(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join4(this.projectsHashDir, f));
+    return readdirSync2(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join5(this.projectsHashDir, f));
   }
   tick() {
     try {
       this.detectSessionChanges();
-      const sessions = Array.from(this.knownSessions.values());
+      const sessions = Array.from(this.currentRoster.values());
       const overrideState = readOverrideState(this.projectStateDir);
       const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
       let mutated = false;
@@ -24511,19 +24914,46 @@ class AgentChannel {
           });
           break;
         }
+        case "pa_compact_recovery": {
+          const tsMs = new Date(String(ev.ts ?? "")).getTime();
+          const RECOVERY_FRESH_MS = 15 * 60000;
+          if (!Number.isFinite(tsMs) || Date.now() - tsMs > RECOVERY_FRESH_MS) {
+            break;
+          }
+          const fromId8 = ev.from_session.slice(0, 8);
+          const task = String(ev.task ?? "").trim();
+          this.emit({
+            content: `[PA compacted] The PrimeAgent (PA-${fromId8}) just compacted its ` + `context` + (task ? ` (its last task: ${task})` : "") + `. Its summary is lossy and likely dropped load-bearing context ` + `it was holding about the fleet. Surface what PA will need to ` + `re-establish: what you are working on, your recent completions ` + `WITH IDs, and - critically - flag anything already DONE or any ` + `directive PA already sent you, so it does not re-request or ` + `re-drive it. The final minutes before PA compacted are the ` + `highest-loss zone (directives it sent you then may be missing ` + `from its summary; items it thinks are pending may already be ` + `done). Reply to PA now; non-blocking, advisory.`,
+            meta: {
+              from_session: ev.from_session,
+              from_id8: fromId8,
+              from_role: "prime",
+              from_name: `<pa_compact_recovery>`,
+              from_task: task || null,
+              event_type: "pa_compact_recovery",
+              ts: typeof ev.ts === "string" ? ev.ts : new Date().toISOString(),
+              addressed_to: [this.selfSession.session_id]
+            }
+          });
+          break;
+        }
         default:
           break;
       }
     }
   }
   processFile(file, sessions, overrideState, offsets) {
-    const lastOffset = offsets[file] ?? 0;
     let stat;
     try {
-      stat = statSync2(file);
+      stat = statSync3(file);
     } catch {
       return false;
     }
+    if (offsets[file] === undefined) {
+      offsets[file] = stat.size;
+      return true;
+    }
+    const lastOffset = offsets[file];
     if (stat.size === lastOffset)
       return false;
     if (stat.size < lastOffset) {
@@ -24531,11 +24961,18 @@ class AgentChannel {
       return true;
     }
     let buf;
+    let fd;
     try {
-      const raw = readFileSync2(file);
-      buf = raw.subarray(lastOffset).toString("utf8");
+      fd = openSync(file, "r");
+      const length = stat.size - lastOffset;
+      const chunk = Buffer.allocUnsafe(length);
+      const bytesRead = readSync(fd, chunk, 0, length, lastOffset);
+      buf = chunk.subarray(0, bytesRead).toString("utf8");
     } catch {
       return false;
+    } finally {
+      if (fd !== undefined)
+        closeSync(fd);
     }
     const lines = buf.split(`
 `);
@@ -24857,7 +25294,7 @@ async function handleRespondToPermission(input, ctx) {
 import { homedir as homedir2 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join5(import.meta.dir, "..", "package.json");
+    const pkgPath = join6(import.meta.dir, "..", "package.json");
     return JSON.parse(readFileSync3(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
@@ -24920,10 +25357,10 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join5(projectDir, ".orchestrator-state");
+  const stateDir = join6(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join5(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join6(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync6(perPidFile)) {
         const raw = readFileSync3(perPidFile, "utf8").trim();
@@ -24936,14 +25373,14 @@ function getFallbackSessionId() {
       }
     } catch {}
   }
-  const file = join5(stateDir, "active-session");
+  const file = join6(stateDir, "active-session");
   try {
     if (existsSync6(file)) {
       const raw = readFileSync3(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join5(stateDir, `active-session-${claudePid}`);
+          const perPidFile = join6(stateDir, `active-session-${claudePid}`);
           if (!existsSync6(perPidFile)) {
             try {
               writeFileSync(perPidFile, raw, "utf8");
@@ -25241,7 +25678,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join5(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackFile = join6(resolvedProjectDir, ".orchestrator-state", "active-session");
     const fallbackExists = existsSync6(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
@@ -26449,7 +26886,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join5(homedir2(), ".claude", "projects", projectHash);
+  const projectsHashDir = join6(homedir2(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -26465,7 +26902,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join5(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,

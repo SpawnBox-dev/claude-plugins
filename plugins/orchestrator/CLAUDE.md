@@ -16,6 +16,18 @@ git status -s dist/server.js  # should show 'M' if you changed any mcp/* file
 
 If the M flag isn't there after a source change, you forgot to rebuild. Do not commit until dist/server.js is in the staged changeset.
 
+**Automated backstop:** `tests/dist-freshness.test.ts` FAILS in the suite when `dist/server.js` is older than the newest `mcp/` source file - so a stale bundle can no longer pass `bun test` and reach a commit. If that test fails, the fix is always `bun run build` (risk `206a0af3`: this exact staleness made 0.30.56-0.30.65's code inert at runtime for a month; caught by a code-reviewer on a flap-code change).
+
+### Publish checklist (the bump-and-ship flow)
+
+Publishing = the marketplace registry picks up whatever is on `main`. Do ALL of these in ONE changeset, in order - skipping the build is the trap above:
+
+1. `bun run build` **first** - regenerate `dist/server.js` from your `mcp/` changes. (No mcp/ change this ship? Still safe to run; it's a no-op.)
+2. `bun run typecheck && bun test` - suite green, including `dist-freshness` (proves the bundle you're about to ship matches source).
+3. Bump the version in **all three** manifests to the same value: `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`.
+4. `git add -A` including `dist/server.js` - confirm `git status -s dist/server.js` shows `M` whenever an mcp/ file changed.
+5. Commit + push to `main`. Fleet adoption is `/plugin update` + `/mcp` reconnect (or session restart) per terminal.
+
 ### MANDATORY: Every Turn
 
 <EXTREMELY_IMPORTANT>
