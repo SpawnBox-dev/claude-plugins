@@ -2046,8 +2046,14 @@ server.tool(
 
 server.tool(
   "update_session_task",
-  "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching.",
-  { task: z.string().min(1).max(500), session_id: z.string().optional() },
+  "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.",
+  {
+    task: z.string().min(1).max(500),
+    session_id: z.string().optional(),
+    warm_context: z.array(z.string()).max(50).optional(),
+    hot_path_status: z.string().max(80).optional(),
+    keep_clean: z.boolean().optional(),
+  },
   async (args) => {
     const sid = resolveSessionId(args.session_id);
     if (!sid || !sessionTracker) {
@@ -2058,6 +2064,23 @@ server.tool(
       };
     }
     const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+    // PA-coherence self-declare (Phase 3): persist the optional coherence fields
+    // to this session's agent-channel roster row (via declareSelf -> the
+    // per-column setters) so the repurposing query can read them. Only present
+    // fields are written; the auto-derived warm_context floor (Phase 5) is left
+    // intact when warm_context is omitted.
+    if (
+      agentChannel &&
+      (args.warm_context !== undefined ||
+        args.hot_path_status !== undefined ||
+        args.keep_clean !== undefined)
+    ) {
+      agentChannel.declareSelf({
+        warm_context: args.warm_context,
+        hot_path_status: args.hot_path_status,
+        keep_clean: args.keep_clean,
+      });
+    }
     return { content: [{ type: "text" as const, text }] };
   }
 );

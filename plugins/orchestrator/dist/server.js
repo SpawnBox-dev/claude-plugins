@@ -22899,6 +22899,18 @@ function writeSession(stateDir, entry) {
        current_task = excluded.current_task,
        kind = excluded.kind`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null);
 }
+function setWarmContext(stateDir, session_id, tags) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET warm_context = ? WHERE session_id = ?`).run(JSON.stringify(tags), session_id);
+}
+function setHotPathStatus(stateDir, session_id, status) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET hot_path_status = ? WHERE session_id = ?`).run(status, session_id);
+}
+function setKeepClean(stateDir, session_id, keep) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET keep_clean = ? WHERE session_id = ?`).run(keep ? 1 : 0, session_id);
+}
 function removeSession(stateDir, session_id) {
   const db = getDb(stateDir);
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
@@ -24802,6 +24814,18 @@ class AgentChannel {
     if (this.heartbeatTimer)
       clearInterval(this.heartbeatTimer);
     removeSession(this.projectStateDir, this.selfSession.session_id);
+  }
+  declareSelf(fields) {
+    const sid = this.selfSession.session_id;
+    if (fields.warm_context !== undefined) {
+      setWarmContext(this.projectStateDir, sid, fields.warm_context);
+    }
+    if (fields.hot_path_status !== undefined) {
+      setHotPathStatus(this.projectStateDir, sid, fields.hot_path_status);
+    }
+    if (fields.keep_clean !== undefined) {
+      setKeepClean(this.projectStateDir, sid, fields.keep_clean);
+    }
   }
   heartbeat() {
     try {
@@ -26985,7 +27009,13 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching.", { task: exports_external.string().min(1).max(500), session_id: exports_external.string().optional() }, async (args) => {
+server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.", {
+  task: exports_external.string().min(1).max(500),
+  session_id: exports_external.string().optional(),
+  warm_context: exports_external.array(exports_external.string()).max(50).optional(),
+  hot_path_status: exports_external.string().max(80).optional(),
+  keep_clean: exports_external.boolean().optional()
+}, async (args) => {
   const sid = resolveSessionId(args.session_id);
   if (!sid || !sessionTracker) {
     return {
@@ -26995,6 +27025,13 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
     };
   }
   const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+  if (agentChannel && (args.warm_context !== undefined || args.hot_path_status !== undefined || args.keep_clean !== undefined)) {
+    agentChannel.declareSelf({
+      warm_context: args.warm_context,
+      hot_path_status: args.hot_path_status,
+      keep_clean: args.keep_clean
+    });
+  }
   return { content: [{ type: "text", text }] };
 });
 server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.", {

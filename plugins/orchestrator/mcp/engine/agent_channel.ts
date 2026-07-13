@@ -29,6 +29,9 @@ import {
   readOffsets,
   writeAllOffsets,
   readNewSystemEvents,
+  setWarmContext,
+  setHotPathStatus,
+  setKeepClean,
   type SessionEntry,
 } from "./agent_channel_state";
 
@@ -409,6 +412,30 @@ export class AgentChannel {
     if (this.timer) clearInterval(this.timer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     removeSession(this.projectStateDir, this.selfSession.session_id);
+  }
+
+  /** PA-coherence primitive (Phase 3): write this session's SELF-declared
+   *  coherence fields to its own agent_channel.db row via the dedicated
+   *  per-column setters. Only the fields PRESENT in `fields` are written (each
+   *  setter is an independent UPDATE), so a partial declare leaves the rest
+   *  untouched. This is the self-declared OVERRIDE half of warm_context +
+   *  the intent fields (hot_path_status / keep_clean); auto-derivation (Phase 5)
+   *  is the floor. Wired to the update_session_task tool. */
+  declareSelf(fields: {
+    warm_context?: string[];
+    hot_path_status?: string;
+    keep_clean?: boolean;
+  }): void {
+    const sid = this.selfSession.session_id;
+    if (fields.warm_context !== undefined) {
+      setWarmContext(this.projectStateDir, sid, fields.warm_context);
+    }
+    if (fields.hot_path_status !== undefined) {
+      setHotPathStatus(this.projectStateDir, sid, fields.hot_path_status);
+    }
+    if (fields.keep_clean !== undefined) {
+      setKeepClean(this.projectStateDir, sid, fields.keep_clean);
+    }
   }
 
   /**

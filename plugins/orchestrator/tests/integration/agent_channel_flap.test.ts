@@ -15,6 +15,7 @@ import { tmpdir } from "os";
 import { AgentChannel, DEPART_GRACE_TICKS, classifyAbsence, classifyIngress, parseIngressTail, INGRESS_STALE_THRESHOLD_MS, type ChannelNotification } from "../../mcp/engine/agent_channel";
 import {
   writeSession,
+  readSessions,
   removeSession,
   closeAgentChannelDb,
   type SessionEntry,
@@ -666,5 +667,38 @@ describe("ingress-death detection (integration) - WI 19294811", () => {
     const chan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => received.push(n));
     runIngress(chan, now);
     expect(eventsOfType(received, "ingress_suspect", pa.id8).length).toBe(0);
+  });
+});
+
+// ─── PA-coherence primitive: self-declare (WI, Phase 3) ─────────────────────
+// declareSelf writes the SELF-declared coherence fields (warm_context /
+// hot_path_status / keep_clean) to this session's own agent_channel.db row via
+// the dedicated setters - the self-declared side of the machine-queryable
+// fleet-context (auto-derivation is the floor; this is the override/intent).
+describe("declareSelf - self-declared coherence (WI 19294811-family, Phase 3)", () => {
+  test("writes warm_context / hot_path_status / keep_clean to the session's own row", () => {
+    const self = makeSession("subordinate", "5e1f0000", "SA-self");
+    writeSession(stateDir, self); // the row must exist (setters are UPDATE)
+    const chan = new AgentChannel(stateDir, projectsHashDir, self, () => {});
+    (chan as any).declareSelf({
+      warm_context: ["egress-detection", "anonymizer.rs"],
+      hot_path_status: "idle-available",
+      keep_clean: true,
+    });
+    const [row] = readSessions(stateDir).filter((r) => r.id8 === "5e1f0000");
+    expect(row.warm_context).toEqual(["egress-detection", "anonymizer.rs"]);
+    expect(row.hot_path_status).toBe("idle-available");
+    expect(row.keep_clean).toBe(true);
+  });
+
+  test("only the provided fields are written (partial declare leaves others untouched)", () => {
+    const self = makeSession("subordinate", "5e1f0001", "SA-self2");
+    writeSession(stateDir, self);
+    const chan = new AgentChannel(stateDir, projectsHashDir, self, () => {});
+    (chan as any).declareSelf({ hot_path_status: "driving" });
+    const [row] = readSessions(stateDir).filter((r) => r.id8 === "5e1f0001");
+    expect(row.hot_path_status).toBe("driving");
+    expect(row.warm_context ?? null).toBeNull();
+    expect(row.keep_clean ?? null).toBeNull();
   });
 });
