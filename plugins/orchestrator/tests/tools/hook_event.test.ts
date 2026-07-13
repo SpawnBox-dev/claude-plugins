@@ -13,6 +13,8 @@ import {
   POST_COMPACT_RECOVERY_EVENT,
   PA_COMPACT_RECOVERY_EVENT,
   HOOK_EVENTS,
+  composeWardenNudgeText,
+  type WardenLedgerState,
   type HookEventResponse,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
@@ -1128,6 +1130,112 @@ describe("hook_event dispatcher", () => {
       expect(r.systemMessage).toContain("MY-OWN-STATE");
       expect(r.systemMessage).not.toContain("OTHER-SESSION-STATE");
     });
+  });
+});
+
+// WI 6430ebf6: context-warden liveness nudge - PURE core (all gates + text).
+// The impure disk/DB gathering (composeWardenLivenessNudge) stays
+// untested-for-live, same convention as the getLiveSessions glue.
+describe("WI 6430ebf6: context-warden liveness nudge (composeWardenNudgeText)", () => {
+  const staleLedger: WardenLedgerState = {
+    status: "stale",
+    ageMs: 600_000,
+    instance: "abc12345",
+    ts: "2026-07-12T00:00:00.000Z",
+  };
+  const absentLedger: WardenLedgerState = { status: "absent" };
+  const freshLedger: WardenLedgerState = { status: "fresh", ageMs: 30_000 };
+
+  test("subordinate role never nudges", () => {
+    const r = composeWardenNudgeText({
+      role: "subordinate",
+      fleetSize: 4,
+      ledger: absentLedger,
+      turnsSinceLastNudge: null,
+    });
+    expect(r.fired).toBe(false);
+    expect(r.text).toBe("");
+  });
+
+  test("a solo prime (no active fleet) does not nudge", () => {
+    const r = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 1,
+      ledger: absentLedger,
+      turnsSinceLastNudge: null,
+    });
+    expect(r.fired).toBe(false);
+    expect(r.text).toBe("");
+  });
+
+  test("a fresh ledger is silent AND clears the de-dup so a later death nudges promptly", () => {
+    const r = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: freshLedger,
+      turnsSinceLastNudge: 2,
+    });
+    expect(r.fired).toBe(false);
+    expect(r.text).toBe("");
+    expect(r.clearDedup).toBe(true);
+  });
+
+  test("prime + active fleet + ABSENT ledger + never nudged -> fires (no-redundancy text)", () => {
+    const r = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: absentLedger,
+      turnsSinceLastNudge: null,
+    });
+    expect(r.fired).toBe(true);
+    expect(r.text).toContain("No context-warden ledger");
+    expect(r.text).toContain("step 5.8");
+    expect(r.text).toContain("TaskList");
+  });
+
+  test("prime + active fleet + STALE ledger -> fires with instance + presumed-dead framing", () => {
+    const r = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: staleLedger,
+      turnsSinceLastNudge: null,
+    });
+    expect(r.fired).toBe(true);
+    expect(r.text.toUpperCase()).toContain("PRESUMED DEAD");
+    expect(r.text).toContain("abc12345");
+    expect(r.text).toContain("step 5.8");
+  });
+
+  test("de-dup: within the min-gap it stays silent; at/after the gap it fires again", () => {
+    const near = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: staleLedger,
+      turnsSinceLastNudge: 3,
+    });
+    expect(near.fired).toBe(false);
+    expect(near.text).toBe("");
+    const far = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: staleLedger,
+      turnsSinceLastNudge: 50,
+    });
+    expect(far.fired).toBe(true);
+  });
+
+  test("a counter reset (NEGATIVE turnsSinceLastNudge) is treated as never-nudged and FIRES (MCP-restart backstop, review Finding 1)", () => {
+    // turn (in-memory) resets to 1 on an MCP restart while warden_nudge_turn
+    // persists at, say, 50 -> turnsSinceLastNudge = 1 - 50 = -49. A negative
+    // gap must NOT read as "within the 10-turn window" (that would silence the
+    // deterministic backstop for ~59 turns right when a restart happened).
+    const r = composeWardenNudgeText({
+      role: "prime",
+      fleetSize: 4,
+      ledger: staleLedger,
+      turnsSinceLastNudge: -49,
+    });
+    expect(r.fired).toBe(true);
   });
 });
 

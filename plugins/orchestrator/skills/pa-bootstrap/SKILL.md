@@ -289,16 +289,35 @@ Spawn it in the BACKGROUND via the Agent tool:
   the agent definition itself - `agents/context-warden.md`).
 - `model: "opus"` - NEVER Fable (subagents must not run on Fable).
 - `run_in_background: true`.
-- prompt: tell it to begin its loop - read any prior ledger at the stable
-  path, bank each active session's transcript position, do a first pass,
-  write the ledger, then self-arm its timer. Nothing more; the brief
-  carries the duties.
+- prompt: restate the ABSOLUTE canonical ledger path (resolve the value of
+  `$CLAUDE_PROJECT_DIR/.orchestrator-state/warden-ledger.md`) and tell it to
+  run its **singleton guard FIRST**, then begin its loop: read any prior
+  ledger at that path, bank each active session's transcript position, do a
+  first pass, write the ledger (heartbeat line first), then self-arm its
+  timer at `<=150s`. Restating the absolute path is load-bearing - without it
+  the warden may default to its scratchpad and the ledger dies with your
+  session (incident 9d9a448d). The brief carries the rest of the duties.
 
 If a warden ledger already exists from a prior PA (the path is stable
-across restarts), the new warden picks up from it. **Reliability:** the
-ledger FILE is the source of truth; the warden's completion notification is
-only a doorbell (it has flaked live - always fall back to reading the
-file). This is the ONE subagent PA spawns (see Hard rules).
+across restarts), the new warden picks up from it. This is the ONE subagent
+PA spawns (see Hard rules).
+
+**Liveness, singleton, and teardown (from incident 9d9a448d):**
+- **Liveness = ledger mtime, NOT TaskList.** TaskList does NOT enumerate
+  named background agents (it returned "No tasks found" while two wardens
+  ran). A healthy warden writes the ledger every `<=150s`, so a ledger mtime
+  older than ~7 min during an active fleet means it is dead/stuck - respawn.
+  The plugin ALSO nudges you deterministically when the ledger goes
+  absent/stale (WI 6430ebf6), so you don't have to remember to check.
+- **Singleton.** The warden self-guards duplicates via the ledger heartbeat
+  mutex, but the Agent tool auto-suffixes a name collision to
+  `context-warden-2` rather than rejecting - so if you respawn, KILL THE OLD
+  ONE FIRST (teardown below); do not rely on the name alone.
+- **Teardown = `TaskStop` by name** (verified working). Stop the warden by
+  its agent name before respawning or when winding down.
+- **Reliability:** the ledger FILE is the source of truth; the completion
+  notification is only a doorbell (it has flaked live - always fall back to
+  reading the file).
 
 ### 6. Check for any existing global pause
 
@@ -324,9 +343,12 @@ their call.
 Print:
 
 ```
-PA ready (Opus 4.7, max effort). <N> SAs in orchestration.
+PA ready (<your actual model>, <your actual effort - xhigh is the standing default>). <N> SAs in orchestration.
 Override state: <none|paused-on-X|global-pause>.
 ```
+
+Fill in your ACTUAL model + effort (do not hardcode - the retired "Opus 4.7,
+max effort" values were stale for months).
 
 ## Comms-flag convention (user-facing output)
 

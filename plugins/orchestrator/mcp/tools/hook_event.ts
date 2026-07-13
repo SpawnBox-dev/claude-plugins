@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { statSync, readFileSync } from "fs";
+import { join } from "path";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
 import { appendSystemEvent, type SystemEvent } from "../engine/agent_channel_state";
@@ -220,12 +222,18 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   // per-level-widening thresholds, with escalating wording. Resets on
   // save_progress.
   const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
+  // WI 6430ebf6: deterministic warden-liveness backstop (NOT compaction-gated) -
+  // a prime with an active fleet whose warden ledger is absent/stale gets a
+  // de-duped nudge to (re)spawn it (PA self-checking proved unreliable: ~11h
+  // warden-less, note 9d9a448d).
+  const wardenNudge = composeWardenLivenessNudge(ctx, args.session_id, turn);
 
   const parts: string[] = [reminder];
   if (bridge) parts.push(`Last turn bridge: ${bridge}`);
   if (siblingLine) parts.push(siblingLine);
   if (loopClose) parts.push(loopClose);
   if (checkpointNudge) parts.push(checkpointNudge);
+  if (wardenNudge) parts.push(wardenNudge);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -1270,6 +1278,163 @@ function composeCheckpointCadenceNudge(
     return `[orch] Still uncheckpointed: ${turnsSinceSave} turns / ${activity} substantive actions of work not yet saved. Call save_progress THIS turn - re-deriving lost context after a compaction or crash costs far more than the save.${paTag}`;
   }
   return `[orch] URGENT checkpoint gap: ${turnsSinceSave} turns / ${activity} substantive actions since your last save_progress. You are one compaction away from losing all of it. Call save_progress NOW, before more work.${paTag}`;
+}
+
+// ── WI 6430ebf6: context-warden liveness nudge ──────────────────────────────
+// A PA that never compacts never re-checks its warden (spawn is bootstrap-only;
+// a live PA ran ~11h warden-less, note 9d9a448d). PA self-checking proved
+// unreliable, so this is a DETERMINISTIC recurring check: for a prime session
+// with an active fleet, if the canonical warden ledger is absent or its mtime
+// is stale (a healthy warden writes every <=WARDEN_HEARTBEAT_MAX_INTERVAL_S),
+// nudge PA to (re)spawn it. De-duped so it is never an every-turn nag.
+const WARDEN_HEARTBEAT_MAX_INTERVAL_S = 150;
+const WARDEN_STALE_THRESHOLD_MS = 420_000; // ~2.8x the max interval
+const WARDEN_NUDGE_MIN_GAP_TURNS = 10;
+
+export interface WardenLedgerState {
+  status: "fresh" | "stale" | "absent";
+  ageMs?: number;
+  instance?: string;
+  ts?: string;
+}
+
+/** PURE core of the warden-liveness nudge - all gates + text, deterministically
+ *  testable. The impure gathering (role/fleet/ledger/dedup from disk+DB) lives
+ *  in composeWardenLivenessNudge and stays untested-for-live, same convention
+ *  as composePostCompactReorientation's getLiveSessions glue. */
+export function composeWardenNudgeText(opts: {
+  role: "prime" | "subordinate";
+  fleetSize: number; // total live sessions incl self
+  ledger: WardenLedgerState;
+  turnsSinceLastNudge: number | null; // null = never nudged this session
+}): { text: string; fired: boolean; clearDedup: boolean } {
+  const NONE = { text: "", fired: false, clearDedup: false };
+  // Prime + active-fleet gate. A subordinate has no warden; a solo prime is out
+  // of scope (the 11h-warden-less loss mode was a PA coordinating a live fleet).
+  if (opts.role !== "prime") return NONE;
+  if (opts.fleetSize < 2) return NONE;
+  // A healthy (fresh) ledger: silent, and CLEAR the de-dup so the NEXT staleness
+  // nudges promptly instead of waiting out a stale gap window.
+  if (opts.ledger.status === "fresh") {
+    return { text: "", fired: false, clearDedup: true };
+  }
+  // Absent or stale -> de-dup (never an every-turn nag). A NEGATIVE gap means
+  // the in-memory turn counter reset (MCP restart) below the persisted
+  // last-nudge turn - we can't trust it as "within window", so treat it as
+  // never-nudged and FIRE (review Finding 1: otherwise the backstop goes silent
+  // for ~59 turns right after a restart). The `>= 0` guard is the fix; the shell
+  // then rewrites last-nudge = current turn on fire, self-correcting the gap.
+  if (
+    opts.turnsSinceLastNudge !== null &&
+    opts.turnsSinceLastNudge >= 0 &&
+    opts.turnsSinceLastNudge < WARDEN_NUDGE_MIN_GAP_TURNS
+  ) {
+    return NONE;
+  }
+  const n = opts.fleetSize;
+  const tail =
+    " TaskList does NOT list background agents; the ledger mtime IS the liveness signal.";
+  let text: string;
+  if (opts.ledger.status === "absent") {
+    text =
+      `[orch] No context-warden ledger at the canonical path while ${n} sessions are active - ` +
+      `you have NO context redundancy. Spawn one: /pa-bootstrap step 5.8 (background, Opus).` +
+      tail;
+  } else {
+    // stale: a stale ledger ALWAYS means the last live WRITER stopped - a
+    // duplicate that STOOD DOWN never writes here (it reports to its spawner),
+    // so this is "presumed dead/stuck", never a stand-down artifact.
+    const who = opts.ledger.instance
+      ? `instance ${opts.ledger.instance}`
+      : "the last warden";
+    const when = opts.ledger.ts ? ` at ${opts.ledger.ts}` : "";
+    const age =
+      opts.ledger.ageMs != null
+        ? ` (${Math.round(opts.ledger.ageMs / 1000)}s ago)`
+        : "";
+    text =
+      `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` +
+      `sessions are active - a healthy warden writes every <=${WARDEN_HEARTBEAT_MAX_INTERVAL_S}s, ` +
+      `so it is PRESUMED DEAD/STUCK. Respawn: /pa-bootstrap step 5.8.` +
+      tail;
+  }
+  return { text, fired: true, clearDedup: false };
+}
+
+/** Canonical warden ledger path: <project-root>/.orchestrator-state/warden-ledger.md
+ *  (sibling of agent-channel/, resolved the same way getAgentChannelStateDir
+ *  resolves its root). This is the ONE stable, session-independent location the
+ *  warden writes - see agents/context-warden.md (FIX 1). */
+function wardenLedgerPath(): string | null {
+  const root =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  if (!root) return null;
+  return join(root, ".orchestrator-state", "warden-ledger.md");
+}
+
+/** mtime IS liveness (FIX 2 guarantees a per-pass write). The staleness DECISION
+ *  is mtime-only (robust to any ledger format); the instance/ts are a best-effort
+ *  parse of the top heartbeat line for the nudge TEXT, never load-bearing. */
+function wardenLedgerLiveness(ledgerPath: string): WardenLedgerState {
+  let st;
+  try {
+    st = statSync(ledgerPath);
+  } catch {
+    return { status: "absent" };
+  }
+  const ageMs = Date.now() - st.mtimeMs;
+  if (ageMs <= WARDEN_STALE_THRESHOLD_MS) return { status: "fresh", ageMs };
+  let instance: string | undefined;
+  let ts: string | undefined;
+  try {
+    const head = readFileSync(ledgerPath).subarray(0, 512).toString("utf8");
+    const mi = head.match(/instance=([^\s|]+)/i);
+    const mt = head.match(/\bts=([^\s|]+)/i);
+    if (mi) instance = mi[1];
+    if (mt) ts = mt[1];
+  } catch {
+    /* best-effort - text only */
+  }
+  return { status: "stale", ageMs, instance, ts };
+}
+
+/** Impure shell: gathers role + fleet size + ledger liveness + de-dup state,
+ *  then delegates to the pure composeWardenNudgeText. Stays untested-for-live
+ *  (the getLiveSessions / disk reads are non-hermetic), same convention as the
+ *  other getLiveSessions call sites. */
+function composeWardenLivenessNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  turn: number
+): string {
+  const sid = sanitizeSessionId(sessionId);
+  const live = getLiveSessions();
+  if (!live) return ""; // no agent-channel -> not a fleet, nothing to guard
+  const self = live.find((e) => e.session_id === sid) ?? null;
+  const role: "prime" | "subordinate" =
+    self?.role === "prime" ? "prime" : "subordinate";
+  const ledgerPath = wardenLedgerPath();
+  if (!ledgerPath) return "";
+  const ledger = wardenLedgerLiveness(ledgerPath);
+  const key = `warden_nudge_turn_${sid}`;
+  const last = readIntState(ctx.db, key);
+  const turnsSince = last > 0 ? turn - last : null;
+  const r = composeWardenNudgeText({
+    role,
+    fleetSize: live.length,
+    ledger,
+    turnsSinceLastNudge: turnsSince,
+  });
+  if (r.clearDedup) ctx.db.run(`DELETE FROM plugin_state WHERE key = ?`, [key]);
+  if (r.fired) {
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [key, String(turn), now()]
+    );
+  }
+  return r.text;
 }
 
 function handleSubagentStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {

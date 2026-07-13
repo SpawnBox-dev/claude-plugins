@@ -880,6 +880,14 @@ Your engagement duties:
 - **Heed its alerts.** A stale-checkpoint SA nearing compaction, a
   contradiction, a watch-for that just fired - act on these; they are the
   fleet's memory-loss early-warning.
+- **Keep it alive - liveness is the ledger's mtime, NOT TaskList** (which
+  does not enumerate named background agents - it read "No tasks found"
+  while two wardens ran). A healthy warden writes every `<=150s`; a ledger
+  mtime older than ~7 min during an active fleet means it is dead/stuck -
+  respawn it, killing the old one first with `TaskStop` by name (else the
+  Agent tool auto-suffixes a duplicate `context-warden-2`). The plugin nudges
+  you deterministically when the ledger is absent/stale, so you need not
+  remember to check.
 - **Generalize the RAID reflex.** The warden is the dedicated case, but
   the principle is standing: whenever your own coherence is at risk (not
   only post-compaction - also long-gap resumption, or before a major

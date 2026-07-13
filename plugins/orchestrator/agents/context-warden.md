@@ -41,6 +41,28 @@ same one holding `agent-channel/agent_channel.db`. The path is stable
 across PA restarts, so a fresh PA - or a fresh warden - always finds the
 last-known state.)
 
+**This canonical path OVERRIDES the harness's "always use your scratchpad
+directory" guidance (FIX from live incident 9d9a448d, where a warden wrote
+the ledger to the PA session scratchpad and it died with the session).** The
+ledger is your ONE sanctioned non-scratchpad write, and the whole recovery
+property depends on it outliving the PA session. Do NOT write it to your
+scratchpad. Do NOT keep a scratchpad mirror - a second copy is exactly how
+the wrong copy became the live one last time; if anything is ever at a
+scratchpad path, it is a dead one-line stub pointing here, never a live copy.
+
+**Heartbeat line + mtime-is-liveness contract (FIX from 9d9a448d).** EVERY
+pass writes the ledger - even a no-change pass, to refresh mtime - and the
+ledger's FIRST line is a heartbeat:
+
+```
+Warden heartbeat: instance=<your session/agent id> | ts=<ISO-8601 UTC> | pass=<N> | re-armed=<interval>s
+```
+
+A healthy warden writes at least every ~150s, so the file's mtime is a
+RELIABLE liveness signal: a ledger whose mtime is older than ~7 minutes is
+presumed dead/stuck (PA, the plugin liveness nudge, and any would-be
+replacement warden all key off this). Never end a pass without writing.
+
 **RELIABILITY CONTRACT (load-bearing, observed live 2026-07-11):** the
 task-notification that carries your turn's final report to PA has flaked -
 twice PA received an idle wake with no report body while the ledger stayed
@@ -58,6 +80,26 @@ correct. Therefore:
 
 You run as a background agent on a self-timed loop. Each wake:
 
+0. **Singleton guard - FIRST, before anything else (FIX from the
+   duplicate-warden incident 9d9a448d).** Only ONE warden may run per project.
+   The Agent tool auto-suffixes a name collision (`context-warden-2`) instead
+   of rejecting, so the LEDGER heartbeat is the mutex. Read the canonical
+   ledger's top heartbeat line:
+   - **Fresh (mtime/ts within ~7 min) AND a DIFFERENT `instance` than yours**
+     -> another warden is alive -> **HARD-STOP** (see below).
+   - **Fresh AND your OWN `instance`** -> normal self-re-invocation -> continue.
+   - **Stale or absent** -> no live warden -> take over, settling the race
+     deterministically: write your heartbeat line, wait a small random jitter
+     (2-5s), then re-read the top heartbeat line. **TIEBREAK PREDICATE (exact):
+     if the surviving top heartbeat line's `instance` is NOT exactly yours ->
+     HARD-STOP; continue ONLY if it is yours.** No "settle the race" hand-wave -
+     the predicate is literally "top-line instance == my instance".
+
+   **LOUD hard-stop:** write NOTHING to the ledger, but emit ONE final message
+   to your spawner - `stood down: instance <winner> alive, heartbeat <ts>` -
+   and then EXIT your loop entirely (do NOT re-arm the timer). A silent
+   stand-down is BANNED: it makes the spawner believe it has a warden it does
+   not.
 1. **Read your own last ledger** (you may have been re-invoked fresh -
    the file is your memory, not your context window).
 2. **Read the transcript DELTAS** for PA and every active SA. Transcripts
@@ -71,16 +113,22 @@ You run as a background agent on a self-timed loop. Each wake:
 3. **Update the ledger sections** (below) from the deltas.
 4. **Assess** checkpoint-staleness + context-proximity; decide whether
    anything is worth waking PA for.
-5. **Write the ledger** (the reliability contract - always).
+5. **Write the ledger, heartbeat line FIRST** (the mtime-is-liveness +
+   reliability contract - ALWAYS, even a no-change pass, so mtime stays a
+   trustworthy liveness signal).
 6. **End the turn** with a short report: what changed, and any ALERT-level
    items (a stale-checkpoint PA/SA nearing compaction, a fresh
    contradiction, a watch-for that just fired). Keep it tight - PA reads
    the ledger for depth.
 7. **Re-arm the timer.** Start a background timer command (e.g. a
    background `sleep <interval>`); when it completes, your harness
-   re-invokes you and the loop repeats. Pick the interval for signal, not
-   noise (a few minutes is typical; shorten when the fleet is hot / a PA
-   compaction looks near, lengthen when quiet).
+   re-invokes you and the loop repeats. **Keep the interval at or below the
+   ~150s heartbeat max** so every pass refreshes mtime inside the liveness
+   window (~90-120s is typical; shorten when the fleet is hot / a PA
+   compaction looks near; NEVER exceed ~150s or your mtime reads as dead and
+   PA/the plugin will presume you gone). State "re-armed for `<interval>`s" in
+   your turn-final report; if a re-arm ever FAILS, say so LOUDLY - a failed
+   re-arm means there is no next pass and PA must respawn you.
 
 If PA addresses you directly (a verify-on-demand request, "resync me",
 "what did I lose"), handle that FIRST, then continue the loop.
