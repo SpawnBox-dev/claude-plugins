@@ -76,6 +76,11 @@ import { Database } from "bun:sqlite";
  */
 export type SessionKind = "prime" | "subordinate" | "discord-bot";
 
+/** PA-coherence primitive (WI 19294811-family): a session's fleet-liveness as
+ *  the repurposing query gates on it. `healthy` = reachable; the two `_suspect`
+ *  states mean alive-but-not-reachable and are carried with a TTL. */
+export type LivenessState = "healthy" | "egress_suspect" | "ingress_suspect";
+
 export interface SessionEntry {
   session_id: string;
   id8: string;
@@ -85,6 +90,22 @@ export interface SessionEntry {
   last_heartbeat_at: string;
   current_task?: string | null;
   kind?: SessionKind;
+  // --- PA-coherence primitive (design 2026-07-13) -----------------------------
+  // These are written ONLY by dedicated setters, NEVER by writeSession (a
+  // heartbeat), so they survive the 30s heartbeat cadence. liveness_* in
+  // particular is OBSERVER-written (a peer writes it about the subject).
+  /** Subsystems/files/WIs this session is warm on (auto-derived floor +
+   *  self-declared override). Stored as a JSON array; absent = unknown. */
+  warm_context?: string[] | null;
+  liveness_state?: LivenessState | null;
+  /** ISO-8601 of the freshest observation that set liveness_state (freshest wins). */
+  liveness_ts?: string | null;
+  /** ISO-8601 TTL for a `_suspect` state (null for healthy). */
+  liveness_expires_at?: string | null;
+  /** Self-declared intent: `driving` | `holding-for-<X>` | `idle-available` | `parked`. */
+  hot_path_status?: string | null;
+  /** Self-declared pollution flag: "do NOT steer me, keeping context clean." */
+  keep_clean?: boolean | null;
 }
 
 export interface OverrideState {
@@ -276,7 +297,13 @@ function getDb(stateDir: string): Database {
       started_at TEXT NOT NULL,
       last_heartbeat_at TEXT NOT NULL,
       current_task TEXT,
-      kind TEXT
+      kind TEXT,
+      warm_context TEXT,
+      liveness_state TEXT,
+      liveness_ts TEXT,
+      liveness_expires_at TEXT,
+      hot_path_status TEXT,
+      keep_clean INTEGER
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -305,8 +332,38 @@ function getDb(stateDir: string): Database {
     );
     CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
+  // PA-coherence primitive: additive columns on PRE-EXISTING DBs (the CREATE
+  // above only adds them to fresh DBs). Idempotent - a no-op once present.
+  ensureColumns(db, "sessions", {
+    warm_context: "TEXT",
+    liveness_state: "TEXT",
+    liveness_ts: "TEXT",
+    liveness_expires_at: "TEXT",
+    hot_path_status: "TEXT",
+    keep_clean: "INTEGER",
+  });
   dbCache.set(stateDir, db);
   return db;
+}
+
+/** Idempotently add missing columns to `table`. SQLite's ALTER TABLE ADD COLUMN
+ *  errors if the column exists, so guard on PRAGMA table_info. Additive only -
+ *  never drops or retypes. Exported for the schema-migration test. */
+export function ensureColumns(
+  db: Database,
+  table: string,
+  cols: Record<string, string>,
+): void {
+  const existing = new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+      (c) => c.name,
+    ),
+  );
+  for (const [col, decl] of Object.entries(cols)) {
+    if (!existing.has(col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl};`);
+    }
+  }
 }
 
 // === sessions ===
@@ -320,6 +377,12 @@ interface SessionRow {
   last_heartbeat_at: string;
   current_task: string | null;
   kind: string | null;
+  warm_context: string | null;
+  liveness_state: string | null;
+  liveness_ts: string | null;
+  liveness_expires_at: string | null;
+  hot_path_status: string | null;
+  keep_clean: number | null;
 }
 
 function rowToEntry(r: SessionRow): SessionEntry {
@@ -337,6 +400,20 @@ function rowToEntry(r: SessionRow): SessionEntry {
   // surface as explicit nulls in the returned shape.
   if (r.current_task !== null) entry.current_task = r.current_task;
   if (r.kind !== null) entry.kind = r.kind as SessionKind;
+  // PA-coherence columns (omit-when-NULL, same roundtrip discipline).
+  if (r.warm_context !== null) {
+    try {
+      const parsed = JSON.parse(r.warm_context);
+      if (Array.isArray(parsed)) entry.warm_context = parsed as string[];
+    } catch {
+      // Corrupt JSON -> treat as unknown, don't surface a bad value.
+    }
+  }
+  if (r.liveness_state !== null) entry.liveness_state = r.liveness_state as LivenessState;
+  if (r.liveness_ts !== null) entry.liveness_ts = r.liveness_ts;
+  if (r.liveness_expires_at !== null) entry.liveness_expires_at = r.liveness_expires_at;
+  if (r.hot_path_status !== null) entry.hot_path_status = r.hot_path_status;
+  if (r.keep_clean !== null) entry.keep_clean = r.keep_clean !== 0;
   return entry;
 }
 
@@ -411,7 +488,10 @@ export function readSessions(stateDir: string): SessionEntry[] {
   migrateSessionsLegacy(stateDir, db);
   const rows = prep(
     db,
-    `SELECT session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind FROM sessions`,
+    `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
+            current_task, kind, warm_context, liveness_state, liveness_ts,
+            liveness_expires_at, hot_path_status, keep_clean
+     FROM sessions`,
   ).all() as SessionRow[];
   return rows.map(rowToEntry);
 }
@@ -419,13 +499,27 @@ export function readSessions(stateDir: string): SessionEntry[] {
 export function writeSession(stateDir: string, entry: SessionEntry): void {
   if (!entry?.session_id) return;
   const db = getDb(stateDir);
-  // INSERT OR REPLACE = atomic upsert. No read-modify-write window. Race-free
-  // by SQLite engine semantics (WAL serializes writers via BEGIN IMMEDIATE).
+  // Atomic UPSERT that updates ONLY the base fields on conflict. Changed from
+  // INSERT OR REPLACE (which rewrites the WHOLE row) so that a heartbeat - which
+  // runs every 30s and carries only base fields - does NOT clobber the
+  // PA-coherence columns (warm_context / liveness_* / hot_path_status /
+  // keep_clean). Those are OBSERVER- or self-set via the dedicated setters
+  // below; liveness_* in particular is written by a PEER about this subject and
+  // could never survive if the subject's own heartbeat REPLACE'd the row.
+  // Race-free by SQLite/WAL semantics (BEGIN IMMEDIATE serializes writers).
   prep(
     db,
-    `INSERT OR REPLACE INTO sessions
+    `INSERT INTO sessions
        (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       id8 = excluded.id8,
+       role = excluded.role,
+       name = excluded.name,
+       started_at = excluded.started_at,
+       last_heartbeat_at = excluded.last_heartbeat_at,
+       current_task = excluded.current_task,
+       kind = excluded.kind`,
   ).run(
     entry.session_id,
     entry.id8,
@@ -436,6 +530,66 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
     entry.current_task ?? null,
     entry.kind ?? null,
   );
+}
+
+// === PA-coherence setters (dedicated per-column; never via writeSession) ===
+// Each is an UPDATE on an existing row - a no-op if the session isn't registered
+// yet (the row is created by writeSession on the first heartbeat). Additive and
+// idempotent; safe to call from any observer or the subject itself.
+
+/** Set/replace a session's warm_context (JSON array of subsystem/file/WI tags). */
+export function setWarmContext(stateDir: string, session_id: string, tags: string[]): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET warm_context = ? WHERE session_id = ?`).run(
+    JSON.stringify(tags),
+    session_id,
+  );
+}
+
+/** Set a session's self-declared hot-path status
+ *  (`driving` | `holding-for-<X>` | `idle-available` | `parked`). */
+export function setHotPathStatus(stateDir: string, session_id: string, status: string): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET hot_path_status = ? WHERE session_id = ?`).run(
+    status,
+    session_id,
+  );
+}
+
+/** Set a session's self-declared keep-clean (pollution) flag. */
+export function setKeepClean(stateDir: string, session_id: string, keep: boolean): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET keep_clean = ? WHERE session_id = ?`).run(
+    keep ? 1 : 0,
+    session_id,
+  );
+}
+
+/** Record a fleet-liveness observation about `session_id`, FRESHEST-observation
+ *  wins: the write applies only if `observedAt` is at least as new as the
+ *  stored `liveness_ts` (or none is stored). Any peer may write - there is NO
+ *  single designated observer (that would be a SPOF killing the peer-redundancy
+ *  that makes egress/ingress detection work). A `_suspect` state carries a TTL
+ *  (`ttlSeconds` -> `liveness_expires_at`); `healthy` clears it. */
+export function setSessionLiveness(
+  stateDir: string,
+  session_id: string,
+  opts: { state: LivenessState; observedAt: string; ttlSeconds?: number },
+): void {
+  const db = getDb(stateDir);
+  const expiresAt =
+    opts.state !== "healthy" && opts.ttlSeconds
+      ? new Date(new Date(opts.observedAt).getTime() + opts.ttlSeconds * 1000).toISOString()
+      : null;
+  // Freshest-wins guard in SQL: update only when the incoming observation is not
+  // older than the stored one (NULL stored -> always accept).
+  prep(
+    db,
+    `UPDATE sessions
+       SET liveness_state = ?, liveness_ts = ?, liveness_expires_at = ?
+     WHERE session_id = ?
+       AND (liveness_ts IS NULL OR liveness_ts <= ?)`,
+  ).run(opts.state, opts.observedAt, expiresAt, session_id, opts.observedAt);
 }
 
 export function removeSession(stateDir: string, session_id: string): void {

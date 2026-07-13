@@ -22747,7 +22747,13 @@ function getDb(stateDir) {
       started_at TEXT NOT NULL,
       last_heartbeat_at TEXT NOT NULL,
       current_task TEXT,
-      kind TEXT
+      kind TEXT,
+      warm_context TEXT,
+      liveness_state TEXT,
+      liveness_ts TEXT,
+      liveness_expires_at TEXT,
+      hot_path_status TEXT,
+      keep_clean INTEGER
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -22776,8 +22782,24 @@ function getDb(stateDir) {
     );
     CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
+  ensureColumns(db, "sessions", {
+    warm_context: "TEXT",
+    liveness_state: "TEXT",
+    liveness_ts: "TEXT",
+    liveness_expires_at: "TEXT",
+    hot_path_status: "TEXT",
+    keep_clean: "INTEGER"
+  });
   dbCache.set(stateDir, db);
   return db;
+}
+function ensureColumns(db, table, cols) {
+  const existing = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
+  for (const [col, decl] of Object.entries(cols)) {
+    if (!existing.has(col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl};`);
+    }
+  }
 }
 function rowToEntry(r) {
   const entry = {
@@ -22792,6 +22814,23 @@ function rowToEntry(r) {
     entry.current_task = r.current_task;
   if (r.kind !== null)
     entry.kind = r.kind;
+  if (r.warm_context !== null) {
+    try {
+      const parsed = JSON.parse(r.warm_context);
+      if (Array.isArray(parsed))
+        entry.warm_context = parsed;
+    } catch {}
+  }
+  if (r.liveness_state !== null)
+    entry.liveness_state = r.liveness_state;
+  if (r.liveness_ts !== null)
+    entry.liveness_ts = r.liveness_ts;
+  if (r.liveness_expires_at !== null)
+    entry.liveness_expires_at = r.liveness_expires_at;
+  if (r.hot_path_status !== null)
+    entry.hot_path_status = r.hot_path_status;
+  if (r.keep_clean !== null)
+    entry.keep_clean = r.keep_clean !== 0;
   return entry;
 }
 function migrateSessionsLegacy(stateDir, db) {
@@ -22838,16 +22877,27 @@ function migrateSessionsLegacy(stateDir, db) {
 function readSessions(stateDir) {
   const db = getDb(stateDir);
   migrateSessionsLegacy(stateDir, db);
-  const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind FROM sessions`).all();
+  const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
+            current_task, kind, warm_context, liveness_state, liveness_ts,
+            liveness_expires_at, hot_path_status, keep_clean
+     FROM sessions`).all();
   return rows.map(rowToEntry);
 }
 function writeSession(stateDir, entry) {
   if (!entry?.session_id)
     return;
   const db = getDb(stateDir);
-  prep(db, `INSERT OR REPLACE INTO sessions
+  prep(db, `INSERT INTO sessions
        (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null);
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       id8 = excluded.id8,
+       role = excluded.role,
+       name = excluded.name,
+       started_at = excluded.started_at,
+       last_heartbeat_at = excluded.last_heartbeat_at,
+       current_task = excluded.current_task,
+       kind = excluded.kind`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null);
 }
 function removeSession(stateDir, session_id) {
   const db = getDb(stateDir);
