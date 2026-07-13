@@ -922,15 +922,19 @@ Your engagement duties:
 - **Heed its alerts.** A stale-checkpoint SA nearing compaction, a
   contradiction, a watch-for that just fired - act on these; they are the
   fleet's memory-loss early-warning.
-- **Keep it alive - liveness is the ledger's mtime, NOT TaskList** (which
-  does not enumerate named background agents - it read "No tasks found"
-  while two wardens ran). A healthy warden writes every `<=150s`; a ledger
-  mtime older than ~7 min during an active fleet means it is dead/stuck -
-  respawn it, killing the old one first with `TaskStop` by name (else the
-  Agent tool auto-suffixes a duplicate `context-warden-2`). The plugin nudges
-  you deterministically when the ledger is absent/stale (~7-min automatic
-  backstop); as a coarse manual habit, glance at the ledger mtime yourself
-  every ~10-15 min while lanes are hot (proven cadence, live run 2026-07-13).
+- **Keep it alive - YOU are its liveness loop, not its own timer.** A warden's
+  self-arm timer is FIRE-AND-SIT: a completed background `sleep` does NOT wake a
+  DORMANT warden (the same dormant-subagent re-invocation gap as ingress-death).
+  So the warden cannot keep itself running - **you must POLL its ledger mtime
+  (~every 5 min) and SendMessage-POKE it (past ~6 min) to run its next pass.
+  That poll-and-poke IS the liveness loop** (proven live 2026-07-13; it is why
+  warden-1/2 died dormant trusting their timers). Liveness is the ledger mtime,
+  NOT TaskList (which does not enumerate named background agents - it read "No
+  tasks found" while two wardens ran). If a poke does not revive it (mtime stays
+  stale past ~7 min), RESPAWN it - killing the old one first with `TaskStop` by
+  name (else the Agent tool auto-suffixes a duplicate `context-warden-2`). The
+  plugin also nudges you deterministically when the ledger is absent/stale
+  (~7-min automatic backstop).
 - **Generalize the RAID reflex.** The warden is the dedicated case, but
   the principle is standing: whenever your own coherence is at risk (not
   only post-compaction - also long-gap resumption, or before a major
