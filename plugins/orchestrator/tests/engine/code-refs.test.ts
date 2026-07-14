@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { parseCodeRefs, stringifyCodeRefs } from "../../mcp/utils";
+import { parseCodeRefs, stringifyCodeRefs, codeRefsInput } from "../../mcp/utils";
 import { handleRemember } from "../../mcp/tools/remember";
 import { handleRecall } from "../../mcp/tools/recall";
 import { handleSupersede } from "../../mcp/tools/supersede";
@@ -11,6 +11,35 @@ function makeDb(type: "project" | "global"): Database {
   applyMigrations(db, type);
   return db;
 }
+
+describe("R7.8 codeRefsInput: bare-string coercion (agent-slip forgiveness)", () => {
+  const schema = codeRefsInput("test code_refs");
+
+  test("coerces a bare string to a single-element array", () => {
+    expect(schema.parse("mcp/server.ts")).toEqual(["mcp/server.ts"]);
+  });
+
+  test("passes an array through unchanged", () => {
+    expect(schema.parse(["a.ts", "b.ts"])).toEqual(["a.ts", "b.ts"]);
+  });
+
+  test("does NOT comma-split a bare string (code_refs is an array of paths, not CSV)", () => {
+    expect(schema.parse("a.ts,b.ts")).toEqual(["a.ts,b.ts"]);
+  });
+
+  test("allows undefined (optional) and empty array (clear)", () => {
+    expect(schema.parse(undefined)).toBeUndefined();
+    expect(schema.parse([])).toEqual([]);
+  });
+
+  test("rejects an empty-string ref (min length 1 enforced after coercion)", () => {
+    expect(() => schema.parse("")).toThrow();
+  });
+
+  test("rejects a non-string, non-array value", () => {
+    expect(() => schema.parse(123)).toThrow();
+  });
+});
 
 describe("R5 code_refs: serialization helpers", () => {
   test("stringifyCodeRefs + parseCodeRefs roundtrip", () => {

@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
+import { z } from "zod";
 import type { NoteSummary } from "./types";
 
 /** Generate a UUID v4 identifier. */
@@ -208,6 +209,35 @@ export function stringifyCodeRefs(refs: string[] | null | undefined): string | n
     new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0))
   );
   return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+}
+
+/**
+ * R7.8: single shared Zod input schema for the `code_refs` parameter across the
+ * 5 note/work-item tools (note, update_note, supersede_note, create_work_item,
+ * update_work_item). Defining it once keeps the accepted shape drift-proof.
+ *
+ * It COERCES a bare string into a single-element array, so `code_refs: "path"`
+ * is accepted instead of erroring - a recurring agent slip (PA observed three
+ * different sessions hit the code_refs shape in one night, each costing a retry
+ * turn). A lone string is unambiguously ONE path; we deliberately do NOT
+ * comma-split it (that is the `tags` contract, not code_refs - a path may
+ * legitimately contain characters a CSV split would mangle). Non-string,
+ * non-array values fall through to the array validator, which emits the shape
+ * error. The advertised JSON schema stays "array of strings" (the preprocess
+ * target), so the model still gets correct guidance; the coercion is purely
+ * runtime leniency. Per-element and array bounds match the original inline
+ * schema (each path 1-500 chars; max 50 entries).
+ *
+ * @param desc per-site describe text (the parameter's documentation).
+ */
+export function codeRefsInput(desc: string) {
+  return z
+    .preprocess(
+      (v) => (typeof v === "string" ? [v] : v),
+      z.array(z.string().min(1).max(500)).max(50),
+    )
+    .optional()
+    .describe(desc);
 }
 
 /**

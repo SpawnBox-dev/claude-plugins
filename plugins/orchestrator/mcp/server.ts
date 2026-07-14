@@ -26,7 +26,7 @@ import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpe
 import { resolveNoteId } from "./tools/id_resolver";
 import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
-import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString } from "./utils";
+import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, codeRefsInput } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 
@@ -888,11 +888,7 @@ server.tool(
       })
       .optional()
       .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
-    code_refs: z
-      .array(z.string().min(1).max(500))
-      .max(50)
-      .optional()
-      .describe("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries."),
+    code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries."),
   },
   async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
     session_id = resolveSessionId(session_id);
@@ -1269,7 +1265,7 @@ server.tool(
     context: z.string().optional().describe("New context (replaces existing)"),
     tags: z.string().optional().describe("New tags (replaces existing)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
-    code_refs: z.array(z.string().min(1).max(500)).max(50).optional().describe("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
+    code_refs: codeRefsInput("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
     session_id: z.string().optional().describe("Session ID - attributed to the revision snapshot."),
   },
   async ({ id, content, append_content, context, tags, confidence, code_refs, session_id }) => {
@@ -1466,7 +1462,7 @@ server.tool(
     new_content: z.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
     new_type: z.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
     reason: z.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
-    code_refs: z.array(z.string().min(1).max(500)).max(50).optional().describe("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
+    code_refs: codeRefsInput("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
     session_id: z.string().optional().describe("Session ID - enables cross-session attribution on the supersede action."),
   },
   async ({ old_id, new_id, new_content, new_type, reason, code_refs, session_id }) => {
@@ -1572,7 +1568,7 @@ server.tool(
     due_date: z.string().optional().describe("Due date in YYYY-MM-DD format"),
     tags: z.string().optional(),
     context: z.string().optional(),
-    code_refs: z.array(z.string().min(1).max(500)).max(50).optional().describe("Array of file or module paths this work item points at. Same format as note() code_refs."),
+    code_refs: codeRefsInput("Array of file or module paths this work item points at. Same format as note() code_refs."),
     session_id: z.string().optional().describe("Session ID that created this work item. Enables cross-session discovery."),
   },
   async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, code_refs, session_id }) => {
@@ -1643,7 +1639,7 @@ server.tool(
     tags: z.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
     context: z.string().optional().describe("Updated context (replaces existing; empty string clears)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
-    code_refs: z.array(z.string().min(1).max(500)).max(50).optional().describe("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
+    code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
     blocked_by: z.string().optional().describe("ID of the note blocking this work item (creates blocks link)"),
   },
   async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {

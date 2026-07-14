@@ -20321,6 +20321,9 @@ function stringifyCodeRefs(refs) {
   const cleaned = Array.from(new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0)));
   return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
 }
+function codeRefsInput(desc) {
+  return exports_external.preprocess((v) => typeof v === "string" ? [v] : v, exports_external.array(exports_external.string().min(1).max(500)).max(50)).optional().describe(desc);
+}
 function formatAge(iso, now2 = new Date) {
   const then = new Date(iso);
   const diffMs = now2.getTime() - then.getTime();
@@ -26070,7 +26073,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     target_id: exports_external.string().optional().describe("Required for update_existing / supersede_existing / close_existing actions. The id of the near-duplicate candidate being acted on."),
     reason: exports_external.string().optional().describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread.")
   }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
-  code_refs: exports_external.array(exports_external.string().min(1).max(500)).max(50).optional().describe("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries.")
+  code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries.")
 }, async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
@@ -26410,7 +26413,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   context: exports_external.string().optional().describe("New context (replaces existing)"),
   tags: exports_external.string().optional().describe("New tags (replaces existing)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
-  code_refs: exports_external.array(exports_external.string().min(1).max(500)).max(50).optional().describe("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
+  code_refs: codeRefsInput("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
   session_id: exports_external.string().optional().describe("Session ID - attributed to the revision snapshot.")
 }, async ({ id, content, append_content, context, tags, confidence, code_refs, session_id }) => {
   session_id = resolveSessionId(session_id);
@@ -26549,7 +26552,7 @@ server.tool("supersede_note", "Replace an old note with a new one, preserving hi
   new_content: exports_external.string().optional().describe("Content for a new replacement note created inline. Requires new_type."),
   new_type: exports_external.enum(NOTE_TYPES).optional().describe("Type for the inline replacement note. Required when new_content is provided."),
   reason: exports_external.string().optional().describe("Why the old note is being superseded (recorded in the new note's context)."),
-  code_refs: exports_external.array(exports_external.string().min(1).max(500)).max(50).optional().describe("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
+  code_refs: codeRefsInput("code_refs for the inline-created replacement note. Ignored when new_id is provided (the target note keeps its own refs). See note() code_refs for format."),
   session_id: exports_external.string().optional().describe("Session ID - enables cross-session attribution on the supersede action.")
 }, async ({ old_id, new_id, new_content, new_type, reason, code_refs, session_id }) => {
   session_id = resolveSessionId(session_id);
@@ -26619,7 +26622,7 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format"),
   tags: exports_external.string().optional(),
   context: exports_external.string().optional(),
-  code_refs: exports_external.array(exports_external.string().min(1).max(500)).max(50).optional().describe("Array of file or module paths this work item points at. Same format as note() code_refs."),
+  code_refs: codeRefsInput("Array of file or module paths this work item points at. Same format as note() code_refs."),
   session_id: exports_external.string().optional().describe("Session ID that created this work item. Enables cross-session discovery.")
 }, async ({ content: rawContent, title, description, priority, status, parent_id, due_date, tags, context, code_refs, session_id }) => {
   const content = rawContent || title || description || "";
@@ -26688,7 +26691,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   tags: exports_external.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
   context: exports_external.string().optional().describe("Updated context (replaces existing; empty string clears)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
-  code_refs: exports_external.array(exports_external.string().min(1).max(500)).max(50).optional().describe("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
+  code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
 }, async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
   const projectDb2 = getProjectDb();
