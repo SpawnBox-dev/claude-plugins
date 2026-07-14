@@ -6519,7 +6519,27 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join6 } from "path";
-import { existsSync as existsSync6, readFileSync as readFileSync3, writeFileSync } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
+
+// mcp/engine/lifecycle_log.ts
+import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
+import { dirname } from "path";
+function appendLifecycleLine(filePath, line, capBytes, nowIso) {
+  try {
+    const dir = dirname(filePath);
+    if (!existsSync(dir))
+      mkdirSync(dir, { recursive: true });
+    try {
+      if (statSync(filePath).size > capBytes) {
+        writeFileSync(filePath, `[orchestrator] --- log rotated (>${capBytes}B) at=${nowIso} ---
+`);
+      }
+    } catch {}
+    appendFileSync(filePath, line);
+  } catch {}
+}
+
+// mcp/server.ts
 import { execSync } from "child_process";
 
 // node_modules/zod/v3/external.js
@@ -19534,8 +19554,8 @@ var GLOBAL_TYPES = ["user_pattern", "tool_capability"];
 
 // mcp/db/connection.ts
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "fs";
+import { dirname as dirname2, join } from "path";
 import { homedir } from "os";
 
 // mcp/db/schema.ts
@@ -19954,16 +19974,16 @@ var projectDb = null;
 function getGlobalDbPath() {
   const newPath = join(homedir(), ".claude", "orchestrator", "global.db");
   const legacyPath = join(homedir(), ".orchestrator", "global.db");
-  if (!existsSync(newPath) && existsSync(legacyPath)) {
-    const newDir = dirname(newPath);
-    if (!existsSync(newDir)) {
-      mkdirSync(newDir, { recursive: true });
+  if (!existsSync2(newPath) && existsSync2(legacyPath)) {
+    const newDir = dirname2(newPath);
+    if (!existsSync2(newDir)) {
+      mkdirSync2(newDir, { recursive: true });
     }
     const { copyFileSync } = __require("fs");
     copyFileSync(legacyPath, newPath);
     for (const suffix of ["-wal", "-shm"]) {
       const src = legacyPath + suffix;
-      if (existsSync(src)) {
+      if (existsSync2(src)) {
         copyFileSync(src, newPath + suffix);
       }
     }
@@ -19978,9 +19998,9 @@ function getProjectDbPath() {
   return join(root, ".orchestrator", "project.db");
 }
 function initDb(path, dbType) {
-  const dir = dirname(path);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  const dir = dirname2(path);
+  if (!existsSync2(dir)) {
+    mkdirSync2(dir, { recursive: true });
   }
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
@@ -22144,7 +22164,7 @@ function composeUserProfile(globalDb2) {
 }
 
 // mcp/tools/reflect.ts
-import { existsSync as existsSync2 } from "fs";
+import { existsSync as existsSync3 } from "fs";
 import path from "path";
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
@@ -22240,7 +22260,7 @@ function handleReflect(projectDb2, globalDb2, input) {
         for (const ref of refs) {
           codeRefsChecked++;
           const fullPath = path.join(projectRoot, ref);
-          if (!existsSync2(fullPath)) {
+          if (!existsSync3(fullPath)) {
             codeRefsBroken++;
           }
         }
@@ -22664,17 +22684,17 @@ function handlePrepare(projectDb2, globalDb2, input) {
 }
 
 // mcp/engine/live_sessions.ts
-import { existsSync as existsSync4 } from "fs";
+import { existsSync as existsSync5 } from "fs";
 import { join as join3 } from "path";
 
 // mcp/engine/agent_channel_state.ts
 import {
   readFileSync,
-  existsSync as existsSync3,
-  mkdirSync as mkdirSync2,
+  existsSync as existsSync4,
+  mkdirSync as mkdirSync3,
   unlinkSync,
   readdirSync,
-  statSync
+  statSync as statSync2
 } from "fs";
 import { join as join2 } from "path";
 import { Database as Database2 } from "bun:sqlite";
@@ -22682,8 +22702,8 @@ var SESSIONS_FILE = "sessions.json";
 var STATE_FILE = "state.json";
 var AGENT_CHANNEL_DB_FILE = "agent_channel.db";
 function ensureDir(dir) {
-  if (!existsSync3(dir))
-    mkdirSync2(dir, { recursive: true });
+  if (!existsSync4(dir))
+    mkdirSync3(dir, { recursive: true });
 }
 var tmpSweptDirs = new Set;
 var TMP_SWEEP_MIN_AGE_MS = 5 * 60000;
@@ -22703,7 +22723,7 @@ function sweepStaleTmpArtifacts(stateDir) {
       continue;
     const full = join2(stateDir, name);
     try {
-      if (now3 - statSync(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
+      if (now3 - statSync2(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
         continue;
       unlinkSync(full);
     } catch {}
@@ -22835,7 +22855,7 @@ function rowToEntry(r) {
 }
 function migrateSessionsLegacy(stateDir, db) {
   const legacyPath = join2(stateDir, SESSIONS_FILE);
-  if (!existsSync3(legacyPath))
+  if (!existsSync4(legacyPath))
     return;
   let legacy = [];
   try {
@@ -22917,7 +22937,7 @@ function removeSession(stateDir, session_id) {
 }
 function migrateOverrideStateLegacy(stateDir, db) {
   const legacyPath = join2(stateDir, STATE_FILE);
-  if (!existsSync3(legacyPath))
+  if (!existsSync4(legacyPath))
     return;
   let legacy = null;
   try {
@@ -22972,7 +22992,7 @@ function readOverrideState(stateDir) {
 }
 function migrateOffsetsLegacy(stateDir, db, receiverId8) {
   const legacyPath = join2(stateDir, `offsets-${receiverId8}.json`);
-  if (!existsSync3(legacyPath))
+  if (!existsSync4(legacyPath))
     return;
   let legacy = null;
   try {
@@ -23040,7 +23060,7 @@ function rowToSystemEvent(r) {
 }
 function migrateSystemEventsLegacy(stateDir, db) {
   const legacyPath = join2(stateDir, "system_events.jsonl");
-  if (!existsSync3(legacyPath))
+  if (!existsSync4(legacyPath))
     return;
   let lines = [];
   try {
@@ -23099,10 +23119,10 @@ function readNewSystemEvents(stateDir, lastSeenId) {
 function getAgentChannelStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const stateDir = join3(projectDir, ".orchestrator-state", "agent-channel");
-  if (!existsSync4(stateDir))
+  if (!existsSync5(stateDir))
     return null;
-  const dbExists = existsSync4(join3(stateDir, "agent_channel.db"));
-  const legacyExists = existsSync4(join3(stateDir, "sessions.json"));
+  const dbExists = existsSync5(join3(stateDir, "agent_channel.db"));
+  const legacyExists = existsSync5(join3(stateDir, "sessions.json"));
   if (!dbExists && !legacyExists)
     return null;
   return stateDir;
@@ -23379,7 +23399,7 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { statSync as statSync2, readFileSync as readFileSync2 } from "fs";
+import { statSync as statSync3, readFileSync as readFileSync2 } from "fs";
 import { join as join4 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
@@ -24036,7 +24056,7 @@ function wardenLedgerPath() {
 function wardenLedgerLiveness(ledgerPath) {
   let st;
   try {
-    st = statSync2(ledgerPath);
+    st = statSync3(ledgerPath);
   } catch {
     return { status: "absent" };
   }
@@ -24508,7 +24528,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync, readSync, closeSync, existsSync as existsSync5, statSync as statSync3, readdirSync as readdirSync2 } from "fs";
+import { openSync, readSync, closeSync, existsSync as existsSync6, statSync as statSync4, readdirSync as readdirSync2 } from "fs";
 import { join as join5 } from "path";
 
 // mcp/engine/addressing.ts
@@ -24942,7 +24962,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync3(join5(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -24951,7 +24971,7 @@ class AgentChannel {
     let fd;
     try {
       const path2 = join5(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync3(path2).size;
+      const size = statSync4(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
@@ -25005,7 +25025,7 @@ class AgentChannel {
     }
   }
   listJsonlFiles() {
-    if (!existsSync5(this.projectsHashDir))
+    if (!existsSync6(this.projectsHashDir))
       return [];
     return readdirSync2(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join5(this.projectsHashDir, f));
   }
@@ -25141,7 +25161,7 @@ class AgentChannel {
   processFile(file, sessions, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync3(file);
+      stat = statSync4(file);
     } catch {
       return false;
     }
@@ -25558,7 +25578,7 @@ function getFallbackSessionId() {
   if (claudePid) {
     const perPidFile = join6(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync6(perPidFile)) {
+      if (existsSync7(perPidFile)) {
         const raw = readFileSync3(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
@@ -25571,15 +25591,15 @@ function getFallbackSessionId() {
   }
   const file = join6(stateDir, "active-session");
   try {
-    if (existsSync6(file)) {
+    if (existsSync7(file)) {
       const raw = readFileSync3(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
           const perPidFile = join6(stateDir, `active-session-${claudePid}`);
-          if (!existsSync6(perPidFile)) {
+          if (!existsSync7(perPidFile)) {
             try {
-              writeFileSync(perPidFile, raw, "utf8");
+              writeFileSync2(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
 `);
             } catch {}
@@ -25875,7 +25895,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
     const fallbackFile = join6(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync6(fallbackFile);
+    const fallbackExists = existsSync7(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -27257,9 +27277,18 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
+var MCP_LIFECYCLE_LOG = join6(process.env.CLAUDE_CONFIG_DIR || join6(homedir2(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LOG_CAP_BYTES = 2097152;
+function logMcpLifecycle(line) {
+  appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
+}
+function emitLifecycle(line) {
+  process.stderr.write(line);
+  logMcpLifecycle(line);
+}
 function logShutdownTrigger(trigger) {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
-  process.stderr.write(`[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${uptimeSec} session_id=${resolveSessionId() ?? "<none>"}
+  emitLifecycle(`[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${uptimeSec} session_id=${resolveSessionId() ?? "<none>"}
 `);
 }
 var shutdownLogged = false;
@@ -27277,18 +27306,18 @@ process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
 process.on("SIGINT", () => shutdownOnce("SIGINT"));
 process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
 process.on("uncaughtException", (err) => {
-  process.stderr.write(`[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} msg=${err instanceof Error ? err.message : String(err)}
+  emitLifecycle(`[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} msg=${err instanceof Error ? err.message : String(err)}
 stack=${err instanceof Error ? err.stack ?? "<no stack>" : "<not an Error>"}
 `);
   shutdownOnce("uncaughtException");
 });
 process.on("unhandledRejection", (reason) => {
-  process.stderr.write(`[orchestrator] unhandledRejection at=${new Date().toISOString()} pid=${process.pid} reason=${reason instanceof Error ? reason.message : String(reason)}
+  emitLifecycle(`[orchestrator] unhandledRejection at=${new Date().toISOString()} pid=${process.pid} reason=${reason instanceof Error ? reason.message : String(reason)}
 stack=${reason instanceof Error ? reason.stack ?? "<no stack>" : "<not an Error>"}
 `);
 });
 setInterval(() => {
-  process.stderr.write(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
+  emitLifecycle(`[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} session_id=${resolveSessionId() ?? "<none>"}
 `);
 }, 300000).unref();
 function getProcessCreationTime(pid) {
@@ -27434,7 +27463,7 @@ if (initialParentClaudePid) {
   setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
 }
 async function main() {
-  process.stderr.write(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
+  emitLifecycle(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();

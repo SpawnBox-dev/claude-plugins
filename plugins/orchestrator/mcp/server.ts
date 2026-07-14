@@ -1,5 +1,7 @@
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { appendLifecycleLine } from "./engine/lifecycle_log";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2552,14 +2554,35 @@ function startAgentChannel(): void {
 // can correlate against Claude Code's behavior. Issue observed 2026-05-11:
 // an idle SA's MCP child silently died (session_departed event fired)
 // while claude.exe stayed alive - manual /plugin reconnect was required.
-// We have no Claude Code MCP supervision logs accessible, so the only
-// observability handle is the MCP server's own stderr. Capture the trigger
-// (stdin end vs close, vs signal) + timestamp + pid + uptime so the next
-// occurrence has an evidence trail.
+// CC does not persist MCP-server stderr anywhere readable (the ~/.claude debug /
+// mcp-servers dirs are empty), so lifecycle/crash events written only to stderr
+// vanish after the fact - exactly why a disconnect used to leave no trail.
+// FIX (Jarid-directed 2026-07-14): mirror every lifecycle event (startup,
+// shutdown, uncaughtException+stack, unhandledRejection+stack, 5-min liveness
+// heartbeat) to a DURABLE, cross-session file so the NEXT disconnect is
+// diagnosable - a crash stack = a plugin bug to harden; a heartbeat that just
+// STOPS with no shutdown line = the process was killed (OOM / harness) = env.
+// Each line carries session_id + pid so one global file answers "which MCPs
+// died when". Bounded (2MB, truncate-rotate) + never throws (a crash logger
+// that crashes the MCP would be worse than none).
 const mcpStartMs = Date.now();
+const MCP_LIFECYCLE_LOG = join(
+  process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+  "orchestrator",
+  "mcp-lifecycle.log",
+);
+const MCP_LOG_CAP_BYTES = 2 * 1024 * 1024;
+function logMcpLifecycle(line: string): void {
+  appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
+}
+/** Write a lifecycle line to BOTH stderr (live) and the durable file (post-hoc). */
+function emitLifecycle(line: string): void {
+  process.stderr.write(line);
+  logMcpLifecycle(line);
+}
 function logShutdownTrigger(trigger: string): void {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
-  process.stderr.write(
+  emitLifecycle(
     `[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} ` +
       `pid=${process.pid} uptime_sec=${uptimeSec} ` +
       `session_id=${resolveSessionId() ?? "<none>"}\n`,
@@ -2578,7 +2601,7 @@ process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
 process.on("SIGINT", () => shutdownOnce("SIGINT"));
 process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
 process.on("uncaughtException", (err) => {
-  process.stderr.write(
+  emitLifecycle(
     `[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} ` +
       `msg=${err instanceof Error ? err.message : String(err)}\n` +
       `stack=${err instanceof Error ? (err.stack ?? "<no stack>") : "<not an Error>"}\n`,
@@ -2586,7 +2609,7 @@ process.on("uncaughtException", (err) => {
   shutdownOnce("uncaughtException");
 });
 process.on("unhandledRejection", (reason) => {
-  process.stderr.write(
+  emitLifecycle(
     `[orchestrator] unhandledRejection at=${new Date().toISOString()} pid=${process.pid} ` +
       `reason=${reason instanceof Error ? reason.message : String(reason)}\n` +
       `stack=${reason instanceof Error ? (reason.stack ?? "<no stack>") : "<not an Error>"}\n`,
@@ -2596,12 +2619,14 @@ process.on("unhandledRejection", (reason) => {
   // load-bearing, the next operation will surface it.
 });
 
-// Liveness heartbeat to stderr every 5 minutes. Lets us bracket exactly when
-// the MCP went silent if it ever disconnects unexpectedly - the last "alive"
-// timestamp before the gap is the upper bound for the failure window. Cheap
-// (one stderr write every 5min); no orchestrator-internal effect.
+// Liveness heartbeat every 5 minutes, now durably persisted. Lets us bracket
+// exactly when the MCP went silent if it ever disconnects unexpectedly - the
+// last "alive" line in the file before the gap is the upper bound for the
+// failure window, and the ABSENCE of a following shutdown line means it was
+// killed (OOM / harness) rather than exiting cleanly. Cheap; no orchestrator-
+// internal effect.
 setInterval(() => {
-  process.stderr.write(
+  emitLifecycle(
     `[orchestrator] alive at=${new Date().toISOString()} pid=${process.pid} ` +
       `uptime_sec=${Math.round((Date.now() - mcpStartMs) / 1000)} ` +
       `session_id=${resolveSessionId() ?? "<none>"}\n`,
@@ -2930,10 +2955,11 @@ if (initialParentClaudePid) {
 
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
-  // Startup version banner. Goes to stderr (which Claude Code captures into
-  // the plugin log). Makes "is the new version actually running?" trivially
-  // answerable without inferring from rendering changes.
-  process.stderr.write(
+  // Startup version banner. Persisted durably (stderr + lifecycle file) so it
+  // pairs with the eventual shutdown/crash line: "started at T1, last alive at
+  // T2, no shutdown line" = killed between T2 and T2+5min. Also makes "is the
+  // new version actually running?" trivially answerable.
+  emitLifecycle(
     `[orchestrator] MCP server starting - version=${PLUGIN_VERSION} ` +
       `pid=${process.pid} ` +
       `session_id=${resolveSessionId() ?? "<none>"} ` +
