@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { appendLifecycleLine } from "../../mcp/engine/lifecycle_log";
+import { appendLifecycleLine, emitLifecycleLine } from "../../mcp/engine/lifecycle_log";
 
 let dir: string;
 beforeEach(() => {
@@ -63,5 +63,47 @@ describe("appendLifecycleLine", () => {
       appendLifecycleLine(p, "should-be-swallowed\n", CAP, NOW),
     ).not.toThrow();
     expect(existsSync(p)).toBe(false); // nothing written under the blocker
+  });
+});
+
+describe("emitLifecycleLine", () => {
+  test("writes the durable file even when the stderr writer throws (transport-death safety)", () => {
+    // The whole point: during transport death stderr is a dead pipe and its
+    // write raises (EPIPE-class). That must NOT skip the durable file write -
+    // otherwise the log is blind in exactly the scenario it exists to capture.
+    const fileCalls: string[] = [];
+    const stderr = () => {
+      throw new Error("EPIPE: broken pipe");
+    };
+    expect(() =>
+      emitLifecycleLine(stderr, (s) => fileCalls.push(s), "event\n"),
+    ).not.toThrow();
+    expect(fileCalls).toEqual(["event\n"]);
+  });
+
+  test("writes the file BEFORE stderr", () => {
+    const order: string[] = [];
+    emitLifecycleLine(
+      () => order.push("stderr"),
+      () => order.push("file"),
+      "event\n",
+    );
+    expect(order).toEqual(["file", "stderr"]);
+  });
+
+  test("both sinks receive the exact line on the happy path", () => {
+    let fileLine = "";
+    let stderrLine = "";
+    emitLifecycleLine(
+      (s) => {
+        stderrLine = s;
+      },
+      (s) => {
+        fileLine = s;
+      },
+      "L\n",
+    );
+    expect(fileLine).toBe("L\n");
+    expect(stderrLine).toBe("L\n");
   });
 });

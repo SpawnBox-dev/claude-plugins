@@ -6538,6 +6538,12 @@ function appendLifecycleLine(filePath, line, capBytes, nowIso) {
     appendFileSync(filePath, line);
   } catch {}
 }
+function emitLifecycleLine(writeStderr, writeFile, line) {
+  writeFile(line);
+  try {
+    writeStderr(line);
+  } catch {}
+}
 
 // mcp/server.ts
 import { execSync } from "child_process";
@@ -27283,8 +27289,7 @@ function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
 }
 function emitLifecycle(line) {
-  process.stderr.write(line);
-  logMcpLifecycle(line);
+  emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
 }
 function logShutdownTrigger(trigger) {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);

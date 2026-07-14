@@ -51,3 +51,31 @@ export function appendLifecycleLine(
     // Persistent logging must NEVER crash the MCP. Swallow all errors.
   }
 }
+
+/**
+ * Fan a lifecycle line to the durable file (primary) and stderr (best-effort).
+ *
+ * ORDER IS LOAD-BEARING: the durable file is written FIRST because `writeFile`
+ * (appendLifecycleLine) never throws, so the evidence is captured even when
+ * stderr is a dead/closed pipe. A `process.stderr.write` on a broken pipe CAN
+ * raise (EPIPE-class, especially under Bun) - and that happens during transport
+ * death, which is precisely the disconnect scenario this log exists to
+ * diagnose. Writing stderr first (as the original inline code did) would let an
+ * EPIPE skip the file write in exactly the case we most need it. So: file
+ * first, then stderr wrapped in its own try/catch as strictly best-effort.
+ *
+ * Sinks are injected so the ordering + swallow guarantees are unit-testable
+ * without a live stderr pipe.
+ */
+export function emitLifecycleLine(
+  writeStderr: (line: string) => void,
+  writeFile: (line: string) => void,
+  line: string,
+): void {
+  writeFile(line);
+  try {
+    writeStderr(line);
+  } catch {
+    // stderr may be a dead pipe during transport death - best-effort only.
+  }
+}

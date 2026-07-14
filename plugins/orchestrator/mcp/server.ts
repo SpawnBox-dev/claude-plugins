@@ -1,7 +1,7 @@
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { appendLifecycleLine } from "./engine/lifecycle_log";
+import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2575,10 +2575,13 @@ const MCP_LOG_CAP_BYTES = 2 * 1024 * 1024;
 function logMcpLifecycle(line: string): void {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
 }
-/** Write a lifecycle line to BOTH stderr (live) and the durable file (post-hoc). */
+/**
+ * Write a lifecycle line to BOTH the durable file (primary) and stderr (live,
+ * best-effort). File FIRST so a dead-pipe EPIPE on stderr - the transport-death
+ * case this log exists for - can't skip the durable write. See emitLifecycleLine.
+ */
 function emitLifecycle(line: string): void {
-  process.stderr.write(line);
-  logMcpLifecycle(line);
+  emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
 }
 function logShutdownTrigger(trigger: string): void {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
