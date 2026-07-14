@@ -1,6 +1,5 @@
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
