@@ -23,6 +23,11 @@ export interface ReflectInput {
    *  the maintenance stays available, it just stops blocking the one call
    *  every session must make before it is allowed to respond. */
   skip_merge?: boolean;
+  /** 0.30.96: run the auto-link backfill prune. OFF by default and requires an
+   *  explicit opt-in per call, because it is NOT REVERSIBLE - the auto-linker
+   *  only ever generates links at note-write time, so there is no rebuild path
+   *  and ~750K removed edges do not come back. Park a DB copy first. */
+  prune_links?: boolean;
 }
 
 export interface ReflectResult {
@@ -90,14 +95,27 @@ export function handleReflect(
       projectMerged = mergeDuplicates(projectDb);
     })();
 
-    // 0.30.95: backfill-prune the pre-0.30.73 link saturation. Gated by the
-    // same flag as the merge because it is the same KIND of thing - heavy
-    // maintenance that belongs in an EXPLICIT retro, never in the inline
-    // startup pass. Measured at ~48s on the live DB (750,794 edges removed,
-    // 961,411 -> 210,617), which is exactly why briefing must not run it.
-    projectDb.transaction(() => {
-      linksPruned = pruneSaturatedLinks(projectDb).removed;
-    })();
+    // 0.30.96: the prune requires its OWN explicit opt-in. It is NOT part of
+    // routine maintenance.
+    //
+    // 0.30.95 gated it behind `!skip_merge`, i.e. it ran on any explicit retro.
+    // PA's review caught why that is wrong, and the answer was not what I
+    // assumed: THE PRUNE IS NOT RE-DERIVABLE. Every caller of createAutoLinks
+    // is at note-WRITE time (note / work-item / child creation); there is no
+    // rebuild-all path anywhere in the codebase. So pruning is a ONE-WAY
+    // deletion of ~750K edges, and putting that behind a routine maintenance
+    // verb means an agent running ordinary upkeep performs an irreversible mass
+    // delete it did not ask for.
+    //
+    // Selection is sound (top-N by the same strength/signal/recency ordering
+    // the read path uses, so only never-surfaced edges go) and the type-by-type
+    // counts show zero collateral damage. Neither fact makes it reversible.
+    // Until a rebuild exists, this stays opt-in per call.
+    if (input.prune_links) {
+      projectDb.transaction(() => {
+        linksPruned = pruneSaturatedLinks(projectDb).removed;
+      })();
+    }
   }
 
   projectDb.transaction(() => {

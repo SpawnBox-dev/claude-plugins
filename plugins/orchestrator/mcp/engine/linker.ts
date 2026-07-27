@@ -444,9 +444,26 @@ export const AUTO_LINK_MIN_RELEVANCE = 0.08;
  *
  * WHAT IT KEEPS: the highest-ranked N per source note, ordered EXACTLY as the
  * read path already orders them (recall.ts fetchLinkedNotes: link strength,
- * then target signal, then recency). So the prune removes precisely the edges
- * that were never going to be surfaced anyway - it changes what is STORED
- * without changing what is SHOWN.
+ * then target signal, then recency).
+ *
+ * PRECISE CLAIM, because the loose version is wrong and was caught in review:
+ * "changes what is STORED without changing what is SHOWN" holds AT DEFAULT
+ * SETTINGS ONLY. lookup's default link_limit is 20, comfortably under the cap,
+ * so a default detail-view is bit-identical before and after. But link_limit
+ * accepts up to 500, and a caller who explicitly asks for a wide neighbourhood
+ * WILL see fewer edges afterwards.
+ *
+ * That is an accepted consequence, not an oversight: such a caller now gets the
+ * 25 highest-ranked neighbours instead of 500 mostly-noise ones, which is the
+ * entire point at ~140 edges per note. Stated explicitly so nobody later reads
+ * the invariant as universal - cascade.ts also walks links, but only over
+ * part_of / blocks, which this never touches.
+ *
+ * CAVEAT ON THE ORDERING: `signal` is a weak term right now, because decay
+ * never persisted until 0.30.92 (see reflect.ts) - so signals are undecayed and
+ * flatter than they should be. Link strength is doing most of the work. After
+ * decay has run for a while the ranking gets strictly better; it is not wrong
+ * today, just less discriminating than it will be.
  *
  * Deliberately NOT wired into briefing. It belongs in an explicit maintenance
  * pass; the startup path is a hard-gated call and has no business doing a mass

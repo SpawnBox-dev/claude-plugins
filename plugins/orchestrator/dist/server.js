@@ -22442,9 +22442,11 @@ function handleReflect(projectDb2, globalDb2, input) {
     projectDb2.transaction(() => {
       projectMerged = mergeDuplicates(projectDb2);
     })();
-    projectDb2.transaction(() => {
-      linksPruned = pruneSaturatedLinks(projectDb2).removed;
-    })();
+    if (input.prune_links) {
+      projectDb2.transaction(() => {
+        linksPruned = pruneSaturatedLinks(projectDb2).removed;
+      })();
+    }
   }
   projectDb2.transaction(() => {
     orphanCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes n
