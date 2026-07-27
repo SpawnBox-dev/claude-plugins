@@ -145,6 +145,20 @@ Live case (0.30.72): `lookup({code_ref: "path"})` was rejected by the tool while
 
 Corollary, learned the same session: **prefer shipping CONTENT over shipping a POINTER.** A pointer costs the reader a decision they will usually decline; inlined content costs them nothing. That is why the pre-edit hint now carries the notes rather than asking for a lookup, and why the retrieval triggers run the query themselves.
 
+### Designing a nudge (read before adding one)
+
+Every advisory this plugin emits competes for the same scarce attention, and a bad one does not merely waste a slot - it teaches agents to skim the channel that also carries the good ones. Four separate advisories were caught doing exactly that in a single session (2026-07-27).
+
+**Three rules, each earned from a live failure:**
+
+1. **Fire on STATE CHANGE, not on a tick.** The loop-close nudge fired ~30 times across ~40 turns naming the same work item; PA stopped reading it by turn ten and said outright that if it had ever named a *different* item, it would have been missed. The sibling roster rendered 5-15 times per turn. Both are now content-keyed: identical repeat suppressed, any real change renders immediately, with a floor so a static state cannot vanish entirely.
+
+2. **Name the SPECIFIC thing, and make it actionable.** The one advisory observed being honoured names a peer's id8 and a note id and says what to do with them. The filtered ones were generic exhortations. Specific-and-actionable beats correct-and-vague.
+
+3. **Never assert a diagnosis the signal cannot support.** The ingress watchdog asserted "the session loop is PARKED" plus a physical remedy, on a signal that was 0-for-3. Being pre-formatted as a conclusion is what made careful agents relay it, and a human was sent to press keys at a healthy terminal. If a signal is ambiguous, say so and lead with the cheapest discriminator.
+
+**Open question worth knowing about (note `517db4cd`):** decision `ea5bee61` says informational alerts don't change behaviour and only blocking does. There is now a competing hypothesis - that advisories fail when they are *uninformative*, not when they are *advisory*. If the refinement holds, the fix for an ignored signal is usually rule 1 plus rule 2, which is far cheaper than making it blocking and preserves the agent's judgement. Unresolved; don't treat either as settled.
+
 ### The Goal
 
 Context windows are temporary. The orchestrator is permanent. Every session should leave the knowledge base richer than it found it.
