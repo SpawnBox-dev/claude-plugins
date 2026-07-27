@@ -282,6 +282,15 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
     turn
   );
   if (domainShift) parts.push(domainShift);
+  // 0.30.82: history-rewrite state check. Unconditional (no premise marker
+  // required) because the operation itself is the justification.
+  const rewriteCheck = composeHistoryRewriteNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
+  if (rewriteCheck) parts.push(rewriteCheck);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -470,6 +479,88 @@ const BULK_DESTRUCTIVE_PATTERNS: RegExp[] = [
   // own terms instead of hoisting a shared \b.
   /\b(?:post|send|email|dm|notify|ping|reply)\b[^.]{0,40}(?:\ball\b|\bevery\b|\beach\b|\bthe \d+|~\d+)/i,
 ];
+
+// 0.30.82: HISTORY-REWRITING git operations get their own UNCONDITIONAL check.
+//
+// The 0.30.75 premise detector requires a premise assertion AND a
+// bulk/destructive marker. That conjunction is right for most instructions and
+// WRONG for this class, which the 2026-07-27 PII incident made concrete.
+//
+// PA's own account: "I nearly directed an --amend onto what I'd been TOLD was
+// the tip, on the strength of a report rather than a `git log` I ran myself."
+// The premise there was "your commit is still the tip" - a claim about state,
+// carrying no count, no named tool, no backticked command. The conjunction
+// misses it entirely, and the operation it guards is among the least
+// reversible things the fleet performs.
+//
+// So: for rewrite operations, do not require a premise marker. The premise is
+// ALWAYS the same - "the state is what I last saw / was told it was" - and it
+// is always worth one read to confirm. PA's framing of why this lands hardest
+// on the coordinator: "my instructions carry Jarid's authority", so a directive
+// issued on a stale report is executed as though it were verified.
+const HISTORY_REWRITE_PATTERNS: RegExp[] = [
+  /\b(?:force[- ]?push|push\s+--force|--force-with-lease)\b/i,
+  /\bgit\s+(?:commit\s+)?--amend\b/i,
+  /\bamend\b[^.]{0,40}\b(?:commit|it|that|tip|head)\b/i,
+  /\bgit\s+rebase\b|\brebase\b[^.]{0,30}\b(?:onto|interactive|-i)\b/i,
+  /\b(?:filter-repo|filter-branch|bfg)\b/i,
+  /\bgit\s+reset\s+--hard\b|\breset\s+--hard\b/i,
+  // Hyphenated compounds are the common written form ("squash-and-force"), and
+  // requiring a SPACE before "force" made this miss one of its own motivating
+  // cases on the first run. Caught by the test that feeds the verbatim phrase -
+  // which is the entire point of that discipline (anti_pattern 04359482).
+  /\bsquash[- ]and[- ]force\b/i,
+  /\bsquash\b[^.]{0,40}\b(?:commit|history)\b/i,
+  /\bdrop\s+(?:the\s+)?commit\b|\brewrite\s+(?:the\s+)?history\b/i,
+];
+
+/** PURE: does this instruction propose rewriting git history? Exported for
+ *  tests. Unlike detectsUncheckedPremise this needs NO second signal - the
+ *  operation itself is the justification. */
+export function detectsHistoryRewrite(prompt: string): boolean {
+  if (!prompt) return false;
+  return HISTORY_REWRITE_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: the history-rewrite check. Exported for tests. */
+export function composeHistoryRewriteText(): string {
+  return (
+    "[orch] THIS PROPOSES REWRITING GIT HISTORY - verify the STATE before you act on it, " +
+    "not the REPORT of the state.\n" +
+    "  - Run `git log origin/main..HEAD` and `git log HEAD..origin/main` YOURSELF, now. " +
+    "Confirm the commit you are about to rewrite is still where you think it is. If anything " +
+    "landed on top, the plan changes.\n" +
+    "  - Check the WORKING TREE too, not just the remote. A remote-only check passes while a " +
+    "value sits live in a tracked file, ready to re-arm on the next `git add`.\n" +
+    "  - If this came from someone else's report rather than your own read, that is exactly " +
+    "the case to re-verify: a directive issued on a stale report gets executed as though it " +
+    "were verified.\n" +
+    "  - Prefer the SMALLEST operation that works (amend one tip commit) over a full-history " +
+    "rewrite (filter-repo/BFG), and confirm any secret is gone with a pattern that matches how " +
+    "the data is actually FORMATTED - `587-777` does not match `(587) 777`.\n" +
+    "  This is near-irreversible and it is shared state. One read costs seconds."
+  );
+}
+
+/** Impure shell: fire the history-rewrite check, lightly de-duped. */
+function composeHistoryRewriteNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!detectsHistoryRewrite(userPrompt)) return "";
+  const key = `history_rewrite_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  // Tighter gap than the other triggers: repeating this one during an actual
+  // rewrite sequence is cheap, and missing it is not.
+  if (last > 0 && turn - last >= 0 && turn - last < 2) return "";
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, String(turn), now()]
+  );
+  return composeHistoryRewriteText();
+}
 
 /** PURE: does this instruction assert a premise AND propose bulk/destructive
  *  action? Exported for tests. */

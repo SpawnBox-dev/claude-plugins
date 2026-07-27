@@ -23774,6 +23774,9 @@ function handleUserPromptSubmit(ctx, args) {
   const domainShift = composeDomainShiftNudge(ctx, args.session_id, userPrompt, turn);
   if (domainShift)
     parts.push(domainShift);
+  const rewriteCheck = composeHistoryRewriteNudge(ctx, args.session_id, userPrompt, turn);
+  if (rewriteCheck)
+    parts.push(rewriteCheck);
   return { additionalContext: parts.join(`
 
 `) };
@@ -23843,6 +23846,38 @@ var BULK_DESTRUCTIVE_PATTERNS = [
   /\b(?:every|all|each of the)\s+[a-z_-]{3,}s\b/i,
   /\b(?:post|send|email|dm|notify|ping|reply)\b[^.]{0,40}(?:\ball\b|\bevery\b|\beach\b|\bthe \d+|~\d+)/i
 ];
+var HISTORY_REWRITE_PATTERNS = [
+  /\b(?:force[- ]?push|push\s+--force|--force-with-lease)\b/i,
+  /\bgit\s+(?:commit\s+)?--amend\b/i,
+  /\bamend\b[^.]{0,40}\b(?:commit|it|that|tip|head)\b/i,
+  /\bgit\s+rebase\b|\brebase\b[^.]{0,30}\b(?:onto|interactive|-i)\b/i,
+  /\b(?:filter-repo|filter-branch|bfg)\b/i,
+  /\bgit\s+reset\s+--hard\b|\breset\s+--hard\b/i,
+  /\bsquash[- ]and[- ]force\b/i,
+  /\bsquash\b[^.]{0,40}\b(?:commit|history)\b/i,
+  /\bdrop\s+(?:the\s+)?commit\b|\brewrite\s+(?:the\s+)?history\b/i
+];
+function detectsHistoryRewrite(prompt) {
+  if (!prompt)
+    return false;
+  return HISTORY_REWRITE_PATTERNS.some((re) => re.test(prompt));
+}
+function composeHistoryRewriteText() {
+  return "[orch] THIS PROPOSES REWRITING GIT HISTORY - verify the STATE before you act on it, " + `not the REPORT of the state.
+` + "  - Run `git log origin/main..HEAD` and `git log HEAD..origin/main` YOURSELF, now. " + "Confirm the commit you are about to rewrite is still where you think it is. If anything " + `landed on top, the plan changes.
+` + "  - Check the WORKING TREE too, not just the remote. A remote-only check passes while a " + "value sits live in a tracked file, ready to re-arm on the next `git add`.\n" + "  - If this came from someone else's report rather than your own read, that is exactly " + "the case to re-verify: a directive issued on a stale report gets executed as though it " + `were verified.
+` + "  - Prefer the SMALLEST operation that works (amend one tip commit) over a full-history " + "rewrite (filter-repo/BFG), and confirm any secret is gone with a pattern that matches how " + "the data is actually FORMATTED - `587-777` does not match `(587) 777`.\n" + "  This is near-irreversible and it is shared state. One read costs seconds.";
+}
+function composeHistoryRewriteNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsHistoryRewrite(userPrompt))
+    return "";
+  const key = `history_rewrite_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 2)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  return composeHistoryRewriteText();
+}
 function detectsUncheckedPremise(prompt) {
   if (!prompt)
     return false;
