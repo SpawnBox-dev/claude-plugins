@@ -3,3 +3,12 @@ node_modules/
 *.db-wal
 *.db-shm
 .sidecar-port
+
+# Throwaway profiling/measurement harnesses run from the plugin ROOT.
+# Committed by accident TWICE on 2026-07-27 (prof3/prof4, then p12) from one
+# cause: a broad `git add -A` after a measurement run. A resolution that
+# depends on remembering fails a third time, so this is the mechanical fix.
+# Anchored with a leading slash so it can only ever match the plugin root -
+# real source lives in mcp/ and tests/ and is unaffected.
+/prof*.ts
+/p[0-9]*.ts
