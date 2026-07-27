@@ -24207,6 +24207,67 @@ function composeAreaEntryContext(ctx, sessionId, filePath) {
 ` + lines + `
   More: \`lookup({code_ref:"${area}"})\`. The KB holds what was TRIED, REJECTED, or ` + `already DECIDED here - which is a different class of thing from what the code comments ` + `explain, and it is the part you cannot recover by reading the source.`;
 }
+var EDITED_FILES_KEY_PREFIX = "edited_files_";
+var EDIT_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+var EDITED_FILES_CAP = 60;
+function recordEditedFile(ctx, sessionId, filePath) {
+  const norm = normalizeCodeRef(filePath);
+  if (!norm)
+    return;
+  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  const seen = row?.value ? row.value.split(`
+`).filter(Boolean) : [];
+  if (seen.includes(norm))
+    return;
+  const next = [...seen, norm].slice(-EDITED_FILES_CAP);
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, next.join(`
+`), now()]);
+}
+function findNotesDescribingEditedFiles(db, editedFiles, max = 4) {
+  const out = [];
+  const seenNotes = new Set;
+  for (const file of editedFiles) {
+    if (out.length >= max)
+      break;
+    const needle = JSON.stringify(file);
+    let rows = [];
+    try {
+      rows = db.query(`SELECT id, type, content FROM notes
+           WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+             AND superseded_by IS NULL AND resolved = 0
+           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+           LIMIT 3`).all(`%${needle}%`);
+    } catch {
+      rows = [];
+    }
+    for (const r of rows) {
+      if (out.length >= max)
+        break;
+      if (seenNotes.has(r.id))
+        continue;
+      seenNotes.add(r.id);
+      out.push({ ...r, file });
+    }
+  }
+  return out;
+}
+function composeEditedFileCuration(ctx, sessionId) {
+  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  const files = row?.value ? row.value.split(`
+`).filter(Boolean) : [];
+  if (files.length === 0)
+    return "";
+  const hits = findNotesDescribingEditedFiles(ctx.db, files);
+  if (hits.length === 0)
+    return "";
+  const lines = hits.map((h) => `  - **${h.id.slice(0, 8)}** [${h.type}] describes \`${h.file}\`: ${truncate(h.content, 110)}`).join(`
+`);
+  return `**Stale-by-your-own-edit.** You changed ${files.length} file${files.length === 1 ? "" : "s"} this session. ` + `These notes describe files you touched:
+${lines}
+` + `  -> For each: does your change make it WRONG? If so \`update_note\` or \`supersede_note\` NOW. ` + `This is the half that gets missed - you are asked to curate what you READ, but the notes most ` + `likely to be silently wrong are the ones describing code you REWROTE without ever opening them.`;
+}
 function handlePostToolUse(ctx, args) {
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
@@ -24226,6 +24287,9 @@ function handlePostToolUse(ctx, args) {
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
   const filePath = args.payload?.file_path ?? null;
   const areaEntry = filePath ? composeAreaEntryContext(ctx, args.session_id, filePath) : "";
+  if (filePath && args.tool_name && EDIT_TOOLS.has(args.tool_name)) {
+    recordEditedFile(ctx, args.session_id, filePath);
+  }
   const parts = [];
   if (areaEntry)
     parts.push(areaEntry);
@@ -24564,6 +24628,11 @@ function handleStop(ctx, args) {
     parts.push(`**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:
 ${list}${more}
   -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`);
+    n++;
+  }
+  const editedCuration = composeEditedFileCuration(ctx, args.session_id);
+  if (editedCuration) {
+    parts.push(`**${n}. ${editedCuration}`);
     n++;
   }
   if (freshNoteList.length > 0) {

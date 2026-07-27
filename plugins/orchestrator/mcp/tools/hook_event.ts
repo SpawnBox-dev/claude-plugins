@@ -1206,6 +1206,106 @@ function composeAreaEntryContext(
   );
 }
 
+// ── 0.31.0: STALE-BY-YOUR-OWN-EDIT detection ───────────────────────────────
+//
+// Jarid's original complaint had two halves. Retrieval got four triggers this
+// session. THIS is the other half, and it was the least covered: agents do not
+// keep notes CURRENT as they work.
+//
+// The existing Stop housekeeping asks you to curate the notes you SURFACED.
+// That is keyed on what you READ - but the strongest staleness signal is what
+// you CHANGED. A note describing a file you just rewrote is now suspect
+// whether or not you ever looked at it, and by construction the notes most
+// likely to be silently wrong are the ones you never opened.
+//
+// So: record the files edited this session, and at wrap-up name the specific
+// notes that describe them. Specific and actionable, which is the shape the one
+// advisory that demonstrably got honoured this session had - not "curate your
+// notes", but "you edited X; note ABC describes X; is it still true?"
+const EDITED_FILES_KEY_PREFIX = "edited_files_";
+const EDIT_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+const EDITED_FILES_CAP = 60;
+
+function recordEditedFile(ctx: HookCtx, sessionId: string, filePath: string): void {
+  const norm = normalizeCodeRef(filePath);
+  if (!norm) return;
+  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  const seen = row?.value ? row.value.split("\n").filter(Boolean) : [];
+  if (seen.includes(norm)) return;
+  const next = [...seen, norm].slice(-EDITED_FILES_CAP);
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, next.join("\n"), now()]
+  );
+}
+
+/** PURE: pair each edited file with the notes describing it. Exported for
+ *  tests. Returns at most `max` findings, newest-signal first. */
+export function findNotesDescribingEditedFiles(
+  db: Database,
+  editedFiles: string[],
+  max = 4
+): Array<{ id: string; type: string; content: string; file: string }> {
+  const out: Array<{ id: string; type: string; content: string; file: string }> = [];
+  const seenNotes = new Set<string>();
+  for (const file of editedFiles) {
+    if (out.length >= max) break;
+    const needle = JSON.stringify(file);
+    let rows: Array<{ id: string; type: string; content: string }> = [];
+    try {
+      rows = db
+        .query(
+          `SELECT id, type, content FROM notes
+           WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+             AND superseded_by IS NULL AND resolved = 0
+           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+           LIMIT 3`
+        )
+        .all(`%${needle}%`) as Array<{ id: string; type: string; content: string }>;
+    } catch {
+      rows = [];
+    }
+    for (const r of rows) {
+      if (out.length >= max) break;
+      if (seenNotes.has(r.id)) continue;
+      seenNotes.add(r.id);
+      out.push({ ...r, file });
+    }
+  }
+  return out;
+}
+
+/** Impure shell: read this session's edited-file list and pair it up. */
+function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
+  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  const files = row?.value ? row.value.split("\n").filter(Boolean) : [];
+  if (files.length === 0) return "";
+
+  const hits = findNotesDescribingEditedFiles(ctx.db, files);
+  if (hits.length === 0) return "";
+
+  const lines = hits
+    .map(
+      (h) =>
+        `  - **${h.id.slice(0, 8)}** [${h.type}] describes \`${h.file}\`: ${truncate(h.content, 110)}`
+    )
+    .join("\n");
+
+  return (
+    `**Stale-by-your-own-edit.** You changed ${files.length} file${files.length === 1 ? "" : "s"} this session. ` +
+    `These notes describe files you touched:\n${lines}\n` +
+    `  -> For each: does your change make it WRONG? If so \`update_note\` or \`supersede_note\` NOW. ` +
+    `This is the half that gets missed - you are asked to curate what you READ, but the notes most ` +
+    `likely to be silently wrong are the ones describing code you REWROTE without ever opening them.`
+  );
+}
+
 function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   // Mark orch activity for the turn so PreToolUse Option B doesn't nag.
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
@@ -1249,6 +1349,12 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   const areaEntry = filePath
     ? composeAreaEntryContext(ctx, args.session_id, filePath)
     : "";
+
+  // 0.31.0: remember which files this session EDITED (not merely read), so
+  // wrap-up can name the notes those edits may have invalidated.
+  if (filePath && args.tool_name && EDIT_TOOLS.has(args.tool_name)) {
+    recordEditedFile(ctx, args.session_id, filePath);
+  }
 
   const parts: string[] = [];
   if (areaEntry) parts.push(areaEntry);
@@ -1993,6 +2099,16 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     parts.push(
       `**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:\n${list}${more}\n  -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`
     );
+    n++;
+  }
+
+  // 0.31.0: named BEFORE the surfaced-notes curation, because it is the
+  // stronger signal - "you rewrote the code this note describes" beats "you
+  // read this note" as evidence of staleness, and it is the one nobody is
+  // currently asked about.
+  const editedCuration = composeEditedFileCuration(ctx, args.session_id);
+  if (editedCuration) {
+    parts.push(`**${n}. ${editedCuration}`);
     n++;
   }
 
