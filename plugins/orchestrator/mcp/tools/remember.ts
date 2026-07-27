@@ -10,7 +10,7 @@ import { handleCheckSimilar } from "./check_similar";
 import { truncate } from "../utils";
 import { appendToNoteContent } from "./update_note_helpers";
 import { cascadeResolution } from "./cascade";
-import { stashPendingNote, takePendingNote, PENDING_NOTE_TTL_MS } from "./pending_note";
+import { stashPendingNote, takePendingNote, PENDING_NOTE_TTL_MS, findConcurrentCaptures } from "./pending_note";
 
 export interface RememberInput {
   content: string;
@@ -168,6 +168,40 @@ function formatLinkSummary(created: number, considered: number, capped: boolean)
   );
 }
 
+
+/**
+ * 0.30.78: surface a PEER's near-simultaneous capture of the same knowledge.
+ *
+ * SA-df343a05's correction is why this is keyword-based and not behavioural:
+ * they avoided the duplicate "by being slow, not by method" - checking ~3
+ * minutes after the broadcast, once the peer note was indexed. Sixty seconds
+ * earlier and they would have filed a third. SA-90bf73bd ran check_similar - a
+ * STRONGER check - and got nothing, because the note existed but had no vector
+ * yet. So "look before you write" is not a defence here: the window where it
+ * fails is exactly the window a broadcast creates, and everyone did look.
+ */
+function formatConcurrentAdvisory(
+  peers: Array<{ id: string; type: string; content: string; session: string | null }>
+): string {
+  if (peers.length === 0) return "";
+  const lines = peers
+    .map((p) => {
+      const who = p.session ? ` by SA-${p.session.slice(0, 8)}` : "";
+      return `  - ${p.id.slice(0, 8)} [${p.type}]${who}: "${truncate(p.content, 100)}"`;
+    })
+    .join("\n");
+  return (
+    `\n\n[CONCURRENT CAPTURE - a peer wrote something very similar in the last 15 min]\n` +
+    lines +
+    `\nThe near-duplicate gate CANNOT catch this: it matches on embeddings, and a note ` +
+    `written seconds ago has no vector yet - so check_similar returns nothing even though ` +
+    `the note exists. This is a keyword check against recent writes instead.\n` +
+    `If you and the peer captured the SAME knowledge, one of you should supersede into the ` +
+    `other NOW - pick by better content, not by who was first - and say so in-channel. An ` +
+    `unreconciled fork is a silently divided truth that nobody notices until someone reads both.`
+  );
+}
+
 /**
  * fc7fcb0d: format the non-blocking consolidation advisory appended to a
  * stored note's message when near-matches existed at >= the advisory floor
@@ -204,7 +238,7 @@ async function insertNote(
   globalDb: Database,
   input: RememberInput,
   embeddingClient?: EmbeddingClient | null
-): Promise<{ noteId: string; linksCreated: number; linksConsidered: number; linksCapped: boolean }> {
+): Promise<{ noteId: string; linksCreated: number; linksConsidered: number; linksCapped: boolean; concurrent: string }> {
   const textForKeywords = [input.content, input.context]
     .filter(Boolean)
     .join(" ");
@@ -276,6 +310,13 @@ async function insertNote(
     linksCreated: links.length,
     linksConsidered: linkStats.considered,
     linksCapped: linkStats.capped,
+    concurrent: formatConcurrentAdvisory(
+      findConcurrentCaptures(db, {
+        noteId,
+        keywords,
+        sessionId: input.session_id,
+      })
+    ),
   };
 }
 
@@ -506,7 +547,7 @@ export async function handleRemember(
     // accept_new: proceed with the normal insert. Resolution is a no-op
     // beyond acknowledging the candidates.
     if (action === "accept_new") {
-      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
       // Parity with the normal store path: surface sub-block-threshold
       // near-matches as a non-blocking consolidation advisory. Without this,
       // accepting-new after a gate block would silently drop the
@@ -519,7 +560,7 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}`,
+        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}${concurrent}`,
       };
     }
 
@@ -581,7 +622,7 @@ export async function handleRemember(
 
     if (action === "supersede_existing") {
       // Create new note, then mark target as superseded by it.
-      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(
@@ -607,7 +648,7 @@ export async function handleRemember(
 
     if (action === "close_existing") {
       // Create new note, then mark target as resolved (work_item also flipped to done).
-      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(
@@ -645,7 +686,7 @@ export async function handleRemember(
   }
 
   // ── Normal path: no gate, no resolution ────────────────────────────────
-  const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -653,7 +694,7 @@ export async function handleRemember(
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}`,
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${concurrent}`,
   };
 }
 

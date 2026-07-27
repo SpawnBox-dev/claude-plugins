@@ -21073,6 +21073,41 @@ var PENDING_NOTE_TTL_MS = 60 * 60 * 1000;
 function pendingKey(token) {
   return `${PENDING_PREFIX}${token}`;
 }
+var CONCURRENT_WINDOW_MS = 15 * 60 * 1000;
+function findConcurrentCaptures(db, opts) {
+  const minShared = opts.minShared ?? 3;
+  if (opts.keywords.length < minShared)
+    return [];
+  const cutoff = new Date(Date.now() - (opts.windowMs ?? CONCURRENT_WINDOW_MS)).toISOString();
+  const rows = db.query(`SELECT id, type, content, keywords, source_session
+       FROM notes
+       WHERE created_at >= ? AND id != ? AND superseded_by IS NULL
+       ORDER BY created_at DESC
+       LIMIT 50`).all(cutoff, opts.noteId);
+  const mine = new Set(opts.keywords.map((k) => k.toLowerCase()));
+  const out = [];
+  for (const r of rows) {
+    if (opts.sessionId && r.source_session === opts.sessionId)
+      continue;
+    const theirs = (r.keywords ?? "").split(",").map((k) => k.trim().toLowerCase()).filter(Boolean);
+    if (theirs.length === 0)
+      continue;
+    let shared = 0;
+    const seen = new Set;
+    for (const k of theirs) {
+      if (mine.has(k) && !seen.has(k)) {
+        seen.add(k);
+        shared++;
+      }
+    }
+    if (shared >= minShared) {
+      out.push({ id: r.id, type: r.type, content: r.content, session: r.source_session });
+    }
+    if (out.length >= 3)
+      break;
+  }
+  return out;
+}
 function gcPendingNotes(db, ttlMs = PENDING_NOTE_TTL_MS) {
   const cutoff = new Date(Date.now() - ttlMs).toISOString();
   const rows = db.query(`SELECT key, updated_at FROM plugin_state WHERE key LIKE ?`).all(`${PENDING_PREFIX}%`);
@@ -21160,6 +21195,21 @@ function formatLinkSummary(created, considered, capped) {
     return base;
   return `${base} (kept the ${created} most distinctive of ${considered} keyword matches - ` + `this note shares vocabulary with a large slice of the KB, so more specific wording ` + `would make it easier to find)`;
 }
+function formatConcurrentAdvisory(peers) {
+  if (peers.length === 0)
+    return "";
+  const lines = peers.map((p) => {
+    const who = p.session ? ` by SA-${p.session.slice(0, 8)}` : "";
+    return `  - ${p.id.slice(0, 8)} [${p.type}]${who}: "${truncate(p.content, 100)}"`;
+  }).join(`
+`);
+  return `
+
+[CONCURRENT CAPTURE - a peer wrote something very similar in the last 15 min]
+` + lines + `
+The near-duplicate gate CANNOT catch this: it matches on embeddings, and a note ` + `written seconds ago has no vector yet - so check_similar returns nothing even though ` + `the note exists. This is a keyword check against recent writes instead.
+` + `If you and the peer captured the SAME knowledge, one of you should supersede into the ` + `other NOW - pick by better content, not by who was first - and say so in-channel. An ` + `unreconciled fork is a silently divided truth that nobody notices until someone reads both.`;
+}
 function formatConsolidationAdvisory(candidates) {
   if (candidates.length === 0)
     return "";
@@ -21224,7 +21274,12 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
     noteId,
     linksCreated: links.length,
     linksConsidered: linkStats.considered,
-    linksCapped: linkStats.capped
+    linksCapped: linkStats.capped,
+    concurrent: formatConcurrentAdvisory(findConcurrentCaptures(db, {
+      noteId,
+      keywords,
+      sessionId: input.session_id
+    }))
   };
 }
 var NOTE_CONTENT_HARD_CHARS = 50000;
@@ -21354,7 +21409,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     const action = input.resolution.action;
     const targetId = input.resolution.target_id;
     if (action === "accept_new") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const advisory2 = formatConsolidationAdvisory(advisoryCandidates);
       return {
         stored: true,
@@ -21362,7 +21417,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}`
+        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}${concurrent2}`
       };
     }
     if (!targetId) {
@@ -21410,7 +21465,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "supersede_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [noteId2, timestamp, timestamp, targetId]);
@@ -21428,7 +21483,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "close_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, targetId]);
@@ -21455,7 +21510,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       message: `Unknown resolution action "${action}".`
     };
   }
-  const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb2, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb2, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -21463,7 +21518,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}`
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${concurrent}`
   };
 }
 function inferDimension(content) {
@@ -21636,8 +21691,8 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
           superseded: false,
           old_id: input.old_id,
           new_id: null,
-          error: `cross-scope supersede not supported: old note lives in ${db === projectDb2 ? "project" : "global"} DB, new_id "${input.new_id}" lives in the other DB. Create a replacement in the same scope and try again.`,
-          message: `Cannot supersede across scopes.`
+          error: `cross-scope supersede not supported: the old note lives in the ${db === projectDb2 ? "project" : "global"} DB and new_id "${input.new_id}" lives in the other. ` + `Scope = a separate database here, and links/embeddings/revisions are DB-local, so this cannot be a silent move. TWO SANCTIONED PATHS: ` + `(1) PREFERRED - re-create the SURVIVING content as a new note in the LOSER's scope via note({scope}), then supersede within that one scope. History is preserved and the merge is a normal same-scope supersede. ` + `(2) REDIRECT STUB - the remedy proven in the field (SA-90bf73bd, 2026-07-27): update_note the LOSER so it opens with "SUPERSEDED IN PRACTICE BY <id> (other scope)" plus one line on why the duplicate exists, then close_thread it. ` + `This keeps the old ID resolvable, keeps every INBOUND LINK, and teaches anyone who lands on the old ID. ` + `NEVER delete_note the loser: delete CASCADE-removes its links - the note this was learned on had 87 - and "in revision history" is strictly weaker than "live". A known, linked duplicate is far cheaper than a lost revision history. ` + `If this came from two sessions capturing the same broadcast, settle it in-channel and pick by better CONTENT, not by who wrote first.`,
+          message: `Cannot supersede across scopes - see error for the two sanctioned paths (re-create in one scope, or link-and-close; never delete).`
         };
       }
       return {
@@ -21658,8 +21713,8 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
         superseded: false,
         old_id: input.old_id,
         new_id: null,
-        error: `cross-scope supersede not supported: old note is ${oldIsGlobal ? "global" : "project"}-scoped, new_type "${input.new_type}" would route to ${newGoesGlobal ? "global" : "project"}. Choose a compatible new_type or create the replacement manually in the same scope.`,
-        message: `Cannot supersede across scopes.`
+        error: `cross-scope supersede not supported: the old note is ${oldIsGlobal ? "global" : "project"}-scoped, but new_type "${input.new_type}" routes to the ${newGoesGlobal ? "global" : "project"} DB (some types are always global - see GLOBAL_TYPES). ` + `FIX: pick a new_type that routes to the ${oldIsGlobal ? "global" : "project"} scope, which is usually just keeping the old note's own type. ` + `If the replacement genuinely belongs in the other scope, create it there with note({scope}) and then make the fork explicit on the old note (open it with "SUPERSEDED IN PRACTICE BY <id> (other scope)" and close_thread it). Never delete_note the old one - that discards revision history.`,
+        message: `Cannot supersede across scopes - new_type routes to the other DB. See error for the fix.`
       };
     }
     const created = await handleRemember(projectDb2, globalDb2, {
@@ -26846,10 +26901,11 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     }]
   };
 });
-server.tool("delete_note", "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. Links to/from this note are CASCADE-removed. Equal-priority to note() - curation is as important as capture.", {
+server.tool("delete_note", "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. **Links to/from this note are CASCADE-removed, permanently.** If the note has ANY links this tool REFUSES by default and tells you the count plus the safer path; pass `confirm_cascade: true` only after reading that. For a duplicate or superseded note that has inbound links, the right move is a REDIRECT STUB - update_note it to point at the survivor, then close_thread - which keeps the ID resolvable and every edge intact. Equal-priority to note() - curation is as important as capture.", {
   id: exports_external.string(),
-  reason: exports_external.string().optional().describe("Why this note is being deleted")
-}, async ({ id, reason }) => {
+  reason: exports_external.string().optional().describe("Why this note is being deleted"),
+  confirm_cascade: exports_external.boolean().optional().describe("Required to delete a note that has links. Deleting CASCADE-removes every edge to and from it, which is unrecoverable - the tool will tell you the count and the safer alternative first. Pass true only after reading that.")
+}, async ({ id, reason, confirm_cascade }) => {
   const projectDb2 = getProjectDb();
   const globalDb2 = getGlobalDb();
   let resolved = resolveNoteId(projectDb2, id);
@@ -26868,6 +26924,24 @@ server.tool("delete_note", "Remove a note permanently. Use only when a note is g
   const row = db.query(`SELECT id, type, content FROM notes WHERE id = ?`).get(id);
   if (!row) {
     return { content: [{ type: "text", text: `No note found with id "${id}".` }] };
+  }
+  const linkCount = db.query(`SELECT COUNT(*) AS c FROM links WHERE from_note_id = ? OR to_note_id = ?`).get(id, id).c;
+  if (linkCount > 0 && !confirm_cascade) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `REFUSED - deleting "${id}" would CASCADE-REMOVE ${linkCount} link(s), permanently and unrecoverably.
+
+Deleting is almost never the right cleanup for a duplicate or a superseded note. Prefer, in order:
+  1. REDIRECT STUB (best when the note has inbound links): update_note this note so it opens with "SUPERSEDED BY <id>" plus one line on why it existed, then close_thread it. The ID stays resolvable, all ${linkCount} edges survive, and anyone landing here learns why.
+  2. supersede_note({old_id, new_id}) - replaces it while preserving history and the graph.
+  3. close_thread({id, resolution}) - if the question it tracked is simply settled.
+
+If you have read the above and still want the note and its ${linkCount} link(s) gone, re-call with confirm_cascade: true.`
+        }
+      ]
+    };
   }
   db.run(`DELETE FROM links WHERE from_note_id = ? OR to_note_id = ?`, [id, id]);
   db.run(`DELETE FROM notes WHERE id = ?`, [id]);

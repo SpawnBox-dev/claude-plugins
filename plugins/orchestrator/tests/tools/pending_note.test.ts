@@ -6,6 +6,7 @@ import {
   stashPendingNote,
   takePendingNote,
   gcPendingNotes,
+  findConcurrentCaptures,
   PENDING_NOTE_TTL_MS,
 } from "../../mcp/tools/pending_note";
 import type { EmbeddingClient } from "../../mcp/engine/embeddings";
@@ -285,5 +286,117 @@ describe("gate -> pending_id -> commit (end to end)", () => {
     } as any);
     expect(result.stored).toBe(false);
     expect(result.message).toContain("requires `content`");
+  });
+});
+
+// ===========================================================================
+// 0.30.78: CONCURRENT CAPTURE - the duplication class the gate cannot see.
+//
+// 2026-07-27: PA broadcast one behavioural rule to @all. Three sessions
+// reacted within ~2 minutes. One captured it; one checked, found the existing
+// note and correctly declined; the third ran check_similar, FOUND NOTHING, and
+// filed a duplicate. The gate cleared it.
+//
+// SA-df343a05's correction is why the fix is mechanical rather than
+// behavioural: they avoided the duplicate "by being slow, not by method" -
+// checking ~3 minutes later, once the peer note was indexed. Sixty seconds
+// earlier and they would have filed a third. So "look before you write" is not
+// a defence: the window where it fails is exactly the window a broadcast
+// creates, and everyone did look.
+//
+// Hence a KEYWORD check against recent writes - the notes row is inserted
+// synchronously, so a peer's capture from 90 seconds ago is visible precisely
+// when its embedding is not.
+// ===========================================================================
+describe("concurrent capture detection", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb("project");
+  });
+
+  function insert(opts: {
+    id: string;
+    keywords: string;
+    session: string | null;
+    agoMs?: number;
+  }) {
+    const ts = new Date(Date.now() - (opts.agoMs ?? 1000)).toISOString();
+    db.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, 'convention', ?, NULL, ?, '', 'medium', 0, ?, ?, ?)`,
+      [opts.id, `content for ${opts.id}`, opts.keywords, ts, ts, opts.session]
+    );
+  }
+
+  test("finds a PEER's near-simultaneous capture of the same knowledge", () => {
+    insert({ id: "peer-note", keywords: "browser,tab,navigate,rule", session: "sess-peer" });
+
+    const hits = findConcurrentCaptures(db, {
+      noteId: "mine",
+      keywords: ["browser", "tab", "navigate", "rule"],
+      sessionId: "sess-mine",
+    });
+
+    expect(hits.length).toBe(1);
+    expect(hits[0].id).toBe("peer-note");
+    expect(hits[0].session).toBe("sess-peer");
+  });
+
+  test("ignores the session's OWN recent notes", () => {
+    // A session duplicating itself is usually intentional (a split note).
+    insert({ id: "my-other", keywords: "browser,tab,navigate,rule", session: "sess-mine" });
+    expect(
+      findConcurrentCaptures(db, {
+        noteId: "mine",
+        keywords: ["browser", "tab", "navigate", "rule"],
+        sessionId: "sess-mine",
+      })
+    ).toEqual([]);
+  });
+
+  test("ignores notes outside the recency window", () => {
+    insert({
+      id: "old-peer",
+      keywords: "browser,tab,navigate,rule",
+      session: "sess-peer",
+      agoMs: 60 * 60 * 1000,
+    });
+    expect(
+      findConcurrentCaptures(db, {
+        noteId: "mine",
+        keywords: ["browser", "tab", "navigate", "rule"],
+        sessionId: "sess-mine",
+      })
+    ).toEqual([]);
+  });
+
+  test("requires real overlap, not one incidental shared word", () => {
+    insert({ id: "unrelated", keywords: "browser,cache,eviction", session: "sess-peer" });
+    expect(
+      findConcurrentCaptures(db, {
+        noteId: "mine",
+        keywords: ["browser", "tab", "navigate", "rule"],
+        sessionId: "sess-mine",
+      })
+    ).toEqual([]);
+  });
+
+  test("does NOT depend on embeddings - that is the entire point", () => {
+    // No embeddings row exists for the peer note. check_similar would return
+    // nothing here; this must still find it.
+    insert({ id: "unembedded", keywords: "browser,tab,navigate,rule", session: "sess-peer" });
+    const embeddings = db
+      .query(`SELECT COUNT(*) AS c FROM embeddings`)
+      .get() as { c: number };
+    expect(embeddings.c).toBe(0);
+
+    expect(
+      findConcurrentCaptures(db, {
+        noteId: "mine",
+        keywords: ["browser", "tab", "navigate", "rule"],
+        sessionId: "sess-mine",
+      }).length
+    ).toBe(1);
   });
 });

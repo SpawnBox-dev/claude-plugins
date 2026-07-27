@@ -1412,12 +1412,16 @@ server.tool(
 // ── delete_note ─────────────────────────────────────────────────────────
 server.tool(
   "delete_note",
-  "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. Links to/from this note are CASCADE-removed. Equal-priority to note() - curation is as important as capture.",
+  "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. **Links to/from this note are CASCADE-removed, permanently.** If the note has ANY links this tool REFUSES by default and tells you the count plus the safer path; pass `confirm_cascade: true` only after reading that. For a duplicate or superseded note that has inbound links, the right move is a REDIRECT STUB - update_note it to point at the survivor, then close_thread - which keeps the ID resolvable and every edge intact. Equal-priority to note() - curation is as important as capture.",
   {
     id: z.string(),
     reason: z.string().optional().describe("Why this note is being deleted"),
+    confirm_cascade: z
+      .boolean()
+      .optional()
+      .describe("Required to delete a note that has links. Deleting CASCADE-removes every edge to and from it, which is unrecoverable - the tool will tell you the count and the safer alternative first. Pass true only after reading that."),
   },
-  async ({ id, reason }) => {
+  async ({ id, reason, confirm_cascade }) => {
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
 
@@ -1441,6 +1445,44 @@ server.tool(
 
     if (!row) {
       return { content: [{ type: "text" as const, text: `No note found with id "${id}".` }] };
+    }
+
+    // 0.30.78: STOP THE SILENT CASCADE.
+    //
+    // delete_note is destructive-by-default while LOOKING like a tidy-up, and
+    // the cascade was documented only in the tool description nobody re-reads
+    // at the moment of use. Live cost 2026-07-27: a duplicate cleanup deleted a
+    // note carrying 87 inbound links; the knowledge survived in revision
+    // history but the edges did not, and no warning was shown at any point.
+    //
+    // The proven remedy is a REDIRECT STUB (SA-90bf73bd): update_note the loser
+    // to point at the survivor and close_thread it. That keeps the ID
+    // resolvable, keeps every inbound link, and teaches whoever lands on the
+    // old ID. So the tool now names that path BEFORE it will cascade, and makes
+    // the destructive branch an explicit opt-in rather than the default.
+    const linkCount = (
+      db
+        .query(
+          `SELECT COUNT(*) AS c FROM links WHERE from_note_id = ? OR to_note_id = ?`
+        )
+        .get(id, id) as { c: number }
+    ).c;
+
+    if (linkCount > 0 && !confirm_cascade) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `REFUSED - deleting "${id}" would CASCADE-REMOVE ${linkCount} link(s), permanently and unrecoverably.\n\n` +
+              `Deleting is almost never the right cleanup for a duplicate or a superseded note. Prefer, in order:\n` +
+              `  1. REDIRECT STUB (best when the note has inbound links): update_note this note so it opens with "SUPERSEDED BY <id>" plus one line on why it existed, then close_thread it. The ID stays resolvable, all ${linkCount} edges survive, and anyone landing here learns why.\n` +
+              `  2. supersede_note({old_id, new_id}) - replaces it while preserving history and the graph.\n` +
+              `  3. close_thread({id, resolution}) - if the question it tracked is simply settled.\n\n` +
+              `If you have read the above and still want the note and its ${linkCount} link(s) gone, re-call with confirm_cascade: true.`,
+          },
+        ],
+      };
     }
 
     // Delete links first (in case CASCADE doesn't fire)

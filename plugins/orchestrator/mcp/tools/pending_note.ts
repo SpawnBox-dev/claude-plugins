@@ -49,6 +49,94 @@ function pendingKey(token: string): string {
 }
 
 /**
+ * 0.30.78: CONCURRENT-CAPTURE detection - the duplication class the
+ * near-duplicate gate is structurally blind to.
+ *
+ * Observed 2026-07-27: PA broadcast one behavioural rule to @all. Three
+ * sessions reacted within ~2 minutes. One captured it; one checked, found the
+ * existing note, and correctly declined; the third ran check_similar, FOUND
+ * NOTHING, and filed a duplicate. The gate cleared it.
+ *
+ * WHY THE GATE CANNOT SEE THIS: it compares against EMBEDDED notes, and
+ * embedding happens after the row is written. When the third session queried,
+ * the earlier note either was not embedded yet or was not indexed. So the gate
+ * protects against RE-DERIVING OLD knowledge and is blind to PARALLEL CAPTURE
+ * OF NEW knowledge - which is precisely what a fleet-wide broadcast produces.
+ * PA's read is that this is the more damaging of the two classes: a false
+ * positive costs a round trip, whereas this costs a silently forked truth.
+ *
+ * This check deliberately uses KEYWORDS, not embeddings, because the notes row
+ * is inserted synchronously - so a peer's capture from 90 seconds ago is
+ * visible immediately, exactly when the embedding is not.
+ *
+ * Non-blocking by design: the note is already stored. Losing a capture is
+ * worse than carrying a duplicate for a few minutes, and the author is the
+ * right party to reconcile - so this surfaces the peer's note and id8 and asks
+ * them to merge, rather than rejecting the write.
+ */
+export const CONCURRENT_WINDOW_MS = 15 * 60 * 1000;
+
+export function findConcurrentCaptures(
+  db: Database,
+  opts: {
+    noteId: string;
+    keywords: string[];
+    sessionId?: string;
+    minShared?: number;
+    windowMs?: number;
+  }
+): Array<{ id: string; type: string; content: string; session: string | null }> {
+  const minShared = opts.minShared ?? 3;
+  if (opts.keywords.length < minShared) return [];
+  const cutoff = new Date(
+    Date.now() - (opts.windowMs ?? CONCURRENT_WINDOW_MS)
+  ).toISOString();
+
+  const rows = db
+    .query(
+      `SELECT id, type, content, keywords, source_session
+       FROM notes
+       WHERE created_at >= ? AND id != ? AND superseded_by IS NULL
+       ORDER BY created_at DESC
+       LIMIT 50`
+    )
+    .all(cutoff, opts.noteId) as Array<{
+    id: string;
+    type: string;
+    content: string;
+    keywords: string | null;
+    source_session: string | null;
+  }>;
+
+  const mine = new Set(opts.keywords.map((k) => k.toLowerCase()));
+  const out: Array<{ id: string; type: string; content: string; session: string | null }> = [];
+
+  for (const r of rows) {
+    // A session duplicating ITSELF is a different problem (and usually
+    // intentional - a split note). Only peers count here.
+    if (opts.sessionId && r.source_session === opts.sessionId) continue;
+    const theirs = (r.keywords ?? "")
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+    if (theirs.length === 0) continue;
+    let shared = 0;
+    const seen = new Set<string>();
+    for (const k of theirs) {
+      if (mine.has(k) && !seen.has(k)) {
+        seen.add(k);
+        shared++;
+      }
+    }
+    if (shared >= minShared) {
+      out.push({ id: r.id, type: r.type, content: r.content, session: r.source_session });
+    }
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+/**
  * Delete expired stashes. Called on every stash so the table self-bounds
  * without a cron. Cheap: the prefix scan only ever sees pending rows, and
  * there are at most a handful live at once.

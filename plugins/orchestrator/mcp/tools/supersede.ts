@@ -140,8 +140,32 @@ export async function handleSupersede(
           superseded: false,
           old_id: input.old_id,
           new_id: null,
-          error: `cross-scope supersede not supported: old note lives in ${db === projectDb ? "project" : "global"} DB, new_id "${input.new_id}" lives in the other DB. Create a replacement in the same scope and try again.`,
-          message: `Cannot supersede across scopes.`,
+          // 0.30.78: give the SANCTIONED PATH, not a bare refusal.
+          //
+          // PA flagged this as the nastiest of the concurrent-capture defects:
+          // the consolidation tool fails at precisely the moment it is needed.
+          // Two sessions reacting to one broadcast frequently disagree about
+          // scope - one reads a rule as project-specific, the other as global -
+          // and that disagreement is ITSELF a symptom of concurrent capture. So
+          // the system generates forks its own merge tool structurally cannot
+          // close, and an agent left holding two notes with no sanctioned path
+          // reaches for a manual delete, losing revision history.
+          //
+          // Scope here means a DIFFERENT SQLite DATABASE (project.db vs
+          // global.db), and links/embeddings/revisions are all DB-local, so an
+          // automatic cross-DB move is a real migration, not a flag flip. Until
+          // that is built and tested, the honest fix is to stop leaving the
+          // caller stranded: name the two safe paths explicitly, and say which
+          // one preserves history.
+          error:
+            `cross-scope supersede not supported: the old note lives in the ${db === projectDb ? "project" : "global"} DB and new_id "${input.new_id}" lives in the other. ` +
+            `Scope = a separate database here, and links/embeddings/revisions are DB-local, so this cannot be a silent move. TWO SANCTIONED PATHS: ` +
+            `(1) PREFERRED - re-create the SURVIVING content as a new note in the LOSER's scope via note({scope}), then supersede within that one scope. History is preserved and the merge is a normal same-scope supersede. ` +
+            `(2) REDIRECT STUB - the remedy proven in the field (SA-90bf73bd, 2026-07-27): update_note the LOSER so it opens with "SUPERSEDED IN PRACTICE BY <id> (other scope)" plus one line on why the duplicate exists, then close_thread it. ` +
+            `This keeps the old ID resolvable, keeps every INBOUND LINK, and teaches anyone who lands on the old ID. ` +
+            `NEVER delete_note the loser: delete CASCADE-removes its links - the note this was learned on had 87 - and "in revision history" is strictly weaker than "live". A known, linked duplicate is far cheaper than a lost revision history. ` +
+            `If this came from two sessions capturing the same broadcast, settle it in-channel and pick by better CONTENT, not by who wrote first.`,
+          message: `Cannot supersede across scopes - see error for the two sanctioned paths (re-create in one scope, or link-and-close; never delete).`,
         };
       }
       return {
@@ -163,8 +187,15 @@ export async function handleSupersede(
         superseded: false,
         old_id: input.old_id,
         new_id: null,
-        error: `cross-scope supersede not supported: old note is ${oldIsGlobal ? "global" : "project"}-scoped, new_type "${input.new_type}" would route to ${newGoesGlobal ? "global" : "project"}. Choose a compatible new_type or create the replacement manually in the same scope.`,
-        message: `Cannot supersede across scopes.`,
+        // 0.30.78: same actionable-path treatment as the new_id branch above.
+        // This one is easier to recover from, because the caller usually just
+        // picked a new_type whose GLOBAL_TYPES routing disagrees with the old
+        // note's scope - so naming that as the cause is most of the fix.
+        error:
+          `cross-scope supersede not supported: the old note is ${oldIsGlobal ? "global" : "project"}-scoped, but new_type "${input.new_type}" routes to the ${newGoesGlobal ? "global" : "project"} DB (some types are always global - see GLOBAL_TYPES). ` +
+          `FIX: pick a new_type that routes to the ${oldIsGlobal ? "global" : "project"} scope, which is usually just keeping the old note's own type. ` +
+          `If the replacement genuinely belongs in the other scope, create it there with note({scope}) and then make the fork explicit on the old note (open it with "SUPERSEDED IN PRACTICE BY <id> (other scope)" and close_thread it). Never delete_note the old one - that discards revision history.`,
+        message: `Cannot supersede across scopes - new_type routes to the other DB. See error for the fix.`,
       };
     }
 
