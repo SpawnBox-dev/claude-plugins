@@ -504,6 +504,73 @@ export function pruneSaturatedLinks(
   return { removed: before - after, before, after };
 }
 
+/**
+ * 0.30.97: REGENERATE the auto-link graph from scratch.
+ *
+ * This is the primitive the graph has never had, and its absence is what made
+ * the 0.30.95 prune unsafe. PA's framing, which is the right one: check whether
+ * an operation is RECOVERABLE before checking whether it is CORRECT. A graph
+ * you cannot regenerate is a graph you can never safely repair - every future
+ * fix to link quality inherits the same one-way risk.
+ *
+ * With this, pruning stops being a 750,000-row irreversible deletion and
+ * becomes "a slow afternoon". It is also independently useful: the entire live
+ * graph was built by the PRE-0.30.73 linker, with no cap and no IDF weighting,
+ * so a rebuild re-derives every edge under the current ranking rather than
+ * merely trimming what the old one produced.
+ *
+ * ONLY `related_to` is regenerated - the same boundary the prune uses, and for
+ * the same reason: inferRelationship can emit blocks/depends_on/conflicts_with/
+ * enables, but `supersedes` and `part_of` come only from explicit tools, so
+ * hand-made edges must never be deleted here. Note this means a rebuild does
+ * NOT reproduce auto-generated blocks/enables/etc. edges from the old graph;
+ * those are left exactly as they are, untouched, rather than being destroyed
+ * and re-derived.
+ *
+ * Deliberately NOT wired into retro or briefing. It is an explicit repair
+ * operation, invoked knowingly, and it is slow by nature - every note re-scans
+ * the corpus.
+ */
+export function rebuildAutoLinks(
+  db: Database,
+  opts: { onProgress?: (done: number, total: number) => void } = {}
+): { notes: number; linksBefore: number; linksAfter: number } {
+  const countRelated = () =>
+    (
+      db
+        .query(`SELECT COUNT(*) AS c FROM links WHERE relationship = 'related_to'`)
+        .get() as { c: number }
+    ).c;
+
+  const linksBefore = countRelated();
+
+  const notes = db
+    .query(
+      `SELECT id, keywords FROM notes WHERE keywords IS NOT NULL AND keywords != ''`
+    )
+    .all() as Array<{ id: string; keywords: string }>;
+
+  // Clear ONLY the auto-generated default relationship, then re-derive. Done in
+  // one statement rather than per-note so the graph is never half-old-half-new
+  // if this is wrapped in a transaction by the caller.
+  db.run(`DELETE FROM links WHERE relationship = 'related_to'`);
+
+  let done = 0;
+  for (const note of notes) {
+    const keywords = note.keywords
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean);
+    if (keywords.length > 0) {
+      createAutoLinksWithStats(db, note.id, keywords);
+    }
+    done++;
+    if (opts.onProgress && done % 250 === 0) opts.onProgress(done, notes.length);
+  }
+
+  return { notes: notes.length, linksBefore, linksAfter: countRelated() };
+}
+
 export interface AutoLinkStats {
   links: Link[];
   /** How many candidates cleared minOverlap before ranking/floor/cap. Lets the
@@ -657,8 +724,18 @@ export function createAutoLinksWithStats(
       created_at: timestamp,
     };
 
+    // 0.30.97: OR IGNORE. On a fresh note this can never collide (it has no
+    // edges yet), which is why it never fired in normal operation - but
+    // rebuildAutoLinks re-derives links for EXISTING notes, and
+    // inferRelationship can return a non-`related_to` type for a pair whose
+    // old auto-generated edge of that same type was deliberately preserved.
+    // The unique key is (from, to, relationship), so that is a straight
+    // collision. Keeping the existing row is the correct resolution: it is the
+    // same edge. Found by running the rebuild against a copy of the live DB -
+    // the same UNIQUE-collision class as the merge bug in deduplicator.ts, one
+    // level further in.
     db.run(
-      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+      `INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [
         link.id,

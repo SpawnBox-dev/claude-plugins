@@ -20925,7 +20925,7 @@ function createAutoLinksWithStats(db, noteId, keywords, minOverlap = MIN_SHARED_
       strength,
       created_at: timestamp
     };
-    db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+    db.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`, [
       link.id,
       link.from_note_id,

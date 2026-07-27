@@ -4,6 +4,7 @@ import { applyMigrations } from "../../mcp/db/schema";
 import {
   createAutoLinksWithStats,
   pruneSaturatedLinks,
+  rebuildAutoLinks,
   AUTO_LINK_MAX_PER_NOTE,
 } from "../../mcp/engine/linker";
 import { generateId, now } from "../../mcp/utils";
@@ -281,5 +282,82 @@ describe("pruneSaturatedLinks (backfill)", () => {
     const src = insertNote(db, "a,b,c");
     for (let i = 0; i < 5; i++) link(src, insertNote(db, `n${i}`), "related_to");
     expect(pruneSaturatedLinks(db, 25).removed).toBe(0);
+  });
+});
+
+// ===========================================================================
+// 0.30.97: rebuildAutoLinks - the primitive that makes the prune recoverable.
+//
+// PA's framing, and it is the right order of operations: check whether an
+// operation is RECOVERABLE before checking whether it is CORRECT. A graph you
+// cannot regenerate is a graph you can never safely repair.
+//
+// Also fixes the UNIQUE(from,to,relationship) collision at its SINGLE INSERT
+// SITE rather than per-caller. That constraint bit three times in one session -
+// mergeDuplicates (silently reverting maintenance for months), this rebuild,
+// and by construction any future writer. The defect was never in the callers:
+// inserting into `links` simply was not idempotent.
+//
+// Measured on a copy of the live DB: 83ms/note, ~9.4 minutes for 6,841 notes.
+// Slow by nature (every note re-scans the corpus) and therefore deliberately
+// NOT wired into retro or briefing - it is an explicit repair operation.
+// ===========================================================================
+describe("rebuildAutoLinks", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  test("regenerates related_to edges from scratch", () => {
+    for (let i = 0; i < 6; i++) insertNote(db, "backup,snapshot,retention");
+    db.run(`DELETE FROM links`);
+    expect(
+      (db.query(`SELECT COUNT(*) c FROM links`).get() as { c: number }).c
+    ).toBe(0);
+
+    const r = rebuildAutoLinks(db);
+    expect(r.notes).toBe(6);
+    expect(r.linksAfter).toBeGreaterThan(0);
+  });
+
+  test("does NOT delete hand-made edges it can never re-derive", () => {
+    const a = insertNote(db, "alpha,beta,gamma");
+    const b = insertNote(db, "alpha,beta,gamma");
+    db.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, 'supersedes', 'strong', ?)`,
+      [generateId(), a, b, now()]
+    );
+
+    rebuildAutoLinks(db);
+
+    const kept = db
+      .query(`SELECT COUNT(*) c FROM links WHERE relationship = 'supersedes'`)
+      .get() as { c: number };
+    expect(kept.c).toBe(1);
+  });
+
+  test("is IDEMPOTENT - running it twice does not throw or double up", () => {
+    // This is the regression guard for the UNIQUE collision that killed the
+    // first live run: inferRelationship can return a non-related_to type for a
+    // pair whose preserved edge of that type already exists.
+    for (let i = 0; i < 8; i++) insertNote(db, "daemon,backup,restore");
+
+    const first = rebuildAutoLinks(db);
+    expect(() => rebuildAutoLinks(db)).not.toThrow();
+    const second = rebuildAutoLinks(db);
+    expect(second.linksAfter).toBe(first.linksAfter);
+  });
+
+  test("respects the cap, so a rebuild cannot re-create saturation", () => {
+    for (let i = 0; i < 80; i++) insertNote(db, `session,plugin,update,f${i}`);
+    rebuildAutoLinks(db);
+    const max = db
+      .query(
+        `SELECT MAX(c) m FROM (SELECT from_note_id, COUNT(*) c FROM links WHERE relationship='related_to' GROUP BY from_note_id)`
+      )
+      .get() as { m: number };
+    expect(max.m).toBeLessThanOrEqual(AUTO_LINK_MAX_PER_NOTE);
   });
 });
