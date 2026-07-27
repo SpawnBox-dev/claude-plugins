@@ -110,6 +110,12 @@ function toSummary(row: any): NoteSummary {
  * Compose a session briefing from project and global databases.
  * Optionally filter to specific sections to reduce context cost.
  */
+/** How far ahead the briefing surfaces dated commitments. 30 days is long
+ *  enough that a monthly-cadence external deadline (a credit offer, a registry
+ *  filing) is seen with time to ACT, and short enough that the section stays
+ *  short. */
+export const UPCOMING_HORIZON_DAYS = 30;
+
 export function composeBriefing(
   projectDb: Database,
   globalDb: Database,
@@ -131,6 +137,7 @@ export function composeBriefing(
       blocked_work: [],
       recently_completed: [],
       overdue_work: [],
+      upcoming_work: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
@@ -291,6 +298,7 @@ export function composeBriefing(
   let blockedWork: NoteSummary[] = [];
   let recentlyCompleted: NoteSummary[] = [];
   let overdueWork: NoteSummary[] = [];
+  let upcomingWork: NoteSummary[] = [];
 
   if (include("work_items")) {
     // R3.2: priority tier remains the primary sort (critical still beats
@@ -350,6 +358,40 @@ export function composeBriefing(
       )
       .all(todayStr)
       .map(toSummary);
+
+    // 0.30.74: UPCOMING dated commitments - due within the horizon, NOT yet
+    // due, and deliberately NOT filtered by status.
+    //
+    // Reported by SA-90bf73bd 2026-07-27 with money attached. Two layers, and
+    // you only see the gap with both:
+    //   1. A dated item sitting in `planned`/`proposed` is invisible to the
+    //      default "what's active?" sweep most agents orient with. Their
+    //      CA$600 credit watch is `planned` because that is semantically
+    //      HONEST for a watch item - and that honesty is exactly what hid it.
+    //   2. OVERDUE fires only AFTER the date passes. For a hard EXTERNAL
+    //      deadline that is the one moment the warning is worthless: you
+    //      cannot act on a lapsed offer. The concrete risk was a CA$350 credit
+    //      expiring silently, after which the item recording it would have
+    //      dutifully appeared under OVERDUE.
+    //
+    // Status and deadlines are ORTHOGONAL concerns; letting status gate the
+    // visibility of a date is the defect. Deadlines do not care about
+    // workflow state, so neither does this query.
+    const horizon = new Date(Date.now() + UPCOMING_HORIZON_DAYS * 86400000)
+      .toISOString()
+      .slice(0, 10);
+    upcomingWork = projectDb
+      .query(
+        `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
+         FROM notes
+         WHERE type = 'work_item' AND due_date IS NOT NULL
+         AND due_date >= ? AND due_date <= ?
+         AND status != 'done' AND resolved = 0
+         ORDER BY due_date ASC
+         LIMIT 10`
+      )
+      .all(todayStr, horizon)
+      .map(toSummary);
   }
 
   // R3.3: curation candidates - maintenance-worthy notes surfaced at briefing time
@@ -378,6 +420,7 @@ export function composeBriefing(
     blocked_work: blockedWork,
     recently_completed: recentlyCompleted,
     overdue_work: overdueWork,
+    upcoming_work: upcomingWork,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,

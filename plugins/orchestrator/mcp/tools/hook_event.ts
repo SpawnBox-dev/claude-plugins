@@ -4,7 +4,7 @@ import { join } from "path";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
 import { appendSystemEvent, type SystemEvent } from "../engine/agent_channel_state";
-import { now, normalizeCodeRef } from "../utils";
+import { now, normalizeCodeRef, truncate, extractKeywords } from "../utils";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
 // Cross-session communication is now via agent-channel notifications -
@@ -227,6 +227,13 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   // de-duped nudge to (re)spawn it (PA self-checking proved unreliable: ~11h
   // warden-less, note 9d9a448d).
   const wardenNudge = composeWardenLivenessNudge(ctx, args.session_id, turn);
+  // 0.30.74: retrieval-on-scope-change, hedge-triggered (see above).
+  const scopeRetrieval = composeScopeRetrievalNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
 
   const parts: string[] = [reminder];
   if (bridge) parts.push(`Last turn bridge: ${bridge}`);
@@ -234,8 +241,139 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   if (loopClose) parts.push(loopClose);
   if (checkpointNudge) parts.push(checkpointNudge);
   if (wardenNudge) parts.push(wardenNudge);
+  if (scopeRetrieval) parts.push(scopeRetrieval);
 
   return { additionalContext: parts.join("\n\n") };
+}
+
+// ── 0.30.74: retrieval-on-scope-change ──────────────────────────────────────
+//
+// Jarid, unprompted 2026-07-27: agents are good at WRITING to the orchestrator
+// and bad at READING from it. The moment of failure is SCOPE CHANGE - "i find
+// myself regularly watching an agent do an initial exploration on scope change
+// based on code analysis, and report back to me what it found - and then i have
+// to tell it to look through the kb, git history and docs to find the answers
+// to things it just asked me."
+//
+// Why the existing every-turn "lookup as you go" line does not fix this: it
+// fires on most turns, so it is tuned out (the 5d1c20fc trigger-design defect),
+// and the one concrete call it recommended - lookup({code_ref}) - was REJECTED
+// by the tool until 0.30.72. An instruction that is both constant and sometimes
+// wrong trains agents to ignore the channel it arrives on.
+//
+// THE DETECTOR (SA-df343a05's contribution, and the reason this is tractable):
+// scope change is a vibe, but HEDGING IS A STRING. "i think", "iirc", "wasn't
+// there", "didn't we", "at some point" mark exactly the questions where the
+// ASKER is uncertain and the REPO is not. A hedge also means the PREMISE is
+// itself something to verify - in the worked case the repo corrected Jarid's
+// own framing.
+//
+// Deliberately NOT an every-turn nudge, and deliberately carries CONTENT rather
+// than an instruction to go get content.
+const HEDGE_PATTERNS: RegExp[] = [
+  /\bi think\b/i,
+  /\bi believe\b/i,
+  /\biirc\b/i,
+  /\bif i recall\b/i,
+  /\bwasn'?t there\b/i,
+  /\bdidn'?t we\b/i,
+  /\bdid we ever\b/i,
+  /\bat some point\b/i,
+  /\bi seem to remember\b/i,
+  /\bpretty sure\b/i,
+  /\bi vaguely\b/i,
+  /\bwe used to\b/i,
+  /\bisn'?t there (?:a|an|some)\b/i,
+  /\bwhy (?:is|does|did) .{0,40}\b(again|still)\b/i,
+];
+
+/** PURE: does this prompt hedge? Exported for tests. */
+export function detectsHedge(prompt: string): boolean {
+  if (!prompt) return false;
+  return HEDGE_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: render the retrieval block. Exported for tests. */
+export function composeScopeRetrievalText(
+  hits: Array<{ id: string; type: string; content: string }>
+): string {
+  const head =
+    "[orch] YOUR PROMPT HEDGES (\"i think\" / \"wasn't there\" / \"didn't we\"). That is the " +
+    "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " +
+    "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " +
+    "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " +
+    "a hedged question often contains an assumption the repo will correct.";
+
+  if (hits.length === 0) {
+    return (
+      head +
+      "\n  No stored notes matched this prompt's terms - so check `git log`, `docs/`, and " +
+      "the code, and capture what you find."
+    );
+  }
+
+  const lines = hits
+    .map((h) => `  - [${h.id.slice(0, 8)}] ${h.type}: ${truncate(h.content, 170)}`)
+    .join("\n");
+
+  return (
+    head +
+    "\n\n  POSSIBLY RELEVANT PRIOR KNOWLEDGE (retrieved for you - `lookup({id})` for full bodies):\n" +
+    lines +
+    "\n\n  STALENESS CHECK: for each of these ask not only \"have I read it?\" but \"when this " +
+    "was written, what was true - and is it STILL true?\" A note resting on a live quantity " +
+    "(a count, a status, a date, a \"not yet\") can stay accurate while the CONCLUSION drawn " +
+    "from it expires. If one is now wrong, update it - that is the maintenance half."
+  );
+}
+
+/** Impure shell: hedge-gate, dedup, then retrieve top notes for the prompt's
+ *  salient terms and hand them over inline. */
+function composeScopeRetrievalNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!detectsHedge(userPrompt)) return "";
+
+  // De-dup so a hedge-heavy conversation does not re-fire every turn.
+  const key = `scope_retrieval_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 5) return "";
+
+  const terms = extractKeywords(userPrompt).slice(0, 8);
+  let hits: Array<{ id: string; type: string; content: string }> = [];
+  if (terms.length > 0) {
+    // Rank by how many of the prompt's terms a note carries, then by signal.
+    // Bounded LIKE scan; the notes table is small enough that this stays cheap
+    // and it avoids depending on the embedding sidecar being up.
+    const scoreExpr = terms
+      .map(() => `(CASE WHEN (',' || COALESCE(keywords,'') || ',') LIKE ? THEN 1 ELSE 0 END)`)
+      .join(" + ");
+    const params = terms.map((t: string) => `%,${t},%`);
+    try {
+      hits = ctx.db
+        .query(
+          `SELECT id, type, content, (${scoreExpr}) AS hits
+           FROM notes
+           WHERE superseded_by IS NULL AND resolved = 0
+           HAVING hits >= 2
+           ORDER BY hits DESC, COALESCE(signal, 0) DESC, updated_at DESC
+           LIMIT 4`
+        )
+        .all(...params) as Array<{ id: string; type: string; content: string }>;
+    } catch {
+      hits = [];
+    }
+  }
+
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, String(turn), now()]
+  );
+
+  return composeScopeRetrievalText(hits);
 }
 
 function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
@@ -1897,5 +2035,47 @@ function composeCodeRefsHint(
     [stateKey, currentVersion, now()]
   );
 
-  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
+  // 0.30.74: INLINE THE KNOWLEDGE INSTEAD OF ASKING FOR A LOOKUP.
+  //
+  // This hint used to say "run lookup({code_ref:...}) first". That is an
+  // instruction, and instructions are only as good as compliance: PA reported
+  // seeing this hint DOZENS of times in one session and never once running the
+  // call (which, until 0.30.72, would have been rejected anyway). Jarid's
+  // independent observation is the same failure from the other side - agents
+  // explore code on a scope change and report findings, and he has to tell
+  // them to go read the KB, git history and docs for answers they just asked
+  // him for.
+  //
+  // A pointer costs the agent a decision it will usually decline. The content
+  // costs it nothing. So we spend a few hundred characters and put the actual
+  // notes in front of them - retrieval with no compliance step. The lookup
+  // call is still offered for the full bodies.
+  const notes = db
+    .query(
+      `SELECT id, type, content, updated_at FROM notes
+       WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+         AND superseded_by IS NULL
+       ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+       LIMIT 4`
+    )
+    .all(`%${needle}%`) as Array<{ id: string; type: string; content: string }>;
+
+  if (notes.length === 0) {
+    return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` for file-scoped knowledge that keyword search would miss.`;
+  }
+
+  const lines = notes
+    .map((n) => `  - [${n.id.slice(0, 8)}] ${n.type}: ${truncate(n.content, 160)}`)
+    .join("\n");
+  const more =
+    cnt > notes.length
+      ? `\n  ...and ${cnt - notes.length} more - \`lookup({code_ref:"${norm}"})\` for all of them.`
+      : "";
+
+  return (
+    `PRIOR KNOWLEDGE about this file (${cnt} note${cnt === 1 ? "" : "s"}) - read before editing:\n` +
+    lines +
+    more +
+    `\n  Full bodies: \`lookup({code_ref:"${norm}"})\`. If any of these is now WRONG because of your change, update it.`
+  );
 }

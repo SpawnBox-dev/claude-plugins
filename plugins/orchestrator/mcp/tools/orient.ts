@@ -205,6 +205,20 @@ function formatBriefing(
       lines.push("");
     }
 
+    // 0.30.74: dated commitments that have NOT yet lapsed. Rendered right
+    // after OVERDUE and BEFORE the status-filtered work lists, because a hard
+    // external deadline is actionable only while it is still in the future -
+    // and because status must not gate a date (SA-90bf73bd, 2026-07-27).
+    if (briefing.upcoming_work.length > 0) {
+      lines.push("## UPCOMING DEADLINES (any status)");
+      for (const item of briefing.upcoming_work) {
+        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+        const st = item.status ? ` (${item.status})` : "";
+        lines.push(`- [DUE] ${pri}${st} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
+      }
+      lines.push("");
+    }
+
     if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
       lines.push("## Work Items");
       if (briefing.active_work.length > 0) {

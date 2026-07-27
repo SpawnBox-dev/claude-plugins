@@ -22106,6 +22106,7 @@ function toSummary(row) {
     code_refs: parseCodeRefs(row.code_refs ?? null)
   };
 }
+var UPCOMING_HORIZON_DAYS = 30;
 function composeBriefing(projectDb2, globalDb2, sections) {
   const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const noteCount = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
@@ -22117,6 +22118,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       blocked_work: [],
       recently_completed: [],
       overdue_work: [],
+      upcoming_work: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
@@ -22205,6 +22207,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let blockedWork = [];
   let recentlyCompleted = [];
   let overdueWork = [];
+  let upcomingWork = [];
   if (include("work_items")) {
     activeWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
          FROM notes
@@ -22232,6 +22235,14 @@ function composeBriefing(projectDb2, globalDb2, sections) {
          AND status != 'done' AND resolved = 0
          ORDER BY due_date ASC
          LIMIT 10`).all(todayStr).map(toSummary);
+    const horizon = new Date(Date.now() + UPCOMING_HORIZON_DAYS * 86400000).toISOString().slice(0, 10);
+    upcomingWork = projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
+         FROM notes
+         WHERE type = 'work_item' AND due_date IS NOT NULL
+         AND due_date >= ? AND due_date <= ?
+         AND status != 'done' AND resolved = 0
+         ORDER BY due_date ASC
+         LIMIT 10`).all(todayStr, horizon).map(toSummary);
   }
   const curation_candidates = include("curation_candidates") ? fetchCurationCandidates(projectDb2) : [];
   const suggestedFocus = overdueWork.length > 0 ? truncate(overdueWork[0].content, 100) : activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
@@ -22244,6 +22255,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     blocked_work: blockedWork,
     recently_completed: recentlyCompleted,
     overdue_work: overdueWork,
+    upcoming_work: upcomingWork,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,
@@ -22575,6 +22587,15 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
         const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
         const tagStr = item.tags ? ` {${item.tags}}` : "";
         lines.push(`- \u26A0\uFE0F ${pri}${tagStr} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
+      }
+      lines.push("");
+    }
+    if (briefing.upcoming_work.length > 0) {
+      lines.push("## UPCOMING DEADLINES (any status)");
+      for (const item of briefing.upcoming_work) {
+        const pri = item.priority ? `[${item.priority.toUpperCase()}]` : "";
+        const st = item.status ? ` (${item.status})` : "";
+        lines.push(`- [DUE] ${pri}${st} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
       }
       lines.push("");
     }
@@ -23677,6 +23698,7 @@ function handleUserPromptSubmit(ctx, args) {
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
   const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
   const wardenNudge = composeWardenLivenessNudge(ctx, args.session_id, turn);
+  const scopeRetrieval = composeScopeRetrievalNudge(ctx, args.session_id, userPrompt, turn);
   const parts = [reminder];
   if (bridge)
     parts.push(`Last turn bridge: ${bridge}`);
@@ -23688,9 +23710,72 @@ function handleUserPromptSubmit(ctx, args) {
     parts.push(checkpointNudge);
   if (wardenNudge)
     parts.push(wardenNudge);
+  if (scopeRetrieval)
+    parts.push(scopeRetrieval);
   return { additionalContext: parts.join(`
 
 `) };
+}
+var HEDGE_PATTERNS = [
+  /\bi think\b/i,
+  /\bi believe\b/i,
+  /\biirc\b/i,
+  /\bif i recall\b/i,
+  /\bwasn'?t there\b/i,
+  /\bdidn'?t we\b/i,
+  /\bdid we ever\b/i,
+  /\bat some point\b/i,
+  /\bi seem to remember\b/i,
+  /\bpretty sure\b/i,
+  /\bi vaguely\b/i,
+  /\bwe used to\b/i,
+  /\bisn'?t there (?:a|an|some)\b/i,
+  /\bwhy (?:is|does|did) .{0,40}\b(again|still)\b/i
+];
+function detectsHedge(prompt) {
+  if (!prompt)
+    return false;
+  return HEDGE_PATTERNS.some((re) => re.test(prompt));
+}
+function composeScopeRetrievalText(hits) {
+  const head = `[orch] YOUR PROMPT HEDGES ("i think" / "wasn't there" / "didn't we"). That is the ` + "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " + "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " + "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " + "a hedged question often contains an assumption the repo will correct.";
+  if (hits.length === 0) {
+    return head + "\n  No stored notes matched this prompt's terms - so check `git log`, `docs/`, and " + "the code, and capture what you find.";
+  }
+  const lines = hits.map((h) => `  - [${h.id.slice(0, 8)}] ${h.type}: ${truncate(h.content, 170)}`).join(`
+`);
+  return head + `
+
+  POSSIBLY RELEVANT PRIOR KNOWLEDGE (retrieved for you - \`lookup({id})\` for full bodies):
+` + lines + `
+
+  STALENESS CHECK: for each of these ask not only "have I read it?" but "when this ` + 'was written, what was true - and is it STILL true?" A note resting on a live quantity ' + '(a count, a status, a date, a "not yet") can stay accurate while the CONCLUSION drawn ' + "from it expires. If one is now wrong, update it - that is the maintenance half.";
+}
+function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsHedge(userPrompt))
+    return "";
+  const key = `scope_retrieval_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 5)
+    return "";
+  const terms = extractKeywords(userPrompt).slice(0, 8);
+  let hits = [];
+  if (terms.length > 0) {
+    const scoreExpr = terms.map(() => `(CASE WHEN (',' || COALESCE(keywords,'') || ',') LIKE ? THEN 1 ELSE 0 END)`).join(" + ");
+    const params = terms.map((t) => `%,${t},%`);
+    try {
+      hits = ctx.db.query(`SELECT id, type, content, (${scoreExpr}) AS hits
+           FROM notes
+           WHERE superseded_by IS NULL AND resolved = 0
+           HAVING hits >= 2
+           ORDER BY hits DESC, COALESCE(signal, 0) DESC, updated_at DESC
+           LIMIT 4`).all(...params);
+    } catch {
+      hits = [];
+    }
+  }
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  return composeScopeRetrievalText(hits);
 }
 function handlePreToolUse(ctx, args) {
   const filePath = args.payload?.file_path ?? null;
@@ -24693,7 +24778,21 @@ function composeCodeRefsHint(db, sessionId, filePath) {
   if (prior && prior.value >= currentVersion)
     return "";
   db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [stateKey, currentVersion, now()]);
-  return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` first to pull file-scoped knowledge that keyword search would miss.`;
+  const notes = db.query(`SELECT id, type, content, updated_at FROM notes
+       WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+         AND superseded_by IS NULL
+       ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+       LIMIT 4`).all(`%${needle}%`);
+  if (notes.length === 0) {
+    return `This file has ${cnt} note${cnt === 1 ? "" : "s"} tagged with its path - run \`lookup({code_ref:"${norm}"})\` for file-scoped knowledge that keyword search would miss.`;
+  }
+  const lines = notes.map((n) => `  - [${n.id.slice(0, 8)}] ${n.type}: ${truncate(n.content, 160)}`).join(`
+`);
+  const more = cnt > notes.length ? `
+  ...and ${cnt - notes.length} more - \`lookup({code_ref:"${norm}"})\` for all of them.` : "";
+  return `PRIOR KNOWLEDGE about this file (${cnt} note${cnt === 1 ? "" : "s"}) - read before editing:
+` + lines + more + `
+  Full bodies: \`lookup({code_ref:"${norm}"})\`. If any of these is now WRONG because of your change, update it.`;
 }
 
 // mcp/engine/agent_channel.ts

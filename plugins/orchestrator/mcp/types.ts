@@ -209,6 +209,9 @@ export interface Briefing {
   blocked_work: NoteSummary[];
   recently_completed: NoteSummary[];
   overdue_work: NoteSummary[];
+  /** 0.30.74: dated commitments due SOON, regardless of workflow status. See
+   *  composer.ts for why status must not gate this. */
+  upcoming_work: NoteSummary[];
   neglected_areas: string[];
   drift_warning: string | null;
   user_model_summary: string[];
