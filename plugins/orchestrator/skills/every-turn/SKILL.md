@@ -184,6 +184,8 @@ Four instances in one session (2026-07-27), four different systems, one shape:
 
 **When you must use a proxy** (you cannot measure the property directly), write down what you are actually measuring and how it can diverge from what you mean. Divergence is invisible in the healthy case and shows up precisely in the case you built the check for.
 
+**And confirm the check actually RAN.** A correct predicate that never executed reports exactly like a passing one. On Windows/Git Bash this is routine, not exotic: `origin/main:path` silently became `origin\main;path`, two verifications never ran, and a third **printed SUCCEEDED while failing** - the banner proved the script reached that line, not that the assertion held. Heredocs collapse `\\` to `\`, so a test can "prove" a bug that does not exist. Before trusting a clean result: echo the resolved arguments, or drop the shell layer entirely and use a language-level API. Note this was found *inside the fix for* another check that could not fail - the class reproduces under its own remedy, so apply the fire-then-silence test to your **verification step** too, not only to the original guard.
+
 ## Working with git in this project
 
 | Hazard | Rule |
