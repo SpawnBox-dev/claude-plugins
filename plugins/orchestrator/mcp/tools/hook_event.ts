@@ -1302,7 +1302,11 @@ function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
     `These notes describe files you touched:\n${lines}\n` +
     `  -> For each: does your change make it WRONG? If so \`update_note\` or \`supersede_note\` NOW. ` +
     `This is the half that gets missed - you are asked to curate what you READ, but the notes most ` +
-    `likely to be silently wrong are the ones describing code you REWROTE without ever opening them.`
+    `likely to be silently wrong are the ones describing code you REWROTE without ever opening them.\n` +
+    `  NOTE THE LIMIT: this catches CODE staleness only. A note can equally be invalidated by a live ` +
+    `value moving (a price, a quota, a D1 row), a deployment, or a decision reversed in conversation - ` +
+    `none of those are file edits and none will appear here. If something like that happened this ` +
+    `session, the note it invalidated is still yours to find.`
   );
 }
 
