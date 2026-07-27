@@ -361,3 +361,100 @@ describe("rebuildAutoLinks", () => {
     expect(max.m).toBeLessThanOrEqual(AUTO_LINK_MAX_PER_NOTE);
   });
 });
+
+// ===========================================================================
+// 0.30.98: ROUND TRIP - the test that can actually fail.
+//
+// PA's challenge, and it is the right one: "the rebuild completed in 9.4
+// minutes" is a check that cannot fail in the way that matters. It passes just
+// as happily for a rebuild producing half the edges, or the wrong ones, or the
+// right count of wrong ones.
+//
+// FIDELITY IS TRUE BY CONSTRUCTION for anything the CURRENT writer made:
+// rebuildAutoLinks calls createAutoLinksWithStats, which is the exact function
+// insertNote calls on every note() write. It loops the real writer rather than
+// reimplementing the pairing. These tests prove that cheaply rather than
+// assuming it.
+//
+// THE HONEST LIMIT, and it argues AGAINST pruning the live graph: a rebuild
+// reproduces what the writer WOULD produce TODAY, not the historical edge set.
+// Two reasons - (a) the live graph was built by the PRE-0.30.73 linker with no
+// cap and no IDF, so it is not reproducible even in principle, and (b) IDF is
+// corpus-relative, so an edge derived when the corpus was smaller may not be
+// derived now. So the prune is recoverable for edges the current writer made,
+// and NOT recoverable for the 959K legacy edges it would actually delete.
+// ===========================================================================
+describe("prune -> rebuild round trip", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  /** Exact (from,to) related_to edge set, order-independent. */
+  function edgeSet(d: Database): string[] {
+    return (
+      d
+        .query(
+          `SELECT from_note_id || '>' || to_note_id AS e FROM links
+           WHERE relationship = 'related_to' ORDER BY e`
+        )
+        .all() as Array<{ e: string }>
+    ).map((r) => r.e);
+  }
+
+  test("a graph built by the CURRENT writer survives prune -> rebuild EXACTLY", () => {
+    // Build with the real writer, exactly as note() would.
+    const ids: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      ids.push(insertNote(db, `backup,snapshot,retention,shard${i % 4}`));
+    }
+    for (const id of ids) {
+      const kw = (
+        db.query(`SELECT keywords FROM notes WHERE id = ?`).get(id) as {
+          keywords: string;
+        }
+      ).keywords;
+      createAutoLinksWithStats(db, id, kw.split(",").map((k) => k.trim()));
+    }
+
+    const before = edgeSet(db);
+    expect(before.length).toBeGreaterThan(0);
+
+    pruneSaturatedLinks(db, 5);
+    const pruned = edgeSet(db);
+    expect(pruned.length).toBeLessThan(before.length); // the prune really cut
+
+    rebuildAutoLinks(db);
+    const after = edgeSet(db);
+
+    // The claim that matters: the restored edge set is the ORIGINAL one, not
+    // merely the same size. Compared element-wise, order-independent.
+    expect(after).toEqual(before);
+  });
+
+  test("rebuild is deterministic - twice yields the identical edge set", () => {
+    for (let i = 0; i < 20; i++) insertNote(db, `daemon,wsl,docker,x${i % 3}`);
+    rebuildAutoLinks(db);
+    const first = edgeSet(db);
+    rebuildAutoLinks(db);
+    expect(edgeSet(db)).toEqual(first);
+  });
+
+  test("rebuild reproduces what the WRITER produces, note-for-note", () => {
+    // Fidelity by construction, verified: links made by calling the writer
+    // directly are identical to links made by the rebuild.
+    for (let i = 0; i < 15; i++) insertNote(db, `alpha,beta,gamma,d${i % 2}`);
+    const rows = db.query(`SELECT id, keywords FROM notes`).all() as Array<{
+      id: string;
+      keywords: string;
+    }>;
+    for (const r of rows) {
+      createAutoLinksWithStats(db, r.id, r.keywords.split(",").map((k) => k.trim()));
+    }
+    const writerGraph = edgeSet(db);
+
+    rebuildAutoLinks(db);
+    expect(edgeSet(db)).toEqual(writerGraph);
+  });
+});
