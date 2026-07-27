@@ -20837,41 +20837,83 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   return results;
 }
 function createAutoLinks(db, noteId, keywords, minOverlap = MIN_SHARED_KEYWORDS) {
+  return createAutoLinksWithStats(db, noteId, keywords, minOverlap).links;
+}
+var AUTO_LINK_MAX_PER_NOTE = 25;
+var AUTO_LINK_MIN_RELEVANCE = 0.08;
+function createAutoLinksWithStats(db, noteId, keywords, minOverlap = MIN_SHARED_KEYWORDS) {
   if (keywords.length === 0)
-    return [];
+    return { links: [], considered: 0, capped: false };
   const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
   const sourceRow = db.query(`SELECT type FROM notes WHERE id = ?`).get(noteId);
   const sourceType = sourceRow?.type ?? "insight";
   const candidates = db.query(`SELECT id, type, keywords FROM notes WHERE id != ? AND keywords IS NOT NULL AND keywords != ''`).all(noteId);
-  const links = [];
-  const timestamp = now();
+  const parsedCandidates = [];
+  const df = new Map;
   for (const candidate of candidates) {
     const candidateKeywords = candidate.keywords.split(",").map((k) => k.trim().toLowerCase()).filter((k) => k.length > 0);
-    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
-    if (overlap.length >= minOverlap) {
-      const strength = overlap.length >= 5 ? "strong" : overlap.length >= 3 ? "moderate" : "weak";
-      const relationship = inferRelationship(sourceType, candidate.type);
-      const link = {
-        id: generateId(),
-        from_note_id: noteId,
-        to_note_id: candidate.id,
-        relationship,
-        strength,
-        created_at: timestamp
-      };
-      db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`, [
-        link.id,
-        link.from_note_id,
-        link.to_note_id,
-        link.relationship,
-        link.strength,
-        link.created_at
-      ]);
-      links.push(link);
+    parsedCandidates.push({
+      id: candidate.id,
+      type: candidate.type,
+      keywords: candidateKeywords
+    });
+    const seen = new Set;
+    for (const k of candidateKeywords) {
+      if (noteKeywords.has(k) && !seen.has(k)) {
+        seen.add(k);
+        df.set(k, (df.get(k) ?? 0) + 1);
+      }
     }
   }
-  return links;
+  const corpusSize = parsedCandidates.length + 1;
+  const idf = (term) => Math.log(1 + corpusSize / (1 + (df.get(term) ?? 0)));
+  let totalIdf = 0;
+  for (const k of noteKeywords)
+    totalIdf += idf(k);
+  const scored = [];
+  for (const candidate of parsedCandidates) {
+    const overlap = candidate.keywords.filter((k) => noteKeywords.has(k));
+    if (overlap.length < minOverlap)
+      continue;
+    const sharedTerms = new Set(overlap);
+    let sharedIdf = 0;
+    for (const t of sharedTerms)
+      sharedIdf += idf(t);
+    const relevance = totalIdf > 0 ? sharedIdf / totalIdf : 0;
+    scored.push({
+      id: candidate.id,
+      type: candidate.type,
+      overlap: sharedTerms.size,
+      relevance
+    });
+  }
+  const considered = scored.length;
+  const ranked = scored.filter((s) => s.relevance >= AUTO_LINK_MIN_RELEVANCE).sort((a, b) => b.relevance - a.relevance || b.overlap - a.overlap || a.id.localeCompare(b.id)).slice(0, AUTO_LINK_MAX_PER_NOTE);
+  const links = [];
+  const timestamp = now();
+  for (const candidate of ranked) {
+    const strength = candidate.overlap >= 5 ? "strong" : candidate.overlap >= 3 ? "moderate" : "weak";
+    const relationship = inferRelationship(sourceType, candidate.type);
+    const link = {
+      id: generateId(),
+      from_note_id: noteId,
+      to_note_id: candidate.id,
+      relationship,
+      strength,
+      created_at: timestamp
+    };
+    db.run(`INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`, [
+      link.id,
+      link.from_note_id,
+      link.to_note_id,
+      link.relationship,
+      link.strength,
+      link.created_at
+    ]);
+    links.push(link);
+  }
+  return { links, considered, capped: considered > links.length };
 }
 
 // mcp/engine/scorer.ts
@@ -21110,6 +21152,14 @@ function sharedMatchTerms(content, candidateContent, max = 8) {
   }
   return shared;
 }
+function formatLinkSummary(created, considered, capped) {
+  if (created === 0)
+    return "";
+  const base = ` with ${created} auto-link(s)`;
+  if (!capped)
+    return base;
+  return `${base} (kept the ${created} most distinctive of ${considered} keyword matches - ` + `this note shares vocabulary with a large slice of the KB, so more specific wording ` + `would make it easier to find)`;
+}
 function formatConsolidationAdvisory(candidates) {
   if (candidates.length === 0)
     return "";
@@ -21153,7 +21203,8 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
     input.session_id ?? null,
     codeRefsJson
   ]);
-  const links = createAutoLinks(db, noteId, keywords);
+  const linkStats = createAutoLinksWithStats(db, noteId, keywords);
+  const links = linkStats.links;
   if (embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
@@ -21169,7 +21220,12 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   if (input.type === "user_pattern") {
     writeUserModel(globalDb2, input.content, input.context, input.dimension);
   }
-  return { noteId, linksCreated: links.length };
+  return {
+    noteId,
+    linksCreated: links.length,
+    linksConsidered: linkStats.considered,
+    linksCapped: linkStats.capped
+  };
 }
 var NOTE_CONTENT_HARD_CHARS = 50000;
 async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
@@ -21253,7 +21309,7 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
       const bucket = bucketLabel(c.similarity);
       const shared = sharedMatchTerms(input.content, c.content);
       const why = shared.length > 0 ? `
-      matched on: ${shared.join(", ")}` : "";
+      overlapping terms (indicative, not the match basis): ${shared.join(", ")}` : "";
       return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"${why}`;
     }).join(`
 `);
@@ -21270,7 +21326,8 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
 
 ` + candidateLines + `
 
-` + guidanceBlock + "\n\nNOTE ON `matched on:` - these are the shared terms that drove the score. " + "If the overlap is all generic/domain jargon and the actual CLAIMS differ, " + "that is a false positive and `accept_new` is correct.\n" + `
+` + guidanceBlock + "\n\nHOW TO READ `overlapping terms` - the block is decided by SEMANTIC (embedding) " + "similarity; those terms are shared vocabulary shown as evidence, not the thing that " + "matched. They can diverge in both directions: two notes can be embedding-close with " + "almost no shared words (paraphrases of one claim), or share heavy jargon and still be " + "far apart. Use them as a hint, not a verdict. The reliable signature of a FALSE " + `positive is heavy shared jargon PLUS genuinely different claims - judge the claims.
+` + `
 Your note body is SAVED - do NOT re-send it. Commit with the token alone:
 ` + `  note({ pending_id: "${pendingId}", resolution: { action: "accept_new" } })
 
@@ -21297,7 +21354,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     const action = input.resolution.action;
     const targetId = input.resolution.target_id;
     if (action === "accept_new") {
-      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const advisory2 = formatConsolidationAdvisory(advisoryCandidates);
       return {
         stored: true,
@@ -21305,7 +21362,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}"${linksCreated2 > 0 ? ` with ${linksCreated2} auto-link(s)` : ""}. (resolution: accept_new)${advisory2}`
+        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}`
       };
     }
     if (!targetId) {
@@ -21353,7 +21410,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "supersede_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [noteId2, timestamp, timestamp, targetId]);
@@ -21371,7 +21428,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "close_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, targetId]);
@@ -21398,7 +21455,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       message: `Unknown resolution action "${action}".`
     };
   }
-  const { noteId, linksCreated } = await insertNote(db, globalDb2, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb2, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -21406,7 +21463,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.${advisory}`
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}`
   };
 }
 function inferDimension(content) {
@@ -26163,7 +26220,7 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity is at/above the type's bar (0.75 decision/convention, 0.85 anti_pattern) against an existing note, and will return candidates. **Your body is stashed server-side** - re-call with `pending_id` (returned in the block message) plus a `resolution` of accept_new / update_existing / supersede_existing / close_existing. Do NOT re-send `content`. Each candidate now shows a `matched on:` list of the shared terms that drove the score: if the overlap is all generic/domain jargon while the actual claims differ, that is a false positive and accept_new is correct.", {
+server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity is at/above the type's bar (0.75 decision/convention, 0.85 anti_pattern) against an existing note, and will return candidates. **Your body is stashed server-side** - re-call with `pending_id` (returned in the block message) plus a `resolution` of accept_new / update_existing / supersede_existing / close_existing. Do NOT re-send `content`. Each candidate also lists `overlapping terms (indicative, not the match basis)` - shared vocabulary shown as EVIDENCE. The block itself is decided by embedding similarity, not by those terms, so treat them as a hint and judge the CLAIMS: heavy shared jargon plus genuinely different claims is the signature of a false positive, and accept_new is correct there.", {
   content: exports_external.string().optional().describe("The knowledge to capture. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
   type: exports_external.enum(NOTE_TYPES).optional().describe("Note type. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
   pending_id: exports_external.string().optional().describe("Token returned when the near-duplicate gate blocks a write. Pass it WITH a `resolution` to commit the stashed body - do NOT re-send `content`. One-shot; expires after 60 minutes. Any field you also pass explicitly overrides the stashed value, so you can amend while committing."),

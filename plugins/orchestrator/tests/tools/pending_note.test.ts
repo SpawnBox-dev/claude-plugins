@@ -188,8 +188,12 @@ describe("gate -> pending_id -> commit (end to end)", () => {
     expect(blocked.blocked_on_resolution).toBe(true);
     expect(blocked.pending_id).toMatch(/^[0-9a-f]{8}$/);
     expect(blocked.message).toContain("do NOT re-send");
-    // The message must show WHY it matched, not only how hard.
-    expect(blocked.message).toContain("matched on:");
+    // The message must show the shared vocabulary as EVIDENCE - and must label
+    // it as indicative, since the block is decided by embedding cosine, not by
+    // these terms. Pinning the honest label so it cannot silently regress into
+    // claiming causation.
+    expect(blocked.message).toContain("overlapping terms (indicative, not the match basis)");
+    expect(blocked.message).not.toContain("matched on:");
   });
 
   test("committing with pending_id alone stores the full stashed body", async () => {

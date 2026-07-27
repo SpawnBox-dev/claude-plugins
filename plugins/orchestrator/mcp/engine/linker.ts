@@ -377,7 +377,67 @@ export function createAutoLinks(
   keywords: string[],
   minOverlap = MIN_SHARED_KEYWORDS
 ): Link[] {
-  if (keywords.length === 0) return [];
+  return createAutoLinksWithStats(db, noteId, keywords, minOverlap).links;
+}
+
+/**
+ * 0.30.72+: cap + relevance floor on auto-linking.
+ *
+ * THE PROBLEM (fleet-reported 2026-07-27 with hard numbers by SA-90bf73bd,
+ * SA-df343a05 and SA-5a433456): this function linked a new note to EVERY note
+ * in the KB sharing >= minOverlap keywords, with no bound. At ~7,300 notes and
+ * a shared house vocabulary, single notes drew 494, 295, 293, 285 and 254
+ * edges. SA-90bf73bd's 494-edge note was not a densely-connected concept - its
+ * terms (deploy, push, worker, dashboard, version, ship) simply collide with
+ * most of the KB.
+ *
+ * WHY IT MATTERS: "signal at that count is indistinguishable from none."
+ * Nobody traverses 494 edges, so a note that links to everything is
+ * discoverable via nothing - the hub actively degrades the neighbourhood
+ * retrieval path it was supposed to serve. df343a05 reported never once using
+ * the graph to navigate, and keeping detail-view readable only via
+ * `link_limit: 0`. Their smallest-degree notes were the useful ones.
+ *
+ * THE FIX, per SA-90bf73bd's recommendation ("bias toward a cap plus a
+ * relevance floor rather than a pure similarity threshold"):
+ *   1. RANK by Jaccard (overlap / union), not by raw overlap count. Raw count
+ *      rewards verbose notes; Jaccard normalizes, so a generic note sharing 4
+ *      terms out of 40 ranks below a precise one sharing 4 out of 8. Jaccard
+ *      also matches what deduplicator.ts already uses - one similarity notion
+ *      across the engine, not two.
+ *   2. FLOOR at AUTO_LINK_MIN_RELEVANCE - drops the long tail of incidental
+ *      vocabulary collisions that cleared minOverlap on size alone.
+ *   3. CAP at AUTO_LINK_MAX_PER_NOTE, keeping the highest-ranked. This is the
+ *      guarantee: degree is bounded regardless of how large the KB grows, so
+ *      this cannot silently regress as the corpus scales.
+ *
+ * minOverlap is still enforced first, so R4.3 semantics are untouched.
+ */
+export const AUTO_LINK_MAX_PER_NOTE = 25;
+/** Jaccard floor. Deliberately permissive - the CAP is the primary bound, and
+ *  an over-tight floor would silently sever legitimate sparse links. This only
+ *  clips the tail where overlap cleared minOverlap purely because one side had
+ *  a large keyword set. */
+export const AUTO_LINK_MIN_RELEVANCE = 0.08;
+
+export interface AutoLinkStats {
+  links: Link[];
+  /** How many candidates cleared minOverlap before ranking/floor/cap. Lets the
+   *  caller tell the author "you created a hub, not a note" at write time -
+   *  which SA-5a433456 asked for explicitly, having no way to know a work item
+   *  had drawn 295 edges. */
+  considered: number;
+  /** True when ranking discarded candidates that cleared minOverlap. */
+  capped: boolean;
+}
+
+export function createAutoLinksWithStats(
+  db: Database,
+  noteId: string,
+  keywords: string[],
+  minOverlap = MIN_SHARED_KEYWORDS
+): AutoLinkStats {
+  if (keywords.length === 0) return { links: [], considered: 0, capped: false };
 
   const noteKeywords = new Set(keywords.map((k) => k.toLowerCase()));
 
@@ -394,56 +454,140 @@ export function createAutoLinks(
     )
     .all(noteId) as Array<{ id: string; type: string; keywords: string }>;
 
-  const links: Link[] = [];
-  const timestamp = now();
-
+  // ── Pass 1: document frequency for THIS note's terms ────────────────────
+  // SA-df343a05 sharpened the diagnosis on 2026-07-27 and it changed the fix.
+  // PA's hypothesis was "the highest-linking notes are the least specific".
+  // The counter-example: a decision note with an extremely NARROW claim (one
+  // session must not run one command) drew 421 edges, because its VOCABULARY
+  // was dense with house jargon - session, plugin, update, transport, bot, PA.
+  // So the driver is COMMON-VOCABULARY DENSITY, not claim generality: two
+  // equally narrow notes can link 40x differently based purely on how much
+  // shared jargon they carry.
+  //
+  // A flat cap cannot fix that - it keeps 25 arbitrary edges instead of 421.
+  // Term RARITY can. In a KB where ~7,300 notes all say "session" and "note",
+  // those terms carry no information; "portproxy" or "vhdx" carry a lot. So
+  // weight each shared term by inverse document frequency and score a
+  // candidate by how much of this note's DISTINCTIVE vocabulary it shares.
+  //
+  // Cost is free: we already scan every candidate row, so DF is computed in
+  // the same pass rather than with an extra query.
+  const parsedCandidates: Array<{ id: string; type: string; keywords: string[] }> = [];
+  const df = new Map<string, number>();
   for (const candidate of candidates) {
     const candidateKeywords = candidate.keywords
       .split(",")
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0);
-
-    // Calculate overlap
-    const overlap = candidateKeywords.filter((k) => noteKeywords.has(k));
-
-    if (overlap.length >= minOverlap) {
-      const strength =
-        overlap.length >= 5
-          ? "strong"
-          : overlap.length >= 3
-            ? "moderate"
-            : "weak";
-
-      const relationship = inferRelationship(
-        sourceType,
-        candidate.type as NoteType
-      );
-
-      const link: Link = {
-        id: generateId(),
-        from_note_id: noteId,
-        to_note_id: candidate.id,
-        relationship,
-        strength,
-        created_at: timestamp,
-      };
-
-      db.run(
-        `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          link.id,
-          link.from_note_id,
-          link.to_note_id,
-          link.relationship,
-          link.strength,
-          link.created_at,
-        ]
-      );
-
-      links.push(link);
+    parsedCandidates.push({
+      id: candidate.id,
+      type: candidate.type,
+      keywords: candidateKeywords,
+    });
+    // Only the source note's terms matter for scoring; counting just those
+    // keeps the map small regardless of KB size.
+    const seen = new Set<string>();
+    for (const k of candidateKeywords) {
+      if (noteKeywords.has(k) && !seen.has(k)) {
+        seen.add(k);
+        df.set(k, (df.get(k) ?? 0) + 1);
+      }
     }
   }
 
-  return links;
+  const corpusSize = parsedCandidates.length + 1;
+  const idf = (term: string): number =>
+    Math.log(1 + corpusSize / (1 + (df.get(term) ?? 0)));
+
+  // Total distinctive weight of this note. A candidate's relevance is the
+  // FRACTION of that weight it shares, so the score is normalized to 0..1 and
+  // comparable across notes of very different keyword-set sizes.
+  let totalIdf = 0;
+  for (const k of noteKeywords) totalIdf += idf(k);
+
+  // ── Pass 2: score every candidate that clears minOverlap ─────────────────
+  type Scored = {
+    id: string;
+    type: string;
+    overlap: number;
+    relevance: number;
+  };
+  const scored: Scored[] = [];
+
+  for (const candidate of parsedCandidates) {
+    const overlap = candidate.keywords.filter((k) => noteKeywords.has(k));
+    if (overlap.length < minOverlap) continue;
+
+    // Dedupe: a candidate repeating a term must not be scored twice for it.
+    const sharedTerms = new Set(overlap);
+    let sharedIdf = 0;
+    for (const t of sharedTerms) sharedIdf += idf(t);
+
+    const relevance = totalIdf > 0 ? sharedIdf / totalIdf : 0;
+
+    scored.push({
+      id: candidate.id,
+      type: candidate.type,
+      overlap: sharedTerms.size,
+      relevance,
+    });
+  }
+
+  const considered = scored.length;
+
+  const ranked = scored
+    .filter((s) => s.relevance >= AUTO_LINK_MIN_RELEVANCE)
+    // Strongest relevance first; raw overlap breaks ties so a genuinely
+    // richer match wins between equal-ratio candidates. id is the final
+    // tiebreak purely so the selection is deterministic.
+    .sort(
+      (a, b) =>
+        b.relevance - a.relevance ||
+        b.overlap - a.overlap ||
+        a.id.localeCompare(b.id)
+    )
+    .slice(0, AUTO_LINK_MAX_PER_NOTE);
+
+  const links: Link[] = [];
+  const timestamp = now();
+
+  for (const candidate of ranked) {
+    const strength =
+      candidate.overlap >= 5
+        ? "strong"
+        : candidate.overlap >= 3
+          ? "moderate"
+          : "weak";
+
+    const relationship = inferRelationship(
+      sourceType,
+      candidate.type as NoteType
+    );
+
+    const link: Link = {
+      id: generateId(),
+      from_note_id: noteId,
+      to_note_id: candidate.id,
+      relationship,
+      strength,
+      created_at: timestamp,
+    };
+
+    db.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        link.id,
+        link.from_note_id,
+        link.to_note_id,
+        link.relationship,
+        link.strength,
+        link.created_at,
+      ]
+    );
+
+    links.push(link);
+  }
+
+  return { links, considered, capped: considered > links.length };
 }

@@ -3,7 +3,7 @@ import type { NoteType, Dimension } from "../types";
 import { GLOBAL_TYPES, DIMENSIONS } from "../types";
 import { generateId, now, extractKeywords, stringifyCodeRefs, parseTagList } from "../utils";
 import { findDuplicates, MIN_SHARED_KEYWORDS } from "../engine/deduplicator";
-import { createAutoLinks } from "../engine/linker";
+import { createAutoLinksWithStats } from "../engine/linker";
 import { promoteConfidence } from "../engine/scorer";
 import { type EmbeddingClient } from "../engine/embeddings";
 import { handleCheckSimilar } from "./check_similar";
@@ -109,8 +109,16 @@ export function bucketLabel(similarity: number): string {
 }
 
 /**
- * 0.30.72+: the terms actually driving a candidate's match, so the gate can
- * show WHY it fired instead of only how hard.
+ * 0.30.72+: the vocabulary two notes share, so the gate can show EVIDENCE for
+ * why it fired instead of only how hard.
+ *
+ * HONESTY BOUND (corrected 0.30.73): the gate BLOCKS on cosine similarity over
+ * embeddings (check_similar.ts), NOT on these keywords. So this list explains
+ * the match, it does not compute it. It is still the right thing to show: for
+ * jargon-dense text the two correlate strongly, and "heavy shared jargon +
+ * different claims" is precisely the signature of a false positive. But do not
+ * read it as the cause, and do not expect changing these terms to change the
+ * block.
  *
  * Reported independently by PA, SA-b14fafa3 and SA-5a433456 on 2026-07-27:
  * the gate blocks on shared VOCABULARY, not on the claim. Concrete cases -
@@ -135,6 +143,29 @@ export function sharedMatchTerms(
     if (shared.length >= max) break;
   }
   return shared;
+}
+
+
+/**
+ * 0.30.73: tell the author at write time when their note became a HUB.
+ *
+ * SA-5a433456 asked for exactly this: "surface the count back to the author at
+ * write time so I can tell I've created a hub rather than a note." Before the
+ * cap, a work item silently drew 295 edges and a note 494 - and the author had
+ * no way to know. Now that ranking discards the tail, saying how many were
+ * considered is the honest signal: a high considered-count means this note's
+ * vocabulary is broadly shared, which is worth knowing while you can still
+ * make the wording more specific.
+ */
+function formatLinkSummary(created: number, considered: number, capped: boolean): string {
+  if (created === 0) return "";
+  const base = ` with ${created} auto-link(s)`;
+  if (!capped) return base;
+  return (
+    `${base} (kept the ${created} most distinctive of ${considered} keyword matches - ` +
+    `this note shares vocabulary with a large slice of the KB, so more specific wording ` +
+    `would make it easier to find)`
+  );
 }
 
 /**
@@ -173,7 +204,7 @@ async function insertNote(
   globalDb: Database,
   input: RememberInput,
   embeddingClient?: EmbeddingClient | null
-): Promise<{ noteId: string; linksCreated: number }> {
+): Promise<{ noteId: string; linksCreated: number; linksConsidered: number; linksCapped: boolean }> {
   const textForKeywords = [input.content, input.context]
     .filter(Boolean)
     .join(" ");
@@ -215,7 +246,8 @@ async function insertNote(
     ]
   );
 
-  const links = createAutoLinks(db, noteId, keywords);
+  const linkStats = createAutoLinksWithStats(db, noteId, keywords);
+  const links = linkStats.links;
 
   // Embed the new note (still needed for future similarity queries).
   if (embeddingClient) {
@@ -239,7 +271,12 @@ async function insertNote(
     writeUserModel(globalDb, input.content, input.context, input.dimension);
   }
 
-  return { noteId, linksCreated: links.length };
+  return {
+    noteId,
+    linksCreated: links.length,
+    linksConsidered: linkStats.considered,
+    linksCapped: linkStats.capped,
+  };
 }
 
 /** 0.30.26+ per-note hard size limit. Primitives should stay primitive;
@@ -395,7 +432,15 @@ export async function handleRemember(
         const pct = Math.round(c.similarity * 100);
         const bucket = bucketLabel(c.similarity);
         const shared = sharedMatchTerms(input.content, c.content);
-        const why = shared.length > 0 ? `\n      matched on: ${shared.join(", ")}` : "";
+        // Label is deliberately "indicative", not "matched on". The block is
+        // decided by embedding cosine; these terms are a correlated artefact.
+        // A misleading explanation shown at the moment of confusion teaches a
+        // false model of the gate - the same failure shape as docs that tell
+        // agents to make a call the tool rejects.
+        const why =
+          shared.length > 0
+            ? `\n      overlapping terms (indicative, not the match basis): ${shared.join(", ")}`
+            : "";
         return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"${why}`;
       })
       .join("\n");
@@ -424,9 +469,12 @@ export async function handleRemember(
       candidateLines +
       "\n\n" +
       guidanceBlock +
-      "\n\nNOTE ON `matched on:` - these are the shared terms that drove the score. " +
-      "If the overlap is all generic/domain jargon and the actual CLAIMS differ, " +
-      "that is a false positive and `accept_new` is correct.\n" +
+      "\n\nHOW TO READ `overlapping terms` - the block is decided by SEMANTIC (embedding) " +
+      "similarity; those terms are shared vocabulary shown as evidence, not the thing that " +
+      "matched. They can diverge in both directions: two notes can be embedding-close with " +
+      "almost no shared words (paraphrases of one claim), or share heavy jargon and still be " +
+      "far apart. Use them as a hint, not a verdict. The reliable signature of a FALSE " +
+      "positive is heavy shared jargon PLUS genuinely different claims - judge the claims.\n" +
       "\nYour note body is SAVED - do NOT re-send it. Commit with the token alone:\n" +
       `  note({ pending_id: "${pendingId}", resolution: { action: "accept_new" } })\n\n` +
       "Choose one:\n" +
@@ -458,7 +506,7 @@ export async function handleRemember(
     // accept_new: proceed with the normal insert. Resolution is a no-op
     // beyond acknowledging the candidates.
     if (action === "accept_new") {
-      const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
       // Parity with the normal store path: surface sub-block-threshold
       // near-matches as a non-blocking consolidation advisory. Without this,
       // accepting-new after a gate block would silently drop the
@@ -471,7 +519,7 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}. (resolution: accept_new)${advisory}`,
+        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}`,
       };
     }
 
@@ -533,7 +581,7 @@ export async function handleRemember(
 
     if (action === "supersede_existing") {
       // Create new note, then mark target as superseded by it.
-      const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(
@@ -559,7 +607,7 @@ export async function handleRemember(
 
     if (action === "close_existing") {
       // Create new note, then mark target as resolved (work_item also flipped to done).
-      const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(
@@ -597,7 +645,7 @@ export async function handleRemember(
   }
 
   // ── Normal path: no gate, no resolution ────────────────────────────────
-  const { noteId, linksCreated } = await insertNote(db, globalDb, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped } = await insertNote(db, globalDb, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -605,7 +653,7 @@ export async function handleRemember(
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${linksCreated > 0 ? ` with ${linksCreated} auto-link(s)` : ""}.${advisory}`,
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}`,
   };
 }
 
