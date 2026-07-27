@@ -5,6 +5,7 @@ import path from "node:path";
 import { computeAutonomyScore } from "../engine/scorer";
 import { decayAllSignals } from "../engine/signal";
 import { mergeDuplicates } from "../engine/deduplicator";
+import { pruneSaturatedLinks } from "../engine/linker";
 import { now, parseCodeRefs } from "../utils";
 
 export interface ReflectInput {
@@ -26,6 +27,8 @@ export interface ReflectInput {
 
 export interface ReflectResult {
   signals_decayed: number;
+  /** 0.30.95: auto-links removed by the saturation prune (explicit retro only). */
+  links_pruned: number;
   duplicates_found: number;
   duplicates_merged: number;
   orphan_notes: number;
@@ -57,6 +60,7 @@ export function handleReflect(
   const timestamp = now();
   let projectDecayed = 0;
   let projectMerged = 0;
+  let linksPruned = 0;
   let orphanCount = 0;
   let revalidationRows: Array<{ id: string; content: string; type: string }> = [];
   const autonomyScores: Record<string, string> = {};
@@ -84,6 +88,15 @@ export function handleReflect(
   if (!input.skip_merge) {
     projectDb.transaction(() => {
       projectMerged = mergeDuplicates(projectDb);
+    })();
+
+    // 0.30.95: backfill-prune the pre-0.30.73 link saturation. Gated by the
+    // same flag as the merge because it is the same KIND of thing - heavy
+    // maintenance that belongs in an EXPLICIT retro, never in the inline
+    // startup pass. Measured at ~48s on the live DB (750,794 edges removed,
+    // 961,411 -> 210,617), which is exactly why briefing must not run it.
+    projectDb.transaction(() => {
+      linksPruned = pruneSaturatedLinks(projectDb).removed;
     })();
   }
 
@@ -266,6 +279,7 @@ export function handleReflect(
 
   return {
     signals_decayed: totalDecayed,
+    links_pruned: linksPruned,
     duplicates_found: totalMerged,
     duplicates_merged: totalMerged,
     orphan_notes: orphanCount,

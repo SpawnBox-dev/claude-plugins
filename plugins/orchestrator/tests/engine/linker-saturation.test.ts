@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import {
   createAutoLinksWithStats,
+  pruneSaturatedLinks,
   AUTO_LINK_MAX_PER_NOTE,
 } from "../../mcp/engine/linker";
 import { generateId, now } from "../../mcp/utils";
@@ -193,5 +194,92 @@ describe("auto-link saturation", () => {
 
     // Same inputs -> same ranked selection (ties broken deterministically).
     expect(a.links.length).toBe(b.links.length);
+  });
+});
+
+// ===========================================================================
+// 0.30.95: BACKFILL PRUNE for the pre-0.30.73 graph.
+//
+// The 0.30.73 cap bounds NEW notes only. Measured on the live DB: 959,125
+// links across 6,827 notes, top node 1,119, and 768 notes carrying >300 edges
+// totalling 325,754.
+//
+// SAFETY, established by reading the producer rather than assuming:
+// inferRelationship() CAN emit blocks / depends_on / conflicts_with / enables,
+// so relationship type alone does not separate auto edges from hand-made ones.
+// It can never emit `supersedes` (linker.ts states handleSupersede is the only
+// valid path) and never `part_of`. So the prune touches ONLY `related_to` -
+// 94.7% of the volume - and every semantically-typed edge survives by
+// construction. Verified on a copy of the live DB: 750,794 removed, and
+// enables/depends_on/blocks/conflicts_with/supersedes/part_of counts came out
+// byte-identical.
+// ===========================================================================
+describe("pruneSaturatedLinks (backfill)", () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  function link(from: string, to: string, rel: string, strength = "weak") {
+    db.run(
+      `INSERT INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [generateId(), from, to, rel, strength, now()]
+    );
+  }
+
+  test("caps related_to out-degree and reports what it removed", () => {
+    const src = insertNote(db, "a,b,c");
+    for (let i = 0; i < 60; i++) {
+      const t = insertNote(db, `t${i}`);
+      link(src, t, "related_to");
+    }
+    const r = pruneSaturatedLinks(db, 25);
+    expect(r.removed).toBe(35);
+    const left = db
+      .query(`SELECT COUNT(*) c FROM links WHERE from_note_id = ?`)
+      .get(src) as { c: number };
+    expect(left.c).toBe(25);
+  });
+
+  test("NEVER touches supersedes or part_of - they cannot be auto-generated", () => {
+    const src = insertNote(db, "a,b,c");
+    for (let i = 0; i < 40; i++) link(src, insertNote(db, `x${i}`), "supersedes");
+    for (let i = 0; i < 40; i++) link(src, insertNote(db, `y${i}`), "part_of");
+    const r = pruneSaturatedLinks(db, 5);
+    expect(r.removed).toBe(0);
+    const kept = db
+      .query(`SELECT COUNT(*) c FROM links WHERE relationship IN ('supersedes','part_of')`)
+      .get() as { c: number };
+    expect(kept.c).toBe(80);
+  });
+
+  test("leaves hand-made semantic edges alone even above the cap", () => {
+    // A `blocks` edge can come from blocked_by (manual). Since type alone
+    // cannot tell them apart, none of these are pruned - the 5% we decline to
+    // touch is also the 5% that carries meaning.
+    const src = insertNote(db, "a,b,c");
+    for (let i = 0; i < 40; i++) link(src, insertNote(db, `b${i}`), "blocks");
+    expect(pruneSaturatedLinks(db, 5).removed).toBe(0);
+  });
+
+  test("keeps the STRONGEST edges - what the read path would have surfaced", () => {
+    const src = insertNote(db, "a,b,c");
+    const strong = insertNote(db, "keep-me");
+    link(src, strong, "related_to", "strong");
+    for (let i = 0; i < 30; i++) link(src, insertNote(db, `w${i}`), "related_to", "weak");
+
+    pruneSaturatedLinks(db, 5);
+    const survived = db
+      .query(`SELECT COUNT(*) c FROM links WHERE from_note_id = ? AND to_note_id = ?`)
+      .get(src, strong) as { c: number };
+    expect(survived.c).toBe(1);
+  });
+
+  test("is a no-op on an already-healthy graph", () => {
+    const src = insertNote(db, "a,b,c");
+    for (let i = 0; i < 5; i++) link(src, insertNote(db, `n${i}`), "related_to");
+    expect(pruneSaturatedLinks(db, 25).removed).toBe(0);
   });
 });

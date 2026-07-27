@@ -420,6 +420,73 @@ export const AUTO_LINK_MAX_PER_NOTE = 25;
  *  a large keyword set. */
 export const AUTO_LINK_MIN_RELEVANCE = 0.08;
 
+/**
+ * 0.30.95: BACKFILL PRUNE for the pre-0.30.73 link graph.
+ *
+ * The cap added in 0.30.73 bounds NEW notes only. Measured on the live DB:
+ * 959,125 links across 6,827 notes (~140 each; top node 1,119; 768 notes
+ * carry >300 edges totalling 325,754). At that density the graph has stopped
+ * discriminating - if everything connects to everything, traversal is
+ * indistinguishable from enumeration, and the notes with the highest degree are
+ * the LEAST specific rather than the most connected.
+ *
+ * WHY THIS IS SAFE TO RUN, established by reading the producer rather than
+ * assuming: inferRelationship() can emit blocks / depends_on / conflicts_with /
+ * enables, so relationship type alone does NOT separate auto-generated edges
+ * from hand-made ones. But it can never emit `supersedes` - linker.ts states
+ * that handleSupersede is the only valid path - and it never emits `part_of`.
+ *
+ * So this prunes ONLY `related_to`, the auto-linker's default and 908,154 of
+ * the 959,125 edges (94.7%). Every semantically-typed edge is left untouched,
+ * which means a manually-created `blocks` (from blocked_by) or a `supersedes`
+ * chain cannot be damaged even in principle. The 5% we decline to touch is also
+ * the 5% that carries actual meaning.
+ *
+ * WHAT IT KEEPS: the highest-ranked N per source note, ordered EXACTLY as the
+ * read path already orders them (recall.ts fetchLinkedNotes: link strength,
+ * then target signal, then recency). So the prune removes precisely the edges
+ * that were never going to be surfaced anyway - it changes what is STORED
+ * without changing what is SHOWN.
+ *
+ * Deliberately NOT wired into briefing. It belongs in an explicit maintenance
+ * pass; the startup path is a hard-gated call and has no business doing a mass
+ * delete (0.30.92 removed the last such operation from it).
+ */
+export function pruneSaturatedLinks(
+  db: Database,
+  maxPerNote = AUTO_LINK_MAX_PER_NOTE
+): { removed: number; before: number; after: number } {
+  const count = () =>
+    (db.query(`SELECT COUNT(*) AS c FROM links`).get() as { c: number }).c;
+  const before = count();
+
+  // Rank each note's related_to edges the way the reader will see them, and
+  // drop everything past the cap. Window function over the join so the target
+  // note's signal participates in the ordering.
+  db.run(
+    `DELETE FROM links WHERE rowid IN (
+       SELECT rowid FROM (
+         SELECT l.rowid AS rowid,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.from_note_id
+                  ORDER BY
+                    CASE l.strength WHEN 'strong' THEN 3 WHEN 'moderate' THEN 2 WHEN 'weak' THEN 1 ELSE 0 END DESC,
+                    COALESCE(n.signal, 0) DESC,
+                    n.updated_at DESC
+                ) AS rn
+         FROM links l
+         JOIN notes n ON n.id = l.to_note_id
+         WHERE l.relationship = 'related_to'
+       )
+       WHERE rn > ?
+     )`,
+    [maxPerNote]
+  );
+
+  const after = count();
+  return { removed: before - after, before, after };
+}
+
 export interface AutoLinkStats {
   links: Link[];
   /** How many candidates cleared minOverlap before ranking/floor/cap. Lets the

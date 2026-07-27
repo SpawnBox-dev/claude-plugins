@@ -20842,6 +20842,28 @@ function createAutoLinks(db, noteId, keywords, minOverlap = MIN_SHARED_KEYWORDS)
 }
 var AUTO_LINK_MAX_PER_NOTE = 25;
 var AUTO_LINK_MIN_RELEVANCE = 0.08;
+function pruneSaturatedLinks(db, maxPerNote = AUTO_LINK_MAX_PER_NOTE) {
+  const count = () => db.query(`SELECT COUNT(*) AS c FROM links`).get().c;
+  const before = count();
+  db.run(`DELETE FROM links WHERE rowid IN (
+       SELECT rowid FROM (
+         SELECT l.rowid AS rowid,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.from_note_id
+                  ORDER BY
+                    CASE l.strength WHEN 'strong' THEN 3 WHEN 'moderate' THEN 2 WHEN 'weak' THEN 1 ELSE 0 END DESC,
+                    COALESCE(n.signal, 0) DESC,
+                    n.updated_at DESC
+                ) AS rn
+         FROM links l
+         JOIN notes n ON n.id = l.to_note_id
+         WHERE l.relationship = 'related_to'
+       )
+       WHERE rn > ?
+     )`, [maxPerNote]);
+  const after = count();
+  return { removed: before - after, before, after };
+}
 function createAutoLinksWithStats(db, noteId, keywords, minOverlap = MIN_SHARED_KEYWORDS) {
   if (keywords.length === 0)
     return { links: [], considered: 0, capped: false };
@@ -22408,6 +22430,7 @@ function handleReflect(projectDb2, globalDb2, input) {
   const timestamp = now();
   let projectDecayed = 0;
   let projectMerged = 0;
+  let linksPruned = 0;
   let orphanCount = 0;
   let revalidationRows = [];
   const autonomyScores = {};
@@ -22418,6 +22441,9 @@ function handleReflect(projectDb2, globalDb2, input) {
   if (!input.skip_merge) {
     projectDb2.transaction(() => {
       projectMerged = mergeDuplicates(projectDb2);
+    })();
+    projectDb2.transaction(() => {
+      linksPruned = pruneSaturatedLinks(projectDb2).removed;
     })();
   }
   projectDb2.transaction(() => {
@@ -22521,6 +22547,7 @@ function handleReflect(projectDb2, globalDb2, input) {
   ].filter(Boolean).join(" ");
   return {
     signals_decayed: totalDecayed,
+    links_pruned: linksPruned,
     duplicates_found: totalMerged,
     duplicates_merged: totalMerged,
     orphan_notes: orphanCount,
