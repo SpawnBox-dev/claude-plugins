@@ -158,14 +158,48 @@ export function mergeDuplicates(db: Database): number {
         const survivorId = notes[i].id;
         const victimId = notes[j].id;
 
-        // Re-link: point any links from/to the victim to the survivor
+        // Re-link: point any links from/to the victim at the survivor.
+        //
+        // 0.30.92 BUGFIX - this threw SQLITE_CONSTRAINT_UNIQUE and took the
+        // ENTIRE weekly maintenance pass down with it.
+        //
+        // `links` carries UNIQUE(from_note_id, to_note_id, relationship). A
+        // plain UPDATE re-points the victim's edges onto the survivor, so any
+        // neighbour BOTH already link to produces a duplicate edge and the
+        // statement throws. The de-dup cleanup below was written to handle
+        // exactly that collision, but it runs AFTER the update that dies - the
+        // ordering makes it unreachable.
+        //
+        // At the observed scale a collision is not an edge case, it is a
+        // certainty: 959,125 links across 6,827 notes (~140 each, top node
+        // 1,119), so two merge candidates virtually always share neighbours.
+        //
+        // BLAST RADIUS, which is why this is the highest-value fix of the
+        // session: handleReflect wraps decayAllSignals + mergeDuplicates in ONE
+        // transaction, and handleOrient inline-invokes handleReflect on the
+        // weekly auto-retro gate. So the throw rolled back the decay too, and
+        // NO maintenance has been completing on this database - no signal
+        // decay, no duplicate merging. That is a large part of how the graph
+        // reached 959K links and the file reached 490MB unchecked. The failure
+        // was silent because the caller catches and logs.
+        //
+        // OR IGNORE skips the colliding rows; the victim's now-redundant edges
+        // are removed wholesale below, which is correct because the survivor
+        // already holds an equivalent edge.
         db.run(
-          `UPDATE links SET from_note_id = ? WHERE from_note_id = ?`,
+          `UPDATE OR IGNORE links SET from_note_id = ? WHERE from_note_id = ?`,
           [survivorId, victimId]
         );
         db.run(
-          `UPDATE links SET to_note_id = ? WHERE to_note_id = ?`,
+          `UPDATE OR IGNORE links SET to_note_id = ? WHERE to_note_id = ?`,
           [survivorId, victimId]
+        );
+
+        // Anything still pointing at the victim is a collision OR IGNORE
+        // skipped - the survivor already has that edge, so drop it.
+        db.run(
+          `DELETE FROM links WHERE from_note_id = ? OR to_note_id = ?`,
+          [victimId, victimId]
         );
 
         // Remove self-links that may have formed
@@ -173,10 +207,13 @@ export function mergeDuplicates(db: Database): number {
           `DELETE FROM links WHERE from_note_id = to_note_id`
         );
 
-        // Remove duplicate links (same from/to pair)
+        // Remove duplicate links. Grouped by the FULL unique key including
+        // relationship - grouping by (from,to) alone deleted distinct
+        // relationship edges between the same pair, which the unique index
+        // explicitly permits.
         db.run(
           `DELETE FROM links WHERE rowid NOT IN (
-             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id
+             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id, relationship
            )`
         );
 

@@ -189,34 +189,50 @@ export function composeBriefing(
       Date.now() - 7 * 24 * 60 * 60 * 1000
     ).toISOString();
 
-    const allTagRows = projectDb
+    // 0.30.92: SINGLE PASS. This was the briefing timeout.
+    //
+    // The previous shape was a textbook N+1: build the set of distinct tags,
+    // then run ONE `SELECT COUNT(*) ... WHERE tags LIKE '%tag%'` PER TAG. With
+    // a leading wildcard no index applies, so each iteration is a full table
+    // scan with string matching.
+    //
+    // MEASURED on the live DB (6,827 notes, 8,888+ distinct tags): this section
+    // ALONE exceeds 240s, while work_items / open_threads / decisions are ~0.1s
+    // each. That is the >120s `briefing` timeout four of six sessions reported
+    // - not corpus size, and not the 61s duplicate merge, which turned out to
+    // be a smaller second cost sitting beside this one.
+    //
+    // Same answer in one pass: read every note's tags and updated_at once, and
+    // record the most recent activity per tag as we go. O(notes x tags-per-note)
+    // instead of O(distinct-tags x notes).
+    //
+    // SEMANTIC FIX, deliberate and worth knowing: the old query matched tags by
+    // SUBSTRING (`LIKE '%map%'` was satisfied by a note tagged `roadmap`), while
+    // the tag SET was built with parseTagList. So a tag could be judged "active"
+    // on the strength of an unrelated tag that merely contained it, and would
+    // then never be reported as neglected. This uses exact tag equality on both
+    // sides, so results are more accurate as well as faster - expect a few tags
+    // to newly appear as neglected that substring collisions had been masking.
+    const rows = projectDb
       .query(
-        `SELECT DISTINCT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`
+        `SELECT tags, updated_at FROM notes WHERE tags IS NOT NULL AND tags != ''`
       )
-      .all() as Array<{ tags: string }>;
+      .all() as Array<{ tags: string; updated_at: string }>;
 
-    const tagSet = new Set<string>();
-    for (const row of allTagRows) {
+    // tag -> whether any note carrying it was updated within the window.
+    const tagRecent = new Map<string, boolean>();
+    for (const row of rows) {
+      const isRecent = (row.updated_at ?? "") >= sevenDaysAgo;
       // c658ce38: parseTagList heals JSON-array-stringified tag values so a
       // bracket/quote artifact never becomes a fake "neglected area".
       for (const tag of parseTagList(row.tags)) {
-        tagSet.add(tag);
+        if (isRecent) tagRecent.set(tag, true);
+        else if (!tagRecent.has(tag)) tagRecent.set(tag, false);
       }
     }
 
-    for (const tag of tagSet) {
-      const recentCount = (
-        projectDb
-          .query(
-            `SELECT COUNT(*) as cnt FROM notes
-             WHERE tags LIKE ? AND updated_at >= ?`
-          )
-          .get(`%${tag}%`, sevenDaysAgo) as { cnt: number }
-      ).cnt;
-
-      if (recentCount === 0) {
-        neglectedAreas.push(tag);
-      }
+    for (const [tag, recent] of tagRecent) {
+      if (!recent) neglectedAreas.push(tag);
     }
   }
 

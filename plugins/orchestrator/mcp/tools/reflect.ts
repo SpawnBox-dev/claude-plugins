@@ -9,6 +9,19 @@ import { now, parseCodeRefs } from "../utils";
 
 export interface ReflectInput {
   focus?: string;
+  /** 0.30.92: skip the O(n-squared) duplicate merge.
+   *
+   *  MEASURED on the live 6,827-note / 959K-link project DB: mergeDuplicates
+   *  takes 61.2 SECONDS to complete - half the 120s tool budget, in one call,
+   *  and handleOrient invokes this INLINE on its weekly auto-retro gate. That
+   *  is the briefing timeout four sessions independently reported.
+   *
+   *  What it buys at that price is near-zero: the same measured run merged 2
+   *  notes and removed 76 links out of 959,125. So the latency-sensitive
+   *  startup path skips it, and an EXPLICIT `retro` call still performs it -
+   *  the maintenance stays available, it just stops blocking the one call
+   *  every session must make before it is allowed to respond. */
+  skip_merge?: boolean;
 }
 
 export interface ReflectResult {
@@ -56,9 +69,25 @@ export function handleReflect(
     anti_pattern_count: number;
   }> = [];
 
+  // 0.30.92: decay and merge run in SEPARATE transactions.
+  //
+  // They shared one, so when mergeDuplicates threw SQLITE_CONSTRAINT_UNIQUE
+  // (see deduplicator.ts) the rollback reverted the DECAY as well. Signal decay
+  // has therefore never persisted on this database, silently, for as long as
+  // the collision condition has held - the weekly pass that exists to keep the
+  // KB coherent was reverting its own work, and the only observable was a slow
+  // briefing. A merge collision has no business undoing decay.
   projectDb.transaction(() => {
     projectDecayed = decayAllSignals(projectDb);
-    projectMerged = mergeDuplicates(projectDb);
+  })();
+
+  if (!input.skip_merge) {
+    projectDb.transaction(() => {
+      projectMerged = mergeDuplicates(projectDb);
+    })();
+  }
+
+  projectDb.transaction(() => {
 
     // Count orphan notes (notes with no links in either direction)
     orphanCount = (

@@ -1,0 +1,12 @@
+import { Database } from "bun:sqlite";
+import { handleReflect } from "./mcp/tools/reflect";
+import { composeBriefing } from "./mcp/engine/composer";
+const db = new Database(process.env.PDB!);
+const g = new Database(process.env.GDB!);
+db.run("PRAGMA busy_timeout = 5000"); g.run("PRAGMA busy_timeout = 5000");
+let s = performance.now();
+const r = handleReflect(db, g, { skip_merge: true });
+console.log(`retro (skip_merge): ${((performance.now()-s)/1000).toFixed(1)}s  decayed=${r.signals_decayed} merged=${r.duplicates_merged}`);
+s = performance.now();
+const b = composeBriefing(db, g);
+console.log(`composeBriefing:    ${((performance.now()-s)/1000).toFixed(1)}s  active=${b.active_work.length} upcoming=${b.upcoming_work.length}`);

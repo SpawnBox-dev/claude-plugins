@@ -20429,11 +20429,12 @@ function mergeDuplicates(db) {
         }
         const survivorId = notes[i].id;
         const victimId = notes[j].id;
-        db.run(`UPDATE links SET from_note_id = ? WHERE from_note_id = ?`, [survivorId, victimId]);
-        db.run(`UPDATE links SET to_note_id = ? WHERE to_note_id = ?`, [survivorId, victimId]);
+        db.run(`UPDATE OR IGNORE links SET from_note_id = ? WHERE from_note_id = ?`, [survivorId, victimId]);
+        db.run(`UPDATE OR IGNORE links SET to_note_id = ? WHERE to_note_id = ?`, [survivorId, victimId]);
+        db.run(`DELETE FROM links WHERE from_note_id = ? OR to_note_id = ?`, [victimId, victimId]);
         db.run(`DELETE FROM links WHERE from_note_id = to_note_id`);
         db.run(`DELETE FROM links WHERE rowid NOT IN (
-             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id
+             SELECT MIN(rowid) FROM links GROUP BY from_note_id, to_note_id, relationship
            )`);
         db.run(`DELETE FROM notes WHERE id = ?`, [victimId]);
         merged.add(victimId);
@@ -22198,19 +22199,20 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let neglectedAreas = [];
   if (include("neglected")) {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const allTagRows = projectDb2.query(`SELECT DISTINCT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
-    const tagSet = new Set;
-    for (const row of allTagRows) {
+    const rows = projectDb2.query(`SELECT tags, updated_at FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
+    const tagRecent = new Map;
+    for (const row of rows) {
+      const isRecent = (row.updated_at ?? "") >= sevenDaysAgo;
       for (const tag of parseTagList(row.tags)) {
-        tagSet.add(tag);
+        if (isRecent)
+          tagRecent.set(tag, true);
+        else if (!tagRecent.has(tag))
+          tagRecent.set(tag, false);
       }
     }
-    for (const tag of tagSet) {
-      const recentCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes
-             WHERE tags LIKE ? AND updated_at >= ?`).get(`%${tag}%`, sevenDaysAgo).cnt;
-      if (recentCount === 0) {
+    for (const [tag, recent] of tagRecent) {
+      if (!recent)
         neglectedAreas.push(tag);
-      }
     }
   }
   let driftWarning = null;
@@ -22412,7 +22414,13 @@ function handleReflect(projectDb2, globalDb2, input) {
   const autonomyInputs = [];
   projectDb2.transaction(() => {
     projectDecayed = decayAllSignals(projectDb2);
-    projectMerged = mergeDuplicates(projectDb2);
+  })();
+  if (!input.skip_merge) {
+    projectDb2.transaction(() => {
+      projectMerged = mergeDuplicates(projectDb2);
+    })();
+  }
+  projectDb2.transaction(() => {
     orphanCount = projectDb2.query(`SELECT COUNT(*) as cnt FROM notes n
            WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.from_note_id = n.id OR l.to_note_id = n.id)`).get().cnt;
     revalidationRows = projectDb2.query(`SELECT id, content, type FROM notes
@@ -22811,7 +22819,7 @@ function handleOrient(projectDb2, globalDb2, input, sessionTracker) {
     } catch {}
     if (noteCount > 0 && shouldAutoRetro(projectDb2)) {
       try {
-        const retroResult = handleReflect(projectDb2, globalDb2, {});
+        const retroResult = handleReflect(projectDb2, globalDb2, { skip_merge: true });
         autoRetroSummary = retroResult.message || "Retro maintenance ran.";
       } catch (err) {
         console.error("[orient] auto-retro failed", err);

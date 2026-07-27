@@ -431,7 +431,17 @@ export function handleOrient(
 
     if (noteCount > 0 && shouldAutoRetro(projectDb)) {
       try {
-        const retroResult = handleReflect(projectDb, globalDb, {});
+        // 0.30.92: the auto-retro runs INLINE inside the one call every
+        // session must make before it is allowed to respond, so it must not
+        // carry an unbounded maintenance sweep. MEASURED on the live DB:
+        // mergeDuplicates alone takes 61.2s - half the tool budget - to merge 2
+        // notes and remove 76 links out of 959,125. It finds almost nothing
+        // because the write-time check_similar gate already blocks duplicates
+        // before they land, so this post-hoc sweep is a vestigial second
+        // mechanism sitting on the hot path. Decay still runs here (cheap, and
+        // it is the part that was actually load-bearing); an explicit `retro`
+        // call still performs the merge.
+        const retroResult = handleReflect(projectDb, globalDb, { skip_merge: true });
         autoRetroSummary = retroResult.message || "Retro maintenance ran.";
       } catch (err) {
         console.error("[orient] auto-retro failed", err);
