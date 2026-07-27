@@ -155,6 +155,18 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "I read the schema / the producer, so I know the behavior" | Read the PRODUCER **and every CONSUMER** before costing a change. Two real saves in one session: a reporting endpoint that would have silently read zero, and an account-deletion cascade that would have clawed back paid creator earnings. The mirror-image error - verifying a column exists but never reading the write path, which was hardcoded to a stub - happened the same hour. |
 | "The instruction told me the method, so I'll use the method" | A named method or count is a CLAIM ABOUT THE WORLD wearing the clothes of an instruction. "Trace via `git tag --contains`" assumed tags were complete: 5 existed against 165 releases. "Post to the ~26 archived threads" assumed they were silent: 17 of 29 already had a message. Ask what OUTCOME is wanted, then verify the premise before acting. |
 
+## When your own verb changes, look up the TECHNIQUE
+
+Watch your own output for the shift from **"can X be done?"** to **"here's how we'd do X."** That transition is the moment you stop evaluating and start committing - and it is the moment to look for a prior decision.
+
+Crucially: search the **technique**, not the domain. Prior decisions that forbid a method are usually filed under the system that first raised them, in vocabulary you would never think to search from where you now stand.
+
+Worked case (2026-07-27): an agent moved from "is this hypothesis answerable?" to "we'd compute the hash and match it against the ID list." A standing decision forbade exactly that - re-identifying a deliberately severed link - but it was indexed under the *system* that produced it, so no domain-shaped search reached it. The agent had done a lookup and reasonably felt covered.
+
+Two reasons this trigger is usable rather than aspirational: it fires on **intent**, so it catches drift into areas whose vocabulary you'd never search; and the signal is **in your own writing**, so it needs no self-awareness about scope having changed - only noticing the verb moved.
+
+Note the plugin cannot detect this for you. Hooks see your prompts and your tool calls, not your prose. This one is yours to catch.
+
 ## A check that cannot fail is not a check
 
 Before trusting any guard, detector, grep, or assertion you just wrote: **run it against the exact case that motivated it and confirm it FIRES.** Then feed it a known-negative and confirm it stays silent. A check you have only ever seen return "clean" has not been tested, it has been assumed - and "clean" is indistinguishable from "covered".
