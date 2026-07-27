@@ -3,7 +3,11 @@ import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import {
   detectsHedge,
+  detectsScopeExpansion,
+  detectsRetrievalTrigger,
+  detectsUncheckedPremise,
   composeScopeRetrievalText,
+  composePremiseCheckText,
 } from "../../mcp/tools/hook_event";
 import { composeBriefing, UPCOMING_HORIZON_DAYS } from "../../mcp/engine/composer";
 import { generateId, now } from "../../mcp/utils";
@@ -168,5 +172,105 @@ describe("UPCOMING deadlines in the briefing", () => {
     const briefing = composeBriefing(projectDb, globalDb);
     expect(briefing.upcoming_work.map((w) => w.content)).not.toContain("lapsed already");
     expect(briefing.overdue_work.map((w) => w.content)).toContain("lapsed already");
+  });
+});
+
+// ===========================================================================
+// 0.30.75: the two classes hedge-detection alone misses.
+//
+//   SCOPE EXPANSION - SA-90bf73bd reported against 0.30.74's stated limit:
+//   "can we ALSO improve our telemetry portal" was fully confident, carried no
+//   hedge, and landed on KB-covered ground. Their framing of the danger is the
+//   important part: hedging catches "the USER is uncertain"; the riskier case
+//   is "the user is CERTAIN and the repo disagrees." They concluded there was
+//   no string to key on - but there is, it just is not a confidence marker.
+//   It is a topic-shift marker.
+//
+//   UNCHECKED PREMISE - SA-df343a05's method-vs-outcome distinction, with two
+//   worked cases that would each have caused real damage.
+// ===========================================================================
+
+describe("scope-expansion detection (the confident-but-new-ground case)", () => {
+  test("fires on topic-shift markers that carry NO uncertainty", () => {
+    const expanding = [
+      "can we also improve our telemetry portal",
+      "what about the backup restore path",
+      "while you're at it, check the daemon logs",
+      "next, let's look at the worker routes",
+      "switching to the landing page now",
+      "let's also add a health check",
+      "new task: audit the entitlements",
+    ];
+    for (const p of expanding) {
+      expect(detectsScopeExpansion(p)).toBe(true);
+      expect(detectsRetrievalTrigger(p)).toBe(true);
+    }
+  });
+
+  test("the canonical reported miss now fires", () => {
+    // Verbatim shape of SA-90bf73bd's case.
+    const p = "can we also improve/enhance our telemetry portal";
+    expect(detectsHedge(p)).toBe(false); // still no hedge - that was the gap
+    expect(detectsRetrievalTrigger(p)).toBe(true); // ...and it is now covered
+  });
+
+  test("stays silent on ordinary in-scope instructions", () => {
+    for (const p of [
+      "fix the failing test in linker.test.ts",
+      "publish the release",
+      "rebuild dist and commit",
+    ]) {
+      expect(detectsScopeExpansion(p)).toBe(false);
+    }
+  });
+
+  test("labels an expansion differently from a hedge", () => {
+    const expansion = composeScopeRetrievalText([], "expansion");
+    expect(expansion).toContain("EXPANDS SCOPE");
+    // The distinction that matters: a confident request can still be wrong.
+    expect(expansion).toContain("NOT that the asker is unsure");
+
+    const hedge = composeScopeRetrievalText([], "hedge");
+    expect(hedge).toContain("HEDGES");
+  });
+});
+
+describe("unchecked-premise detection (method-shaped bulk instructions)", () => {
+  test("fires on the two reported worked cases", () => {
+    expect(
+      detectsUncheckedPremise(
+        "post closure messages to the ~26 archived threads"
+      )
+    ).toBe(true);
+    expect(
+      detectsUncheckedPremise(
+        "backfill ship versions for all releases via `git tag --contains`"
+      )
+    ).toBe(true);
+  });
+
+  test("requires BOTH a premise assertion and bulk/destructive intent", () => {
+    // A count with no bulk action - not worth interrupting for.
+    expect(detectsUncheckedPremise("there are 26 archived threads")).toBe(false);
+    // Bulk action with no asserted premise - nothing to verify.
+    expect(detectsUncheckedPremise("delete the temp file")).toBe(false);
+  });
+
+  test("stays silent on outcome-shaped instructions", () => {
+    // The distinction: an outcome-shaped instruction embeds no premise because
+    // it leaves the method open.
+    expect(
+      detectsUncheckedPremise("find which release each fix shipped in")
+    ).toBe(false);
+  });
+
+  test("the block names both failure modes concretely", () => {
+    const text = composePremiseCheckText();
+    expect(text).toContain("COUNT");
+    expect(text).toContain("METHOD");
+    expect(text).toContain("OUTCOME");
+    // The worked cases are the persuasive part - keep them in the message.
+    expect(text).toContain("165 releases");
+    expect(text).toContain("17 of 29");
   });
 });

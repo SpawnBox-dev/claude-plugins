@@ -242,6 +242,14 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   if (checkpointNudge) parts.push(checkpointNudge);
   if (wardenNudge) parts.push(wardenNudge);
   if (scopeRetrieval) parts.push(scopeRetrieval);
+  // 0.30.75: unchecked-premise check for method/count-shaped bulk instructions.
+  const premiseCheck = composePremiseCheckNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
+  if (premiseCheck) parts.push(premiseCheck);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -293,16 +301,65 @@ export function detectsHedge(prompt: string): boolean {
   return HEDGE_PATTERNS.some((re) => re.test(prompt));
 }
 
+// 0.30.75: the residual case the hedge detector misses, closed.
+//
+// SA-90bf73bd, reporting against 0.30.74's stated limit: Jarid's "can we ALSO
+// improve/enhance our telemetry portal" was fully confident, carried no hedge,
+// and landed squarely on KB-covered ground (dashboard conventions, the
+// never-joined-populations decision, prior funnel-honesty rules). It went well
+// only because the work happened to force a trip through the source. Their
+// framing of the danger is exact: the hedge detector catches "the USER is
+// uncertain"; the riskier case is "the user is CERTAIN and the repo disagrees."
+//
+// They concluded there was no string to key on. There is one - just not a
+// confidence marker. It is a TOPIC-SHIFT marker. Jarid's own words for the
+// complaint were "scope change/expansion", and English marks expansion openly:
+// "can we also", "what about", "while you're at it", "next let's", "now do",
+// "switching to". Those do not express doubt, so the hedge patterns skip them,
+// but they announce precisely the moment the session enters ground it has not
+// yet touched - which is the moment retrieval is most valuable and least
+// likely to happen.
+const SCOPE_EXPANSION_PATTERNS: RegExp[] = [
+  /\b(?:can|could|should) we (?:also|now)\b/i,
+  /\bwhat about\b/i,
+  /\bwhile you'?re (?:at it|in there)\b/i,
+  /\b(?:next|now),? (?:let'?s|can you|do|look at|move on)\b/i,
+  /\b(?:switch|switching|pivot|pivoting|move) (?:to|over to|onto)\b/i,
+  /\b(?:also|additionally|on top of that),? (?:improve|enhance|add|fix|update|check|look)\b/i,
+  /\blet'?s (?:also|now)\b/i,
+  /\bnew (?:task|topic|thing|area|scope)\b/i,
+];
+
+/** PURE: does this prompt EXPAND scope to new ground? Exported for tests. */
+export function detectsScopeExpansion(prompt: string): boolean {
+  if (!prompt) return false;
+  return SCOPE_EXPANSION_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: should the retrieval block fire at all? Either the asker is uncertain
+ *  (hedge) or the session is entering new ground (expansion). */
+export function detectsRetrievalTrigger(prompt: string): boolean {
+  return detectsHedge(prompt) || detectsScopeExpansion(prompt);
+}
+
 /** PURE: render the retrieval block. Exported for tests. */
 export function composeScopeRetrievalText(
-  hits: Array<{ id: string; type: string; content: string }>
+  hits: Array<{ id: string; type: string; content: string }>,
+  reason: "hedge" | "expansion" = "hedge"
 ): string {
   const head =
-    "[orch] YOUR PROMPT HEDGES (\"i think\" / \"wasn't there\" / \"didn't we\"). That is the " +
-    "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " +
-    "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " +
-    "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " +
-    "a hedged question often contains an assumption the repo will correct.";
+    reason === "expansion"
+      ? "[orch] THIS PROMPT EXPANDS SCOPE (\"can we also\" / \"what about\" / \"next let's\"). " +
+        "You are entering ground this session has not worked, which is exactly where the " +
+        "reflex is fresh code exploration and exactly where the KB, `git log` and `docs/` " +
+        "most often already hold the answer. Note the risk here is NOT that the asker is " +
+        "unsure - a confident request can still land on settled ground the repo has an " +
+        "opinion about. Read before you explore, and verify the PREMISE of the request."
+      : "[orch] YOUR PROMPT HEDGES (\"i think\" / \"wasn't there\" / \"didn't we\"). That is the " +
+        "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " +
+        "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " +
+        "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " +
+        "a hedged question often contains an assumption the repo will correct.";
 
   if (hits.length === 0) {
     return (
@@ -327,6 +384,106 @@ export function composeScopeRetrievalText(
   );
 }
 
+// ── 0.30.75: unchecked-premise detection (the class hedging MISSES) ─────────
+//
+// 0.30.74 shipped hedge detection and I named its limit: a CONFIDENT
+// instruction into KB-covered territory does not fire it. SA-df343a05 then
+// supplied the complementary signal with two worked cases from the same night,
+// both confident PA directives, both would have caused real damage:
+//
+//   "Trace ship versions via `git tag --contains`."
+//        -> 5 tags existed against 165 releases. Would have stamped April
+//           fixes with July version numbers.
+//   "Post closure messages to the ~26 archived threads."
+//        -> 17 of 29 already had one. Would have pinged reporters with
+//           three-month-old news.
+//
+// THE SHAPE: both specify a METHOD, not an OUTCOME. "Trace via git tag" says
+// HOW; "find which release each shipped in" says WHAT. A method-specifying
+// instruction silently embeds a premise about the world - that git tags are
+// complete, that those threads are silent - and that premise is the checkable
+// thing. An outcome-specifying instruction embeds no such premise because it
+// leaves the method open. Same for bare quantities: "26 threads" is a CLAIM
+// WEARING THE CLOTHES OF AN INSTRUCTION.
+//
+// SCOPED DELIBERATELY NARROW, per the reporter's own caveat: plenty of
+// method-specifying instructions are perfectly sound, so firing everywhere
+// would be noise. This requires a premise assertion AND a bulk/destructive
+// marker - the cases where an unchecked premise is most expensive.
+
+/** A count/quantity, or a named tool/technique, asserted inside an instruction. */
+const PREMISE_ASSERTION_PATTERNS: RegExp[] = [
+  // "~26 threads", "the 12 files", "all 40 records", and crucially the real
+  // reported case "~26 ARCHIVED threads" - allow up to two adjectives between
+  // the count and the plural noun, or the pattern misses the exact phrasing
+  // that motivated it.
+  /\b(?:~|about |approximately |all |the )?\d{1,6}\s+(?:of the |of )?(?:[a-z_-]+\s+){0,2}[a-z_-]{3,}s\b/i,
+  // "via `git tag --contains`", "using rg", "with sed"
+  /\b(?:via|using|with|through)\s+[`'"]?(?:git|rg|grep|sed|awk|find|jq|sqlite3?|curl|wrangler|docker|npm|bun)\b/i,
+  // an explicit shell/command incantation in backticks
+  /`[^`]*\b(?:git|rg|grep|sed|awk|find|jq|sqlite3?|curl|wrangler|docker)\b[^`]*`/i,
+  // "the schema says", "the docs say", "X is empty/complete"
+  /\b(?:the (?:schema|docs?|table|index|log|manifest)) (?:says?|shows?|has|contains)\b/i,
+];
+
+/** Bulk or hard-to-reverse intent - where an unchecked premise costs most. */
+const BULK_DESTRUCTIVE_PATTERNS: RegExp[] = [
+  /\b(?:delete|remove|purge|drop|wipe|truncate|revoke|reset|overwrite|clobber)\b/i,
+  /\b(?:backfill|migrate|rename|re-?tag|bulk|mass|batch)\b/i,
+  /\b(?:every|all|each of the)\s+[a-z_-]{3,}s\b/i,
+  // NOTE the alternation shape: a leading \b before `~\d+` can NEVER match,
+  // because `~` and the preceding space are both non-word characters so there
+  // is no boundary between them. That silently killed the exact reported case
+  // ("post ... to the ~26 archived threads"). Anchor each alternative on its
+  // own terms instead of hoisting a shared \b.
+  /\b(?:post|send|email|dm|notify|ping|reply)\b[^.]{0,40}(?:\ball\b|\bevery\b|\beach\b|\bthe \d+|~\d+)/i,
+];
+
+/** PURE: does this instruction assert a premise AND propose bulk/destructive
+ *  action? Exported for tests. */
+export function detectsUncheckedPremise(prompt: string): boolean {
+  if (!prompt) return false;
+  const asserts = PREMISE_ASSERTION_PATTERNS.some((re) => re.test(prompt));
+  if (!asserts) return false;
+  return BULK_DESTRUCTIVE_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: the premise-check block. Exported for tests. */
+export function composePremiseCheckText(): string {
+  return (
+    "[orch] THIS INSTRUCTION SPECIFIES A METHOD OR A COUNT, AND LOOKS BULK/HARD-TO-REVERSE. " +
+    "A named technique or a number is a CLAIM ABOUT THE WORLD wearing the clothes of an " +
+    "instruction - and the claim is checkable before you act on it.\n" +
+    "  - If a COUNT was given, derive it yourself first. Two real cases: \"post to the ~26 " +
+    "archived threads\" (17 of 29 already had one - would have pinged reporters with " +
+    "three-month-old news).\n" +
+    "  - If a METHOD was given, confirm it actually covers the population. \"Trace ship " +
+    "versions via `git tag --contains`\" (5 tags existed against 165 releases - would have " +
+    "stamped April fixes with July versions).\n" +
+    "  - Ask what OUTCOME is wanted, then pick the method that achieves it. An outcome-shaped " +
+    "instruction carries no hidden premise; a method-shaped one always does.\n" +
+    "  Verifying costs one query. Being wrong here is bulk and hard to undo."
+  );
+}
+
+/** Impure shell: fire the premise check, de-duped so it stays rare. */
+function composePremiseCheckNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!detectsUncheckedPremise(userPrompt)) return "";
+  const key = `premise_check_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 3) return "";
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, String(turn), now()]
+  );
+  return composePremiseCheckText();
+}
+
 /** Impure shell: hedge-gate, dedup, then retrieve top notes for the prompt's
  *  salient terms and hand them over inline. */
 function composeScopeRetrievalNudge(
@@ -335,7 +492,12 @@ function composeScopeRetrievalNudge(
   userPrompt: string,
   turn: number
 ): string {
-  if (!detectsHedge(userPrompt)) return "";
+  if (!detectsRetrievalTrigger(userPrompt)) return "";
+  // Hedge wins the label when both fire - it is the stronger signal that the
+  // asker's own framing may be wrong, not merely unexplored.
+  const reason: "hedge" | "expansion" = detectsHedge(userPrompt)
+    ? "hedge"
+    : "expansion";
 
   // De-dup so a hedge-heavy conversation does not re-fire every turn.
   const key = `scope_retrieval_turn_${sanitizeSessionId(sessionId)}`;
@@ -373,7 +535,7 @@ function composeScopeRetrievalNudge(
     [key, String(turn), now()]
   );
 
-  return composeScopeRetrievalText(hits);
+  return composeScopeRetrievalText(hits, reason);
 }
 
 function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {

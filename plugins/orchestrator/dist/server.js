@@ -23712,6 +23712,9 @@ function handleUserPromptSubmit(ctx, args) {
     parts.push(wardenNudge);
   if (scopeRetrieval)
     parts.push(scopeRetrieval);
+  const premiseCheck = composePremiseCheckNudge(ctx, args.session_id, userPrompt, turn);
+  if (premiseCheck)
+    parts.push(premiseCheck);
   return { additionalContext: parts.join(`
 
 `) };
@@ -23737,8 +23740,26 @@ function detectsHedge(prompt) {
     return false;
   return HEDGE_PATTERNS.some((re) => re.test(prompt));
 }
-function composeScopeRetrievalText(hits) {
-  const head = `[orch] YOUR PROMPT HEDGES ("i think" / "wasn't there" / "didn't we"). That is the ` + "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " + "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " + "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " + "a hedged question often contains an assumption the repo will correct.";
+var SCOPE_EXPANSION_PATTERNS = [
+  /\b(?:can|could|should) we (?:also|now)\b/i,
+  /\bwhat about\b/i,
+  /\bwhile you'?re (?:at it|in there)\b/i,
+  /\b(?:next|now),? (?:let'?s|can you|do|look at|move on)\b/i,
+  /\b(?:switch|switching|pivot|pivoting|move) (?:to|over to|onto)\b/i,
+  /\b(?:also|additionally|on top of that),? (?:improve|enhance|add|fix|update|check|look)\b/i,
+  /\blet'?s (?:also|now)\b/i,
+  /\bnew (?:task|topic|thing|area|scope)\b/i
+];
+function detectsScopeExpansion(prompt) {
+  if (!prompt)
+    return false;
+  return SCOPE_EXPANSION_PATTERNS.some((re) => re.test(prompt));
+}
+function detectsRetrievalTrigger(prompt) {
+  return detectsHedge(prompt) || detectsScopeExpansion(prompt);
+}
+function composeScopeRetrievalText(hits, reason = "hedge") {
+  const head = reason === "expansion" ? `[orch] THIS PROMPT EXPANDS SCOPE ("can we also" / "what about" / "next let's"). ` + "You are entering ground this session has not worked, which is exactly where the " + "reflex is fresh code exploration and exactly where the KB, `git log` and `docs/` " + "most often already hold the answer. Note the risk here is NOT that the asker is " + "unsure - a confident request can still land on settled ground the repo has an " + "opinion about. Read before you explore, and verify the PREMISE of the request." : `[orch] YOUR PROMPT HEDGES ("i think" / "wasn't there" / "didn't we"). That is the ` + "signal that the ASKER is uncertain and the REPO probably is not. Do NOT answer this " + "from fresh code exploration alone - the KB, `git log` and `docs/` frequently already " + "hold the answer, sometimes to the exact question being asked. Verify the PREMISE too: " + "a hedged question often contains an assumption the repo will correct.";
   if (hits.length === 0) {
     return head + "\n  No stored notes matched this prompt's terms - so check `git log`, `docs/`, and " + "the code, and capture what you find.";
   }
@@ -23751,9 +23772,47 @@ function composeScopeRetrievalText(hits) {
 
   STALENESS CHECK: for each of these ask not only "have I read it?" but "when this ` + 'was written, what was true - and is it STILL true?" A note resting on a live quantity ' + '(a count, a status, a date, a "not yet") can stay accurate while the CONCLUSION drawn ' + "from it expires. If one is now wrong, update it - that is the maintenance half.";
 }
-function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
-  if (!detectsHedge(userPrompt))
+var PREMISE_ASSERTION_PATTERNS = [
+  /\b(?:~|about |approximately |all |the )?\d{1,6}\s+(?:of the |of )?(?:[a-z_-]+\s+){0,2}[a-z_-]{3,}s\b/i,
+  /\b(?:via|using|with|through)\s+[`'"]?(?:git|rg|grep|sed|awk|find|jq|sqlite3?|curl|wrangler|docker|npm|bun)\b/i,
+  /`[^`]*\b(?:git|rg|grep|sed|awk|find|jq|sqlite3?|curl|wrangler|docker)\b[^`]*`/i,
+  /\b(?:the (?:schema|docs?|table|index|log|manifest)) (?:says?|shows?|has|contains)\b/i
+];
+var BULK_DESTRUCTIVE_PATTERNS = [
+  /\b(?:delete|remove|purge|drop|wipe|truncate|revoke|reset|overwrite|clobber)\b/i,
+  /\b(?:backfill|migrate|rename|re-?tag|bulk|mass|batch)\b/i,
+  /\b(?:every|all|each of the)\s+[a-z_-]{3,}s\b/i,
+  /\b(?:post|send|email|dm|notify|ping|reply)\b[^.]{0,40}(?:\ball\b|\bevery\b|\beach\b|\bthe \d+|~\d+)/i
+];
+function detectsUncheckedPremise(prompt) {
+  if (!prompt)
+    return false;
+  const asserts = PREMISE_ASSERTION_PATTERNS.some((re) => re.test(prompt));
+  if (!asserts)
+    return false;
+  return BULK_DESTRUCTIVE_PATTERNS.some((re) => re.test(prompt));
+}
+function composePremiseCheckText() {
+  return "[orch] THIS INSTRUCTION SPECIFIES A METHOD OR A COUNT, AND LOOKS BULK/HARD-TO-REVERSE. " + "A named technique or a number is a CLAIM ABOUT THE WORLD wearing the clothes of an " + `instruction - and the claim is checkable before you act on it.
+` + '  - If a COUNT was given, derive it yourself first. Two real cases: "post to the ~26 ' + 'archived threads" (17 of 29 already had one - would have pinged reporters with ' + `three-month-old news).
+` + '  - If a METHOD was given, confirm it actually covers the population. "Trace ship ' + 'versions via `git tag --contains`" (5 tags existed against 165 releases - would have ' + `stamped April fixes with July versions).
+` + "  - Ask what OUTCOME is wanted, then pick the method that achieves it. An outcome-shaped " + `instruction carries no hidden premise; a method-shaped one always does.
+` + "  Verifying costs one query. Being wrong here is bulk and hard to undo.";
+}
+function composePremiseCheckNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsUncheckedPremise(userPrompt))
     return "";
+  const key = `premise_check_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 3)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  return composePremiseCheckText();
+}
+function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsRetrievalTrigger(userPrompt))
+    return "";
+  const reason = detectsHedge(userPrompt) ? "hedge" : "expansion";
   const key = `scope_retrieval_turn_${sanitizeSessionId(sessionId)}`;
   const last = readIntState(ctx.db, key);
   if (last > 0 && turn - last >= 0 && turn - last < 5)
@@ -23775,7 +23834,7 @@ function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
     }
   }
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
-  return composeScopeRetrievalText(hits);
+  return composeScopeRetrievalText(hits, reason);
 }
 function handlePreToolUse(ctx, args) {
   const filePath = args.payload?.file_path ?? null;
