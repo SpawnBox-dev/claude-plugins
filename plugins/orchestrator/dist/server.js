@@ -23777,6 +23777,12 @@ function handleUserPromptSubmit(ctx, args) {
   const rewriteCheck = composeHistoryRewriteNudge(ctx, args.session_id, userPrompt, turn);
   if (rewriteCheck)
     parts.push(rewriteCheck);
+  const guardCheck = composeGuardAuthoringNudge(ctx, args.session_id, userPrompt, turn);
+  if (guardCheck)
+    parts.push(guardCheck);
+  const volatileCheck = composeVolatileValueNudge(ctx, args.session_id, userPrompt, turn);
+  if (volatileCheck)
+    parts.push(volatileCheck);
   return { additionalContext: parts.join(`
 
 `) };
@@ -23857,6 +23863,66 @@ var HISTORY_REWRITE_PATTERNS = [
   /\bsquash\b[^.]{0,40}\b(?:commit|history)\b/i,
   /\bdrop\s+(?:the\s+)?commit\b|\brewrite\s+(?:the\s+)?history\b/i
 ];
+var GUARD_AUTHORING_PATTERNS = [
+  /\b(?:grep|search|scan|sweep)\b[^.]{0,50}\b(?:for|the repo|the tree|history|commits?)\b/i,
+  /\b(?:check|verify|confirm|make sure|ensure)\b[^.]{0,60}\b(?:not (?:in|present)|isn'?t (?:in|there)|removed|gone|clean|absent|no longer)\b/i,
+  /\b(?:pii|secret|credential|api[- ]?key|token|password|phone number|sin|ssn|account number)\b/i,
+  /\b(?:redact|scrub|sanitiz|mask)\w*\b/i,
+  /\bguard(?:ing)?\s+against\b|\bpre-?commit\s+(?:hook|check|guard)\b/i,
+  /\bleak(?:ed|ing)?\b[^.]{0,40}\b(?:check|scan|verify|prevent)\b/i
+];
+var VOLATILE_VALUE_PATTERNS = [
+  /\b(?:price|pricing|cost|costs|how much|\$\d)\b/i,
+  /\b(?:tier|plan|subscription|entitlement|quota|allowance|limit)s?\b/i,
+  /\b(?:deadline|due date|expires?|expiry|renewal|trial length)\b/i,
+  /\b(?:discount|refund|coupon|promo|credit)s?\b/i,
+  /\b(?:free|pro|paid)\s+(?:tier|plan|users?)\b/i
+];
+function detectsVolatileValue(prompt) {
+  if (!prompt)
+    return false;
+  return VOLATILE_VALUE_PATTERNS.some((re) => re.test(prompt));
+}
+function composeVolatileValueText() {
+  return "[orch] THIS TOUCHES A VALUE THAT CHANGES UNDER YOU (price, tier, quota, entitlement, " + `deadline, discount). VERIFY IT AT THE LIVE SOURCE BEFORE ASSERTING IT.
+` + "  - Figures you have carried since session start are the dangerous kind: your CONFIDENCE " + "does not decay when the value does. A confident question does not mean a settled answer, " + `so nothing about the ASKING will warn you.
+` + "  - Real near-miss: pricing changed mid-session and an agent still held the old figures. " + "They were corrected only because a file happened to change underneath them - not by " + "retrieving anything. One inbound question earlier and that would have gone to a customer, " + `in public, in the product's voice.
+` + "  - Where more than one source can state the value (what is CHARGED vs what is DISPLAYED " + `vs what is ADVERTISED), they drift independently. Name which one you read.
+` + '  - Say the source and the timestamp in your answer. "Pro is $X (read from <source> just ' + 'now)" is checkable; "Pro is $X" is a memory.';
+}
+function composeVolatileValueNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsVolatileValue(userPrompt))
+    return "";
+  const key = `volatile_value_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 4)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  return composeVolatileValueText();
+}
+function detectsGuardAuthoring(prompt) {
+  if (!prompt)
+    return false;
+  return GUARD_AUTHORING_PATTERNS.some((re) => re.test(prompt));
+}
+function composeGuardAuthoringText() {
+  return "[orch] YOU ARE ABOUT TO WRITE OR RUN A CHECK. Test the CHECK before you trust its verdict - " + `a check that cannot fail is indistinguishable from one that found nothing.
+` + "  1. RUN IT AGAINST THE CASE THAT MOTIVATED IT and confirm it FIRES. Then a known-negative, " + `and confirm it stays silent. This takes about ten seconds.
+` + "  2. MATCH HOW THE DATA IS ACTUALLY FORMATTED, not how you happened to type it. Real case: a " + "guard grepped `587-777` while the value read `(587) 777-0995`. No common substring, so it " + 'printed "clean" and the number was committed - then passed again on the follow-up commit ' + `because the same literal was reused.
+` + "  3. For NUMBERS, normalise before matching (strip non-digits both sides) rather than " + "guessing separators. A digit-normalised guard catches every formatting of the same value; a " + `literal catches exactly one.
+` + '  4. A "clean" result from an UNTESTED check is not evidence. Say which cases you verified ' + `it fires on, so "I checked" means something to whoever reads it.
+` + "  This is the cheap moment. Everything after the commit is the expensive one.";
+}
+function composeGuardAuthoringNudge(ctx, sessionId, userPrompt, turn) {
+  if (!detectsGuardAuthoring(userPrompt))
+    return "";
+  const key = `guard_authoring_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 3)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
+  return composeGuardAuthoringText();
+}
 function detectsHistoryRewrite(prompt) {
   if (!prompt)
     return false;

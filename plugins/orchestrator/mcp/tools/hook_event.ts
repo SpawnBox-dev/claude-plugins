@@ -291,6 +291,24 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
     turn
   );
   if (rewriteCheck) parts.push(rewriteCheck);
+  // 0.30.85: fire at the moment a guard is AUTHORED (the cheap intervention
+  // point), not only when rewriting history to undo the damage.
+  const guardCheck = composeGuardAuthoringNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
+  if (guardCheck) parts.push(guardCheck);
+  // 0.30.85: values that change under you, where confidence does not decay
+  // with accuracy and no phrasing signal exists.
+  const volatileCheck = composeVolatileValueNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
+  if (volatileCheck) parts.push(volatileCheck);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -513,6 +531,155 @@ const HISTORY_REWRITE_PATTERNS: RegExp[] = [
   /\bsquash\b[^.]{0,40}\b(?:commit|history)\b/i,
   /\bdrop\s+(?:the\s+)?commit\b|\brewrite\s+(?:the\s+)?history\b/i,
 ];
+
+// 0.30.85: fire at the moment a GUARD IS AUTHORED, which is where the leak
+// actually happens.
+//
+// SA-b14fafa3, correcting 0.30.82 from the incident that produced it: "my leak
+// did not happen at any of those [rewrite] ops. It happened at an ordinary
+// `git add` + commit + push, with a guard that ran and passed. The rewrite only
+// entered the picture afterwards, as the attempted REMEDY."
+//
+// So as shipped, the format-matching advice fired at the moment you are trying
+// to UNDO the damage - by which point the value is in pushed history and only
+// the expensive fix remains. The prevention moment is the ordinary commit, and
+// upstream of that, the moment someone WRITES THE CHECK.
+//
+// The verbatim sequence, twice, with zero rewrite ops and zero triggers:
+//   guard greps `587-777` -> value is `(587) 777-0995` -> no common substring
+//   -> "clean" -> commit -> push. Then the same literal was reused on the
+//   follow-up commit and passed again.
+//
+// Their validation is the argument for putting it here: a digit-normalised
+// guard fires on all six formats of that number including the bracketed one
+// that leaked, and stays silent on three known-negatives - and testing it
+// against the motivating case took about TEN SECONDS. That is the cheapest
+// intervention available anywhere in this chain.
+const GUARD_AUTHORING_PATTERNS: RegExp[] = [
+  /\b(?:grep|search|scan|sweep)\b[^.]{0,50}\b(?:for|the repo|the tree|history|commits?)\b/i,
+  /\b(?:check|verify|confirm|make sure|ensure)\b[^.]{0,60}\b(?:not (?:in|present)|isn'?t (?:in|there)|removed|gone|clean|absent|no longer)\b/i,
+  /\b(?:pii|secret|credential|api[- ]?key|token|password|phone number|sin|ssn|account number)\b/i,
+  /\b(?:redact|scrub|sanitiz|mask)\w*\b/i,
+  /\bguard(?:ing)?\s+against\b|\bpre-?commit\s+(?:hook|check|guard)\b/i,
+  /\bleak(?:ed|ing)?\b[^.]{0,40}\b(?:check|scan|verify|prevent)\b/i,
+];
+
+// 0.30.85: VOLATILE-VALUE assertions warrant retrieval regardless of trigger.
+//
+// SA-df343a05, from a live near-miss ninety seconds after it happened: pricing
+// changed ($9.99/$99.99/$24.99 -> $9/$90/$24 tax-included) and they were
+// carrying the stale figures from session start. They were corrected only
+// because a file changed underneath them - not by retrieving anything. Had a
+// pricing question arrived by Discord push in the preceding hours, they would
+// have answered "confidently and wrong, to a community member, in public."
+//
+// None of the triggers built this session would have fired, and their analysis
+// of why is exact:
+//   - NOT hedged. "How much is Pro?" is a confident question. Hedge detection
+//     finds the USER's doubt; here the doubt was the agent's, and invisible.
+//   - NOT a directory visit or edit. Answering a question touches no files.
+//   - NOT a domain shift. Pricing IS their domain; their vocabulary never moved.
+//
+// The distinguishing property is not the topic or the phrasing - it is that the
+// VALUE ITSELF CHANGES UNDER YOU while your confidence does not. So the trigger
+// is a narrow list of volatile-value domains where being confidently stale is
+// worst: public, to a customer, in the product's own voice.
+const VOLATILE_VALUE_PATTERNS: RegExp[] = [
+  /\b(?:price|pricing|cost|costs|how much|\$\d)\b/i,
+  /\b(?:tier|plan|subscription|entitlement|quota|allowance|limit)s?\b/i,
+  /\b(?:deadline|due date|expires?|expiry|renewal|trial length)\b/i,
+  /\b(?:discount|refund|coupon|promo|credit)s?\b/i,
+  /\b(?:free|pro|paid)\s+(?:tier|plan|users?)\b/i,
+];
+
+/** PURE: does this turn involve a value that changes under you? Exported for
+ *  tests. */
+export function detectsVolatileValue(prompt: string): boolean {
+  if (!prompt) return false;
+  return VOLATILE_VALUE_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: the volatile-value check. Exported for tests. */
+export function composeVolatileValueText(): string {
+  return (
+    "[orch] THIS TOUCHES A VALUE THAT CHANGES UNDER YOU (price, tier, quota, entitlement, " +
+    "deadline, discount). VERIFY IT AT THE LIVE SOURCE BEFORE ASSERTING IT.\n" +
+    "  - Figures you have carried since session start are the dangerous kind: your CONFIDENCE " +
+    "does not decay when the value does. A confident question does not mean a settled answer, " +
+    "so nothing about the ASKING will warn you.\n" +
+    "  - Real near-miss: pricing changed mid-session and an agent still held the old figures. " +
+    "They were corrected only because a file happened to change underneath them - not by " +
+    "retrieving anything. One inbound question earlier and that would have gone to a customer, " +
+    "in public, in the product's voice.\n" +
+    "  - Where more than one source can state the value (what is CHARGED vs what is DISPLAYED " +
+    "vs what is ADVERTISED), they drift independently. Name which one you read.\n" +
+    "  - Say the source and the timestamp in your answer. \"Pro is $X (read from <source> just " +
+    "now)\" is checkable; \"Pro is $X\" is a memory."
+  );
+}
+
+/** Impure shell: fire the volatile-value check, de-duped. */
+function composeVolatileValueNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!detectsVolatileValue(userPrompt)) return "";
+  const key = `volatile_value_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 4) return "";
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, String(turn), now()]
+  );
+  return composeVolatileValueText();
+}
+
+/** PURE: is the agent about to author or run a verification/guard? Exported
+ *  for tests. */
+export function detectsGuardAuthoring(prompt: string): boolean {
+  if (!prompt) return false;
+  return GUARD_AUTHORING_PATTERNS.some((re) => re.test(prompt));
+}
+
+/** PURE: the guard-authoring check. Exported for tests. */
+export function composeGuardAuthoringText(): string {
+  return (
+    "[orch] YOU ARE ABOUT TO WRITE OR RUN A CHECK. Test the CHECK before you trust its verdict - " +
+    "a check that cannot fail is indistinguishable from one that found nothing.\n" +
+    "  1. RUN IT AGAINST THE CASE THAT MOTIVATED IT and confirm it FIRES. Then a known-negative, " +
+    "and confirm it stays silent. This takes about ten seconds.\n" +
+    "  2. MATCH HOW THE DATA IS ACTUALLY FORMATTED, not how you happened to type it. Real case: a " +
+    "guard grepped `587-777` while the value read `(587) 777-0995`. No common substring, so it " +
+    "printed \"clean\" and the number was committed - then passed again on the follow-up commit " +
+    "because the same literal was reused.\n" +
+    "  3. For NUMBERS, normalise before matching (strip non-digits both sides) rather than " +
+    "guessing separators. A digit-normalised guard catches every formatting of the same value; a " +
+    "literal catches exactly one.\n" +
+    "  4. A \"clean\" result from an UNTESTED check is not evidence. Say which cases you verified " +
+    "it fires on, so \"I checked\" means something to whoever reads it.\n" +
+    "  This is the cheap moment. Everything after the commit is the expensive one."
+  );
+}
+
+/** Impure shell: fire the guard-authoring check, lightly de-duped. */
+function composeGuardAuthoringNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!detectsGuardAuthoring(userPrompt)) return "";
+  const key = `guard_authoring_turn_${sanitizeSessionId(sessionId)}`;
+  const last = readIntState(ctx.db, key);
+  if (last > 0 && turn - last >= 0 && turn - last < 3) return "";
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, String(turn), now()]
+  );
+  return composeGuardAuthoringText();
+}
 
 /** PURE: does this instruction propose rewriting git history? Exported for
  *  tests. Unlike detectsUncheckedPremise this needs NO second signal - the
