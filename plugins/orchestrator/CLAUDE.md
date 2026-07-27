@@ -145,6 +145,17 @@ Live case (0.30.72): `lookup({code_ref: "path"})` was rejected by the tool while
 
 Corollary, learned the same session: **prefer shipping CONTENT over shipping a POINTER.** A pointer costs the reader a decision they will usually decline; inlined content costs them nothing. That is why the pre-edit hint now carries the notes rather than asking for a lookup, and why the retrieval triggers run the query themselves.
 
+### Latency and liveness are the same bug here
+
+The MCP server is a single Bun event loop. The 30s heartbeat, the 1.5s channel tick, and every tool call share it. **Any long SYNCHRONOUS operation starves the heartbeat**, and once it lapses past the 90s stale threshold a peer reaps the session and announces `session_departed` - for a process that is alive and working.
+
+This has now caused the same visible failure twice, from two different culprits: an N-squared transcript read (WI `8522c487`) and a 240s N+1 in the briefing's neglected-areas section (fixed 0.30.92). In both cases the reported symptom was a *flap* - sessions appearing to leave and rejoin - and the actual defect was a slow query.
+
+**Two consequences worth holding:**
+
+- **A latency bug in a tool is also a liveness bug.** Anything slow enough to annoy a user is slow enough to make a healthy process look dead to anything watching a heartbeat. Fixing the query fixed the flap; nobody needed to touch the liveness code.
+- **When sessions flap, ask who flapped before debugging the detector.** Every observed flap hit a NEWLY-JOINED session, because only new sessions run the mandatory startup `briefing`. Long-running sessions never flapped. That asymmetry identified the culprit faster than reading the detector would have - and the detector was working correctly the entire time.
+
 ### Designing a nudge (read before adding one)
 
 Every advisory this plugin emits competes for the same scarce attention, and a bad one does not merely waste a slot - it teaches agents to skim the channel that also carries the good ones. Four separate advisories were caught doing exactly that in a single session (2026-07-27).
