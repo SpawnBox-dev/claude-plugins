@@ -586,7 +586,18 @@ const GUARD_AUTHORING_PATTERNS: RegExp[] = [
 // worst: public, to a customer, in the product's own voice.
 const VOLATILE_VALUE_PATTERNS: RegExp[] = [
   /\b(?:price|pricing|cost|costs|how much|\$\d)\b/i,
-  /\b(?:tier|plan|subscription|entitlement|quota|allowance|limit)s?\b/i,
+  // 0.30.99: `limit` and `plan` removed as bare terms - self-observed false
+  // positive within 90 minutes of shipping this. It fired on "fidelity limit"
+  // in a discussion about graph rebuilds, and in this codebase alone `limit`
+  // appears as link_limit, rate limit, character limit, time limit. `plan`
+  // is worse (a plan of work). Both are commercial only in context, so they
+  // now need a commercial qualifier; the unambiguous commercial nouns stay
+  // bare. Exactly the "volume that carries no information" failure this
+  // session spent all evening fixing - shipping a noisy trigger and leaving it
+  // is worse than not shipping it.
+  /\b(?:tier|subscription|entitlement|quota|allowance)s?\b/i,
+  /\b(?:pricing|billing|payment|price)\s+(?:plan|tier|limit)s?\b/i,
+  /\b(?:usage|storage|api|rate)\s+(?:quota|allowance|cap)s?\b/i,
   /\b(?:deadline|due date|expires?|expiry|renewal|trial length)\b/i,
   /\b(?:discount|refund|coupon|promo|credit)s?\b/i,
   /\b(?:free|pro|paid)\s+(?:tier|plan|users?)\b/i,

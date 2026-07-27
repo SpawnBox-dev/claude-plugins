@@ -99,3 +99,49 @@ describe("volatile values - fires where confidence outlives accuracy", () => {
     expect(t).toContain("Name which one you read");
   });
 });
+
+// ===========================================================================
+// 0.30.99: false-positive narrowing, self-observed 90 minutes after shipping.
+//
+// The volatile-value trigger fired on the phrase "fidelity limit" during a
+// discussion about graph rebuilds - nothing commercial anywhere near it. In
+// this codebase alone `limit` appears as link_limit, rate limit, character
+// limit and time limit, so the bare term would have fired near-constantly on
+// nothing. `plan` is worse: a plan of work.
+//
+// Both now require a commercial qualifier. The unambiguous commercial nouns
+// (tier, subscription, entitlement, quota, allowance) stay bare.
+// ===========================================================================
+describe("volatile-value false positives (0.30.99 narrowing)", () => {
+  test("does NOT fire on non-commercial uses of limit/plan", () => {
+    for (const p of [
+      "state the fidelity limit you found",
+      "what's the link_limit default",
+      "we hit a rate limit on the API",
+      "there's a character limit on the field",
+      "what's the plan for tomorrow",
+      "the plan is to rebuild the graph first",
+    ]) {
+      expect(detectsVolatileValue(p), p).toBe(false);
+    }
+  });
+
+  test("STILL fires on the cases that motivated the trigger", () => {
+    // The regression guard: narrowing must not silence the real thing.
+    for (const p of [
+      "how much is Pro?",
+      "what's the price of the annual plan",
+      "does the free tier include cloud backup",
+      "what's our storage quota for Pro",
+      "when does that credit expire",
+      "is there a discount for the season pass",
+    ]) {
+      expect(detectsVolatileValue(p), p).toBe(true);
+    }
+  });
+
+  test("fires on limit/plan WHEN commercially qualified", () => {
+    expect(detectsVolatileValue("what's the pricing plan")).toBe(true);
+    expect(detectsVolatileValue("what's our storage quota")).toBe(true);
+  });
+});

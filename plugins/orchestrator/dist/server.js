@@ -23910,7 +23910,9 @@ var GUARD_AUTHORING_PATTERNS = [
 ];
 var VOLATILE_VALUE_PATTERNS = [
   /\b(?:price|pricing|cost|costs|how much|\$\d)\b/i,
-  /\b(?:tier|plan|subscription|entitlement|quota|allowance|limit)s?\b/i,
+  /\b(?:tier|subscription|entitlement|quota|allowance)s?\b/i,
+  /\b(?:pricing|billing|payment|price)\s+(?:plan|tier|limit)s?\b/i,
+  /\b(?:usage|storage|api|rate)\s+(?:quota|allowance|cap)s?\b/i,
   /\b(?:deadline|due date|expires?|expiry|renewal|trial length)\b/i,
   /\b(?:discount|refund|coupon|promo|credit)s?\b/i,
   /\b(?:free|pro|paid)\s+(?:tier|plan|users?)\b/i
