@@ -21025,6 +21025,60 @@ function cascadeResolution(db, noteId, timestamp) {
   return results;
 }
 
+// mcp/tools/pending_note.ts
+var PENDING_PREFIX = "pending_note_";
+var PENDING_NOTE_TTL_MS = 60 * 60 * 1000;
+function pendingKey(token) {
+  return `${PENDING_PREFIX}${token}`;
+}
+function gcPendingNotes(db, ttlMs = PENDING_NOTE_TTL_MS) {
+  const cutoff = new Date(Date.now() - ttlMs).toISOString();
+  const rows = db.query(`SELECT key, updated_at FROM plugin_state WHERE key LIKE ?`).all(`${PENDING_PREFIX}%`);
+  let removed = 0;
+  for (const r of rows) {
+    if (r.updated_at < cutoff) {
+      db.run(`DELETE FROM plugin_state WHERE key = ?`, [r.key]);
+      removed++;
+    }
+  }
+  return removed;
+}
+function stashPendingNote(db, input) {
+  gcPendingNotes(db);
+  const token = generateId().replace(/-/g, "").slice(0, 8);
+  const payload = {
+    content: input.content,
+    type: input.type,
+    context: input.context,
+    tags: input.tags,
+    scope: input.scope,
+    dimension: input.dimension,
+    session_id: input.session_id,
+    code_refs: input.code_refs
+  };
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [pendingKey(token), JSON.stringify(payload), now()]);
+  return token;
+}
+function takePendingNote(db, token, ttlMs = PENDING_NOTE_TTL_MS) {
+  const key = pendingKey(token.trim());
+  const row = db.query(`SELECT value, updated_at FROM plugin_state WHERE key = ?`).get(key);
+  if (!row)
+    return null;
+  db.run(`DELETE FROM plugin_state WHERE key = ?`, [key]);
+  const age = Date.now() - new Date(row.updated_at).getTime();
+  if (!Number.isFinite(age) || age > ttlMs)
+    return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    if (!parsed || typeof parsed.content !== "string" || !parsed.content) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 // mcp/tools/remember.ts
 var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
 var SIMILARITY_ALERT_THRESHOLDS = {
@@ -21043,6 +21097,18 @@ function bucketLabel(similarity) {
   if (similarity >= 0.85)
     return "LIKELY RELATED";
   return "ADJACENT";
+}
+function sharedMatchTerms(content, candidateContent, max = 8) {
+  const a = new Set(extractKeywords(content));
+  const b = extractKeywords(candidateContent);
+  const shared = [];
+  for (const term of b) {
+    if (a.has(term) && !shared.includes(term))
+      shared.push(term);
+    if (shared.length >= max)
+      break;
+  }
+  return shared;
 }
 function formatConsolidationAdvisory(candidates) {
   if (candidates.length === 0)
@@ -21107,6 +21173,33 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
 }
 var NOTE_CONTENT_HARD_CHARS = 50000;
 async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
+  if (input.pending_id) {
+    const stashed = takePendingNote(projectDb2, input.pending_id);
+    if (!stashed) {
+      return {
+        stored: false,
+        note_id: null,
+        duplicate: false,
+        promoted: false,
+        links_created: 0,
+        message: `pending_id "${input.pending_id}" is unknown, expired, or already committed - nothing was written. ` + `Pending bodies are one-shot and expire after ${Math.round(PENDING_NOTE_TTL_MS / 60000)} minutes. ` + `Re-send the note with its full content plus your resolution.`
+      };
+    }
+    input = {
+      ...stashed,
+      ...Object.fromEntries(Object.entries(input).filter(([, v]) => v !== undefined))
+    };
+  }
+  if (typeof input.content !== "string" || input.content.length === 0) {
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      message: "note() requires `content` (and `type`), unless you pass a `pending_id` from a blocked near-duplicate gate."
+    };
+  }
   if (input.content.length > NOTE_CONTENT_HARD_CHARS) {
     return {
       stored: false,
@@ -21158,7 +21251,10 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
     const candidateLines = sortedCandidates.map((c) => {
       const pct = Math.round(c.similarity * 100);
       const bucket = bucketLabel(c.similarity);
-      return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"`;
+      const shared = sharedMatchTerms(input.content, c.content);
+      const why = shared.length > 0 ? `
+      matched on: ${shared.join(", ")}` : "";
+      return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"${why}`;
     }).join(`
 `);
     const guidanceBlock = `Guidance by match strength:
@@ -21167,19 +21263,24 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
 ` + "- ADJACENT (75-84%): overlapping vocabulary but likely different concepts. accept_new is usually correct; update/supersede only if you are certain of duplication.";
     const gatePct = Math.round(blockThreshold * 100);
     const typeBarNote = input.type === "anti_pattern" ? " anti_pattern uses a stricter bar because vocabulary-adjacent-but-distinct" + " failure modes are expected - if this is a DIFFERENT failure mode/angle," + " accept_new is correct; if the SAME mode, prefer update_existing/" + "supersede_existing to keep the catalog consolidated." : "";
+    const pendingId = stashPendingNote(projectDb2, input);
     const message = `Near-duplicate detected. Review before choosing resolution:
 
 ` + `(Gate: ${input.type} blocks at >=${gatePct}% similarity.${typeBarNote})
 
 ` + candidateLines + `
 
-` + guidanceBlock + `
+` + guidanceBlock + "\n\nNOTE ON `matched on:` - these are the shared terms that drove the score. " + "If the overlap is all generic/domain jargon and the actual CLAIMS differ, " + "that is a false positive and `accept_new` is correct.\n" + `
+Your note body is SAVED - do NOT re-send it. Commit with the token alone:
+` + `  note({ pending_id: "${pendingId}", resolution: { action: "accept_new" } })
 
-Choose one:
+` + `Choose one:
 ` + `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different
 ` + `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new
 ` + `  - resolution: { action: "supersede_existing", target_id: "ID", reason?: "..." }  -- new note supersedes target (preserves history)
-` + `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved`;
+` + `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved
+` + `
+(Any field you pass alongside pending_id overrides the stashed one, so you can amend while committing. ` + `The token is one-shot and expires in ${Math.round(PENDING_NOTE_TTL_MS / 60000)} minutes; after that, re-send the content.)`;
     return {
       stored: false,
       note_id: null,
@@ -21188,6 +21289,7 @@ Choose one:
       links_created: 0,
       blocked_on_resolution: true,
       candidates: sortedCandidates,
+      pending_id: pendingId,
       message
     };
   }
@@ -21807,7 +21909,7 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
       message: results.length > 0 ? `Found ${results.length} note(s) matching "${input.query}"${offsetLabel}.${totalHint}${moreHint}` : offset > 0 ? `No more results after offset ${offset} for "${input.query}".${totalHint}` : `No notes found matching "${input.query}".${totalHint}`
     };
   }
-  if (input.type || input.tag) {
+  if (input.type || input.tag || input.code_ref) {
     const conditions = [];
     const params = [];
     if (input.type) {
@@ -22767,6 +22869,7 @@ function getDb(stateDir) {
     db.exec("PRAGMA journal_mode = WAL;");
   }
   db.exec("PRAGMA synchronous = NORMAL;");
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
@@ -26060,9 +26163,10 @@ server.tool("install_embeddings", "Check and install dependencies needed for sem
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.", {
-  content: exports_external.string(),
-  type: exports_external.enum(NOTE_TYPES),
+server.tool("note", "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity is at/above the type's bar (0.75 decision/convention, 0.85 anti_pattern) against an existing note, and will return candidates. **Your body is stashed server-side** - re-call with `pending_id` (returned in the block message) plus a `resolution` of accept_new / update_existing / supersede_existing / close_existing. Do NOT re-send `content`. Each candidate now shows a `matched on:` list of the shared terms that drove the score: if the overlap is all generic/domain jargon while the actual claims differ, that is a false positive and accept_new is correct.", {
+  content: exports_external.string().optional().describe("The knowledge to capture. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
+  type: exports_external.enum(NOTE_TYPES).optional().describe("Note type. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
+  pending_id: exports_external.string().optional().describe("Token returned when the near-duplicate gate blocks a write. Pass it WITH a `resolution` to commit the stashed body - do NOT re-send `content`. One-shot; expires after 60 minutes. Any field you also pass explicitly overrides the stashed value, so you can amend while committing."),
   context: exports_external.string().optional(),
   tags: exports_external.string().optional(),
   scope: exports_external.enum(["global", "project"]).optional(),
@@ -26074,7 +26178,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     reason: exports_external.string().optional().describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread.")
   }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
   code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries.")
-}, async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
+}, async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs, pending_id }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
@@ -26087,7 +26191,8 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     dimension,
     session_id,
     resolution,
-    code_refs
+    code_refs,
+    pending_id
   }, embeddingClient);
   return {
     content: [{ type: "text", text: result.message }]
@@ -26687,13 +26792,14 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   status: exports_external.enum(WORK_ITEM_STATUSES).optional(),
   priority: exports_external.enum(WORK_ITEM_PRIORITIES).optional(),
   due_date: exports_external.string().optional().describe("Due date in YYYY-MM-DD format, or empty string to clear"),
-  content: exports_external.string().optional().describe("Updated description"),
+  content: exports_external.string().optional().describe("REPLACES the description WHOLESALE - the prior text is gone. To add to a work item without destroying prior enrichment, use `append_content` instead."),
+  append_content: exports_external.string().min(1).max(20000).optional().describe("Timestamped segment to append to the existing description. Preferred over `content` for additive updates - no read-before-write, no risk of clobbering enrichment written by another session. Mutually exclusive with `content`. Max 20000 chars per append."),
   tags: exports_external.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
   context: exports_external.string().optional().describe("Updated context (replaces existing; empty string clears)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
   code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
-}, async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
+}, async ({ id, status, priority, due_date, content, append_content, tags, context, confidence, code_refs, blocked_by }) => {
   const projectDb2 = getProjectDb();
   const resolved = resolveNoteId(projectDb2, id);
   if (resolved.ambiguous) {
@@ -26712,6 +26818,9 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     return {
       content: [{ type: "text", text: `No note found with id "${id}".` }]
     };
+  }
+  if (append_content !== undefined && content !== undefined) {
+    return { content: [{ type: "text", text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
   }
   const timestamp = now();
   const setFragments = [];
@@ -26740,6 +26849,10 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     setFragments.push("keywords = ?");
     bindValues.push(newKeywords.join(","));
     changes.push("content updated");
+  }
+  if (append_content !== undefined) {
+    appendToNoteContent(projectDb2, id, append_content);
+    changes.push("append_content");
   }
   if (tags !== undefined) {
     const normTags = normalizeTagString(tags);
@@ -27037,7 +27150,7 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
 `) }] };
 });
 server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.", {
-  task: exports_external.string().min(1).max(500),
+  task: exports_external.string().min(1).max(2000),
   session_id: exports_external.string().optional(),
   warm_context: exports_external.array(exports_external.string()).max(50).optional(),
   hot_path_status: exports_external.string().max(80).optional(),

@@ -473,7 +473,18 @@ export async function handleRecall(
   // matching the filters. Lets callers like /pa-bootstrap do
   // `lookup({type: "user_pattern", limit: 25})` to surface recent
   // user-knowledge without inventing a meaningful query string.
-  if (input.type || input.tag) {
+  //
+  // 0.30.72+: code_ref ALONE also enters this mode. It could not before, and
+  // that made the R5 reverse-index - documented as the THIRD retrieval path in
+  // the tool description AND in the plugin's CLAUDE.md - unreachable on its
+  // own: `lookup({code_ref: "path"})` fell through to "Provide either a query,
+  // an id, or a type/tag filter". The code_ref condition was already built
+  // inside this block (below); only the entry gate omitted it. Worst part is
+  // that the PreToolUse hook instructs agents to run that EXACT call before
+  // editing a file with tagged notes, so the plugin was routinely telling the
+  // fleet to make a call it then rejected - agents reasonably concluded the
+  // file had no notes. Found 2026-07-27 by following the plugin's own hook.
+  if (input.type || input.tag || input.code_ref) {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
     if (input.type) {

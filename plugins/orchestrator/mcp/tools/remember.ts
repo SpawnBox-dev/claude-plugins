@@ -10,6 +10,7 @@ import { handleCheckSimilar } from "./check_similar";
 import { truncate } from "../utils";
 import { appendToNoteContent } from "./update_note_helpers";
 import { cascadeResolution } from "./cascade";
+import { stashPendingNote, takePendingNote, PENDING_NOTE_TTL_MS } from "./pending_note";
 
 export interface RememberInput {
   content: string;
@@ -34,6 +35,11 @@ export interface RememberInput {
    *  ["mcp/server.ts", "src-tauri/src/core/backup/"]. Not line numbers or
    *  symbols - orchestrator points at the neighborhood and carries the WHY. */
   code_refs?: string[];
+  /** 0.30.72+: token returned by a blocked gate. Supplying it rehydrates the
+   *  stashed body so `resolution` alone commits the write - no re-transmission
+   *  of content/tags/code_refs. Any field ALSO passed explicitly wins over the
+   *  stashed one, so the same call can amend while committing. */
+  pending_id?: string;
 }
 
 export interface RememberResult {
@@ -48,6 +54,10 @@ export interface RememberResult {
   blocked_on_resolution?: boolean;
   /** R4: top candidates returned to the caller when the gate fires. */
   candidates?: Array<{ id: string; type: string; content: string; similarity: number }>;
+  /** 0.30.72+: token identifying the stashed body when the gate blocks. Quote
+   *  it back as `pending_id` with a `resolution` to commit without re-sending
+   *  the content. */
+  pending_id?: string;
 }
 
 const SIMILARITY_ALERT_TYPES: NoteType[] = ["decision", "convention", "anti_pattern"];
@@ -96,6 +106,35 @@ export function bucketLabel(similarity: number): string {
   if (similarity >= 0.95) return "HIGH MATCH";
   if (similarity >= 0.85) return "LIKELY RELATED";
   return "ADJACENT";
+}
+
+/**
+ * 0.30.72+: the terms actually driving a candidate's match, so the gate can
+ * show WHY it fired instead of only how hard.
+ *
+ * Reported independently by PA, SA-b14fafa3 and SA-5a433456 on 2026-07-27:
+ * the gate blocks on shared VOCABULARY, not on the claim. Concrete cases -
+ * "code-signing dates as historical evidence" gated against "code signing as a
+ * shipping feature"; a knowledge-placement convention gated at 87% against
+ * three notes about PA behaviour. In an orchestrator KB nearly every note says
+ * PA / SA / session / compaction, so jargon alone can carry a pair over the
+ * bar. Showing the overlap lets the author see "this matched on shared jargon"
+ * in one glance and answer accept_new with confidence - instead of learning to
+ * reflexively accept_new, which is what destroys the gate's value.
+ */
+export function sharedMatchTerms(
+  content: string,
+  candidateContent: string,
+  max = 8
+): string[] {
+  const a = new Set(extractKeywords(content));
+  const b = extractKeywords(candidateContent);
+  const shared: string[] = [];
+  for (const term of b) {
+    if (a.has(term) && !shared.includes(term)) shared.push(term);
+    if (shared.length >= max) break;
+  }
+  return shared;
 }
 
 /**
@@ -220,6 +259,48 @@ export async function handleRemember(
   input: RememberInput,
   embeddingClient?: EmbeddingClient | null
 ): Promise<RememberResult> {
+  // ── 0.30.72+: rehydrate a gate-blocked body from its pending token ───────
+  // Runs FIRST, before every other check, because everything downstream reads
+  // content/type. The stash always lives in projectDb (plugin_state is project-
+  // scoped runtime state) even when the note itself will land in globalDb.
+  if (input.pending_id) {
+    const stashed = takePendingNote(projectDb, input.pending_id);
+    if (!stashed) {
+      return {
+        stored: false,
+        note_id: null,
+        duplicate: false,
+        promoted: false,
+        links_created: 0,
+        message:
+          `pending_id "${input.pending_id}" is unknown, expired, or already committed - nothing was written. ` +
+          `Pending bodies are one-shot and expire after ${Math.round(PENDING_NOTE_TTL_MS / 60000)} minutes. ` +
+          `Re-send the note with its full content plus your resolution.`,
+      };
+    }
+    // Explicitly-passed fields WIN over the stash, so the commit call can also
+    // amend (e.g. add a tag or a code_ref the gate made you notice) without
+    // re-sending the body.
+    input = {
+      ...stashed,
+      ...Object.fromEntries(
+        Object.entries(input).filter(([, v]) => v !== undefined)
+      ),
+    } as RememberInput;
+  }
+
+  if (typeof input.content !== "string" || input.content.length === 0) {
+    return {
+      stored: false,
+      note_id: null,
+      duplicate: false,
+      promoted: false,
+      links_created: 0,
+      message:
+        "note() requires `content` (and `type`), unless you pass a `pending_id` from a blocked near-duplicate gate.",
+    };
+  }
+
   // 0.30.26+ size check before any DB work
   if (input.content.length > NOTE_CONTENT_HARD_CHARS) {
     return {
@@ -313,7 +394,9 @@ export async function handleRemember(
       .map((c) => {
         const pct = Math.round(c.similarity * 100);
         const bucket = bucketLabel(c.similarity);
-        return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"`;
+        const shared = sharedMatchTerms(input.content, c.content);
+        const why = shared.length > 0 ? `\n      matched on: ${shared.join(", ")}` : "";
+        return `  [${bucket} ${pct}%] **${c.id}** [${c.type}] "${truncate(c.content, 120)}"${why}`;
       })
       .join("\n");
 
@@ -331,17 +414,28 @@ export async function handleRemember(
           " accept_new is correct; if the SAME mode, prefer update_existing/" +
           "supersede_existing to keep the catalog consolidated."
         : "";
+    // 0.30.72+: stash the body so the resolution round-trip costs a token, not
+    // a full re-transmission of the note. See pending_note.ts for why.
+    const pendingId = stashPendingNote(projectDb, input);
+
     const message =
       "Near-duplicate detected. Review before choosing resolution:\n\n" +
       `(Gate: ${input.type} blocks at >=${gatePct}% similarity.${typeBarNote})\n\n` +
       candidateLines +
       "\n\n" +
       guidanceBlock +
-      "\n\nChoose one:\n" +
+      "\n\nNOTE ON `matched on:` - these are the shared terms that drove the score. " +
+      "If the overlap is all generic/domain jargon and the actual CLAIMS differ, " +
+      "that is a false positive and `accept_new` is correct.\n" +
+      "\nYour note body is SAVED - do NOT re-send it. Commit with the token alone:\n" +
+      `  note({ pending_id: "${pendingId}", resolution: { action: "accept_new" } })\n\n` +
+      "Choose one:\n" +
       `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different\n` +
       `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new\n` +
       `  - resolution: { action: "supersede_existing", target_id: "ID", reason?: "..." }  -- new note supersedes target (preserves history)\n` +
-      `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved`;
+      `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved\n` +
+      `\n(Any field you pass alongside pending_id overrides the stashed one, so you can amend while committing. ` +
+      `The token is one-shot and expires in ${Math.round(PENDING_NOTE_TTL_MS / 60000)} minutes; after that, re-send the content.)`;
 
     return {
       stored: false,
@@ -351,6 +445,7 @@ export async function handleRemember(
       links_created: 0,
       blocked_on_resolution: true,
       candidates: sortedCandidates,
+      pending_id: pendingId,
       message,
     };
   }

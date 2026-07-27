@@ -13,7 +13,7 @@ import {
   BRIEFING_SECTIONS,
   DIMENSIONS,
 } from "./types";
-import type { WorkItemStatus, Dimension } from "./types";
+import type { WorkItemStatus, Dimension, NoteType } from "./types";
 import { getProjectDb, getGlobalDb } from "./db/connection";
 import { handleRemember } from "./tools/remember";
 import { handleSupersede } from "./tools/supersede";
@@ -859,10 +859,14 @@ server.tool(
 // ── note ────────────────────────────────────────────────────────────────
 server.tool(
   "note",
-  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity >= 0.75 against an existing note, and will return candidates. You must then re-call with a `resolution` choosing one of accept_new / update_existing / supersede_existing / close_existing.",
+  "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity is at/above the type's bar (0.75 decision/convention, 0.85 anti_pattern) against an existing note, and will return candidates. **Your body is stashed server-side** - re-call with `pending_id` (returned in the block message) plus a `resolution` of accept_new / update_existing / supersede_existing / close_existing. Do NOT re-send `content`. Each candidate now shows a `matched on:` list of the shared terms that drove the score: if the overlap is all generic/domain jargon while the actual claims differ, that is a false positive and accept_new is correct.",
   {
-    content: z.string(),
-    type: z.enum(NOTE_TYPES),
+    content: z.string().optional().describe("The knowledge to capture. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
+    type: z.enum(NOTE_TYPES).optional().describe("Note type. Required UNLESS you pass `pending_id` to commit a gate-blocked note."),
+    pending_id: z
+      .string()
+      .optional()
+      .describe("Token returned when the near-duplicate gate blocks a write. Pass it WITH a `resolution` to commit the stashed body - do NOT re-send `content`. One-shot; expires after 60 minutes. Any field you also pass explicitly overrides the stashed value, so you can amend while committing."),
     context: z.string().optional(),
     tags: z.string().optional(),
     scope: z.enum(["global", "project"]).optional(),
@@ -890,12 +894,12 @@ server.tool(
       .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
     code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries."),
   },
-  async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs }) => {
+  async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs, pending_id }) => {
     session_id = resolveSessionId(session_id);
     if (session_id) registerSessionOnce(session_id);
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
-      content,
-      type,
+      content: content as string,
+      type: type as NoteType,
       context,
       tags,
       scope,
@@ -903,6 +907,7 @@ server.tool(
       session_id,
       resolution,
       code_refs,
+      pending_id,
     }, embeddingClient);
     return {
       content: [{ type: "text" as const, text: result.message }],
@@ -1635,14 +1640,15 @@ server.tool(
     status: z.enum(WORK_ITEM_STATUSES).optional(),
     priority: z.enum(WORK_ITEM_PRIORITIES).optional(),
     due_date: z.string().optional().describe("Due date in YYYY-MM-DD format, or empty string to clear"),
-    content: z.string().optional().describe("Updated description"),
+    content: z.string().optional().describe("REPLACES the description WHOLESALE - the prior text is gone. To add to a work item without destroying prior enrichment, use `append_content` instead."),
+    append_content: z.string().min(1).max(20000).optional().describe("Timestamped segment to append to the existing description. Preferred over `content` for additive updates - no read-before-write, no risk of clobbering enrichment written by another session. Mutually exclusive with `content`. Max 20000 chars per append."),
     tags: z.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
     context: z.string().optional().describe("Updated context (replaces existing; empty string clears)"),
     confidence: z.enum(["low", "medium", "high"]).optional(),
     code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
     blocked_by: z.string().optional().describe("ID of the note blocking this work item (creates blocks link)"),
   },
-  async ({ id, status, priority, due_date, content, tags, context, confidence, code_refs, blocked_by }) => {
+  async ({ id, status, priority, due_date, content, append_content, tags, context, confidence, code_refs, blocked_by }) => {
     const projectDb = getProjectDb();
 
     // Resolve id8 prefix -> full UUID. The orchestrator surfaces note IDs as
@@ -1669,6 +1675,13 @@ server.tool(
       return {
         content: [{ type: "text" as const, text: `No note found with id "${id}".` }],
       };
+    }
+
+    // 0.30.72+: same mutual-exclusion guard update_note carries. Accepting
+    // both would apply the append and then overwrite it with `content` in the
+    // same statement - a silent data loss dressed as a successful call.
+    if (append_content !== undefined && content !== undefined) {
+      return { content: [{ type: "text" as const, text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
     }
 
     const timestamp = now();
@@ -1702,6 +1715,19 @@ server.tool(
       setFragments.push("keywords = ?");
       bindValues.push(newKeywords.join(","));
       changes.push("content updated");
+    }
+    // 0.30.72+: additive update parity with update_note. update_work_item
+    // previously offered ONLY wholesale `content` replacement, so annotating a
+    // work item meant read-modify-write and any miss silently destroyed prior
+    // enrichment - including another session's. SA-df343a05 reported avoiding
+    // exactly that clobber on 2026-07-27 only because a memory warned them,
+    // and it matches a standing cross-project anti-pattern about these tools
+    // looking like they merge when they replace. Same appendToNoteContent
+    // helper update_note uses, so timestamp format and keyword re-extraction
+    // stay identical across both tools.
+    if (append_content !== undefined) {
+      appendToNoteContent(projectDb, id, append_content);
+      changes.push("append_content");
     }
     if (tags !== undefined) {
       // c658ce38: normalize at capture so a JSON-array-stringified tags
@@ -2045,7 +2071,14 @@ server.tool(
   "update_session_task",
   "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.",
   {
-    task: z.string().min(1).max(500),
+    // 0.30.72+: raised 500 -> 2000. The 500 cap was cutting the part of a lane
+    // declaration that peers most need: the standing "do NOT do X" holds.
+    // SA-df343a05 had to trim its holds twice to fit and SA-4e3d2623's first
+    // call was rejected outright on 2026-07-27. This string is read by every
+    // sibling's briefing and rides on every channel notification, so truncating
+    // it degrades exactly the cross-session awareness the field exists for.
+    // 2000 is still a hard bound - it is a broadcast line, not a checkpoint.
+    task: z.string().min(1).max(2000),
     session_id: z.string().optional(),
     warm_context: z.array(z.string()).max(50).optional(),
     hot_path_status: z.string().max(80).optional(),

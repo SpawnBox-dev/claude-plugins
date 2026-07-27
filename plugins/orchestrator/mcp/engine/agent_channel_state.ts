@@ -288,6 +288,17 @@ function getDb(stateDir: string): Database {
     db.exec("PRAGMA journal_mode = WAL;");
   }
   db.exec("PRAGMA synchronous = NORMAL;");
+  // 0.30.72+: WAL lets readers run concurrently but WRITERS STILL SERIALIZE.
+  // Without a busy timeout a concurrent writer throws SQLITE_BUSY ("database
+  // is locked") IMMEDIATELY instead of waiting out the other writer. This DB
+  // is the most write-contended in the plugin - every live session heartbeats
+  // into it (~30s), the filewatcher persists offsets, and update_session_task
+  // writes on demand - so with a 5-session fleet, overlap is routine.
+  // SA-df343a05 hit `database is locked` twice on update_session_task on
+  // 2026-07-27 and had to retry by hand. The project/global DBs have carried
+  // this pragma since v0.16 for exactly this reason (see db/connection.ts);
+  // the agent-channel DB was simply never given it.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
