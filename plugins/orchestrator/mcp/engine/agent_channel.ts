@@ -144,6 +144,11 @@ export function classifyIngress(opts: {
   lastRealIsMidTurn: boolean;
   now: number;
   thresholdMs: number;
+  /** 0.30.77: mtime of the peer's transcript file. A TRANSCRIPT WRITE IS
+   *  LIVENESS - it happens on turn completion regardless of whether the turn
+   *  produced any channel text. Null when unavailable (falls through to the
+   *  old behavior). */
+  transcriptMtimeMs?: number | null;
 }): "ingress_suspect" | "healthy" | "pending" {
   // Only present (heartbeat-fresh) sessions are ingress candidates; an absent
   // peer is egress/departed territory (classifyAbsence owns it).
@@ -157,6 +162,32 @@ export function classifyIngress(opts: {
   // No delivery has been enqueued-but-unprocessed since the last real activity
   // -> the loop is draining normally.
   if (opts.oldestOrphanEnqueueTs == null) return "healthy";
+  // 0.30.77 - REJECTED MECHANISM, recorded so nobody re-derives it.
+  //
+  // The obvious fix for this detector's 0-for-3 record looks like "a transcript
+  // write is liveness": if the peer's transcript has been written since the
+  // delivery was enqueued, a turn ran, so the loop is not parked. It is a good
+  // instinct and it is WRONG HERE, for a reason that is invisible until you
+  // read the ingress path: THE ENQUEUE ITSELF IS WRITTEN INTO THE TARGET'S
+  // TRANSCRIPT. So `mtime >= oldestOrphanEnqueueTs` is true BY CONSTRUCTION,
+  // for a parked session as much as a healthy one, and gating on it silently
+  // disables the detector entirely - strictly worse than false positives,
+  // because a permanently-silent watchdog reads as "no problems".
+  //
+  // Caught by tests/integration/agent_channel_flap.test.ts, which failed
+  // exactly as it should have. `transcriptMtimeMs` is therefore accepted and
+  // deliberately UNUSED for classification.
+  //
+  // What the real fix has to key on instead: a REAL (non-queue-op) transcript
+  // entry appearing after the orphan enqueue - i.e. PA's tell, "a session that
+  // cannot see the channel cannot post to it." parseIngressTail already models
+  // that, so the residual bug is in the PARSE (which entries count as real,
+  // and whether the 128KB tail window reaches them), not in the classifier.
+  // Fixing it needs a real parked-session transcript to test against, which no
+  // firing has yet produced. Until then the alert's WORDING carries the safety:
+  // it is phrased as a question with the address-it-first triage, not as a
+  // diagnosis with a physical remedy.
+  void opts.transcriptMtimeMs;
   // A delivery has sat unprocessed; once it passes the threshold the loop is
   // parked (open menu/prompt, or other cause).
   if (opts.now - opts.oldestOrphanEnqueueTs >= opts.thresholdMs) return "ingress_suspect";
@@ -695,23 +726,68 @@ export class AgentChannel {
       // episode. Genuine departure clears the flag in the departed loop.
       if (tail == null) continue;
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
+      // 0.30.77: transcript mtime as the liveness discriminator (see
+      // classifyIngress). Best-effort - a stat failure just falls through to
+      // the prior behavior rather than suppressing a genuine alarm.
+      let transcriptMtimeMs: number | null = null;
+      try {
+        transcriptMtimeMs = statSync(
+          join(this.projectsHashDir, `${sid}.jsonl`)
+        ).mtimeMs;
+      } catch {
+        transcriptMtimeMs = null;
+      }
       const verdict = classifyIngress({
         heartbeatFresh: true, // membership in `current` == heartbeat fresh
         oldestOrphanEnqueueTs,
         lastRealIsMidTurn,
         now,
         thresholdMs: INGRESS_STALE_THRESHOLD_MS,
+        transcriptMtimeMs,
       });
       if (verdict === "ingress_suspect") {
         if (!this.ingressEmitted.has(sid)) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60_000);
           this.emit({
+            // 0.30.77: DOWNGRADED FROM DIAGNOSIS TO QUESTION, and the cheapest
+            // discriminator is now step 1.
+            //
+            // The old text asserted "the session loop is PARKED (an open
+            // menu/prompt is the confirmed cause)" and named a PHYSICAL remedy.
+            // At 0-for-3 on real parks that was a false claim carrying a real
+            // cost: a peer relayed it to Jarid and told him to go press keys at
+            // a terminal for a session that was working fine.
+            //
+            // The lesson is about ALERT DESIGN, not about the readers. As
+            // SA-b14fafa3 put it: the alert arrived pre-formatted as a
+            // diagnosis with a remedy bolted on - not a signal inviting
+            // investigation, but a conclusion. Relaying it is the behavior it
+            // was built to produce, so an authoritative-sounding false positive
+            // converts careful agents into relays for as long as it is phrased
+            // that way. Fix the wording before the readers' judgement.
+            //
+            // Step 1 is now the tell that was in everyone's context and that
+            // nobody reached for: A SESSION THAT CANNOT SEE THE CHANNEL CANNOT
+            // POST TO IT. Addressing the suspect costs one line, has no false
+            // positives, and settles it before any file is opened.
             content:
-              `[ingress_suspect] ${entry.name} (${entry.id8}) - heartbeat fresh ` +
-              `but a channel delivery has sat unprocessed for >${mins}min = the ` +
-              `session loop is PARKED (an open menu/prompt is the confirmed cause; ` +
-              `other causes possible). It cannot see this. Fix: check that terminal ` +
-              `for an open menu/prompt - Enter/Escape, then /mcp if still dead.`,
+              `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` +
+              `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` +
+              `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` +
+              `a long build, extended thinking, or a session deliberately keeping its ` +
+              `output low all look IDENTICAL to a park from out here. Every firing of this ` +
+              `alert so far has been a false alarm.\n` +
+              `TRIAGE, in order - do NOT skip to the last step:\n` +
+              `  1. ADDRESS IT: post "@${entry.id8} are you there?" and wait ONE turn. A ` +
+              `busy-but-healthy session answers; a parked one cannot. This is the whole ` +
+              `test - if it can answer at all, it was never parked.\n` +
+              `  2. If silent, check its transcript mtime (~/.claude/projects/<hash>/` +
+              `${entry.session_id}.jsonl). Still growing = alive, working, not parked.\n` +
+              `  3. ONLY after silence to a direct address AND a frozen transcript, ask ` +
+              `the user to check that terminal for an open menu/prompt (Enter/Escape, then ` +
+              `/mcp). Asking a human to interrupt a working terminal is the expensive ` +
+              `error here, and it is the one this alert has actually caused.\n` +
+              `Note: the subject cannot see this message. If it needs to know, tell it.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,

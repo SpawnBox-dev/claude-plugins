@@ -25039,6 +25039,7 @@ function classifyIngress(opts) {
     return "healthy";
   if (opts.oldestOrphanEnqueueTs == null)
     return "healthy";
+  opts.transcriptMtimeMs;
   if (opts.now - opts.oldestOrphanEnqueueTs >= opts.thresholdMs)
     return "ingress_suspect";
   return "pending";
@@ -25322,18 +25323,30 @@ class AgentChannel {
       if (tail == null)
         continue;
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
+      let transcriptMtimeMs = null;
+      try {
+        transcriptMtimeMs = statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+      } catch {
+        transcriptMtimeMs = null;
+      }
       const verdict = classifyIngress({
         heartbeatFresh: true,
         oldestOrphanEnqueueTs,
         lastRealIsMidTurn,
         now: now3,
-        thresholdMs: INGRESS_STALE_THRESHOLD_MS
+        thresholdMs: INGRESS_STALE_THRESHOLD_MS,
+        transcriptMtimeMs
       });
       if (verdict === "ingress_suspect") {
         if (!this.ingressEmitted.has(sid)) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60000);
           this.emit({
-            content: `[ingress_suspect] ${entry.name} (${entry.id8}) - heartbeat fresh ` + `but a channel delivery has sat unprocessed for >${mins}min = the ` + `session loop is PARKED (an open menu/prompt is the confirmed cause; ` + `other causes possible). It cannot see this. Fix: check that terminal ` + `for an open menu/prompt - Enter/Escape, then /mcp if still dead.`,
+            content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here. Every firing of this ` + `alert so far has been a false alarm.
+` + `TRIAGE, in order - do NOT skip to the last step:
+` + `  1. ADDRESS IT: post "@${entry.id8} are you there?" and wait ONE turn. A ` + `busy-but-healthy session answers; a parked one cannot. This is the whole ` + `test - if it can answer at all, it was never parked.
+` + `  2. If silent, check its transcript mtime (~/.claude/projects/<hash>/` + `${entry.session_id}.jsonl). Still growing = alive, working, not parked.
+` + `  3. ONLY after silence to a direct address AND a frozen transcript, ask ` + `the user to check that terminal for an open menu/prompt (Enter/Escape, then ` + `/mcp). Asking a human to interrupt a working terminal is the expensive ` + `error here, and it is the one this alert has actually caused.
+` + `Note: the subject cannot see this message. If it needs to know, tell it.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,
