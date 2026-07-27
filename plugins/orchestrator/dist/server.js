@@ -22185,6 +22185,8 @@ function toSummary(row) {
   };
 }
 var UPCOMING_HORIZON_DAYS = 30;
+var NEGLECTED_MIN_CLUSTER = 10;
+var NEGLECTED_RENDER_CAP = 12;
 function composeBriefing(projectDb2, globalDb2, sections) {
   const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const noteCount = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
@@ -22221,20 +22223,27 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   let neglectedAreas = [];
   if (include("neglected")) {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const rows = projectDb2.query(`SELECT tags, updated_at FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
+    const rows = projectDb2.query(`SELECT tags, updated_at, type, status, resolved FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
     const tagRecent = new Map;
+    const tagCount = new Map;
+    const tagOpen = new Map;
     for (const row of rows) {
       const isRecent = (row.updated_at ?? "") >= sevenDaysAgo;
+      const isOpen = row.type === "work_item" && !!row.status && row.status !== "done" || row.type === "open_thread" && row.resolved === 0;
       for (const tag of parseTagList(row.tags)) {
+        tagCount.set(tag, (tagCount.get(tag) ?? 0) + 1);
+        if (isOpen)
+          tagOpen.set(tag, (tagOpen.get(tag) ?? 0) + 1);
         if (isRecent)
           tagRecent.set(tag, true);
         else if (!tagRecent.has(tag))
           tagRecent.set(tag, false);
       }
     }
-    for (const [tag, recent] of tagRecent) {
-      if (!recent)
-        neglectedAreas.push(tag);
+    const ranked = [...tagRecent.entries()].filter(([tag, recent]) => !recent && (tagCount.get(tag) ?? 0) >= NEGLECTED_MIN_CLUSTER && (tagOpen.get(tag) ?? 0) > 0).sort((a, b) => (tagOpen.get(b[0]) ?? 0) - (tagOpen.get(a[0]) ?? 0));
+    neglectedAreas = ranked.slice(0, NEGLECTED_RENDER_CAP).map(([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`);
+    if (ranked.length > NEGLECTED_RENDER_CAP) {
+      neglectedAreas.push(`...${ranked.length - NEGLECTED_RENDER_CAP} more dormant clusters with open work`);
     }
   }
   let driftWarning = null;

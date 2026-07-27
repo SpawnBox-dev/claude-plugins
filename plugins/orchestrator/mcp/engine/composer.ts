@@ -116,6 +116,14 @@ function toSummary(row: any): NoteSummary {
  *  short. */
 export const UPCOMING_HORIZON_DAYS = 30;
 
+/** Minimum notes carrying a tag before it counts as an "area" at all. Below
+ *  this it is a label someone used once, not a domain that can go dormant.
+ *  Measured: 6,823 of 10,292 live tags are used exactly once. */
+export const NEGLECTED_MIN_CLUSTER = 10;
+/** How many dormant clusters to render. The rest are summarised as a count -
+ *  a reader acts on the biggest few, never on a list. */
+export const NEGLECTED_RENDER_CAP = 12;
+
 export function composeBriefing(
   projectDb: Database,
   globalDb: Database,
@@ -215,24 +223,100 @@ export function composeBriefing(
     // to newly appear as neglected that substring collisions had been masking.
     const rows = projectDb
       .query(
-        `SELECT tags, updated_at FROM notes WHERE tags IS NOT NULL AND tags != ''`
+        `SELECT tags, updated_at, type, status, resolved FROM notes WHERE tags IS NOT NULL AND tags != ''`
       )
-      .all() as Array<{ tags: string; updated_at: string }>;
+      .all() as Array<{
+      tags: string;
+      updated_at: string;
+      type: string;
+      status: string | null;
+      resolved: number;
+    }>;
 
-    // tag -> whether any note carrying it was updated within the window.
+    // tag -> whether any note carrying it was updated within the window, and
+    // how many notes carry it at all.
     const tagRecent = new Map<string, boolean>();
+    const tagCount = new Map<string, number>();
+    const tagOpen = new Map<string, number>();
     for (const row of rows) {
       const isRecent = (row.updated_at ?? "") >= sevenDaysAgo;
+      // Unfinished business carrying this tag: a work item not yet done, or an
+      // unresolved thread.
+      const isOpen =
+        (row.type === "work_item" && !!row.status && row.status !== "done") ||
+        (row.type === "open_thread" && row.resolved === 0);
       // c658ce38: parseTagList heals JSON-array-stringified tag values so a
       // bracket/quote artifact never becomes a fake "neglected area".
       for (const tag of parseTagList(row.tags)) {
+        tagCount.set(tag, (tagCount.get(tag) ?? 0) + 1);
+        if (isOpen) tagOpen.set(tag, (tagOpen.get(tag) ?? 0) + 1);
         if (isRecent) tagRecent.set(tag, true);
         else if (!tagRecent.has(tag)) tagRecent.set(tag, false);
       }
     }
 
-    for (const [tag, recent] of tagRecent) {
-      if (!recent) neglectedAreas.push(tag);
+    // 0.31.2: REQUIRE A REAL CLUSTER, and rank by size.
+    //
+    // This section emitted 9,359 "neglected areas" - output no reader can act
+    // on, rendered at every session start. Making it fast (0.30.92, 240s ->
+    // 0.07s) did not make it useful; fast garbage is still garbage.
+    //
+    // MEASURED on the live DB, which is what decided the shape: 10,292 distinct
+    // tags across 6,827 notes, and 6,823 of those tags are used EXACTLY ONCE.
+    // Two-thirds of "areas" are one-off labels, not groupings - so the list was
+    // dominated by singletons that were never a domain in the first place. Tags
+    // outnumbering notes means tagging has stopped clustering anything.
+    //
+    // Requiring a real cluster reduces it to something a person would read:
+    // >=10 notes leaves 282 candidates, and the top of that list is genuinely
+    // meaningful - preview (139), dns (131), go-live (130), lemon-squeezy (80).
+    // THAT answers "what would a reader do differently if this were correct?" -
+    // a dormant 131-note domain is worth knowing about; a tag used once is not.
+    //
+    // Counts are carried in the label because "dns (131 notes)" is actionable
+    // while a bare "dns" is not, and it keeps neglected_areas a string[].
+    // SECOND AXIS: rank by UNFINISHED BUSINESS, not by size.
+    //
+    // Size alone still surfaced noise, just less of it. The top clusters by
+    // note count were preview (139), dns (131), go-live (130), lemon-squeezy
+    // (80) - and three of those are quiet because the work FINISHED or was
+    // SUPERSEDED (LS was replaced by Polar; GA shipped; the preview period
+    // ended). "Neglected" is the wrong word for a domain that is simply done,
+    // and a reader learns to skip a 40-line list as readily as a 9,000-line one.
+    //
+    // PA proposed filtering on "does the cluster have open work". MEASURED, that
+    // binary does NOT separate them: lemon-squeezy still carries 4 open items,
+    // go-live 3, preview 6 - retired domains keep stale open items nobody
+    // closed. So the filter alone would have kept exactly the entries it was
+    // meant to remove.
+    //
+    // Ranking by OPEN COUNT does work, and demotes them without a special case:
+    // ga 37 open, performance 14, area:infrastructure 11, cleanup 10, refactor 9
+    // - while lemon-squeezy (4) and go-live (3) fall out of the rendered top 12
+    // on their own. Requiring >= 1 open item also drops the 77 fully-finished
+    // clusters outright.
+    //
+    // "ga: 37 open / 79 notes" answers the test - a reader does something
+    // differently with that. "go-live" alone was never actionable.
+    const ranked = [...tagRecent.entries()]
+      .filter(
+        ([tag, recent]) =>
+          !recent &&
+          (tagCount.get(tag) ?? 0) >= NEGLECTED_MIN_CLUSTER &&
+          (tagOpen.get(tag) ?? 0) > 0
+      )
+      .sort((a, b) => (tagOpen.get(b[0]) ?? 0) - (tagOpen.get(a[0]) ?? 0));
+
+    neglectedAreas = ranked
+      .slice(0, NEGLECTED_RENDER_CAP)
+      .map(
+        ([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`
+      );
+
+    if (ranked.length > NEGLECTED_RENDER_CAP) {
+      neglectedAreas.push(
+        `...${ranked.length - NEGLECTED_RENDER_CAP} more dormant clusters with open work`
+      );
     }
   }
 

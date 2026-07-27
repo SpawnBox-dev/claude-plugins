@@ -274,3 +274,87 @@ describe("unchecked-premise detection (method-shaped bulk instructions)", () => 
     expect(text).toContain("17 of 29");
   });
 });
+
+// ===========================================================================
+// 0.31.2: neglected areas - require a real cluster WITH unfinished business,
+// and rank by that unfinished business.
+//
+// The section emitted 9,359 entries. Making it fast did not make it useful.
+// MEASURED on the live DB: 10,292 distinct tags over 6,827 notes, 6,823 used
+// EXACTLY ONCE - two-thirds of "areas" were one-off labels, never a domain.
+//
+// PA proposed filtering on "has open work" to drop finished domains. Measured,
+// that binary does NOT separate them - lemon-squeezy still carries 4 open
+// items, go-live 3. Ranking by OPEN COUNT does, and demotes them without a
+// special case. Shipped output is 12 lines led by "ga: 37 open / 79 notes".
+// ===========================================================================
+describe("neglected areas: cluster + unfinished business", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+  const OLD = "2020-01-01T00:00:00.000Z";
+
+  beforeEach(() => {
+    projectDb = new Database(":memory:");
+    applyMigrations(projectDb, "project");
+    globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "global");
+  });
+
+  function add(opts: { tag: string; type?: string; status?: string | null; resolved?: number; updated?: string }) {
+    const id = generateId();
+    const ts = opts.updated ?? OLD;
+    projectDb.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, created_at, updated_at)
+       VALUES (?, ?, 'x', NULL, '', ?, 'medium', ?, ?, ?, ?)`,
+      [id, opts.type ?? "insight", opts.tag, opts.resolved ?? 0, opts.status ?? null, ts, ts]
+    );
+  }
+
+  /** A dormant cluster of `n` notes, `open` of them unfinished work items. */
+  function cluster(tag: string, n: number, open: number) {
+    for (let i = 0; i < n - open; i++) add({ tag });
+    for (let i = 0; i < open; i++) add({ tag, type: "work_item", status: "active" });
+  }
+
+  test("ignores singleton tags - they were never a domain", () => {
+    add({ tag: "oneoff", type: "work_item", status: "active" });
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas.join(" ")).not.toContain("oneoff");
+  });
+
+  test("ignores a dormant cluster with NO unfinished business - that is finished, not neglected", () => {
+    cluster("shipped", 30, 0);
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas.join(" ")).not.toContain("shipped");
+  });
+
+  test("surfaces a dormant cluster that still has open work", () => {
+    cluster("stalled", 30, 6);
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas[0]).toContain("stalled");
+    expect(b.neglected_areas[0]).toContain("6 open");
+  });
+
+  test("ranks by OPEN COUNT, not note count - the retired-domain fix", () => {
+    // The live shape: a big retired domain with few loose ends vs a smaller
+    // one genuinely stalled. Size-ranking put the retired one first.
+    cluster("retired-but-huge", 130, 3);
+    cluster("small-but-stalled", 20, 20);
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas[0]).toContain("small-but-stalled");
+  });
+
+  test("a recently-touched cluster is not dormant at all", () => {
+    cluster("hot", 30, 5);
+    add({ tag: "hot", type: "work_item", status: "active", updated: new Date().toISOString() });
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas.join(" ")).not.toContain("hot");
+  });
+
+  test("is capped and says how many it withheld", () => {
+    for (let i = 0; i < 20; i++) cluster(`d${i}`, 12, 12 - (i % 5));
+    const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
+    expect(b.neglected_areas.length).toBeLessThanOrEqual(13);
+    expect(b.neglected_areas[b.neglected_areas.length - 1]).toContain("more dormant");
+  });
+});
