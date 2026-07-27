@@ -55,13 +55,23 @@ pass writes the ledger - even a no-change pass, to refresh mtime - and the
 ledger's FIRST line is a heartbeat:
 
 ```
-Warden heartbeat: instance=<your session/agent id> | ts=<ISO-8601 UTC> | pass=<N> | re-armed=<interval>s
+Warden heartbeat: instance=<your session/agent id> | ts=<ISO-8601 UTC> | pass=<N> | loop=poke-driven | re-armed=<interval>s
 ```
 
-A healthy warden writes at least every ~150s, so the file's mtime is a
-RELIABLE liveness signal: a ledger whose mtime is older than ~7 minutes is
-presumed dead/stuck (PA, the plugin liveness nudge, and any would-be
-replacement warden all key off this). Never end a pass without writing.
+**`loop=` is REQUIRED and it is load-bearing (0.30.83).** Write
+`loop=poke-driven` - that is the real mechanism (see below), and the plugin's
+staleness nudge READS THIS FIELD. Without it the nudge cannot tell a dead warden
+from a correctly-idle one waiting for its next poke, because both produce the
+same growing mtime; PA reported it firing twice on a healthy warden. With it,
+the nudge reframes from "your ledger is STALE" (a fault) to "time to poke your
+warden" (an action), which is the accurate model. Only write `loop=self-timed`
+if you genuinely are self-timed, which per the evidence below you are not.
+
+Between pokes your mtime grows monotonically BY DESIGN. That is normal
+operation, not a fault - so "elapsed time since last write" is NOT by itself a
+liveness signal for a poke-driven warden. Never end a pass without writing, so
+that the mtime still tells PA how long it has been since your last completed
+pass.
 
 **RELIABILITY CONTRACT (load-bearing, observed live 2026-07-11):** the
 task-notification that carries your turn's final report to PA has flaked -

@@ -24596,7 +24596,7 @@ function composeWardenNudgeText(opts) {
     const who = opts.ledger.instance ? `instance ${opts.ledger.instance}` : "the last warden";
     const when = opts.ledger.ts ? ` at ${opts.ledger.ts}` : "";
     const age = opts.ledger.ageMs != null ? ` (${Math.round(opts.ledger.ageMs / 1000)}s ago)` : "";
-    text = `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` + `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` + `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` + `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` + `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` + `mid-pass signal.` + tail;
+    text = opts.ledger.loop === "poke-driven" ? `[orch] TIME TO POKE YOUR CONTEXT-WARDEN - not a fault. Its last pass wrote ${when.trim() || "earlier"}${age}, ` + `and it declares loop=poke-driven, so it is IDLE AWAITING YOUR POKE by design, not stalled. ` + `SendMessage it to run the next pass (${n} sessions are active, so the delta is worth folding in). ` + `A poke-driven warden's mtime grows between pokes - that is normal operation. Do NOT respawn on ` + `this signal alone: respawning a live warden hits the context-warden-2 name collision. Escalate ` + `to /pa-bootstrap step 5.8 only if it stays silent AFTER a poke.` + tail : `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` + `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` + `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` + `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` + `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` + `mid-pass signal.` + tail;
   }
   return { text, fired: true, clearDedup: false };
 }
@@ -24618,16 +24618,24 @@ function wardenLedgerLiveness(ledgerPath) {
     return { status: "fresh", ageMs };
   let instance;
   let ts;
+  let loop;
   try {
-    const head = readFileSync2(ledgerPath).subarray(0, 512).toString("utf8");
+    const head = readFileSync2(ledgerPath).subarray(0, 8192).toString("utf8");
     const mi = head.match(/instance=([^\s|]+)/i);
     const mt = head.match(/\bts=([^\s|]+)/i);
     if (mi)
       instance = mi[1];
     if (mt)
       ts = mt[1];
+    const ml = head.match(/\bloop=([a-z-]+)/i);
+    const declared = ml?.[1]?.toLowerCase();
+    if (declared === "poke-driven" || declared === "self-timed") {
+      loop = declared;
+    } else if (/poke[- ]driven/i.test(head)) {
+      loop = "poke-driven";
+    }
   } catch {}
-  return { status: "stale", ageMs, instance, ts };
+  return { status: "stale", ageMs, instance, ts, loop };
 }
 function composeWardenLivenessNudge(ctx, sessionId, turn) {
   const sid = sanitizeSessionId(sessionId);

@@ -2064,6 +2064,9 @@ export interface WardenLedgerState {
   ageMs?: number;
   instance?: string;
   ts?: string;
+  /** 0.30.83: the warden's own declared loop mode, read from its heartbeat
+   *  line. "poke-driven" means elapsed-since-last-write is NOT a fault. */
+  loop?: "poke-driven" | "self-timed";
 }
 
 /** PURE core of the warden-liveness nudge - all gates + text, deterministically
@@ -2123,14 +2126,36 @@ export function composeWardenNudgeText(opts: {
       opts.ledger.ageMs != null
         ? ` (${Math.round(opts.ledger.ageMs / 1000)}s ago)`
         : "";
+    // 0.30.83: a POKE-DRIVEN warden's mtime grows monotonically between pokes
+    // BY DESIGN, so elapsed-since-last-write is not a fault and must not be
+    // reported as one. PA saw this fire twice on a healthy warden: the output
+    // was identical for "dead" and "correctly idle awaiting its poke", which is
+    // the same measure-a-proxy-and-call-it-the-property shape as the ingress
+    // watchdog (anti_pattern 04359482). The remedy was already right - poke
+    // before escalating - but a fault framing teaches the wrong model, and a PA
+    // that believes it respawns a live warden into the context-warden-2 name
+    // collision.
+    //
+    // So when the warden declares poke-driven, this is an ACTION PROMPT, not an
+    // alarm. Only a genuinely self-timed warden (or one that declares nothing)
+    // gets the staleness framing, because for that one a frozen mtime IS
+    // anomalous.
     text =
-      `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` +
-      `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` +
-      `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` +
-      `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` +
-      `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` +
-      `mid-pass signal.` +
-      tail;
+      opts.ledger.loop === "poke-driven"
+        ? `[orch] TIME TO POKE YOUR CONTEXT-WARDEN - not a fault. Its last pass wrote ${when.trim() || "earlier"}${age}, ` +
+          `and it declares loop=poke-driven, so it is IDLE AWAITING YOUR POKE by design, not stalled. ` +
+          `SendMessage it to run the next pass (${n} sessions are active, so the delta is worth folding in). ` +
+          `A poke-driven warden's mtime grows between pokes - that is normal operation. Do NOT respawn on ` +
+          `this signal alone: respawning a live warden hits the context-warden-2 name collision. Escalate ` +
+          `to /pa-bootstrap step 5.8 only if it stays silent AFTER a poke.` +
+          tail
+        : `[orch] Your context-warden ledger's last write was ${who}${when}${age} while ${n} ` +
+          `sessions are active. A big-delta pass can take ~9min before it writes, so this may be a ` +
+          `slow-but-live warden, not a dead one: SendMessage-POKE it first (a poke revives a dormant ` +
+          `warden, just slowly), and check for a mid-pass signal (ledger mtime creeping / its transcript ` +
+          `growing) before escalating. RESPAWN (/pa-bootstrap step 5.8) only if it stays frozen with no ` +
+          `mid-pass signal.` +
+          tail;
   }
   return { text, fired: true, clearDedup: false };
 }
@@ -2162,16 +2187,30 @@ function wardenLedgerLiveness(ledgerPath: string): WardenLedgerState {
   if (ageMs <= WARDEN_STALE_THRESHOLD_MS) return { status: "fresh", ageMs };
   let instance: string | undefined;
   let ts: string | undefined;
+  let loop: "poke-driven" | "self-timed" | undefined;
   try {
-    const head = readFileSync(ledgerPath).subarray(0, 512).toString("utf8");
+    // 0.30.83: widened from 512B. The heartbeat line is a single long line and
+    // the loop marker sits past the old window, so a 512B read could not have
+    // seen it - the field would have looked absent even when written.
+    const head = readFileSync(ledgerPath).subarray(0, 8192).toString("utf8");
     const mi = head.match(/instance=([^\s|]+)/i);
     const mt = head.match(/\bts=([^\s|]+)/i);
     if (mi) instance = mi[1];
     if (mt) ts = mt[1];
+    // Preferred: the declared field. Fallback: the phrase wardens have been
+    // writing ad hoc ("LOOP: PA-POKE-DRIVEN") before it was specified, so
+    // existing ledgers get the better framing without waiting for a rewrite.
+    const ml = head.match(/\bloop=([a-z-]+)/i);
+    const declared = ml?.[1]?.toLowerCase();
+    if (declared === "poke-driven" || declared === "self-timed") {
+      loop = declared;
+    } else if (/poke[- ]driven/i.test(head)) {
+      loop = "poke-driven";
+    }
   } catch {
     /* best-effort - text only */
   }
-  return { status: "stale", ageMs, instance, ts };
+  return { status: "stale", ageMs, instance, ts, loop };
 }
 
 /** Impure shell: gathers role + fleet size + ledger liveness + de-dup state,
