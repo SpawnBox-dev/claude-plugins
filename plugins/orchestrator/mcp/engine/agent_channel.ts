@@ -634,10 +634,40 @@ export class AgentChannel {
         // path is covered by tests (agent_channel_flap egress self-heal case).
         if (!this.egressEmitted.has(sid)) {
           this.emit({
+            // 0.30.93: KEEP THE SIGNAL, DROP THE DIAGNOSIS. The accepted
+            // false-positive decision above stands and is deliberately NOT
+            // overridden - suppressing this would risk muting a real egress
+            // death, and it still never reaps. What changed is the evidence
+            // about its COST.
+            //
+            // That decision assessed a self-healing trip as "a benign one-off
+            // check-on-X nudge". Observed 2026-07-27: it fired on PA seconds
+            // after Jarid's /reload-plugins restarted every MCP server, and a
+            // peer escalated it to Jarid asking him to run /mcp at a terminal
+            // that was already healthy. A nudge that converts into a human
+            // interrupting a working session is not benign - same escalation
+            // harm the ingress alert caused before 0.30.77.
+            //
+            // PA's discriminator, and it is nearly free: a single reading
+            // cannot distinguish a broken transport from a RESTARTING one. Both
+            // measurements were accurate; the TENSE was wrong - a transient
+            // state reported as a persistent one. Re-sampling thirty seconds
+            // later separates them, and is especially worth it right after
+            // anything restarted the transport.
             content:
-              `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat down ` +
-              `but its transcript is still growing = ALIVE but unreachable ` +
-              `(MCP egress dropped). It cannot see this; it needs a /mcp reconnect.`,
+              `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` +
+              `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` +
+              `egress dropped), and it is also exactly what a RESTARTING transport looks ` +
+              `like for a few seconds.\n` +
+              `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` +
+              `restart or a self-healing wedge is back by then; a real egress death is not. ` +
+              `This measurement can be accurate about a moment that has already passed.\n` +
+              `  2. Did anything just restart the MCP servers (/reload-plugins, /mcp, a ` +
+              `plugin update)? Then expect this and wait it out.\n` +
+              `  3. Only after it persists across two readings, tell the user to run /mcp in ` +
+              `THAT terminal. Asking a human to repair a session that is already fine is the ` +
+              `expensive error here, and it has happened.\n` +
+              `  Note the subject cannot see this message.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,

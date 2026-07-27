@@ -25596,7 +25596,11 @@ class AgentChannel {
       if (verdict === "egress_suspect") {
         if (!this.egressEmitted.has(sid)) {
           this.emit({
-            content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat down ` + `but its transcript is still growing = ALIVE but unreachable ` + `(MCP egress dropped). It cannot see this; it needs a /mcp reconnect.`,
+            content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` + `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` + `egress dropped), and it is also exactly what a RESTARTING transport looks ` + `like for a few seconds.
+` + `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` + `restart or a self-healing wedge is back by then; a real egress death is not. ` + `This measurement can be accurate about a moment that has already passed.
+` + `  2. Did anything just restart the MCP servers (/reload-plugins, /mcp, a ` + `plugin update)? Then expect this and wait it out.
+` + `  3. Only after it persists across two readings, tell the user to run /mcp in ` + `THAT terminal. Asking a human to repair a session that is already fine is the ` + `expensive error here, and it has happened.
+` + `  Note the subject cannot see this message.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,
