@@ -149,6 +149,14 @@ Corollary, learned the same session: **prefer shipping CONTENT over shipping a P
 
 Every advisory this plugin emits competes for the same scarce attention, and a bad one does not merely waste a slot - it teaches agents to skim the channel that also carries the good ones. Four separate advisories were caught doing exactly that in a single session (2026-07-27).
 
+**READ `60f2fdc2` FIRST - this problem was recorded 106 days before the rules below, and they are a rediscovery of it.** That anti-pattern states the root cause exactly: *"Static text in a repeating hook is an enforcement anti-pattern regardless of how loud the wording"* - after ~5 identical firings the model classifies it as chrome and routes no attention to it. There are now **three** remedies for that one cause, and they attack different parts, so check which applies before inventing a fourth:
+
+1. **Context-aware generation** (60f2fdc2's original prescription) - vary the content per turn. Not built.
+2. **Rotation** (Jarid's, recorded in `8f9a3f18`) - rotate phrasing through the **VARIANTS round-robin that already exists** in `hook_event.ts` and is already used for the base every-turn reminder. Cheapest option, plumbing present.
+3. **State-change gating + specificity** (the rules below) - attacks frequency and informativeness rather than phrasing.
+
+Note the triggers added in 0.30.75-0.30.85 use **fixed** text. They are state-gated so they fire rarely, which mitigates habituation - but if any starts getting filtered, remedy 2 is the cheap next step.
+
 **Three rules, each earned from a live failure:**
 
 1. **Fire on STATE CHANGE, not on a tick.** The loop-close nudge fired ~30 times across ~40 turns naming the same work item; PA stopped reading it by turn ten and said outright that if it had ever named a *different* item, it would have been missed. The sibling roster rendered 5-15 times per turn. Both are now content-keyed: identical repeat suppressed, any real change renders immediately, with a floor so a static state cannot vanish entirely.
