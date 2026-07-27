@@ -23771,6 +23771,9 @@ function handleUserPromptSubmit(ctx, args) {
   const premiseCheck = composePremiseCheckNudge(ctx, args.session_id, userPrompt, turn);
   if (premiseCheck)
     parts.push(premiseCheck);
+  const domainShift = composeDomainShiftNudge(ctx, args.session_id, userPrompt, turn);
+  if (domainShift)
+    parts.push(domainShift);
   return { additionalContext: parts.join(`
 
 `) };
@@ -23864,6 +23867,70 @@ function composePremiseCheckNudge(ctx, sessionId, userPrompt, turn) {
     return "";
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
   return composePremiseCheckText();
+}
+var DOMAIN_VOCAB_KEY_PREFIX = "session_vocab_";
+var NEW_TERM_THRESHOLD = 4;
+var DOMAIN_MIN_TURN = 3;
+var DOMAIN_MIN_GAP_TURNS = 4;
+var VOCAB_CAP = 400;
+function newDomainTerms(terms, seen) {
+  const known = new Set(seen);
+  const out = [];
+  for (const t of terms) {
+    if (!known.has(t) && !out.includes(t))
+      out.push(t);
+  }
+  return out;
+}
+function isDomainShift(opts) {
+  if (opts.turn < DOMAIN_MIN_TURN)
+    return false;
+  if (opts.newTerms.length < (opts.threshold ?? NEW_TERM_THRESHOLD))
+    return false;
+  if (opts.turnsSinceLastFire !== null && opts.turnsSinceLastFire >= 0 && opts.turnsSinceLastFire < DOMAIN_MIN_GAP_TURNS) {
+    return false;
+  }
+  return true;
+}
+function composeDomainShiftNudge(ctx, sessionId, userPrompt, turn) {
+  if (!userPrompt)
+    return "";
+  const sid = sanitizeSessionId(sessionId);
+  const vocabKey = `${DOMAIN_VOCAB_KEY_PREFIX}${sid}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(vocabKey);
+  const seen = row?.value ? row.value.split(",").filter(Boolean) : [];
+  const terms = extractKeywords(userPrompt).slice(0, 25);
+  const fresh = newDomainTerms(terms, seen);
+  if (fresh.length > 0) {
+    const merged = [...seen, ...fresh].slice(-VOCAB_CAP);
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [vocabKey, merged.join(","), now()]);
+  }
+  const fireKey = `domain_shift_turn_${sid}`;
+  const last = readIntState(ctx.db, fireKey);
+  const gap = last > 0 ? turn - last : null;
+  if (!isDomainShift({ newTerms: fresh, turn, turnsSinceLastFire: gap }))
+    return "";
+  const scoreExpr = fresh.slice(0, 8).map(() => `(CASE WHEN (',' || COALESCE(keywords,'') || ',') LIKE ? THEN 1 ELSE 0 END)`).join(" + ");
+  const params = fresh.slice(0, 8).map((t) => `%,${t},%`);
+  let hits = [];
+  try {
+    hits = ctx.db.query(`SELECT id, type, content, (${scoreExpr}) AS hits
+         FROM notes
+         WHERE superseded_by IS NULL AND resolved = 0
+         HAVING hits >= 2
+         ORDER BY hits DESC, COALESCE(signal, 0) DESC, updated_at DESC
+         LIMIT 4`).all(...params);
+  } catch {
+    hits = [];
+  }
+  if (hits.length === 0)
+    return "";
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [fireKey, String(turn), now()]);
+  const lines = hits.map((h) => `  - [${h.id.slice(0, 8)}] ${h.type}: ${truncate(h.content, 160)}`).join(`
+`);
+  return `[orch] DOMAIN SHIFT - this turn moved into ground this session has not worked: ` + `${fresh.slice(0, 6).join(", ")}. Prior knowledge, retrieved for you:
+` + lines + `
+  For a NON-CODE domain (a campaign, a pricing call, a policy, a vendor) the KB is ` + `often the ONLY record - there is no source file to read your way into it, so "I explored ` + `and here's what I think" will reconstruct from scratch something already decided. ` + `Check these, and \`git log\` / \`docs/\`, before forming a view or asking the user.`;
 }
 function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
   if (!detectsRetrievalTrigger(userPrompt))
@@ -23960,6 +24027,45 @@ function handlePreToolUse(ctx, args) {
   const ctx_msg = codeRefsHint ? `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. ${codeRefsHint}` : `[orch] Turn ${turn}: about to modify code with no orchestrator tool called this turn. A 2-second lookup({code_ref:'<path>'}) / briefing can surface a relevant decision, convention, or anti-pattern before you operate.`;
   return { permissionDecision: "allow", additionalContext: ctx_msg };
 }
+function deriveArea(filePath) {
+  const norm = normalizeCodeRef(filePath);
+  if (!norm)
+    return null;
+  const idx = norm.lastIndexOf("/");
+  if (idx <= 0)
+    return null;
+  return norm.slice(0, idx);
+}
+function isNewArea(area, visited) {
+  return !visited.includes(area);
+}
+function composeAreaEntryContext(ctx, sessionId, filePath) {
+  const area = deriveArea(filePath);
+  if (!area)
+    return "";
+  const sid = sanitizeSessionId(sessionId);
+  const key = `visited_areas_${sid}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  const visited = row?.value ? row.value.split(`
+`).filter(Boolean) : [];
+  if (!isNewArea(area, visited))
+    return "";
+  const next = [...visited, area].slice(-200);
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, next.join(`
+`), now()]);
+  const notes = ctx.db.query(`SELECT id, type, content FROM notes
+       WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+         AND superseded_by IS NULL
+       ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+       LIMIT 4`).all(`%${area}%`);
+  if (notes.length === 0)
+    return "";
+  const lines = notes.map((n) => `  - [${n.id.slice(0, 8)}] ${n.type}: ${truncate(n.content, 150)}`).join(`
+`);
+  return `[orch] SCOPE EXPANDED - first time this session has touched \`${area}\`. ` + `Prior knowledge about this area, retrieved for you:
+` + lines + `
+  More: \`lookup({code_ref:"${area}"})\`. The KB holds what was TRIED, REJECTED, or ` + `already DECIDED here - which is a different class of thing from what the code comments ` + `explain, and it is the part you cannot recover by reading the source.`;
+}
 function handlePostToolUse(ctx, args) {
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
@@ -23977,7 +24083,11 @@ function handlePostToolUse(ctx, args) {
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
+  const filePath = args.payload?.file_path ?? null;
+  const areaEntry = filePath ? composeAreaEntryContext(ctx, args.session_id, filePath) : "";
   const parts = [];
+  if (areaEntry)
+    parts.push(areaEntry);
   if (driftNudge)
     parts.push(driftNudge);
   if (parts.length === 0)

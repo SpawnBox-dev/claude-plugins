@@ -272,6 +272,16 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
     turn
   );
   if (premiseCheck) parts.push(premiseCheck);
+  // 0.30.80: domain shift detected from the session's own vocabulary, so it
+  // fires on non-code domains (a campaign, a pricing decision, a vendor) that
+  // no file-path or phrasing signal can see.
+  const domainShift = composeDomainShiftNudge(
+    ctx,
+    args.session_id,
+    userPrompt,
+    turn
+  );
+  if (domainShift) parts.push(domainShift);
 
   return { additionalContext: parts.join("\n\n") };
 }
@@ -506,6 +516,147 @@ function composePremiseCheckNudge(
   return composePremiseCheckText();
 }
 
+// ── 0.30.80: DOMAIN shift, not just code-area shift ────────────────────────
+//
+// Jarid, extending the exploration-driven trigger: "not just a new area of the
+// codebase. it has to be new concepts/ideas/domains/etc. like the google ads
+// work for example had nothing to do with code and everything to do with how we
+// were running that campaign, prior decisions, blah blah."
+//
+// That rules out every signal built so far. Hedging and topic-shift phrases key
+// on the USER's wording. First-visit-to-a-directory keys on FILE PATHS. The
+// highest-value lane tonight - ads campaign strategy, spend, prior decisions
+// about how the campaign is run - touches no new phrasing and no new directory,
+// and the KB is the ONLY place that knowledge lives. There is no source file to
+// read your way into it.
+//
+// So the signal has to be the VOCABULARY the session is working in. Track the
+// terms a session has already engaged with; when a cluster of genuinely new
+// salient terms appears AND the KB has notes about them, that is a domain shift
+// whether or not a file or a phrase changed.
+//
+// Guarded so it stays rare and useful:
+//  - needs NEW_TERM_THRESHOLD unseen terms at once, so drifting one word at a
+//    time does not trip it;
+//  - needs matching notes, so entering genuinely undocumented territory is
+//    silent;
+//  - skipped for the first few turns, because at session start EVERYTHING is
+//    new and the briefing has just covered it;
+//  - de-duped on a turn gap, like every other trigger here.
+const DOMAIN_VOCAB_KEY_PREFIX = "session_vocab_";
+export const NEW_TERM_THRESHOLD = 4;
+const DOMAIN_MIN_TURN = 3;
+const DOMAIN_MIN_GAP_TURNS = 4;
+const VOCAB_CAP = 400;
+
+/** PURE: which of these terms has the session not worked in before?
+ *  Exported for tests. */
+export function newDomainTerms(terms: string[], seen: string[]): string[] {
+  const known = new Set(seen);
+  const out: string[] = [];
+  for (const t of terms) {
+    if (!known.has(t) && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+/** PURE: is this a domain shift worth interrupting for? Exported for tests. */
+export function isDomainShift(opts: {
+  newTerms: string[];
+  turn: number;
+  turnsSinceLastFire: number | null;
+  threshold?: number;
+}): boolean {
+  if (opts.turn < DOMAIN_MIN_TURN) return false;
+  if (opts.newTerms.length < (opts.threshold ?? NEW_TERM_THRESHOLD)) return false;
+  if (
+    opts.turnsSinceLastFire !== null &&
+    opts.turnsSinceLastFire >= 0 &&
+    opts.turnsSinceLastFire < DOMAIN_MIN_GAP_TURNS
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Impure shell: track vocabulary, detect a domain shift, retrieve for it. */
+function composeDomainShiftNudge(
+  ctx: HookCtx,
+  sessionId: string,
+  userPrompt: string,
+  turn: number
+): string {
+  if (!userPrompt) return "";
+  const sid = sanitizeSessionId(sessionId);
+  const vocabKey = `${DOMAIN_VOCAB_KEY_PREFIX}${sid}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(vocabKey) as { value: string } | undefined;
+  const seen = row?.value ? row.value.split(",").filter(Boolean) : [];
+
+  const terms = extractKeywords(userPrompt).slice(0, 25);
+  const fresh = newDomainTerms(terms, seen);
+
+  // Always fold the new vocabulary in, whether or not we fire - otherwise the
+  // same shift would re-trigger on every subsequent prompt.
+  if (fresh.length > 0) {
+    const merged = [...seen, ...fresh].slice(-VOCAB_CAP);
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [vocabKey, merged.join(","), now()]
+    );
+  }
+
+  const fireKey = `domain_shift_turn_${sid}`;
+  const last = readIntState(ctx.db, fireKey);
+  const gap = last > 0 ? turn - last : null;
+  if (!isDomainShift({ newTerms: fresh, turn, turnsSinceLastFire: gap })) return "";
+
+  // Retrieve on the NEW terms only - that is the domain being entered.
+  const scoreExpr = fresh
+    .slice(0, 8)
+    .map(() => `(CASE WHEN (',' || COALESCE(keywords,'') || ',') LIKE ? THEN 1 ELSE 0 END)`)
+    .join(" + ");
+  const params = fresh.slice(0, 8).map((t: string) => `%,${t},%`);
+  let hits: Array<{ id: string; type: string; content: string }> = [];
+  try {
+    hits = ctx.db
+      .query(
+        `SELECT id, type, content, (${scoreExpr}) AS hits
+         FROM notes
+         WHERE superseded_by IS NULL AND resolved = 0
+         HAVING hits >= 2
+         ORDER BY hits DESC, COALESCE(signal, 0) DESC, updated_at DESC
+         LIMIT 4`
+      )
+      .all(...params) as Array<{ id: string; type: string; content: string }>;
+  } catch {
+    hits = [];
+  }
+  // Silent when the KB has nothing - entering undocumented territory should not
+  // produce a nag.
+  if (hits.length === 0) return "";
+
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [fireKey, String(turn), now()]
+  );
+
+  const lines = hits
+    .map((h) => `  - [${h.id.slice(0, 8)}] ${h.type}: ${truncate(h.content, 160)}`)
+    .join("\n");
+
+  return (
+    `[orch] DOMAIN SHIFT - this turn moved into ground this session has not worked: ` +
+    `${fresh.slice(0, 6).join(", ")}. Prior knowledge, retrieved for you:\n` +
+    lines +
+    `\n  For a NON-CODE domain (a campaign, a pricing call, a policy, a vendor) the KB is ` +
+    `often the ONLY record - there is no source file to read your way into it, so "I explored ` +
+    `and here's what I think" will reconstruct from scratch something already decided. ` +
+    `Check these, and \`git log\` / \`docs/\`, before forming a view or asking the user.`
+  );
+}
+
 /** Impure shell: hedge-gate, dedup, then retrieve top notes for the prompt's
  *  salient terms and hand them over inline. */
 function composeScopeRetrievalNudge(
@@ -689,6 +840,97 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
   return { permissionDecision: "allow", additionalContext: ctx_msg };
 }
 
+// ── 0.30.80: EXPLORATION-DRIVEN scope expansion ────────────────────────────
+//
+// Jarid, correcting 0.30.75: "scope expansion should not only be gated on
+// whether I as the user give a prompt that would be explicit about scope
+// expansion. The real value would be in the agent noticing scope is expanding
+// as it uncovers more and more about systems during its exploratory
+// operations, and then it needs to know to query the kb as it goes."
+//
+// He is right and it is the sharper trigger. The prompt-string detectors
+// (hedge, topic-shift) only fire on what the USER says, so they cannot see the
+// case that actually dominates: an agent starts in one subsystem, follows a
+// reference into a second, then a third, and by the fifth file it is deep in
+// territory it has never worked and has asked nobody about. No prompt was
+// issued at any point in that walk.
+//
+// The signal is the agent's own footprint. The plugin sees every tool call, so
+// it can watch the set of DIRECTORIES a session has touched and fire the first
+// time a genuinely new one appears. That is scope expansion observed rather
+// than announced.
+//
+// Fires ONCE per area per session and ONLY when the KB actually holds notes for
+// that area, so a walk through undocumented territory stays silent. And it
+// carries the notes inline - same principle as everything else this session:
+// a pointer costs a decision the agent will usually decline.
+
+/** Containing directory of a file, normalized to the form code_refs store.
+ *  Exported for tests. */
+export function deriveArea(filePath: string): string | null {
+  const norm = normalizeCodeRef(filePath);
+  if (!norm) return null;
+  const idx = norm.lastIndexOf("/");
+  if (idx <= 0) return null; // repo-root file: too coarse to be an "area"
+  return norm.slice(0, idx);
+}
+
+/** PURE: has this session been in this area before? Exported for tests. */
+export function isNewArea(area: string, visited: string[]): boolean {
+  return !visited.includes(area);
+}
+
+function composeAreaEntryContext(
+  ctx: HookCtx,
+  sessionId: string,
+  filePath: string
+): string {
+  const area = deriveArea(filePath);
+  if (!area) return "";
+
+  const sid = sanitizeSessionId(sessionId);
+  const key = `visited_areas_${sid}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  const visited = row?.value ? row.value.split("\n").filter(Boolean) : [];
+
+  if (!isNewArea(area, visited)) return "";
+
+  // Record the visit FIRST, so a session that walks an area with no notes
+  // still never re-evaluates it.
+  const next = [...visited, area].slice(-200); // bounded; oldest drop out
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, next.join("\n"), now()]
+  );
+
+  // Only speak up if there is something to say about this area.
+  const notes = ctx.db
+    .query(
+      `SELECT id, type, content FROM notes
+       WHERE code_refs IS NOT NULL AND code_refs LIKE ?
+         AND superseded_by IS NULL
+       ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+       LIMIT 4`
+    )
+    .all(`%${area}%`) as Array<{ id: string; type: string; content: string }>;
+  if (notes.length === 0) return "";
+
+  const lines = notes
+    .map((n) => `  - [${n.id.slice(0, 8)}] ${n.type}: ${truncate(n.content, 150)}`)
+    .join("\n");
+
+  return (
+    `[orch] SCOPE EXPANDED - first time this session has touched \`${area}\`. ` +
+    `Prior knowledge about this area, retrieved for you:\n` +
+    lines +
+    `\n  More: \`lookup({code_ref:"${area}"})\`. The KB holds what was TRIED, REJECTED, or ` +
+    `already DECIDED here - which is a different class of thing from what the code comments ` +
+    `explain, and it is the part you cannot recover by reading the source.`
+  );
+}
+
 function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   // Mark orch activity for the turn so PreToolUse Option B doesn't nag.
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
@@ -725,7 +967,16 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   // can update its content/status if scope shifted. Once per session+work_item.
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
 
+  // 0.30.80: exploration-driven scope expansion. Fires on ANY tool carrying a
+  // file_path - crucially including READ, so it catches a session widening its
+  // footprint while exploring, not only while editing.
+  const filePath = (args.payload?.file_path as string | undefined) ?? null;
+  const areaEntry = filePath
+    ? composeAreaEntryContext(ctx, args.session_id, filePath)
+    : "";
+
   const parts: string[] = [];
+  if (areaEntry) parts.push(areaEntry);
   if (driftNudge) parts.push(driftNudge);
 
   if (parts.length === 0) return {};

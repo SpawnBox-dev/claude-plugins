@@ -901,7 +901,12 @@ describe("hook_event dispatcher", () => {
           payload: { file_path: "src/z.ts" },
         }
       );
-      expect(r.additionalContext).toBeUndefined();
+      // Narrowed 0.30.80: this test is about the DRIFT nudge specifically, and
+      // PostToolUse now also carries the first-visit-to-a-new-area block, which
+      // legitimately fires here (the seeded note's code_refs put a note in
+      // `src`). Assert on the thing under test rather than on the channel being
+      // empty, so an unrelated addition to the same hook cannot fail it.
+      expect(r.additionalContext ?? "").not.toContain("in-flight work_item");
     });
   });
 
