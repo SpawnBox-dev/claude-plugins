@@ -382,6 +382,27 @@ describe("concurrent capture detection", () => {
     ).toEqual([]);
   });
 
+  test("ignores CHECKPOINTS - a session snapshot is never a knowledge fork", () => {
+    // SA-c5b207e0, from two live firings: the one false positive matched PA's
+    // CHECKPOINT against their anti_pattern note. Checkpoints summarise
+    // everything a session touched, so they are vocabulary-dense by nature and
+    // the most likely false match in the window - while being incapable of
+    // being a real duplicate of a reusable note.
+    const ts = new Date(Date.now() - 1000).toISOString();
+    db.run(
+      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at, source_session)
+       VALUES (?, 'checkpoint', 'session state summary', NULL, ?, '', 'medium', 0, ?, ?, ?)`,
+      ["peer-checkpoint", "browser,tab,navigate,rule", ts, ts, "sess-peer"]
+    );
+    expect(
+      findConcurrentCaptures(db, {
+        noteId: "mine",
+        keywords: ["browser", "tab", "navigate", "rule"],
+        sessionId: "sess-mine",
+      })
+    ).toEqual([]);
+  });
+
   test("does NOT depend on embeddings - that is the entire point", () => {
     // No embeddings row exists for the peer note. check_similar would return
     // nothing here; this must still find it.

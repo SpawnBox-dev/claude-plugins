@@ -92,11 +92,25 @@ export function findConcurrentCaptures(
     Date.now() - (opts.windowMs ?? CONCURRENT_WINDOW_MS)
   ).toISOString();
 
+  // 0.31.4: ARTIFACT CLASS is a free discriminator. Reported by SA-c5b207e0
+  // from two live firings: one TRUE positive (PA had folded their correction
+  // into a note seconds earlier - they retired theirs to a redirect stub rather
+  // than fork the truth), and one FALSE positive that matched PA's CHECKPOINT
+  // against their anti_pattern note. Same subject matter, different KIND of
+  // artifact.
+  //
+  // A checkpoint is a session-state snapshot; a note is reusable knowledge.
+  // They are never duplicates of each other no matter how much vocabulary they
+  // share - and checkpoints are vocabulary-dense by nature (they summarise
+  // everything the session touched), so they are the single most likely false
+  // match in the window. Excluding the class costs nothing and cannot suppress
+  // a real fork.
   const rows = db
     .query(
       `SELECT id, type, content, keywords, source_session
        FROM notes
        WHERE created_at >= ? AND id != ? AND superseded_by IS NULL
+         AND type != 'checkpoint'
        ORDER BY created_at DESC
        LIMIT 50`
     )

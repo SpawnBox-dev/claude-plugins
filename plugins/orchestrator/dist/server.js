@@ -21105,6 +21105,7 @@ function findConcurrentCaptures(db, opts) {
   const rows = db.query(`SELECT id, type, content, keywords, source_session
        FROM notes
        WHERE created_at >= ? AND id != ? AND superseded_by IS NULL
+         AND type != 'checkpoint'
        ORDER BY created_at DESC
        LIMIT 50`).all(cutoff, opts.noteId);
   const mine = new Set(opts.keywords.map((k) => k.toLowerCase()));
