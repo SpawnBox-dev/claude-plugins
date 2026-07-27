@@ -207,7 +207,29 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
 
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
   const userPrompt = (args.payload?.user_prompt as string | undefined) ?? "";
-  const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
+  // 0.30.79: render the sibling roster only when it CHANGES (or every
+  // ROSTER_REFRESH_TURNS as a floor), instead of on every delivery.
+  //
+  // PA reported the roster arriving 5-15 times per turn. There is only ONE call
+  // site and it pushes once, so the multiplier is not duplication in the
+  // composition - it is that UserPromptSubmit fires for EVERY CHANNEL DELIVERY,
+  // and a prime with five chattering SAs takes many deliveries per turn. Each
+  // one re-rendered the same five sessions with the same task strings, differing
+  // only in which *POTENTIAL OVERLAP* markers were set.
+  //
+  // That is one block printed N times, not N advisories competing for attention,
+  // so it can be fixed without touching the advisory-rotation question (which
+  // genuinely does need to wait for this session's three new triggers to settle).
+  // Volume that carries no new information is what teaches agents to skim the
+  // channel that also carries the information.
+  //
+  // Suppression is CONTENT-KEYED, not turn-keyed: a roster that changes (a
+  // session joins, departs, or updates its task) still renders immediately,
+  // because that is exactly when it is worth reading. The turn floor guarantees
+  // a compacted session gets the roster back within a bounded window even if
+  // the fleet is static.
+  const siblingRaw = renderSiblingActivity(ctx, args.session_id, userPrompt);
+  const siblingLine = dedupeSiblingRoster(ctx, args.session_id, turn, siblingRaw);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
 
   // R7 loop-closure + user-signal escalation.
@@ -536,6 +558,86 @@ function composeScopeRetrievalNudge(
   );
 
   return composeScopeRetrievalText(hits, reason);
+}
+
+// ── 0.30.79: sibling-roster dedupe ─────────────────────────────────────────
+//
+// The cost is concentrated exactly where it hurts most. Every SA receives one
+// inbound event per turn and sees the roster once. PA receives one hook-context
+// block PER INBOUND EVENT, and as prime it gets an event for everything anyone
+// else says - 5-15 per turn on a busy night. So the multiplier scales with
+// inbound volume, and PA is the only session with high volume BY CONSTRUCTION:
+// the session with the largest context and the most compactions (three tonight)
+// was paying an N-times tax on boilerplate.
+//
+// Content-keyed rather than turn-keyed on purpose: the roster's whole value is
+// telling you when the fleet CHANGED. Suppressing an identical block costs
+// nothing; suppressing a changed one would break the feature. The turn floor is
+// the safety net so a session that compacts during a static period still gets
+// the roster back within a bounded window.
+export const ROSTER_REFRESH_TURNS = 10;
+
+/** Cheap, stable string hash (djb2). Only needs to detect change, not resist
+ *  collision attacks - and keeps plugin_state small vs storing the block. */
+export function rosterFingerprint(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+/** PURE decision core, exported for tests. */
+export function shouldRenderRoster(opts: {
+  current: string;
+  lastFingerprint: string | null;
+  lastTurn: number | null;
+  turn: number;
+  refreshTurns?: number;
+}): boolean {
+  if (!opts.current) return false;
+  const fp = rosterFingerprint(opts.current);
+  // Changed (or never shown) -> always render. This is the signal.
+  if (opts.lastFingerprint == null || opts.lastFingerprint !== fp) return true;
+  // Unchanged -> render only once the floor has elapsed, so a compacted
+  // session re-acquires the roster even when the fleet is static.
+  if (opts.lastTurn == null) return true;
+  const elapsed = opts.turn - opts.lastTurn;
+  // A negative gap means the counter reset (MCP restart) - treat as stale and
+  // render, same convention as the warden-nudge gap guard.
+  if (elapsed < 0) return true;
+  return elapsed >= (opts.refreshTurns ?? ROSTER_REFRESH_TURNS);
+}
+
+/** Impure shell: read/write the last-shown marker. */
+function dedupeSiblingRoster(
+  ctx: HookCtx,
+  sessionId: string,
+  turn: number,
+  current: string
+): string {
+  if (!current) return "";
+  const key = `sibling_roster_${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+
+  let lastFingerprint: string | null = null;
+  let lastTurn: number | null = null;
+  if (row?.value) {
+    const [t, fp] = row.value.split("|");
+    const parsed = Number(t);
+    lastTurn = Number.isFinite(parsed) ? parsed : null;
+    lastFingerprint = fp ?? null;
+  }
+
+  if (!shouldRenderRoster({ current, lastFingerprint, lastTurn, turn })) {
+    return "";
+  }
+
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, `${turn}|${rosterFingerprint(current)}`, now()]
+  );
+  return current;
 }
 
 function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {

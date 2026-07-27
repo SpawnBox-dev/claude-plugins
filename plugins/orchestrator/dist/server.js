@@ -23748,7 +23748,8 @@ function handleUserPromptSubmit(ctx, args) {
   resetTurnState(ctx.db, args.session_id);
   const reminder = VARIANTS[(turn - 1) % VARIANTS.length];
   const userPrompt = args.payload?.user_prompt ?? "";
-  const siblingLine = renderSiblingActivity(ctx, args.session_id, userPrompt);
+  const siblingRaw = renderSiblingActivity(ctx, args.session_id, userPrompt);
+  const siblingLine = dedupeSiblingRoster(ctx, args.session_id, turn, siblingRaw);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
   const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
   const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
@@ -23890,6 +23891,45 @@ function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
   }
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turn), now()]);
   return composeScopeRetrievalText(hits, reason);
+}
+var ROSTER_REFRESH_TURNS = 10;
+function rosterFingerprint(s) {
+  let h = 5381;
+  for (let i = 0;i < s.length; i++)
+    h = (h << 5) + h + s.charCodeAt(i) | 0;
+  return (h >>> 0).toString(36);
+}
+function shouldRenderRoster(opts) {
+  if (!opts.current)
+    return false;
+  const fp = rosterFingerprint(opts.current);
+  if (opts.lastFingerprint == null || opts.lastFingerprint !== fp)
+    return true;
+  if (opts.lastTurn == null)
+    return true;
+  const elapsed = opts.turn - opts.lastTurn;
+  if (elapsed < 0)
+    return true;
+  return elapsed >= (opts.refreshTurns ?? ROSTER_REFRESH_TURNS);
+}
+function dedupeSiblingRoster(ctx, sessionId, turn, current) {
+  if (!current)
+    return "";
+  const key = `sibling_roster_${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  let lastFingerprint = null;
+  let lastTurn = null;
+  if (row?.value) {
+    const [t, fp] = row.value.split("|");
+    const parsed = Number(t);
+    lastTurn = Number.isFinite(parsed) ? parsed : null;
+    lastFingerprint = fp ?? null;
+  }
+  if (!shouldRenderRoster({ current, lastFingerprint, lastTurn, turn })) {
+    return "";
+  }
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, `${turn}|${rosterFingerprint(current)}`, now()]);
+  return current;
 }
 function handlePreToolUse(ctx, args) {
   const filePath = args.payload?.file_path ?? null;
