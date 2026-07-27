@@ -135,6 +135,16 @@ This means:
 
 If you find yourself building workarounds because a tool "doesn't support" something, check whether the sibling tool on the same row does.
 
+### Self-contradiction is invisible to complaint-driven discovery
+
+The plugin instructs agents constantly - hook nudges, tool descriptions, skills, this file. **Instructions that are WRONG but LOW-FRICTION TO IGNORE generate zero error reports.** Nobody complains; they just quietly stop reading that channel, and the tune-out generalizes to the advice that IS correct.
+
+Live case (0.30.72): `lookup({code_ref: "path"})` was rejected by the tool while the PreToolUse hook, the lookup tool description, and this file all told agents to make exactly that call. The condition already existed inside the query; only the entry gate omitted it. It survived for months because the advice was cheap to skip - PA had seen the hint dozens of times in one session and never once tried it. The plugin was spending a scarce per-turn advisory slot on a call that could not succeed.
+
+**So: periodically EXECUTE the plugin's own documented advice, verbatim, and see if it works.** That is the only reliable detector for this class. Adding a nudge is never sufficient evidence that a behavior changed.
+
+Corollary, learned the same session: **prefer shipping CONTENT over shipping a POINTER.** A pointer costs the reader a decision they will usually decline; inlined content costs them nothing. That is why the pre-edit hint now carries the notes rather than asking for a lookup, and why the retrieval triggers run the query themselves.
+
 ### The Goal
 
 Context windows are temporary. The orchestrator is permanent. Every session should leave the knowledge base richer than it found it.

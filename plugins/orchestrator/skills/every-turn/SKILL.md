@@ -151,6 +151,17 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "I'm almost there" | If you said this last turn too, you're not almost there. You're looping. |
 | "The orchestrator told me what to do" | The orchestrator surfaced context. The current source/docs/upstream remain ground truth. If a note tempted you to skip reading the actual code, read the code. |
 | "Lookup found the answer, I can skip reading the file" | Lookup tells you what was decided/learned in the past. The code may have moved on. Read the file. |
+| "I read the note, so I've done the homework" | A note can stay ACCURATE while the conclusion drawn from it EXPIRES. "Campaign has 0 clicks" was true when written; at 297 clicks the same sentence means the opposite. Ask "when this was written, what was true - and is it still true?" |
+| "I read the schema / the producer, so I know the behavior" | Read the PRODUCER **and every CONSUMER** before costing a change. Two real saves in one session: a reporting endpoint that would have silently read zero, and an account-deletion cascade that would have clawed back paid creator earnings. The mirror-image error - verifying a column exists but never reading the write path, which was hardcoded to a stub - happened the same hour. |
+| "The instruction told me the method, so I'll use the method" | A named method or count is a CLAIM ABOUT THE WORLD wearing the clothes of an instruction. "Trace via `git tag --contains`" assumed tags were complete: 5 existed against 165 releases. "Post to the ~26 archived threads" assumed they were silent: 17 of 29 already had a message. Ask what OUTCOME is wanted, then verify the premise before acting. |
+
+## Working with git in this project
+
+| Hazard | Rule |
+|--------|------|
+| Repo lives in a cloud-synced folder (OneDrive/Dropbox) | **Never `git stash`.** Sync can re-materialise files git believes it stashed, leaving the tree dirty with content the stash also holds - and `-u` puts untracked files in `stash@{0}^3`, where a plain `git checkout stash@{0} -- <path>` will not find them. **Commit the WIP and bisect against the commit instead.** A WIP commit is durable; a stash in a synced repo demonstrably is not. |
+| Verifying a commit landed | Use `git show --stat`, never `git log`. `git log` echoes your own message back and will happily confirm a commit that staged nothing (a path-casing mismatch made `git add` match zero files while `&& git commit` still ran). |
+| "Passes alone, fails in the suite" | **Read the actual failure text before choosing a technique that mutates the working tree.** Isolation is mid-cost; anything that empties the tree is high-cost. A "failure" that says `dist/server.js is STALE` is the build gate working, not a regression. |
 
 ## Turn Bridge (now automatic)
 
