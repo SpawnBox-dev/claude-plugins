@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join6 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync7, readFileSync as readFileSync3, writeFileSync as writeFileSync2, statSync as statSync5 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -26574,7 +26574,14 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const lines = [];
   lines.push("## System Status");
   lines.push("");
-  lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})`);
+  let bundleStamp = "";
+  try {
+    const self = process.argv[1];
+    if (self) {
+      bundleStamp = ` - bundle ${statSync5(self).mtime.toISOString()}`;
+    }
+  } catch {}
+  lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {

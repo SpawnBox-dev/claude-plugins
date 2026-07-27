@@ -1,5 +1,5 @@
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -660,7 +660,31 @@ server.tool(
     const lines: string[] = [];
     lines.push("## System Status");
     lines.push("");
-    lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})`);
+    // 0.30.94: report WHEN this bundle was written, not just its number.
+    //
+    // SA-5a433456's suggestion, from a real confusion tonight: six terminals
+    // were reloaded over ~20 minutes while releases were still being published,
+    // so four different versions were fetched and every session could truthfully
+    // say "I reloaded". Deciding whether a given session was CURRENT required
+    // knowing what happened to be newest at the instant it fetched - knowledge
+    // only the publisher had, which turned a self-check into a six-way poll.
+    //
+    // The bundle's mtime makes the answer self-describing: a session can state
+    // when its own code was written and anyone can compare, without a central
+    // authority. Labelled as the bundle timestamp rather than "published",
+    // because that is what it honestly is - when THIS copy was written to disk.
+    let bundleStamp = "";
+    try {
+      const self = process.argv[1];
+      if (self) {
+        bundleStamp = ` - bundle ${statSync(self).mtime.toISOString()}`;
+      }
+    } catch {
+      /* best-effort: a missing stamp is better than a wrong one */
+    }
+    lines.push(
+      `- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`
+    );
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
