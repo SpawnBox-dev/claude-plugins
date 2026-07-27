@@ -23751,7 +23751,7 @@ function handleUserPromptSubmit(ctx, args) {
   const siblingRaw = renderSiblingActivity(ctx, args.session_id, userPrompt);
   const siblingLine = dedupeSiblingRoster(ctx, args.session_id, turn, siblingRaw);
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
-  const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
+  const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt, turn);
   const checkpointNudge = composeCheckpointCadenceNudge(ctx, args.session_id, turn);
   const wardenNudge = composeWardenLivenessNudge(ctx, args.session_id, turn);
   const scopeRetrieval = composeScopeRetrievalNudge(ctx, args.session_id, userPrompt, turn);
@@ -24061,6 +24061,7 @@ function composeScopeRetrievalNudge(ctx, sessionId, userPrompt, turn) {
   return composeScopeRetrievalText(hits, reason);
 }
 var ROSTER_REFRESH_TURNS = 10;
+var LOOP_CLOSE_REFRESH_TURNS = 25;
 function rosterFingerprint(s) {
   let h = 5381;
   for (let i = 0;i < s.length; i++)
@@ -25127,7 +25128,7 @@ function userPromptSignalsApproval(prompt) {
   }
   return false;
 }
-function composeLoopCloseNudge(ctx, sessionId, userPrompt) {
+function composeLoopCloseNudge(ctx, sessionId, userPrompt, turn) {
   const inFlight = listInFlightWorkItemsForSession(ctx.db, sessionId);
   if (inFlight.length === 0)
     return "";
@@ -25135,6 +25136,28 @@ function composeLoopCloseNudge(ctx, sessionId, userPrompt) {
   if (userPromptSignalsApproval(userPrompt)) {
     return `[orch] User just signaled approval. Close loops NOW. In-flight work_items in your scope: ${ids}. For each: did it just complete? \`update_work_item({id, status:"done"})\`. Capture any decisions/patterns from this turn before they evaporate. If anything else should close, ask explicitly in your reply.`;
   }
+  const stamps = inFlight.map((w) => `${w.id}:${w.updated_at ?? ""}`).join("|");
+  const fp = rosterFingerprint(stamps);
+  const key = `loop_close_${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+  let lastFp = null;
+  let lastTurn = null;
+  if (row?.value) {
+    const [t, f] = row.value.split("|");
+    const parsed = Number(t);
+    lastTurn = Number.isFinite(parsed) ? parsed : null;
+    lastFp = f ?? null;
+  }
+  if (!shouldRenderRoster({
+    current: stamps,
+    lastFingerprint: lastFp,
+    lastTurn,
+    turn,
+    refreshTurns: LOOP_CLOSE_REFRESH_TURNS
+  })) {
+    return "";
+  }
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, `${turn}|${fp}`, now()]);
   return `[orch] Loop-close check: in-flight work_items in your scope: ${ids}. Did any just complete? Mark done. If unsure whether the user considers it done, ASK in your reply rather than carry forward silently.`;
 }
 function composeCodeRefsHint(db, sessionId, filePath) {

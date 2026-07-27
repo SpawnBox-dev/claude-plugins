@@ -233,7 +233,7 @@ function handleUserPromptSubmit(ctx: HookCtx, args: HookEventArgs): HookEventRes
   const bridge = composeBridgeFromLog(ctx, args.session_id, turn);
 
   // R7 loop-closure + user-signal escalation.
-  const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt);
+  const loopClose = composeLoopCloseNudge(ctx, args.session_id, userPrompt, turn);
 
   // WI 2ad3240e (Jarid override 2026-07-11): cadence-aware regular-checkpoint
   // nudge. Point-of-compaction capture cannot work (no model turn), so the
@@ -985,6 +985,12 @@ function composeScopeRetrievalNudge(
 // the safety net so a session that compacts during a static period still gets
 // the roster back within a bounded window.
 export const ROSTER_REFRESH_TURNS = 10;
+/** Loop-close re-surfaces a STATIC in-flight set less often than the roster:
+ *  the roster tells you who is live (worth periodic reconfirmation), while an
+ *  unchanged work-item set is the same question you already declined to answer.
+ *  Long enough that a deliberately long-lived item stops nagging; short enough
+ *  that it cannot disappear for a whole session. */
+export const LOOP_CLOSE_REFRESH_TURNS = 25;
 
 /** Cheap, stable string hash (djb2). Only needs to detect change, not resist
  *  collision attacks - and keeps plugin_state small vs storing the block. */
@@ -2788,7 +2794,8 @@ function userPromptSignalsApproval(prompt: string): boolean {
 function composeLoopCloseNudge(
   ctx: HookCtx,
   sessionId: string,
-  userPrompt: string
+  userPrompt: string,
+  turn: number
 ): string {
   const inFlight = listInFlightWorkItemsForSession(ctx.db, sessionId);
   if (inFlight.length === 0) return "";
@@ -2800,6 +2807,61 @@ function composeLoopCloseNudge(
     // loops decisively this turn.
     return `[orch] User just signaled approval. Close loops NOW. In-flight work_items in your scope: ${ids}. For each: did it just complete? \`update_work_item({id, status:"done"})\`. Capture any decisions/patterns from this turn before they evaporate. If anything else should close, ask explicitly in your reply.`;
   }
+
+  // 0.30.89: NUDGE ON STATE CHANGE, NOT ON TICK.
+  //
+  // Reported by PA with a clean sample (~30 identical firings across ~40 turns
+  // naming one deliberately-long-lived work item), and corroborated by
+  // SA-4e3d2623 experiencing the same thing for its whole session. PA's own
+  // account is the damning part: "By turn ten I stopped reading it. If it had
+  // ever changed to name a DIFFERENT item, I'd probably have missed it."
+  //
+  // That is the mirror of decision ea5bee61's concern, and the same lesson as
+  // the roster fix in 0.30.79: an advisory that fires constantly and
+  // IDENTICALLY trains its reader to filter it out - and here it was filtered
+  // by the session most likely to have a genuine loop-close obligation. Volume
+  // that carries no new information corrodes the channel that also carries the
+  // information.
+  //
+  // So: suppress while the in-flight SET and its updated_at timestamps are
+  // unchanged since the last firing. A NEW item, a CLOSED item, or an EDITED
+  // item all change the fingerprint and render immediately - which is exactly
+  // when the reminder is worth reading. A turn floor re-surfaces a static set
+  // occasionally so a long-lived item cannot vanish entirely.
+  //
+  // The approval-signal branch above deliberately bypasses this: it fires on a
+  // USER SIGNAL, not on a tick, so it is already state-changed by definition.
+  const stamps = inFlight
+    .map((w) => `${w.id}:${(w as { updated_at?: string }).updated_at ?? ""}`)
+    .join("|");
+  const fp = rosterFingerprint(stamps);
+  const key = `loop_close_${sanitizeSessionId(sessionId)}`;
+  const row = ctx.db
+    .query(`SELECT value FROM plugin_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  let lastFp: string | null = null;
+  let lastTurn: number | null = null;
+  if (row?.value) {
+    const [t, f] = row.value.split("|");
+    const parsed = Number(t);
+    lastTurn = Number.isFinite(parsed) ? parsed : null;
+    lastFp = f ?? null;
+  }
+  if (
+    !shouldRenderRoster({
+      current: stamps,
+      lastFingerprint: lastFp,
+      lastTurn,
+      turn,
+      refreshTurns: LOOP_CLOSE_REFRESH_TURNS,
+    })
+  ) {
+    return "";
+  }
+  ctx.db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+    [key, `${turn}|${fp}`, now()]
+  );
 
   return `[orch] Loop-close check: in-flight work_items in your scope: ${ids}. Did any just complete? Mark done. If unsure whether the user considers it done, ASK in your reply rather than carry forward silently.`;
 }
