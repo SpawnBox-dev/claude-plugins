@@ -155,6 +155,23 @@ These thoughts mean STOP - you are rationalizing your way out of using the orche
 | "I read the schema / the producer, so I know the behavior" | Read the PRODUCER **and every CONSUMER** before costing a change. Two real saves in one session: a reporting endpoint that would have silently read zero, and an account-deletion cascade that would have clawed back paid creator earnings. The mirror-image error - verifying a column exists but never reading the write path, which was hardcoded to a stub - happened the same hour. |
 | "The instruction told me the method, so I'll use the method" | A named method or count is a CLAIM ABOUT THE WORLD wearing the clothes of an instruction. "Trace via `git tag --contains`" assumed tags were complete: 5 existed against 165 releases. "Post to the ~26 archived threads" assumed they were silent: 17 of 29 already had a message. Ask what OUTCOME is wanted, then verify the premise before acting. |
 
+## A check that cannot fail is not a check
+
+Before trusting any guard, detector, grep, or assertion you just wrote: **run it against the exact case that motivated it and confirm it FIRES.** Then feed it a known-negative and confirm it stays silent. A check you have only ever seen return "clean" has not been tested, it has been assumed - and "clean" is indistinguishable from "covered".
+
+Four instances in one session (2026-07-27), four different systems, one shape:
+
+| What it did | Why it could never fail |
+|---|---|
+| PII guard grepped `587-777` | The content said `(587) 777`. The pattern could not match the data. Reported clean; the number shipped. |
+| Liveness watchdog measured output volume | Volume is not liveness. Its worst firing was against an agent that had deliberately gone quiet **on the user's instruction** - so it flagged compliance. No threshold fixes a wrong quantity. |
+| A detector regex hoisted `\b` before `~\d+` | `\b~` never matches - `~` and a space are both non-word chars. The detector could not fire on its own motivating example. |
+| A guard compared transcript mtime to an event's enqueue time | The enqueue **writes the transcript**, so the condition was true by construction. Would have silently disabled the detector entirely. |
+
+**Why this class survives:** all of them PASS. A guard that cannot fire emits exactly what a guard finding nothing emits, so no error, no failing test, and no complaint ever arrives. Complaint-driven discovery structurally cannot find it.
+
+**When you must use a proxy** (you cannot measure the property directly), write down what you are actually measuring and how it can diverge from what you mean. Divergence is invisible in the healthy case and shows up precisely in the case you built the check for.
+
 ## Working with git in this project
 
 | Hazard | Rule |
