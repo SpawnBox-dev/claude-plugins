@@ -22186,7 +22186,6 @@ function toSummary(row) {
 }
 var UPCOMING_HORIZON_DAYS = 30;
 var NEGLECTED_MIN_CLUSTER = 10;
-var NEGLECTED_RENDER_CAP = 12;
 function composeBriefing(projectDb2, globalDb2, sections) {
   const include = (section) => !sections || sections.length === 0 || sections.includes(section);
   const noteCount = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
@@ -22241,10 +22240,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       }
     }
     const ranked = [...tagRecent.entries()].filter(([tag, recent]) => !recent && (tagCount.get(tag) ?? 0) >= NEGLECTED_MIN_CLUSTER && (tagOpen.get(tag) ?? 0) > 0).sort((a, b) => (tagOpen.get(b[0]) ?? 0) - (tagOpen.get(a[0]) ?? 0));
-    neglectedAreas = ranked.slice(0, NEGLECTED_RENDER_CAP).map(([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`);
-    if (ranked.length > NEGLECTED_RENDER_CAP) {
-      neglectedAreas.push(`...${ranked.length - NEGLECTED_RENDER_CAP} more dormant clusters with open work`);
-    }
+    neglectedAreas = ranked.map(([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`);
   }
   let driftWarning = null;
   if (include("drift")) {

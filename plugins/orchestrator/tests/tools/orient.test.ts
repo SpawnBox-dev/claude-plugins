@@ -201,12 +201,31 @@ describe("orient tool", () => {
     // "neglected area". Exceeds NEGLECTED_MAX (30), forcing the cap path -
     // the same honest-paging code path cross_session/user_model use.
     const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    // 0.31.2: an "area" now needs a real CLUSTER (>= NEGLECTED_MIN_CLUSTER
+    // notes) AND unfinished business, so each of the 45 areas is seeded as a
+    // qualifying cluster rather than a lone tag. The paging behaviour under
+    // test is unchanged - this only feeds it input that still qualifies.
     for (let i = 0; i < 45; i++) {
-      projectDb.run(
-        `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [generateId(), "decision", `d${i}`, null, "k", `area-${i}`, "medium", 0, old, old]
-      );
+      for (let j = 0; j < 10; j++) {
+        const isOpen = j === 0;
+        projectDb.run(
+          `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            generateId(),
+            isOpen ? "work_item" : "decision",
+            `d${i}-${j}`,
+            null,
+            "k",
+            `area-${i}`,
+            "medium",
+            0,
+            isOpen ? "active" : null,
+            old,
+            old,
+          ]
+        );
+      }
     }
 
     const result = handleOrient(projectDb, globalDb, { event: "startup" });
@@ -224,22 +243,43 @@ describe("orient tool", () => {
   test("c658ce38: JSON-array tags render as clean neglected tags, not char-split garbage", () => {
     suppressAutoRetro(projectDb);
     const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
-    projectDb.run(
-      `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        generateId(),
-        "decision",
-        "a decision with array-shaped tags",
-        null,
-        "k",
-        '["alpha-c658","beta-c658"]',
-        "medium",
-        0,
-        old,
-        old,
-      ]
-    );
+    // 0.31.2: seeded as a qualifying cluster (>=10 notes, >=1 open item) so the
+    // tag-PARSING behaviour under test still reaches the render path. What is
+    // being asserted - that JSON-array tags come out clean rather than
+    // char-split - is unchanged.
+    // A second, differently-tagged cluster keeps the drift detector from
+    // reporting 100% focus on one tag - that warning legitimately QUOTES the
+    // tag name, which would trip the not.toContain('"alpha-c658"') assertion
+    // for a reason unrelated to tag parsing. Fixture drift from seeding the
+    // cluster, not a product bug.
+    // INTERLEAVED: every note here shares the same timestamp, so "recent" is
+    // insertion order - seeding one cluster then the other still let the first
+    // fill the drift window entirely.
+    for (let j = 0; j < 10; j++) {
+      for (const [tagValue, prefix] of [
+        ['["alpha-c658","beta-c658"]', "array-shaped"],
+        ["plain-c658", "plain"],
+      ]) {
+        const isOpen = j === 0;
+        projectDb.run(
+          `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            generateId(),
+            isOpen ? "work_item" : "decision",
+            `a decision with ${prefix} tags ${j}`,
+            null,
+            "k",
+            tagValue,
+            "medium",
+            0,
+            isOpen ? "active" : null,
+            old,
+            old,
+          ]
+        );
+      }
+    }
 
     const result = handleOrient(projectDb, globalDb, { event: "startup" });
 

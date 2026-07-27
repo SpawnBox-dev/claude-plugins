@@ -351,10 +351,15 @@ describe("neglected areas: cluster + unfinished business", () => {
     expect(b.neglected_areas.join(" ")).not.toContain("hot");
   });
 
-  test("is capped and says how many it withheld", () => {
+  test("RANKS but does not truncate - orient owns honest paging", () => {
+    // Capping here would truncate BEFORE orient's paging logic, silently
+    // dropping the "how to retrieve the rest" hint. That regression was caught
+    // by the AC(c) test; the composer ranks and orient pages.
     for (let i = 0; i < 20; i++) cluster(`d${i}`, 12, 12 - (i % 5));
     const b = composeBriefing(projectDb, globalDb, ["neglected"] as any);
-    expect(b.neglected_areas.length).toBeLessThanOrEqual(13);
-    expect(b.neglected_areas[b.neglected_areas.length - 1]).toContain("more dormant");
+    expect(b.neglected_areas.length).toBe(20);
+    // Still ordered by unfinished business, most first.
+    const opens = b.neglected_areas.map((a) => Number(a.match(/: (\d+) open/)![1]));
+    expect(opens).toEqual([...opens].sort((x, y) => y - x));
   });
 });

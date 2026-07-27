@@ -120,8 +120,9 @@ export const UPCOMING_HORIZON_DAYS = 30;
  *  this it is a label someone used once, not a domain that can go dormant.
  *  Measured: 6,823 of 10,292 live tags are used exactly once. */
 export const NEGLECTED_MIN_CLUSTER = 10;
-/** How many dormant clusters to render. The rest are summarised as a count -
- *  a reader acts on the biggest few, never on a list. */
+/** Retained for tests/consumers that reason about render width. The actual
+ *  truncation lives in orient.ts, which pages honestly (count + how to get the
+ *  rest); the composer only RANKS. */
 export const NEGLECTED_RENDER_CAP = 12;
 
 export function composeBriefing(
@@ -307,17 +308,15 @@ export function composeBriefing(
       )
       .sort((a, b) => (tagOpen.get(b[0]) ?? 0) - (tagOpen.get(a[0]) ?? 0));
 
-    neglectedAreas = ranked
-      .slice(0, NEGLECTED_RENDER_CAP)
-      .map(
-        ([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`
-      );
-
-    if (ranked.length > NEGLECTED_RENDER_CAP) {
-      neglectedAreas.push(
-        `...${ranked.length - NEGLECTED_RENDER_CAP} more dormant clusters with open work`
-      );
-    }
+    // NOTE: no cap here on purpose. orient.ts already pages this section
+    // honestly - explicit withheld count PLUS how to retrieve the rest - and
+    // capping in the composer truncated BEFORE that logic ran, which silently
+    // dropped the retrieval hint. That is the "never a silent drop" contract
+    // the AC(c) test guards, and my first attempt broke it. Rank here, render
+    // and page there.
+    neglectedAreas = ranked.map(
+      ([tag]) => `${tag}: ${tagOpen.get(tag)} open / ${tagCount.get(tag)} notes`
+    );
   }
 
   // Drift detection: if 80%+ of last 10 notes share the same top tag

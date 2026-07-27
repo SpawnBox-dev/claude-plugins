@@ -32,14 +32,29 @@ function makeDb(): Database {
   return db;
 }
 
-function addNote(db: Database, opts: { tags: string; updated: string; content?: string }) {
+function addNote(db: Database, opts: { tags: string; updated: string; content?: string; open?: boolean }) {
   const id = generateId();
   db.run(
-    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, created_at, updated_at)
-     VALUES (?, 'insight', ?, NULL, '', ?, 'medium', 0, ?, ?)`,
-    [id, opts.content ?? `note ${id}`, opts.tags, opts.updated, opts.updated]
+    `INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, '', ?, 'medium', 0, ?, ?, ?)`,
+    [
+      id,
+      opts.open ? "work_item" : "insight",
+      opts.content ?? `note ${id}`,
+      opts.tags,
+      opts.open ? "active" : null,
+      opts.updated,
+      opts.updated,
+    ]
   );
   return id;
+}
+
+/** 0.31.2: an "area" now needs a real CLUSTER plus unfinished business, so
+ *  these fixtures seed one instead of a lone tag. What each test asserts -
+ *  dormancy, the substring-collision fix, linearity - is unchanged. */
+function addCluster(db: Database, tag: string, updated: string, n = 10) {
+  for (let i = 0; i < n; i++) addNote(db, { tags: tag, updated, open: i === 0 });
 }
 
 describe("neglected areas", () => {
@@ -55,22 +70,22 @@ describe("neglected areas", () => {
   });
 
   test("reports a tag with no recent activity", () => {
-    addNote(db, { tags: "dormant", updated: OLD });
+    addCluster(db, "dormant", OLD);
     const b = composeBriefing(db, g, ["neglected"] as any);
-    expect(b.neglected_areas).toContain("dormant");
+    expect(b.neglected_areas.join(" ")).toContain("dormant");
   });
 
   test("does NOT report a tag touched inside the window", () => {
-    addNote(db, { tags: "active", updated: NEW });
+    addCluster(db, "active", NEW);
     const b = composeBriefing(db, g, ["neglected"] as any);
-    expect(b.neglected_areas).not.toContain("active");
+    expect(b.neglected_areas.join(" ")).not.toContain("active");
   });
 
   test("one recent note rescues a tag that also has stale notes", () => {
-    addNote(db, { tags: "mixed", updated: OLD });
+    addCluster(db, "mixed", OLD);
     addNote(db, { tags: "mixed", updated: NEW });
     const b = composeBriefing(db, g, ["neglected"] as any);
-    expect(b.neglected_areas).not.toContain("mixed");
+    expect(b.neglected_areas.join(" ")).not.toContain("mixed");
   });
 
   test("SEMANTIC FIX: a substring collision no longer masks a neglected tag", () => {
@@ -78,23 +93,25 @@ describe("neglected areas", () => {
     // `roadmap` made the stale tag `map` look active and it was never
     // reported. Exact tag equality fixes that - expect a few tags to newly
     // appear as neglected.
-    addNote(db, { tags: "map", updated: OLD });
-    addNote(db, { tags: "roadmap", updated: NEW });
+    addCluster(db, "map", OLD);
+    addCluster(db, "roadmap", NEW);
     const b = composeBriefing(db, g, ["neglected"] as any);
-    expect(b.neglected_areas).toContain("map");
-    expect(b.neglected_areas).not.toContain("roadmap");
+    expect(b.neglected_areas.join(" ")).toContain("map:");
+    expect(b.neglected_areas.join(" ")).not.toContain("roadmap");
   });
 
   test("stays linear: many distinct tags do not multiply table scans", () => {
     // The old shape ran one full-table LIKE scan PER DISTINCT TAG. This is the
     // regression guard for that: 400 tags across 400 notes must stay fast.
     for (let i = 0; i < 400; i++) {
-      addNote(db, { tags: `tag${i},shared`, updated: OLD });
+      addNote(db, { tags: `tag${i},shared`, updated: OLD, open: i % 10 === 0 });
     }
     const t0 = performance.now();
     const b = composeBriefing(db, g, ["neglected"] as any);
     const ms = performance.now() - t0;
-    expect(b.neglected_areas.length).toBeGreaterThan(300);
+    // `shared` is the only tag reaching cluster size here; the 400 singletons
+    // are correctly excluded. Linearity is what this guards, not the count.
+    expect(b.neglected_areas.length).toBeGreaterThanOrEqual(1);
     expect(ms).toBeLessThan(2000);
   });
 });
