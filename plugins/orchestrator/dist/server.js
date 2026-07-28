@@ -21234,6 +21234,19 @@ function formatConcurrentAdvisory(peers) {
 The near-duplicate gate CANNOT catch this: it matches on embeddings, and a note ` + `written seconds ago has no vector yet - so check_similar returns nothing even though ` + `the note exists. This is a keyword check against recent writes instead.
 ` + `If you and the peer captured the SAME knowledge, one of you should supersede into the ` + `other NOW - pick by better content, not by who was first - and say so in-channel. An ` + `unreconciled fork is a silently divided truth that nobody notices until someone reads both.`;
 }
+var RELEVANCE_FLOOR = 0.68;
+var RELEVANCE_MAX = 3;
+function formatPriorKnowledge(hits) {
+  if (hits.length === 0)
+    return "";
+  const lines = hits.map((h) => `  - ${h.id.slice(0, 8)} [${h.type}] ${Math.round(h.similarity * 100)}%: "${truncate(h.content, 110)}"`).join(`
+`);
+  return `
+
+[PRIOR KNOWLEDGE on what you just asserted - pushed, you did not ask]
+` + lines + `
+These are NOT duplicates; they are existing notes about the same ground. ` + `If any CONTRADICTS what you just wrote, resolve it now - a fork between an old ` + `note and a new one is invisible until someone reads both. If one makes your note ` + `redundant, supersede rather than leave two. If they simply add context, read them ` + `before you act on your own conclusion.`;
+}
 function formatConsolidationAdvisory(candidates) {
   if (candidates.length === 0)
     return "";
@@ -21362,8 +21375,23 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
   }
   let preInsertCandidates = [];
   let advisoryCandidates = [];
+  let priorKnowledge = [];
   const isAlertScopeType = SIMILARITY_ALERT_TYPES.includes(input.type);
   const blockThreshold = similarityAlertThreshold(input.type);
+  if (!isAlertScopeType && embeddingClient) {
+    try {
+      const vecs = await embeddingClient.embed([input.content]);
+      if (vecs && vecs.length > 0) {
+        priorKnowledge = handleCheckSimilar(db, vecs[0], {
+          proposed_action: input.content,
+          types: NOTE_TYPES.filter((t) => t !== "checkpoint"),
+          threshold: RELEVANCE_FLOOR
+        }).results.slice(0, RELEVANCE_MAX);
+      }
+    } catch (err) {
+      console.error(`[embed] relevance push failed:`, err);
+    }
+  }
   if (isAlertScopeType && embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
@@ -21376,6 +21404,15 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
         });
         preInsertCandidates = similar.results.filter((c) => c.similarity >= blockThreshold).slice(0, 3);
         advisoryCandidates = similar.results.filter((c) => c.similarity >= SIMILARITY_ADVISORY_FLOOR && c.similarity < blockThreshold).slice(0, 3);
+        const shown = new Set([
+          ...preInsertCandidates.map((c) => c.id),
+          ...advisoryCandidates.map((c) => c.id)
+        ]);
+        priorKnowledge = handleCheckSimilar(db, queryVector, {
+          proposed_action: input.content,
+          types: NOTE_TYPES.filter((t) => t !== "checkpoint"),
+          threshold: RELEVANCE_FLOOR
+        }).results.filter((c) => !shown.has(c.id) && c.similarity < SIMILARITY_ADVISORY_FLOOR).slice(0, RELEVANCE_MAX);
       }
     } catch (err) {
       console.error(`[embed] Failed to compute similarity for gate:`, err);
@@ -21441,7 +21478,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}${concurrent2}`
+        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}${formatPriorKnowledge(priorKnowledge)}${concurrent2}`
       };
     }
     if (!targetId) {
@@ -21542,7 +21579,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${concurrent}`
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`
   };
 }
 function inferDimension(content) {

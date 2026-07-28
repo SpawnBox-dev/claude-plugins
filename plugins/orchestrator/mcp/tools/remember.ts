@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { NoteType, Dimension } from "../types";
-import { GLOBAL_TYPES, DIMENSIONS } from "../types";
+import { GLOBAL_TYPES, DIMENSIONS, NOTE_TYPES } from "../types";
 import { generateId, now, extractKeywords, stringifyCodeRefs, parseTagList } from "../utils";
 import { findDuplicates, MIN_SHARED_KEYWORDS } from "../engine/deduplicator";
 import { createAutoLinksWithStats } from "../engine/linker";
@@ -199,6 +199,84 @@ function formatConcurrentAdvisory(
     `If you and the peer captured the SAME knowledge, one of you should supersede into the ` +
     `other NOW - pick by better content, not by who was first - and say so in-channel. An ` +
     `unreconciled fork is a silently divided truth that nobody notices until someone reads both.`
+  );
+}
+
+
+// ── 0.32.0: PUSH PRIOR KNOWLEDGE AT THE MOMENT OF ASSERTION ─────────────────
+//
+// Jarid's root-cause escalation (2026-07-28): "as an agent's scope grows and
+// crosses into new domains, nothing proactively steers it to prior knowledge.
+// It posits instead of discovering, and a human has to say 'there's more
+// there'." Three amplified-and-retracted claims in two days.
+//
+// WHY THE FOUR RETRIEVAL TRIGGERS SHIPPED YESTERDAY DO NOT COVER IT: three of
+// them key on the USER'S PROMPT (hedging, topic-shift phrasing, new vocabulary)
+// and one keys on FILE PATHS. The failure Jarid describes happens while the
+// agent is working - no prompt to inspect, and for a non-code domain (a
+// marketplace's conventions, a pricing model, a vendor's terms) no file either.
+//
+// THE STRUCTURAL GAP, found by reading the write path rather than adding a
+// fifth trigger: there are FIFTEEN note types. Only THREE - decision,
+// convention, anti_pattern - got anything surfaced at write time, and even
+// those were checked for DUPLICATION, not for relevance. An agent writing an
+// `insight` or `architecture` note ("here is what I concluded") saw NOTHING.
+// So the one moment the plugin can actually observe the agent's own claim was
+// silent for 12 of 15 types.
+//
+// Writing a note IS the assertion. That makes it the natural push point:
+// lookup is pull and requires knowing there is something to ask about, which
+// is precisely what the failing agent does not know. This turns capture into a
+// retrieval moment for every type.
+//
+// Deliberately: NON-BLOCKING (the note is already stored - this informs, it
+// does not gate), silent when there is nothing relevant, capped at 3, and it
+// never repeats a note the duplicate gate already showed. Checkpoints are
+// excluded on both sides per 0.31.4 - session snapshots are not knowledge.
+// FLOOR SET BY PRIOR ART, NOT BY TASTE. My first attempt used 0.60 and the
+// existing suite immediately failed: the fc7fcb0d test uses a 0.60 neighbour as
+// its definition of "no near-match, no advisory noise". That is a domain
+// judgement someone already made about this KB, and overriding it silently to
+// make my own feature fire would be exactly the "fix the test into agreement"
+// anti-pattern. 0.68 sits above that established noise line and below the 0.75
+// duplicate floor, so this band is "related but demonstrably not a duplicate".
+//
+// STILL A JUDGEMENT, NOT A MEASUREMENT: the honest way to tune it is observed
+// fire-rate on real writes. SA-5a433456 and PA both warned that a check firing
+// on every note write trains dismissal as reliably as an always-on alert - so
+// if this proves noisy in practice, RAISE it rather than defending it.
+const RELEVANCE_FLOOR = 0.68;
+const RELEVANCE_MAX = 3;
+
+function formatPriorKnowledge(
+  hits: Array<{ id: string; type: string; content: string; similarity: number }>
+): string {
+  if (hits.length === 0) return "";
+  const lines = hits
+    .map(
+      (h) =>
+        // id8, and it IS resolvable - do not "fix" this to a full UUID.
+        // resolveNoteId (mcp/tools/id_resolver.ts) is shared by supersede,
+        // update_note and lookup: exact match first, then `id LIKE 'prefix-%'`
+        // for 8 hex chars, with an ambiguous prefix returning the candidate
+        // list rather than guessing. So the action this block asks for is
+        // takeable with what it renders, and 8 chars keeps a nudge that exists
+        // to avoid noise from spending 36 characters a line on identifiers.
+        // (Checked the hard way: an earlier pass "fixed" this to a full id on
+        // the strength of an empty grep against two filenames that do not
+        // exist. See the round-trip test - it pins the PROPERTY, so a future
+        // change to either the render width or the resolver fails loudly.)
+        `  - ${h.id.slice(0, 8)} [${h.type}] ${Math.round(h.similarity * 100)}%: "${truncate(h.content, 110)}"`
+    )
+    .join("\n");
+  return (
+    `\n\n[PRIOR KNOWLEDGE on what you just asserted - pushed, you did not ask]\n` +
+    lines +
+    `\nThese are NOT duplicates; they are existing notes about the same ground. ` +
+    `If any CONTRADICTS what you just wrote, resolve it now - a fork between an old ` +
+    `note and a new one is invisible until someone reads both. If one makes your note ` +
+    `redundant, supersede rather than leave two. If they simply add context, read them ` +
+    `before you act on your own conclusion.`
   );
 }
 
@@ -426,8 +504,30 @@ export async function handleRemember(
   // advisory on the stored note's message.
   let advisoryCandidates: Candidate[] = [];
 
+  // 0.32.0: relevance push for EVERY type (see formatPriorKnowledge). Computed
+  // here so it shares the single embed call below rather than adding one.
+  let priorKnowledge: Candidate[] = [];
+
   const isAlertScopeType = SIMILARITY_ALERT_TYPES.includes(input.type);
   const blockThreshold = similarityAlertThreshold(input.type);
+  // Relevance push runs for ALL types, including the 12 that never had any
+  // write-time surfacing. Separate embed only when the gate below will not
+  // already do one.
+  if (!isAlertScopeType && embeddingClient) {
+    try {
+      const vecs = await embeddingClient.embed([input.content]);
+      if (vecs && vecs.length > 0) {
+        priorKnowledge = handleCheckSimilar(db, vecs[0], {
+          proposed_action: input.content,
+          types: NOTE_TYPES.filter((t) => t !== "checkpoint") as NoteType[],
+          threshold: RELEVANCE_FLOOR,
+        }).results.slice(0, RELEVANCE_MAX);
+      }
+    } catch (err) {
+      console.error(`[embed] relevance push failed:`, err);
+    }
+  }
+
   if (isAlertScopeType && embeddingClient) {
     try {
       const vecs = await embeddingClient.embed([input.content]);
@@ -452,6 +552,22 @@ export async function handleRemember(
               c.similarity < blockThreshold
           )
           .slice(0, 3);
+        // Relevance band sits BELOW the duplicate floor: related prior work
+        // that is explicitly NOT a duplicate, which is the material the
+        // duplicate-shaped check could never surface. Reuses this vector.
+        const shown = new Set([
+          ...preInsertCandidates.map((c) => c.id),
+          ...advisoryCandidates.map((c) => c.id),
+        ]);
+        priorKnowledge = handleCheckSimilar(db, queryVector, {
+          proposed_action: input.content,
+          types: NOTE_TYPES.filter((t) => t !== "checkpoint") as NoteType[],
+          threshold: RELEVANCE_FLOOR,
+        })
+          .results.filter(
+            (c) => !shown.has(c.id) && c.similarity < SIMILARITY_ADVISORY_FLOOR
+          )
+          .slice(0, RELEVANCE_MAX);
       }
     } catch (err) {
       console.error(`[embed] Failed to compute similarity for gate:`, err);
@@ -560,7 +676,7 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}${concurrent}`,
+        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`,
       };
     }
 
@@ -694,7 +810,7 @@ export async function handleRemember(
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${concurrent}`,
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`,
   };
 }
 
