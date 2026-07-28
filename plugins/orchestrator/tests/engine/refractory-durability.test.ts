@@ -5,14 +5,11 @@ import { join } from "node:path";
 import {
   getAlertLastEmit,
   setAlertLastEmit,
-  lastSystemEventFrom,
   appendSystemEvent,
   closeAgentChannelDb,
   alertEmissionStats,
 } from "../../mcp/engine/agent_channel_state";
 import {
-  compactGraceActive,
-  COMPACT_GRACE_MS,
   ingressRefractoryElapsed,
   INGRESS_SOLE_RECIPIENT_NOTE,
 } from "../../mcp/engine/agent_channel";
@@ -144,88 +141,56 @@ describe("0.32.1: refractory floor survives what it has to survive", () => {
 });
 
 // ===========================================================================
-// Compaction grace: the explanation was already on the bus.
+// 0.34.0: THE COMPACTION GRACE IS REJECTED. Guarding it so it is not re-derived.
+//
+// 0.32.1 suppressed ingress_suspect for 30 minutes after a session's own
+// compaction event. The reasoning was sound: a context rebuild is long and
+// silent, the textbook false positive, and the event is already on the bus so
+// it cost no instrumentation. SA-c5b207e0 proposed it, I shipped it, and
+// SA-b14fafa3 proposed the same thing independently within the hour.
+//
+// It was removed the same day. Instance 8 turned out to be the detector's
+// FIRST TRUE POSITIVE - a real 58-minute MCP transport outage - and it fired
+// 15m55s after a compaction, squarely inside the grace. The suppressor would
+// have swallowed the only real detection this alert has ever made.
+//
+// The coincidence is not bad luck, it is structural: compaction is exactly
+// when a session is re-establishing transport, so "recently compacted" and
+// "transport just died" correlate. That is the general rule now in CLAUDE.md:
+// A SUPPRESSOR WHOSE TRIGGER CORRELATES WITH THE FAILURE MODE IS NOT A
+// FALSE-POSITIVE FILTER, IT IS A BLINDFOLD.
+//
+// Three suppressors were proposed this week keying on signals the failure
+// itself produces - fleet-quiet, compaction-grace, and transcript-mtime. The
+// third was caught at design time in 0.30.77 and is why classifyIngress
+// accepts transcriptMtimeMs and deliberately ignores it (see the `void` there
+// and tests/engine/ingress-liveness.test.ts). Two careful agents re-invented
+// the same blindfold in one day; assume the next one will too.
 // ===========================================================================
-describe("0.32.1: compaction grace reads the published reason", () => {
-  let stateDir: string;
+describe("0.34.0: compaction must NOT suppress ingress_suspect", () => {
+  test("the timing of the real incident is inside any plausible grace window", () => {
+    // Recorded as data rather than prose so the argument survives rewording.
+    const compaction = Date.parse("2026-07-28T13:45:51Z");
+    const trueFiring = Date.parse("2026-07-28T14:01:46Z");
+    const outageStart = Date.parse("2026-07-28T13:54:00Z");
+    const outageEnd = Date.parse("2026-07-28T14:52:00Z");
 
-  beforeEach(() => {
-    stateDir = mkdtempSync(join(tmpdir(), "orch-compact-"));
-  });
-  afterEach(() => teardown(stateDir));
+    // The firing was real: it landed inside a confirmed transport outage.
+    expect(trueFiring).toBeGreaterThan(outageStart);
+    expect(trueFiring).toBeLessThan(outageEnd);
 
-  const SUBJECT = "d4c8dda8-80e2-4427-8588-8f4f979a2120";
-
-  test("finds the subject's own compaction event on the shared bus", () => {
-    const ts = new Date(1_000_000_000_000).toISOString();
-    appendSystemEvent(stateDir, {
-      event_type: "pa_compact_recovery",
-      from_session: SUBJECT,
-      to_session: "some-sa",
-      ts,
-      payload: "{}",
-    });
-    const found = lastSystemEventFrom(
-      stateDir,
-      ["pa_compact_recovery", "post_compact_recovery"],
-      SUBJECT
-    );
-    expect(found).toBe(1_000_000_000_000);
+    // And it sat well inside the 30-minute grace that was briefly shipped.
+    const gapMin = (trueFiring - compaction) / 60_000;
+    expect(gapMin).toBeLessThan(30);
+    expect(Math.round(gapMin)).toBe(16);
   });
 
-  test("SUPPRESSES the 16-minute gap that actually fired", () => {
-    // Real numbers from 2026-07-28: pa_compact_recovery at 13:45:51Z,
-    // ingress_suspect at 14:01:46Z on the same session.
-    const compact = Date.parse("2026-07-28T13:45:51Z");
-    const alert = Date.parse("2026-07-28T14:01:46Z");
-    expect(compactGraceActive(compact, alert)).toBe(true);
-  });
-
-  test("does NOT suppress once the grace window has passed", () => {
-    const compact = 1_000_000_000_000;
-    expect(compactGraceActive(compact, compact + COMPACT_GRACE_MS)).toBe(false);
-    expect(compactGraceActive(compact, compact + COMPACT_GRACE_MS + 1)).toBe(false);
-  });
-
-  test("a subject that never compacted is NOT suppressed", () => {
-    // The detector has to stay armed for the case it exists for.
-    expect(compactGraceActive(undefined, 1_000_000_000_000)).toBe(false);
-    expect(
-      lastSystemEventFrom(stateDir, ["pa_compact_recovery"], SUBJECT)
-    ).toBeUndefined();
-  });
-
-  test("another session's compaction does not mute THIS subject", () => {
-    appendSystemEvent(stateDir, {
-      event_type: "pa_compact_recovery",
-      from_session: "someone-else",
-      to_session: SUBJECT,
-      ts: new Date(1_000_000_000_000).toISOString(),
-    payload: "{}",
-    });
-    // Keyed on who COMPACTED (from_session), not who was told about it - the
-    // recovery advisory is addressed TO peers, so keying on to_session would
-    // mute every peer of a compacting session instead of the session itself.
-    expect(
-      lastSystemEventFrom(stateDir, ["pa_compact_recovery"], SUBJECT)
-    ).toBeUndefined();
-  });
-});
-
-// ===========================================================================
-// 0.32.2: making the floor fleet-wide reassigns responsibility. Say so.
-// ===========================================================================
-describe("0.32.2: the alert states that its reader is the only recipient", () => {
-  test("names the sole-recipient fact AND asks for an explicit hand-off", () => {
-    // A shared floor means the first emit silences every other process, so
-    // exactly one session hears about it. If that session assumes the fleet
-    // was told, the suppressor has traded noise for silence - which is the
-    // worse of the two failures, because nothing reports it.
-    const t = INGRESS_SOLE_RECIPIENT_NOTE.toLowerCase();
-    expect(t).toContain("only session");
-    // Must not merely inform - it has to close the loop either way, otherwise
-    // a reader who declines to triage leaves no trace that nobody did.
-    expect(t).toMatch(/say|declare|out loud/);
+  test("no compaction-grace symbol is exported from the channel engine", async () => {
+    // A structural guard, not a semantic one: if someone re-adds the export,
+    // this fails and they are sent to the comment above before they wire it in.
+    const mod = await import("../../mcp/engine/agent_channel");
+    expect("compactGraceActive" in mod).toBe(false);
+    expect("COMPACT_GRACE_MS" in mod).toBe(false);
   });
 });
 

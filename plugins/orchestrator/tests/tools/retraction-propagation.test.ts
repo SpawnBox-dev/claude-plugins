@@ -177,3 +177,52 @@ describe("0.33.0: retraction propagation surfaces", () => {
     expect(shown).toBeLessThanOrEqual(6);
   });
 });
+
+// ===========================================================================
+// 0.33.3: the memory INDEX is a separate surface from the memory FILE.
+//
+// PA's first-person report, and the second under-enumeration of the SAME claim
+// after the rule already existed: polar-mor-account.md was corrected and
+// MEMORY.md was left teaching the retracted reading. MEMORY.md loads at the
+// start of every session, before any briefing or lookup, so a stale index
+// reaches every new agent earlier and more reliably than the topic file it
+// points at - and reaches them with nothing else in context to contradict it.
+//
+// PA's diagnosis of the repeat is what these tests defend: the rule was not
+// missing, "I fixed the memory file" simply FEELS complete, so the enumeration
+// never runs. The block therefore has to read as a list to work through.
+// ===========================================================================
+describe("0.33.3: memory index is enumerated as its own surface", () => {
+  let db: Database;
+  beforeEach(() => {
+    db = makeDb();
+    addNote(db, { id: OLD, type: "decision", content: "the retracted claim" });
+  });
+
+  test("calls out MEMORY.md even when the scan already matched it", () => {
+    const out = formatPropagationSurfaces(db, OLD, [], ["MEMORY.md", "polar-mor-account.md"]);
+    expect(out).toContain("MEMORY.md");
+    expect(out.toLowerCase()).toContain("session start");
+  });
+
+  test("distinguishes index from topic file when the scan matched only the topic file", () => {
+    const out = formatPropagationSurfaces(db, OLD, [], ["polar-mor-account.md"]);
+    expect(out.toLowerCase()).toContain("separate surface");
+    expect(out).toContain("MEMORY.md");
+  });
+
+  test("enumerates all six surfaces and says to work the list, not sample it", () => {
+    const out = formatPropagationSurfaces(db, OLD, [], []);
+    for (const surface of ["work item", "checkpoint", "memory file", "memory INDEX", "warden ledger"]) {
+      expect(out.toLowerCase()).toContain(surface.toLowerCase());
+    }
+    expect(out.toLowerCase()).toContain("do not sample");
+  });
+
+  test("names why the written rule failed - the feeling of completion", () => {
+    // Without this the block is just a longer checklist, and a longer checklist
+    // is exactly what did not work the first two times.
+    const out = formatPropagationSurfaces(db, OLD, [], []);
+    expect(out.toLowerCase()).toContain("feels complete");
+  });
+});

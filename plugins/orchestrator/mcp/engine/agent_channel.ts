@@ -35,7 +35,7 @@ import {
   type SessionEntry,
   getAlertLastEmit,
   setAlertLastEmit,
-  lastSystemEventFrom,
+  alertEmissionStats,
 } from "./agent_channel_state";
 
 // NOTE: The MCP channels contract (https://code.claude.com/docs/en/channels-reference)
@@ -194,54 +194,35 @@ export const FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 // on. That is the alert training the exact behaviour it must not train.
 export const INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
 
-/**
- * 0.32.1: grace window after a subject's own compaction event.
- *
- * A context rebuild is long, silent, and completely normal - the textbook
- * shape this detector mistakes for a park. Crucially the subject ANNOUNCES it
- * on the shared bus, so this costs no new instrumentation. Sized to match the
- * refractory: both answer "how long should one explained quiet period buy?".
- */
-export const COMPACT_GRACE_MS = 30 * 60 * 1000;
+/** Survives minification, unlike `void` and unlike comments. Grep the built
+ *  bundle for this text to find out why `opts.transcriptMtimeMs` is read and
+ *  thrown away in classifyIngress. */
+export const MTIME_DELIBERATELY_UNUSED =
+  "classifyIngress: transcriptMtimeMs is accepted and DELIBERATELY NOT USED. " +
+  "The enqueue itself writes to the target's transcript, so mtime >= enqueue " +
+  "holds by construction for parked and healthy sessions alike - gating on it " +
+  "would silently disable the detector, and a permanently-silent watchdog " +
+  "reads as 'no problems'. Rejected mechanism, guarded by " +
+  "tests/engine/ingress-liveness.test.ts. Do not 'complete' this.";
 
 /**
- * 0.32.2: the refractory floor became FLEET-WIDE in 0.32.1, and that changes
- * who is responsible - so the alert has to say so.
+ * 0.32.2: the refractory floor is FLEET-WIDE, and that changes who is
+ * responsible - so the alert has to say so.
  *
  * Each session's MCP process emits over its OWN transport, so an alert reaches
- * exactly one session. Before 0.32.1 each process kept a private floor, so
- * every session eventually got its own copy and any of them could triage.
- * Now the first emit suppresses every other process for the window, which is
- * the point (that duplication was most of the noise) but has a sharp edge:
- * exactly ONE session is told, and if it assumes the fleet was told too,
- * nobody triages and the suppressor has converted noise into silence.
- *
- * Diffusion of responsibility is the predictable failure when a group appears
- * to share a duty that has in fact been assigned to one member. The reader
- * cannot know the floor is shared unless the text says it, so it says it.
+ * exactly one session. Before the floor moved into shared storage each process
+ * kept a private copy, so every session eventually got its own alert and any of
+ * them could triage. Now the first emit suppresses every other process for the
+ * window - which is the point, that duplication was most of the noise - but it
+ * means exactly ONE session is told. If that reader assumes the fleet was told,
+ * the suppressor has traded noise for silence, and silence is the worse failure
+ * because nothing reports it.
  */
 export const INGRESS_SOLE_RECIPIENT_NOTE =
   `You are very likely the ONLY session that received this - the alert now ` +
   `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` +
   `was told or is already looking. Resolve it or say out loud that you are not.`;
 
-/** Event types that mean "this session is rebuilding context, of course it is
- *  quiet". Both directions of the compact-recovery handshake count. */
-export const COMPACT_EVENT_TYPES = [
-  "pa_compact_recovery",
-  "post_compact_recovery",
-];
-
-/** Pure predicate, mirroring ingressRefractoryElapsed so both suppressors are
- *  testable without a clock or a database. */
-export function compactGraceActive(
-  lastCompactMs: number | undefined,
-  now: number,
-  graceMs = COMPACT_GRACE_MS,
-): boolean {
-  if (lastCompactMs === undefined) return false;
-  return now - lastCompactMs < graceMs;
-}
 
 /** PURE: may we emit for this session again yet? Exported for tests. */
 export function ingressRefractoryElapsed(
@@ -312,7 +293,20 @@ export function classifyIngress(opts: {
   // firing has yet produced. Until then the alert's WORDING carries the safety:
   // it is phrased as a question with the address-it-first triage, not as a
   // diagnosis with a physical remedy.
-  void opts.transcriptMtimeMs;
+  // 0.34.0: THE INTENT HAS TO SURVIVE THE BUNDLER.
+  //
+  // Source says `void opts.transcriptMtimeMs`, and `void` is the only in-band
+  // signal that the discard is deliberate. The build STRIPS it - the deployed
+  // bundle contains a bare `opts.transcriptMtimeMs;` between two returns, which
+  // reads as a mistake someone should clean up. Comments do not survive either.
+  //
+  // This cost real time on 2026-07-28: a session reading the doc comment
+  // reported the rejected mechanism as SHIPPED, PA ruled on it, reopened the
+  // ruling over suspected version skew, and it took three agents reading three
+  // artifacts to establish that source, cached .ts and deployed bundle all
+  // agreed. A string constant is the one carrier that survives minification, so
+  // the explanation is now greppable in the built artifact itself.
+  void [opts.transcriptMtimeMs, MTIME_DELIBERATELY_UNUSED];
   // A delivery has sat unprocessed; once it passes the threshold the loop is
   // parked (open menu/prompt, or other cause).
   if (opts.now - opts.oldestOrphanEnqueueTs >= opts.thresholdMs) return "ingress_suspect";
@@ -933,18 +927,31 @@ export class AgentChannel {
         // Refractory floor sits OUTSIDE the episode dedup on purpose: the
         // episode flag is cleared whenever the verdict goes healthy, which is
         // precisely how the alert re-asked a question it had just had answered.
-        // 0.32.1: DURABLE floor + compaction grace. Both read shared state so
-        // every emitter sees the same answer; the in-memory Map is a fallback
-        // only for the case where the DB read throws.
+        // 0.32.1 / 0.34.0: DURABLE refractory floor, and NO COMPACTION GRACE.
+        //
+        // THE COMPACTION GRACE WAS REMOVED THE DAY IT SHIPPED. Do not re-add
+        // it. It suppressed ingress_suspect for 30 minutes after a session's
+        // own compaction event, on the reasoning that a context rebuild is long
+        // and silent and therefore the textbook false positive. Then instance 8
+        // turned out to be the detector's FIRST TRUE POSITIVE - PA's MCP
+        // transport was dead from 13:54Z to 14:52Z - and it fired at 14:01:46Z,
+        // 15m55s after a compaction at 13:45:51Z. Squarely inside the grace.
+        // The suppressor would have swallowed the only real detection this
+        // alert has ever made.
+        //
+        // The coincidence was not bad luck, it is structural: compaction is
+        // exactly when a session is re-establishing transport, so the two
+        // correlate. SA-b14fafa3 proposed the same grace independently and
+        // withdrew it for the same reason within the hour.
+        //
+        // THE GENERAL RULE, now in CLAUDE.md's nudge-design section: A
+        // SUPPRESSOR WHOSE TRIGGER CORRELATES WITH THE FAILURE MODE IS NOT A
+        // FALSE-POSITIVE FILTER, IT IS A BLINDFOLD. Two careful agents invented
+        // this same blindfold in one day, so the trap is easy to fall into and
+        // the rule is worth stating before the next suppressor is written.
         let lastEmit: number | undefined;
-        let lastCompact: number | undefined;
         try {
           lastEmit = getAlertLastEmit(this.projectStateDir, "ingress_suspect", sid);
-          lastCompact = lastSystemEventFrom(
-            this.projectStateDir,
-            COMPACT_EVENT_TYPES,
-            sid,
-          );
         } catch {
           lastEmit = this.ingressLastEmit.get(sid);
         }
@@ -952,10 +959,21 @@ export class AgentChannel {
 
         if (
           !this.ingressEmitted.has(sid) &&
-          ingressRefractoryElapsed(lastEmit, now) &&
-          !compactGraceActive(lastCompact, now)
+          ingressRefractoryElapsed(lastEmit, now)
         ) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60_000);
+          // Derived at emit time, so it cannot go stale the way the hardcoded
+          // "every firing has been a false alarm" did.
+          let priorCountLine = "";
+          try {
+            const stats = alertEmissionStats(this.projectStateDir, "ingress_suspect")
+              .find((s) => s.subject_session === sid);
+            priorCountLine = stats?.emit_count
+              ? `This alert has fired ${stats.emit_count} time(s) about this session before.\n`
+              : `First firing about this session.\n`;
+          } catch {
+            priorCountLine = "";
+          }
           this.emit({
             // 0.30.77: DOWNGRADED FROM DIAGNOSIS TO QUESTION, and the cheapest
             // discriminator is now step 1.
@@ -983,8 +1001,35 @@ export class AgentChannel {
               `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` +
               `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` +
               `a long build, extended thinking, or a session deliberately keeping its ` +
-              `output low all look IDENTICAL to a park from out here. Every firing of this ` +
-              `alert so far has been a false alarm.\n` +
+              `output low all look IDENTICAL to a park from out here.\n` +
+              // 0.34.0: THE HARDCODED BASE RATE IS GONE. It read "every firing
+              // of this alert so far has been a false alarm", and on
+              // 2026-07-28 that became false: instance 8 fired inside a real
+              // 58-minute MCP transport outage. Two readers said in as many
+              // words that this exact sentence trained them to discount the
+              // one real firing, and one of them nearly built a suppressor on
+              // it.
+              //
+              // A STATED BASE RATE THAT CAN GO STALE IS WORSE THAN NO STATED
+              // BASE RATE - it carries the authority of a measurement with the
+              // durability of a comment. So what replaces it is derived at
+              // emit time from alert_refractory (0.32.3) and cannot rot, plus
+              // one monotonic fact: a confirmed true positive exists. That
+              // second claim can only ever become more true.
+              priorCountLine +
+              `AT LEAST ONE PAST FIRING WAS REAL: on 2026-07-28 a session's MCP transport ` +
+              `died for 58 minutes while the session itself kept running. Treat this as ` +
+              `open until you have evidence, not as presumed noise.\n` +
+              // The transport case is why the last step is not a formality.
+              // With egress dead: addressing it CANNOT work (the address is
+              // never delivered), and its transcript may look fresh OR frozen -
+              // sampled both ways during the same outage, minutes apart - so
+              // transcript state is a weak signal here, not an inverted one.
+              // The only check that reaches transport failure is /mcp at the
+              // terminal, which is why it is named rather than buried.
+              `IF THIS IS TRANSPORT DEATH (the confirmed real case), the checks below ` +
+              `cannot see it: an address is never delivered, and the transcript may look ` +
+              `either way. Only "/mcp" at that terminal distinguishes it.\n` +
               // 0.31.7: BRANCH ON NEED rather than enforce an order.
               //
               // The 0.30.77 text numbered these 1-2-3 and said "do NOT skip".

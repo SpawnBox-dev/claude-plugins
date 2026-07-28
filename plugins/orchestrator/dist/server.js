@@ -21726,11 +21726,15 @@ function formatPropagationSurfaces(db, oldId, codeRefs, memoryFiles = []) {
 ` : "";
   const memoryNote = memoryFiles.length > 0 ? "" : "No memory file matched on shared terms - that is a keyword miss, not " + "an all-clear, since a paraphrase of the same claim scores zero. " + `MEMORY.md and its topic files are still worth opening.
 `;
+  const indexNote = memoryFiles.some((f) => f.toLowerCase() === "memory.md") ? "MEMORY.md is in that list and is its own surface: it loads at session " + "start, before any briefing or lookup, so a stale line there teaches " + `the retracted version to every new agent.
+` : "MEMORY.md - the index - is a SEPARATE surface from the topic file it " + "points at, and it loads at session start before any briefing or " + "lookup. Correcting the topic file and stopping has already happened " + `twice.
+`;
   return `
 
-A retraction has gone stale before: the checkout correction reached ` + "its work item, the warden ledger and a checkpoint, while " + "polar-mor-account.md kept the false version and every artifact the author " + `had looked at said the job was done.
+A retraction has gone stale before, twice, and the second time was ` + "after the rule against it was written down. The checkout correction " + "reached its work item, the warden ledger and a checkpoint, while " + "polar-mor-account.md kept the false version; that file was then fixed and " + "MEMORY.md was left still teaching the retracted reading. Both times every " + `artifact the author had looked at said the job was done.
 ` + (known ? `Same claim may live here:
-` + known : "") + memoryNote + "Not reachable from this tool: docs/ and specs, and anything already " + "published - Discord, landing copy, release notes. Superseding a note does " + `not touch those.
+` + known : "") + memoryNote + indexNote + "Six surfaces carry a claim in this project - work item, checkpoints, " + "memory file, memory INDEX, warden ledger, and any skill or doc quoting " + "it. Work the list; do not sample it. The reason the written rule did not " + "prevent the repeat is that fixing one surface FEELS complete, so the " + `enumeration never runs.
+` + "Not reachable from this tool: the warden ledger, docs/ and specs, and " + "anything already published - Discord, landing copy, release notes. " + `Superseding a note does not touch those.
 ` + "A surface you opened and found fine is done. Leaving it unchecked is not.";
 }
 async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
@@ -23579,19 +23583,6 @@ function alertEmissionStats(stateDir, alertKind) {
        FROM alert_refractory ORDER BY last_emit_ms DESC`;
   const stmt = prep(db, sql);
   return alertKind ? stmt.all(alertKind) : stmt.all();
-}
-function lastSystemEventFrom(stateDir, eventTypes, fromSession) {
-  if (eventTypes.length === 0)
-    return;
-  const db = getDb(stateDir);
-  const placeholders = eventTypes.map(() => "?").join(", ");
-  const row = prep(db, `SELECT ts FROM system_events
-     WHERE from_session = ? AND event_type IN (${placeholders})
-     ORDER BY id DESC LIMIT 1`).get(fromSession, ...eventTypes);
-  if (!row)
-    return;
-  const ms = new Date(row.ts).getTime();
-  return Number.isFinite(ms) ? ms : undefined;
 }
 
 // mcp/engine/live_sessions.ts
@@ -25677,17 +25668,8 @@ var INGRESS_TAIL_BYTES = 131072;
 var INGRESS_CHECK_INTERVAL_MS = 30000;
 var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 var INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
-var COMPACT_GRACE_MS = 30 * 60 * 1000;
+var MTIME_DELIBERATELY_UNUSED = "classifyIngress: transcriptMtimeMs is accepted and DELIBERATELY NOT USED. " + "The enqueue itself writes to the target's transcript, so mtime >= enqueue " + "holds by construction for parked and healthy sessions alike - gating on it " + "would silently disable the detector, and a permanently-silent watchdog " + "reads as 'no problems'. Rejected mechanism, guarded by " + "tests/engine/ingress-liveness.test.ts. Do not 'complete' this.";
 var INGRESS_SOLE_RECIPIENT_NOTE = `You are very likely the ONLY session that received this - the alert now ` + `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` + `was told or is already looking. Resolve it or say out loud that you are not.`;
-var COMPACT_EVENT_TYPES = [
-  "pa_compact_recovery",
-  "post_compact_recovery"
-];
-function compactGraceActive(lastCompactMs, now3, graceMs = COMPACT_GRACE_MS) {
-  if (lastCompactMs === undefined)
-    return false;
-  return now3 - lastCompactMs < graceMs;
-}
 function ingressRefractoryElapsed(lastEmitMs, now3, refractoryMs = INGRESS_REFRACTORY_MS) {
   if (lastEmitMs === undefined)
     return true;
@@ -26020,19 +26002,28 @@ class AgentChannel {
       });
       if (verdict === "ingress_suspect") {
         let lastEmit;
-        let lastCompact;
         try {
           lastEmit = getAlertLastEmit(this.projectStateDir, "ingress_suspect", sid);
-          lastCompact = lastSystemEventFrom(this.projectStateDir, COMPACT_EVENT_TYPES, sid);
         } catch {
           lastEmit = this.ingressLastEmit.get(sid);
         }
         if (lastEmit === undefined)
           lastEmit = this.ingressLastEmit.get(sid);
-        if (!this.ingressEmitted.has(sid) && ingressRefractoryElapsed(lastEmit, now3) && !compactGraceActive(lastCompact, now3)) {
+        if (!this.ingressEmitted.has(sid) && ingressRefractoryElapsed(lastEmit, now3)) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60000);
+          let priorCountLine = "";
+          try {
+            const stats = alertEmissionStats(this.projectStateDir, "ingress_suspect").find((s) => s.subject_session === sid);
+            priorCountLine = stats?.emit_count ? `This alert has fired ${stats.emit_count} time(s) about this session before.
+` : `First firing about this session.
+`;
+          } catch {
+            priorCountLine = "";
+          }
           this.emit({
-            content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here. Every firing of this ` + `alert so far has been a false alarm.
+            content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here.
+` + priorCountLine + `AT LEAST ONE PAST FIRING WAS REAL: on 2026-07-28 a session's MCP transport ` + `died for 58 minutes while the session itself kept running. Treat this as ` + `open until you have evidence, not as presumed noise.
+` + `IF THIS IS TRANSPORT DEATH (the confirmed real case), the checks below ` + `cannot see it: an address is never delivered, and the transcript may look ` + `either way. Only "/mcp" at that terminal distinguishes it.
 ` + `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:
 ` + `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` + `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, ` + `conclusive: still growing = alive and working, not parked. Costs nobody a ` + `turn. Sample twice a few seconds apart if you want growth rather than age.
 ` + `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` + `there?"). Liveness rides along free with the answer you already wanted, so ` + `asking costs nothing extra. A busy-but-healthy session answers; a parked ` + `one cannot.

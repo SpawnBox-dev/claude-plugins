@@ -178,6 +178,32 @@ export function formatPropagationSurfaces(
         "an all-clear, since a paraphrase of the same claim scores zero. " +
         "MEMORY.md and its topic files are still worth opening.\n";
 
+  // 0.33.3: THE INDEX IS A SEPARATE SURFACE FROM THE FILE, and it is the one
+  // that gets missed after the "real" fix feels done.
+  //
+  // PA's first-person report, 2026-07-28, and it is the SECOND time the same
+  // claim was under-enumerated AFTER the rule existed: they corrected
+  // polar-mor-account.md and stopped, while MEMORY.md still taught the
+  // retracted reading. MEMORY.md loads at the START of every session, before
+  // any briefing or lookup runs - so a stale index reaches every new agent
+  // earlier and more reliably than the topic file it points at, and it reaches
+  // them with no competing information in context yet.
+  //
+  // PA's diagnosis of why writing the rule down did not prevent the repeat is
+  // the part worth encoding: "I fixed the memory file" FEELS complete, so the
+  // enumeration never runs. A checklist only helps if it is read as a list to
+  // WORK THROUGH rather than a category to acknowledge - hence naming all six
+  // surfaces separately, including the two this tool cannot see at all.
+  const indexNote =
+    memoryFiles.some((f) => f.toLowerCase() === "memory.md")
+      ? "MEMORY.md is in that list and is its own surface: it loads at session " +
+        "start, before any briefing or lookup, so a stale line there teaches " +
+        "the retracted version to every new agent.\n"
+      : "MEMORY.md - the index - is a SEPARATE surface from the topic file it " +
+        "points at, and it loads at session start before any briefing or " +
+        "lookup. Correcting the topic file and stopping has already happened " +
+        "twice.\n";
+
   // WORDING IS LOAD-BEARING HERE, and it is not a style preference.
   // SA-c5b207e0 read the 0.33.0 draft cold and reported the asymmetry: FACTS
   // LAND, INSTRUCTIONS BOUNCE. What stopped them was the indicative half; what
@@ -187,15 +213,23 @@ export function formatPropagationSurfaces(
   // all-caps header as "the visual signature of the boilerplate you are trying
   // not to be", which makes readers skip good writing on sight. Removed.
   return (
-    "\n\nA retraction has gone stale before: the checkout correction reached " +
-    "its work item, the warden ledger and a checkpoint, while " +
-    "polar-mor-account.md kept the false version and every artifact the author " +
-    "had looked at said the job was done.\n" +
+    "\n\nA retraction has gone stale before, twice, and the second time was " +
+    "after the rule against it was written down. The checkout correction " +
+    "reached its work item, the warden ledger and a checkpoint, while " +
+    "polar-mor-account.md kept the false version; that file was then fixed and " +
+    "MEMORY.md was left still teaching the retracted reading. Both times every " +
+    "artifact the author had looked at said the job was done.\n" +
     (known ? "Same claim may live here:\n" + known : "") +
     memoryNote +
-    "Not reachable from this tool: docs/ and specs, and anything already " +
-    "published - Discord, landing copy, release notes. Superseding a note does " +
-    "not touch those.\n" +
+    indexNote +
+    "Six surfaces carry a claim in this project - work item, checkpoints, " +
+    "memory file, memory INDEX, warden ledger, and any skill or doc quoting " +
+    "it. Work the list; do not sample it. The reason the written rule did not " +
+    "prevent the repeat is that fixing one surface FEELS complete, so the " +
+    "enumeration never runs.\n" +
+    "Not reachable from this tool: the warden ledger, docs/ and specs, and " +
+    "anything already published - Discord, landing copy, release notes. " +
+    "Superseding a note does not touch those.\n" +
     "A surface you opened and found fine is done. Leaving it unchecked is not."
   );
 }
