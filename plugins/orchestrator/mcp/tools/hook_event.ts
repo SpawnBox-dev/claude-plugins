@@ -354,6 +354,57 @@ const HEDGE_PATTERNS: RegExp[] = [
   /\bwhy (?:is|does|did) .{0,40}\b(again|still)\b/i,
 ];
 
+/**
+ * 0.37.0: a Bash heredoc carrying backslash escapes SILENTLY REWRITES its
+ * payload. Make the broken path announce itself instead.
+ *
+ * SIX INSTANCES IN ONE SESSION (2026-07-28), each one costing more than the
+ * defect being fixed:
+ *   - a Python heredoc TRUNCATED orient.ts TO 0 BYTES (io.open(p,"w") truncates
+ *     before the UnicodeEncodeError fires on a lone surrogate)
+ *   - a collapsed \\ -> \ made TypeScript read \r as a control character and
+ *     "proved" a normalizeCodeRef bug THAT DID NOT EXIST
+ *   - lines.join("\n") in an anchor string arrived as a real newline, so the
+ *     match silently failed
+ *   - the same collapse twice more inside .split("\n"), producing unterminated
+ *     string literals
+ *   - and once more while writing the fix for the previous one, on the rule the
+ *     author had written that morning
+ *
+ * WHY A RULE DID NOT STOP IT (SA-90bf73bd, and this is the reason the check
+ * exists rather than more documentation): "a rule stored as knowledge loses to
+ * a tool that is already in your hand." Six repeats by someone who authored the
+ * rule that day is not a discipline failure - it is evidence that the remedy
+ * has to live at the moment of use. Same family as the day's other findings:
+ * the check that cannot fail, and the tool that cannot refuse.
+ *
+ * NON-BLOCKING and NARROW BY DESIGN. Firing on every heredoc would train
+ * dismissal (the base-rate constraint that gave the note() relevance push its
+ * floor), and most heredocs are fine. The risk signature is specifically a
+ * heredoc PLUS a backslash escape in the body - that pair is what gets
+ * rewritten. A heredoc of plain prose does not fire.
+ */
+const HEREDOC_RE = /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/;
+const BACKSLASH_ESCAPE_RE = /\\[A-Za-z\\]/;
+
+/** PURE: would this Bash command risk silent backslash rewriting? For tests. */
+export function detectsRiskyHeredoc(command: string): boolean {
+  if (!command) return false;
+  if (!HEREDOC_RE.test(command)) return false;
+  return BACKSLASH_ESCAPE_RE.test(command);
+}
+
+export const HEREDOC_WARNING =
+  "[orch] THIS HEREDOC CONTAINS BACKSLASH ESCAPES AND WILL LIKELY REWRITE THEM " +
+  "SILENTLY. Git Bash + the interpreter reading stdin + backslash-bearing " +
+  "source is three escaping layers, and each REWRITES the content rather than " +
+  "failing - you get a plausible-looking file, not an error. Observed six times " +
+  "in one session: one truncated a source file to 0 bytes, one invented a bug " +
+  "that did not exist and cost real debugging time, three produced silent " +
+  "no-match or unterminated literals. Use Write for new files and Edit for " +
+  "changes. If a shell script is genuinely required, String.raw and a quoted " +
+  "delimiter each close one layer - but the reliable move is not to open them.";
+
 /** PURE: does this prompt hedge? Exported for tests. */
 export function detectsHedge(prompt: string): boolean {
   if (!prompt) return false;
@@ -1074,6 +1125,29 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
   let codeRefsHint = "";
   if (filePath) {
     codeRefsHint = composeCodeRefsHint(ctx.db, args.session_id, filePath);
+  }
+
+  // 0.37.0: heredoc-with-backslashes warning. Placed FIRST and returned
+  // immediately, because unlike everything else in this handler it is about to
+  // be destructive - the payload gets rewritten the moment the command runs,
+  // and one instance of this truncated a source file to zero bytes.
+  //
+  // Deliberately advisory (permissionDecision "allow"), never a block: the
+  // pattern has legitimate uses, and R7.7 already retired the one hard
+  // permission gate in this handler as "the closest thing in the codebase to
+  // the sacrosanct-lockout shape". A loud warning at the moment of use is the
+  // whole ask - SA-90bf73bd's point is that a rule stored as knowledge loses to
+  // a tool already in hand, so the remedy has to be here rather than in docs.
+  if (args.tool_name === "Bash") {
+    const cmd = (args.payload?.command as string | undefined) ?? "";
+    if (detectsRiskyHeredoc(cmd)) {
+      return {
+        permissionDecision: "allow",
+        additionalContext: codeRefsHint
+          ? `${HEREDOC_WARNING}\n\n${codeRefsHint}`
+          : HEREDOC_WARNING,
+      };
+    }
   }
 
   // Option-B escalation preserved from the legacy bash hook: nag turn 2-3

@@ -24036,6 +24036,16 @@ var HEDGE_PATTERNS = [
   /\bisn'?t there (?:a|an|some)\b/i,
   /\bwhy (?:is|does|did) .{0,40}\b(again|still)\b/i
 ];
+var HEREDOC_RE = /<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*['"]?/;
+var BACKSLASH_ESCAPE_RE = /\\[A-Za-z\\]/;
+function detectsRiskyHeredoc(command) {
+  if (!command)
+    return false;
+  if (!HEREDOC_RE.test(command))
+    return false;
+  return BACKSLASH_ESCAPE_RE.test(command);
+}
+var HEREDOC_WARNING = "[orch] THIS HEREDOC CONTAINS BACKSLASH ESCAPES AND WILL LIKELY REWRITE THEM " + "SILENTLY. Git Bash + the interpreter reading stdin + backslash-bearing " + "source is three escaping layers, and each REWRITES the content rather than " + "failing - you get a plausible-looking file, not an error. Observed six times " + "in one session: one truncated a source file to 0 bytes, one invented a bug " + "that did not exist and cost real debugging time, three produced silent " + "no-match or unterminated literals. Use Write for new files and Edit for " + "changes. If a shell script is genuinely required, String.raw and a quoted " + "delimiter each close one layer - but the reliable move is not to open them.";
 function detectsHedge(prompt) {
   if (!prompt)
     return false;
@@ -24340,6 +24350,17 @@ function handlePreToolUse(ctx, args) {
   let codeRefsHint = "";
   if (filePath) {
     codeRefsHint = composeCodeRefsHint(ctx.db, args.session_id, filePath);
+  }
+  if (args.tool_name === "Bash") {
+    const cmd = args.payload?.command ?? "";
+    if (detectsRiskyHeredoc(cmd)) {
+      return {
+        permissionDecision: "allow",
+        additionalContext: codeRefsHint ? `${HEREDOC_WARNING}
+
+${codeRefsHint}` : HEREDOC_WARNING
+      };
+    }
   }
   const turn = ctx.tracker.getCurrentTurn(args.session_id);
   if (turn < 2) {
