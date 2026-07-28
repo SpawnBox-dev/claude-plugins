@@ -25484,6 +25484,12 @@ function classifyAbsence(opts) {
 var INGRESS_STALE_THRESHOLD_MS = 180000;
 var INGRESS_TAIL_BYTES = 131072;
 var INGRESS_CHECK_INTERVAL_MS = 30000;
+var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
+function isFleetDormant(peerTurnAges, thresholdMs = FLEET_DORMANT_THRESHOLD_MS) {
+  if (peerTurnAges.length === 0)
+    return false;
+  return peerTurnAges.every((age) => age >= thresholdMs);
+}
 function classifyIngress(opts) {
   if (!opts.heartbeatFresh)
     return "healthy";
@@ -25772,6 +25778,16 @@ class AgentChannel {
     }
   }
   detectIngress(current, now3) {
+    const peerTurnAges = [];
+    for (const sid of current.keys()) {
+      if (sid === this.selfSession.session_id)
+        continue;
+      try {
+        peerTurnAges.push(now3 - statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+      } catch {}
+    }
+    if (isFleetDormant(peerTurnAges))
+      return;
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id)
         continue;

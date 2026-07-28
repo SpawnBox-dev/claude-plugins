@@ -138,6 +138,45 @@ export const INGRESS_CHECK_INTERVAL_MS = 30_000;
 
 // Classify a PRESENT peer's liveness from its transcript ingress signal. PURE
 // for TDD; the tail read + emit glue in detectIngress stays untested-for-live.
+// 0.31.6: SUPPRESS THE WHOLE-FLEET-DORMANT CLASS.
+//
+// SA-b14fafa3's hypothesis, corroborated by firing #6 at 13:09Z after the fleet
+// had been idle overnight: "delivery unprocessed for >3min" is the EXPECTED
+// state when nobody was awake. The terminal is not stuck - it is night. No
+// triage step can ever resolve that as anything but a false alarm, which makes
+// it noise BY CONSTRUCTION rather than a judgement call. With the signal now
+// 0-for-6, removing a systematic false class is worth more than further
+// wording work.
+//
+// THE DISCRIMINATOR is selective quiet vs fleet-wide quiet:
+//   nobody has taken a turn in a long time      -> the fleet is dormant, an
+//                                                  unprocessed delivery carries
+//                                                  no information -> SUPPRESS
+//   others are working, one is silent past the  -> that is the signal this
+//   threshold                                      detector exists for -> FIRE
+//
+// MEASURED FROM TRANSCRIPT MTIME, NOT HEARTBEAT - and this is the part that
+// matters. PA warned that the suppressor must key on something that actually
+// WRITES, or it inherits the blindness it exists to fix. Heartbeat is precisely
+// the wrong choice: it stays fresh while a session sits idle, which is the very
+// condition the alert already reports ("heartbeat is fresh but..."). A
+// transcript write means a TURN RAN. Using heartbeat here would produce a
+// suppressor that can never suppress, bolted to a detector that can never stop.
+export const FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
+
+/** PURE: is the whole fleet quiet, rather than this one peer? `peerTurnAges`
+ *  are ms-since-last-transcript-write for every OTHER live session. Exported
+ *  for tests. */
+export function isFleetDormant(
+  peerTurnAges: number[],
+  thresholdMs = FLEET_DORMANT_THRESHOLD_MS
+): boolean {
+  // A lone session has no fleet to compare against; treat it as not-dormant so
+  // the detector behaves exactly as before rather than going silent forever.
+  if (peerTurnAges.length === 0) return false;
+  return peerTurnAges.every((age) => age >= thresholdMs);
+}
+
 export function classifyIngress(opts: {
   heartbeatFresh: boolean;
   oldestOrphanEnqueueTs: number | null;
@@ -748,6 +787,25 @@ export class AgentChannel {
    *  Self is skipped: a self-emit rides the parked local harness transport and
    *  can never escape its own park, so only a healthy peer can raise the alarm. */
   private detectIngress(current: Map<string, SessionEntry>, now: number): void {
+    // 0.31.6: whole-fleet-dormant gate, evaluated ONCE per scan. If nobody has
+    // taken a turn in a long while, an unprocessed delivery means the fleet was
+    // asleep, not that a session is parked - see isFleetDormant. Keyed on
+    // transcript mtime because that is the only signal here that means "a turn
+    // ran"; heartbeat stays fresh while idle and would make this suppressor
+    // structurally incapable of suppressing.
+    const peerTurnAges: number[] = [];
+    for (const sid of current.keys()) {
+      if (sid === this.selfSession.session_id) continue;
+      try {
+        peerTurnAges.push(
+          now - statSync(join(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs
+        );
+      } catch {
+        /* unreadable transcript tells us nothing either way - omit it */
+      }
+    }
+    if (isFleetDormant(peerTurnAges)) return;
+
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id) continue; // peer-side only
       const tail = this.readTranscriptTail(sid);
