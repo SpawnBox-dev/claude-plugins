@@ -216,8 +216,20 @@ describe("R2.4: supersede_note hardening", () => {
 
   describe("id8 prefix resolution (0.30.22)", () => {
     test("supersede accepts id8 prefix for both old_id and new_id", async () => {
+      // FIXTURE FIXED 0.33.2 - it never created two notes. The originals were
+      // "decision old A id8 test" and "decision new A id8 test", five of six
+      // words shared, so the second deduplicated onto the first and both ids
+      // were IDENTICAL. The test therefore asserted that a note superseding
+      // ITSELF was a success, and passed for as long as nothing refused that.
+      // It never exercised id8 resolution, which is the thing it exists for.
+      // Verified before changing: handleRemember returned duplicate: true and
+      // the same id for both calls.
       const old = await handleRemember(projectDb, globalDb, { content: "decision old A id8 test", type: "decision" });
-      const fresh = await handleRemember(projectDb, globalDb, { content: "decision new A id8 test", type: "decision" });
+      const fresh = await handleRemember(projectDb, globalDb, {
+        content: "an unrelated ruling about deployment rings and rollback windows",
+        type: "decision",
+      });
+      expect(fresh.note_id).not.toBe(old.note_id);
       const oldId8 = old.note_id!.slice(0, 8);
       const newId8 = fresh.note_id!.slice(0, 8);
 
@@ -278,5 +290,96 @@ describe("R2.4: supersede_note hardening", () => {
       expect(result.message).toContain(a);
       expect(result.message).toContain(b);
     });
+  });
+});
+
+// ===========================================================================
+// 0.33.2: the near-duplicate gate must not block a REPLACEMENT.
+//
+// Found by dogfooding, not by review. Consolidating an anti_pattern into a
+// broader version of itself returned "supersede failed during replacement
+// creation" - handleRemember was called with no `resolution`, so for the three
+// alert types (decision / convention / anti_pattern) the gate fired against
+// the very note being superseded and returned note_id: null.
+//
+// A replacement is BY DEFINITION near-duplicate to what it replaces, so this
+// broke supersede_note({new_content}) for those types in the normal case - and
+// worst for the BEST replacements, which resemble the original most.
+//
+// The old error named neither cause nor remedy, which is why it survived: it
+// read as a transient failure rather than a structural one.
+// ===========================================================================
+describe("0.33.2: replacement creation is not blocked by the duplicate gate", () => {
+  let projectDb: Database;
+  let globalDb: Database;
+
+  beforeEach(() => {
+    projectDb = makeDb("project");
+    globalDb = makeDb("global");
+  });
+
+  for (const type of ["anti_pattern", "decision", "convention"] as const) {
+    test(`${type}: a genuinely NEW replacement supersedes without gate interference`, async () => {
+      const original = await handleRemember(projectDb, globalDb, {
+        content:
+          "Never trust an empty grep result as evidence of absence when the search path was guessed.",
+        type,
+      });
+      expect(original.note_id).toBeTruthy();
+
+      const result = await handleSupersede(projectDb, globalDb, {
+        old_id: original.note_id!,
+        new_content:
+          "Say I found nothing, never say there is nothing. A null is a fact about the search, not the world. Four mechanisms produce it: a wrong path, a drifted working directory, a wrong data store, and a paraphrase the keywords miss.",
+        new_type: type,
+        reason: "generalised after counting four instances",
+      });
+
+      expect(result.superseded).toBe(true);
+      expect(result.new_id).toBeTruthy();
+      expect(result.new_id).not.toBe(original.note_id);
+    });
+  }
+
+  test("REFUSES to supersede a note with itself when the replacement dedupes onto it", async () => {
+    // The bug this guards is silent knowledge destruction: superseded_by = own
+    // id, and nearly every retrieval path filters superseded notes, so the note
+    // disappears while claiming to have a successor. It is reached by the most
+    // ordinary route there is - a replacement close enough to the original that
+    // handleRemember correctly returns the existing note instead of a twin.
+    const original = await handleRemember(projectDb, globalDb, {
+      content: "a claim that will be restated almost verbatim",
+      type: "decision",
+    });
+
+    const result = await handleSupersede(projectDb, globalDb, {
+      old_id: original.note_id!,
+      new_content: "a claim that will be restated almost verbatim",
+      new_type: "decision",
+      reason: "near-verbatim restatement",
+    });
+
+    expect(result.superseded).toBe(false);
+    expect(result.message.toLowerCase()).toContain("itself");
+    // Must name a way forward, not just refuse.
+    expect(result.message).toContain("update_note");
+
+    // And the original must be untouched - still visible, not self-superseded.
+    const row = projectDb
+      .query("SELECT superseded_by FROM notes WHERE id = ?")
+      .get(original.note_id!) as { superseded_by: string | null };
+    expect(row.superseded_by).toBeNull();
+  });
+
+  test("a genuine failure reports WHY, not a bare 'failed'", async () => {
+    // The old message named no cause, so a caller could not act on it. Any
+    // failure path must carry the underlying reason forward.
+    const result = await handleSupersede(projectDb, globalDb, {
+      old_id: "does-not-exist-0000-0000-000000000000",
+      new_content: "replacement",
+      new_type: "decision",
+    });
+    expect(result.superseded).toBe(false);
+    expect((result.message + result.error).length).toBeGreaterThan(20);
   });
 });

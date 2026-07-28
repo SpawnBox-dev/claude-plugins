@@ -49,10 +49,24 @@ export interface SupersedeResult {
  * that leaves a false statement live in the highest-traffic surface while
  * every artifact you looked at says you fixed it.
  *
- * WHY supersede IS THE TRIGGER: it is the explicit "this was wrong / has been
- * replaced" act. It is deliberate and comparatively rare, so firing on every
- * one cannot train the dismissal reflex that an always-on check does - the
- * base-rate constraint PA and SA-5a433456 both insisted on.
+ * WHY supersede IS THE TRIGGER, AND WHY THIS BLOCK IS UNCONDITIONAL.
+ * supersede is the explicit "this was wrong / has been replaced" act, and it
+ * is RARE: measured 2026-07-28, global.db held 551 notes of which 2 were
+ * superseded - 0.36%, roughly one supersede per 280 note writes. A dismissal
+ * reflex needs repetition to form, and an act that rare never accumulates it.
+ * That number is recorded here because the instinct to gate this block is
+ * correct in general and SA-c5b207e0 raised it on review; the answer is a
+ * measurement, not a judgement, so re-measure rather than re-argue.
+ *
+ * The gate specifically considered and rejected was "only fire when there are
+ * inbound links or code_refs". It keys a warning about NON-KB surfaces on a
+ * KB-INTERNAL signal, and the two are uncorrelated - an isolated note is if
+ * anything MORE likely to have its claim restated in an unlinked memory file,
+ * so that gate would fire least where it is needed most.
+ *
+ * The general base-rate constraint (PA and SA-5a433456) still stands and is
+ * why note()'s relevance push has a 0.68 floor: note() is frequent, this is
+ * not. Do not copy this unconditional pattern to a frequent surface.
  *
  * HONESTY ABOUT COVERAGE - the load-bearing part. This lists what the KB can
  * PROVE carries the claim (inbound links, work items, the note's own
@@ -359,20 +373,45 @@ export async function handleSupersede(
       };
     }
 
+    // 0.33.2: THE GATE MUST NOT BLOCK A REPLACEMENT, because a replacement is
+    // BY DEFINITION near-duplicate to the note it replaces.
+    //
+    // Found by dogfooding 0.33.1: consolidating an anti_pattern into a broader
+    // version of itself returned "supersede failed during replacement
+    // creation." handleRemember was called with no `resolution`, so for the
+    // three alert types (decision / convention / anti_pattern) the
+    // near-duplicate gate fired against the very note being superseded,
+    // returned note_id: null, and supersede reported a generic failure that
+    // named neither the cause nor a way forward. So `supersede_note` with
+    // new_content has been broken for those types whenever the replacement
+    // resembled the original - i.e. in the normal case, and worst for the
+    // best-written replacements, which resemble the original most.
+    //
+    // accept_new is the correct resolution and not a bypass: the gate exists to
+    // make an author confront a possible duplicate before forking the catalog,
+    // and calling supersede IS that confrontation, already resolved. The old
+    // note is being retired in the same operation, so there is no fork to
+    // prevent - the gate is asking a question the caller has already answered.
     const created = await handleRemember(projectDb, globalDb, {
       content: input.new_content,
       type: input.new_type,
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
       session_id: input.session_id,
       code_refs: input.code_refs,
+      resolution: {
+        action: "accept_new",
+        reason: `replacement authored by supersede_note for ${input.old_id}`,
+      },
     }, embeddingClient);
     if (!created.note_id) {
       return {
         superseded: false,
         old_id: input.old_id,
         new_id: null,
-        error: "failed to create replacement note",
-        message: "supersede failed during replacement creation.",
+        // Surface the underlying reason. The previous text was a dead end -
+        // it named no cause, so the caller could not act on it.
+        error: `failed to create replacement note: ${created.message}`,
+        message: `supersede failed during replacement creation: ${created.message}`,
       };
     }
     newId = created.note_id;
@@ -385,6 +424,36 @@ export async function handleSupersede(
       new_id: null,
       error: "no new_id resolved",
       message: "internal: supersede could not resolve new_id.",
+    };
+  }
+
+  // 0.33.2: A NOTE MUST NEVER SUPERSEDE ITSELF. This writes
+  // superseded_by = <its own id>, and because nearly every retrieval path
+  // filters `superseded_by IS NULL`, the note then vanishes from lookup,
+  // briefing and the link graph while pointing at itself as its own
+  // replacement. The knowledge is silently destroyed by the one tool whose
+  // entire purpose is preserving it, and nothing reports the loss.
+  //
+  // How it happens is not exotic - it is the DEFAULT for a good replacement.
+  // When new_content deduplicates against the note being superseded,
+  // handleRemember correctly returns the EXISTING note's id rather than
+  // creating a twin, so `newId` comes back equal to `old_id`. The closer the
+  // replacement is to the original, the likelier this is; found by dogfooding
+  // a consolidation that was deliberately close.
+  if (newId === input.old_id) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: "replacement resolved to the note being superseded",
+      message:
+        `Refusing to supersede "${input.old_id}" with itself. The replacement ` +
+        `content deduplicated onto that same note, so there is no new note to ` +
+        `point at - completing this would set superseded_by to its own id and ` +
+        `hide the note from every query that filters superseded notes. ` +
+        `Either revise in place with update_note({id, content}), or make the ` +
+        `replacement materially different from the original if it is genuinely ` +
+        `a new note.`,
     };
   }
 

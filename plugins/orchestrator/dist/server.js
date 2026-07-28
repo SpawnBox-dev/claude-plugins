@@ -21853,15 +21853,19 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
       type: input.new_type,
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
       session_id: input.session_id,
-      code_refs: input.code_refs
+      code_refs: input.code_refs,
+      resolution: {
+        action: "accept_new",
+        reason: `replacement authored by supersede_note for ${input.old_id}`
+      }
     }, embeddingClient);
     if (!created.note_id) {
       return {
         superseded: false,
         old_id: input.old_id,
         new_id: null,
-        error: "failed to create replacement note",
-        message: "supersede failed during replacement creation."
+        error: `failed to create replacement note: ${created.message}`,
+        message: `supersede failed during replacement creation: ${created.message}`
       };
     }
     newId = created.note_id;
@@ -21873,6 +21877,15 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
       new_id: null,
       error: "no new_id resolved",
       message: "internal: supersede could not resolve new_id."
+    };
+  }
+  if (newId === input.old_id) {
+    return {
+      superseded: false,
+      old_id: input.old_id,
+      new_id: null,
+      error: "replacement resolved to the note being superseded",
+      message: `Refusing to supersede "${input.old_id}" with itself. The replacement ` + `content deduplicated onto that same note, so there is no new note to ` + `point at - completing this would set superseded_by to its own id and ` + `hide the note from every query that filters superseded notes. ` + `Either revise in place with update_note({id, content}), or make the ` + `replacement materially different from the original if it is genuinely ` + `a new note.`
     };
   }
   const timestamp = now();
