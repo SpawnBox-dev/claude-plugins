@@ -1,7 +1,10 @@
 import type { Database } from "bun:sqlite";
 import type { NoteType } from "../types";
 import { GLOBAL_TYPES } from "../types";
-import { generateId, now } from "../utils";
+import { generateId, now, extractKeywords } from "../utils";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { handleRemember } from "./remember";
 import { resolveNoteId } from "./id_resolver";
 import type { EmbeddingClient } from "../engine/embeddings";
@@ -58,10 +61,64 @@ export interface SupersedeResult {
  * category the original bug lived in would be worse than none, because it
  * would confer exactly the false sense of completion that caused this.
  */
+/**
+ * 0.33.1: name the memory FILE, not the category.
+ *
+ * SA-c5b207e0's review of 0.33.0: "a category gets acknowledged, a filename
+ * gets fixed." They were right, and the argument is stronger than style -
+ * `polar-mor-account.md` is where the motivating miss actually lived, and
+ * telling an author to "check memory files" leaves them the search that the
+ * failure was made of.
+ *
+ * These files are on disk and small, so scoring them costs nothing. Requires
+ * two shared distinctive terms rather than one: a single common word would
+ * list half the directory, and a propagation list that names everything is
+ * back to naming nothing.
+ *
+ * Best-effort by construction - a missing directory, an unreadable file or a
+ * different Claude Code layout all degrade to "no files named", never to a
+ * failed supersede.
+ */
+export function findMemoryFilesCarryingClaim(
+  content: string,
+  projectDir: string,
+  max = 4
+): string[] {
+  try {
+    const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+    const memDir = join(homedir(), ".claude", "projects", projectHash, "memory");
+    if (!existsSync(memDir)) return [];
+
+    const terms = new Set(extractKeywords(content).map((t) => t.toLowerCase()));
+    if (terms.size === 0) return [];
+
+    const scored: Array<{ file: string; hits: number }> = [];
+    for (const file of readdirSync(memDir)) {
+      if (!file.endsWith(".md")) continue;
+      let text: string;
+      try {
+        text = readFileSync(join(memDir, file), "utf-8").toLowerCase();
+      } catch {
+        continue;
+      }
+      let hits = 0;
+      for (const t of terms) if (text.includes(t)) hits++;
+      if (hits >= 2) scored.push({ file, hits });
+    }
+    return scored
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, max)
+      .map((s) => s.file);
+  } catch {
+    return [];
+  }
+}
+
 export function formatPropagationSurfaces(
   db: Database,
   oldId: string,
-  codeRefs: string[]
+  codeRefs: string[],
+  memoryFiles: string[] = []
 ): string {
   const inbound = db
     .query(
@@ -87,20 +144,45 @@ export function formatPropagationSurfaces(
     lines.push(`  FILES THE RETRACTED NOTE POINTED AT: ${codeRefs.join(", ")}`);
   }
 
+  if (memoryFiles.length > 0) {
+    lines.push("  Memory files sharing terms with it: " + memoryFiles.join(", "));
+  }
   const known = lines.length > 0 ? lines.join("\n") + "\n" : "";
+
+  // A MISS FROM THE SCAN IS NOT AN ALL-CLEAR, and saying nothing would let it
+  // read as one. The match is keyword overlap, so a memory file that states the
+  // same claim in different words scores zero - and paraphrase is the normal
+  // case for a file written months earlier by someone summarising. Naming the
+  // files when they match (SA-c5b207e0: "a filename gets fixed, a category gets
+  // acknowledged") must not cost the reliable reminder when they do not, or the
+  // upgrade would be a downgrade precisely for polar-mor-account.md, the file
+  // this whole mechanism exists because of.
+  const memoryNote =
+    memoryFiles.length > 0
+      ? ""
+      : "No memory file matched on shared terms - that is a keyword miss, not " +
+        "an all-clear, since a paraphrase of the same claim scores zero. " +
+        "MEMORY.md and its topic files are still worth opening.\n";
+
+  // WORDING IS LOAD-BEARING HERE, and it is not a style preference.
+  // SA-c5b207e0 read the 0.33.0 draft cold and reported the asymmetry: FACTS
+  // LAND, INSTRUCTIONS BOUNCE. What stopped them was the indicative half; what
+  // they skimmed was the imperative half - the same asymmetry that made PA's
+  // relayed conclusions fail while PA's evidence worked. So this leads with
+  // what happened, not with what to do. They also flagged the bracketed
+  // all-caps header as "the visual signature of the boilerplate you are trying
+  // not to be", which makes readers skip good writing on sight. Removed.
   return (
-    "\n\n[PROPAGATE THE RETRACTION - a correction is not done until every " +
-    "surface carrying it is updated]\n" +
-    known +
-    "  SURFACES THIS TOOL CANNOT SEE - check them yourself, this is where the " +
-    "class actually bites:\n" +
-    "    - memory files (MEMORY.md and the auto-memory topic files) - the " +
-    "highest-traffic surface, and the one that has actually been missed\n" +
-    "    - docs/ and specs that state the same claim\n" +
-    "    - anything already PUBLISHED (Discord, landing copy, release notes) - " +
-    "superseding a note cannot reach those\n" +
-    "  If a surface is fine as-is, that is a real answer. Leaving it " +
-    "unchecked is not."
+    "\n\nA retraction has gone stale before: the checkout correction reached " +
+    "its work item, the warden ledger and a checkpoint, while " +
+    "polar-mor-account.md kept the false version and every artifact the author " +
+    "had looked at said the job was done.\n" +
+    (known ? "Same claim may live here:\n" + known : "") +
+    memoryNote +
+    "Not reachable from this tool: docs/ and specs, and anything already " +
+    "published - Discord, landing copy, release notes. Superseding a note does " +
+    "not touch those.\n" +
+    "A surface you opened and found fine is done. Leaving it unchecked is not."
   );
 }
 
@@ -338,7 +420,18 @@ export async function handleSupersede(
         refs = refRow.code_refs.split(",").map((r) => r.trim()).filter(Boolean);
       }
     }
-    propagation = formatPropagationSurfaces(db, input.old_id, refs);
+    const oldRowForClaim = db
+      .query(`SELECT content FROM notes WHERE id = ?`)
+      .get(input.old_id) as { content: string } | undefined;
+    const memFiles = oldRowForClaim
+      ? findMemoryFilesCarryingClaim(
+          oldRowForClaim.content,
+          process.env.ORCHESTRATOR_PROJECT_ROOT ||
+            process.env.CLAUDE_PROJECT_DIR ||
+            process.cwd()
+        )
+      : [];
+    propagation = formatPropagationSurfaces(db, input.old_id, refs, memFiles);
   } catch {
     propagation = "";
   }

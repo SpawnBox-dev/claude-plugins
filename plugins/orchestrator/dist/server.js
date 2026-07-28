@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join6 } from "path";
-import { existsSync as existsSync7, readFileSync as readFileSync3, writeFileSync as writeFileSync2, statSync as statSync5 } from "fs";
+import { resolve, join as join7 } from "path";
+import { existsSync as existsSync8, readFileSync as readFileSync4, writeFileSync as writeFileSync2, statSync as statSync5 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -21645,6 +21645,11 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
   } catch {}
 }
 
+// mcp/tools/supersede.ts
+import { existsSync as existsSync3, readdirSync, readFileSync } from "fs";
+import { join as join2 } from "path";
+import { homedir as homedir2 } from "os";
+
 // mcp/tools/id_resolver.ts
 function resolveNoteId(db, idOrPrefix) {
   if (!idOrPrefix)
@@ -21663,7 +21668,38 @@ function resolveNoteId(db, idOrPrefix) {
 }
 
 // mcp/tools/supersede.ts
-function formatPropagationSurfaces(db, oldId, codeRefs) {
+function findMemoryFilesCarryingClaim(content, projectDir, max = 4) {
+  try {
+    const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+    const memDir = join2(homedir2(), ".claude", "projects", projectHash, "memory");
+    if (!existsSync3(memDir))
+      return [];
+    const terms = new Set(extractKeywords(content).map((t) => t.toLowerCase()));
+    if (terms.size === 0)
+      return [];
+    const scored = [];
+    for (const file of readdirSync(memDir)) {
+      if (!file.endsWith(".md"))
+        continue;
+      let text;
+      try {
+        text = readFileSync(join2(memDir, file), "utf-8").toLowerCase();
+      } catch {
+        continue;
+      }
+      let hits = 0;
+      for (const t of terms)
+        if (text.includes(t))
+          hits++;
+      if (hits >= 2)
+        scored.push({ file, hits });
+    }
+    return scored.sort((a, b) => b.hits - a.hits).slice(0, max).map((s) => s.file);
+  } catch {
+    return [];
+  }
+}
+function formatPropagationSurfaces(db, oldId, codeRefs, memoryFiles = []) {
   const inbound = db.query(`SELECT n.id, n.type, substr(n.content, 1, 90) AS snippet
        FROM links l JOIN notes n ON n.id = l.from_note_id
        WHERE l.to_note_id = ?
@@ -21682,17 +21718,20 @@ function formatPropagationSurfaces(db, oldId, codeRefs) {
   if (codeRefs.length > 0) {
     lines.push(`  FILES THE RETRACTED NOTE POINTED AT: ${codeRefs.join(", ")}`);
   }
+  if (memoryFiles.length > 0) {
+    lines.push("  Memory files sharing terms with it: " + memoryFiles.join(", "));
+  }
   const known = lines.length > 0 ? lines.join(`
 `) + `
 ` : "";
+  const memoryNote = memoryFiles.length > 0 ? "" : "No memory file matched on shared terms - that is a keyword miss, not " + "an all-clear, since a paraphrase of the same claim scores zero. " + `MEMORY.md and its topic files are still worth opening.
+`;
   return `
 
-[PROPAGATE THE RETRACTION - a correction is not done until every ` + `surface carrying it is updated]
-` + known + "  SURFACES THIS TOOL CANNOT SEE - check them yourself, this is where the " + `class actually bites:
-` + "    - memory files (MEMORY.md and the auto-memory topic files) - the " + `highest-traffic surface, and the one that has actually been missed
-` + `    - docs/ and specs that state the same claim
-` + "    - anything already PUBLISHED (Discord, landing copy, release notes) - " + `superseding a note cannot reach those
-` + "  If a surface is fine as-is, that is a real answer. Leaving it " + "unchecked is not.";
+A retraction has gone stale before: the checkout correction reached ` + "its work item, the warden ledger and a checkpoint, while " + "polar-mor-account.md kept the false version and every artifact the author " + `had looked at said the job was done.
+` + (known ? `Same claim may live here:
+` + known : "") + memoryNote + "Not reachable from this tool: docs/ and specs, and anything already " + "published - Discord, landing copy, release notes. Superseding a note does " + `not touch those.
+` + "A surface you opened and found fine is done. Leaving it unchecked is not.";
 }
 async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
   if (!input.new_id && !(input.new_content && input.new_type)) {
@@ -21856,7 +21895,9 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
         refs = refRow.code_refs.split(",").map((r) => r.trim()).filter(Boolean);
       }
     }
-    propagation = formatPropagationSurfaces(db, input.old_id, refs);
+    const oldRowForClaim = db.query(`SELECT content FROM notes WHERE id = ?`).get(input.old_id);
+    const memFiles = oldRowForClaim ? findMemoryFilesCarryingClaim(oldRowForClaim.content, process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd()) : [];
+    propagation = formatPropagationSurfaces(db, input.old_id, refs, memFiles);
   } catch {
     propagation = "";
   }
@@ -22514,7 +22555,7 @@ function composeUserProfile(globalDb2) {
 }
 
 // mcp/tools/reflect.ts
-import { existsSync as existsSync3 } from "fs";
+import { existsSync as existsSync4 } from "fs";
 import path from "path";
 var DOMAINS = ["frontend", "backend", "cloud", "infra", "testing"];
 function handleReflect(projectDb2, globalDb2, input) {
@@ -22622,7 +22663,7 @@ function handleReflect(projectDb2, globalDb2, input) {
         for (const ref of refs) {
           codeRefsChecked++;
           const fullPath = path.join(projectRoot, ref);
-          if (!existsSync3(fullPath)) {
+          if (!existsSync4(fullPath)) {
             codeRefsBroken++;
           }
         }
@@ -23056,25 +23097,25 @@ function handlePrepare(projectDb2, globalDb2, input) {
 }
 
 // mcp/engine/live_sessions.ts
-import { existsSync as existsSync5 } from "fs";
-import { join as join3 } from "path";
+import { existsSync as existsSync6 } from "fs";
+import { join as join4 } from "path";
 
 // mcp/engine/agent_channel_state.ts
 import {
-  readFileSync,
-  existsSync as existsSync4,
+  readFileSync as readFileSync2,
+  existsSync as existsSync5,
   mkdirSync as mkdirSync3,
   unlinkSync,
-  readdirSync,
+  readdirSync as readdirSync2,
   statSync as statSync2
 } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 import { Database as Database2 } from "bun:sqlite";
 var SESSIONS_FILE = "sessions.json";
 var STATE_FILE = "state.json";
 var AGENT_CHANNEL_DB_FILE = "agent_channel.db";
 function ensureDir(dir) {
-  if (!existsSync4(dir))
+  if (!existsSync5(dir))
     mkdirSync3(dir, { recursive: true });
 }
 var tmpSweptDirs = new Set;
@@ -23085,7 +23126,7 @@ function sweepStaleTmpArtifacts(stateDir) {
   tmpSweptDirs.add(stateDir);
   let entries;
   try {
-    entries = readdirSync(stateDir);
+    entries = readdirSync2(stateDir);
   } catch {
     return;
   }
@@ -23093,7 +23134,7 @@ function sweepStaleTmpArtifacts(stateDir) {
   for (const name of entries) {
     if (!name.includes(".tmp."))
       continue;
-    const full = join2(stateDir, name);
+    const full = join3(stateDir, name);
     try {
       if (now3 - statSync2(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
         continue;
@@ -23124,7 +23165,7 @@ function getDb(stateDir) {
   sweepStaleTmpArtifacts(stateDir);
   const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
   if (useInMemory && false) {}
-  const dbPath = useInMemory ? ":memory:" : join2(stateDir, AGENT_CHANNEL_DB_FILE);
+  const dbPath = useInMemory ? ":memory:" : join3(stateDir, AGENT_CHANNEL_DB_FILE);
   const db = new Database2(dbPath);
   if (!useInMemory) {
     db.exec("PRAGMA journal_mode = WAL;");
@@ -23233,12 +23274,12 @@ function rowToEntry(r) {
   return entry;
 }
 function migrateSessionsLegacy(stateDir, db) {
-  const legacyPath = join2(stateDir, SESSIONS_FILE);
-  if (!existsSync4(legacyPath))
+  const legacyPath = join3(stateDir, SESSIONS_FILE);
+  if (!existsSync5(legacyPath))
     return;
   let legacy = [];
   try {
-    const data = JSON.parse(readFileSync(legacyPath, "utf8"));
+    const data = JSON.parse(readFileSync2(legacyPath, "utf8"));
     legacy = Array.isArray(data) ? data : data?.sessions ?? [];
   } catch {
     try {
@@ -23315,12 +23356,12 @@ function removeSession(stateDir, session_id) {
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
 }
 function migrateOverrideStateLegacy(stateDir, db) {
-  const legacyPath = join2(stateDir, STATE_FILE);
-  if (!existsSync4(legacyPath))
+  const legacyPath = join3(stateDir, STATE_FILE);
+  if (!existsSync5(legacyPath))
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
   } catch {
     try {
       unlinkSync(legacyPath);
@@ -23370,12 +23411,12 @@ function readOverrideState(stateDir) {
   };
 }
 function migrateOffsetsLegacy(stateDir, db, receiverId8) {
-  const legacyPath = join2(stateDir, `offsets-${receiverId8}.json`);
-  if (!existsSync4(legacyPath))
+  const legacyPath = join3(stateDir, `offsets-${receiverId8}.json`);
+  if (!existsSync5(legacyPath))
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
   } catch {
     try {
       unlinkSync(legacyPath);
@@ -23438,12 +23479,12 @@ function rowToSystemEvent(r) {
   };
 }
 function migrateSystemEventsLegacy(stateDir, db) {
-  const legacyPath = join2(stateDir, "system_events.jsonl");
-  if (!existsSync4(legacyPath))
+  const legacyPath = join3(stateDir, "system_events.jsonl");
+  if (!existsSync5(legacyPath))
     return;
   let lines = [];
   try {
-    lines = readFileSync(legacyPath, "utf8").split(`
+    lines = readFileSync2(legacyPath, "utf8").split(`
 `).filter((l) => l.trim());
   } catch {
     try {
@@ -23543,11 +23584,11 @@ function lastSystemEventFrom(stateDir, eventTypes, fromSession) {
 // mcp/engine/live_sessions.ts
 function getAgentChannelStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join3(projectDir, ".orchestrator-state", "agent-channel");
-  if (!existsSync5(stateDir))
+  const stateDir = join4(projectDir, ".orchestrator-state", "agent-channel");
+  if (!existsSync6(stateDir))
     return null;
-  const dbExists = existsSync5(join3(stateDir, "agent_channel.db"));
-  const legacyExists = existsSync5(join3(stateDir, "sessions.json"));
+  const dbExists = existsSync6(join4(stateDir, "agent_channel.db"));
+  const legacyExists = existsSync6(join4(stateDir, "sessions.json"));
   if (!dbExists && !legacyExists)
     return null;
   return stateDir;
@@ -23824,8 +23865,8 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { statSync as statSync3, readFileSync as readFileSync2 } from "fs";
-import { join as join4 } from "path";
+import { statSync as statSync3, readFileSync as readFileSync3 } from "fs";
+import { join as join5 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -24923,7 +24964,7 @@ function wardenLedgerPath() {
   const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   if (!root)
     return null;
-  return join4(root, ".orchestrator-state", "warden-ledger.md");
+  return join5(root, ".orchestrator-state", "warden-ledger.md");
 }
 function wardenLedgerLiveness(ledgerPath) {
   let st;
@@ -24939,7 +24980,7 @@ function wardenLedgerLiveness(ledgerPath) {
   let ts;
   let loop;
   try {
-    const head = readFileSync2(ledgerPath).subarray(0, 8192).toString("utf8");
+    const head = readFileSync3(ledgerPath).subarray(0, 8192).toString("utf8");
     const mi = head.match(/instance=([^\s|]+)/i);
     const mt = head.match(/\bts=([^\s|]+)/i);
     if (mi)
@@ -25444,8 +25485,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync, readSync, closeSync, existsSync as existsSync6, statSync as statSync4, readdirSync as readdirSync2 } from "fs";
-import { join as join5 } from "path";
+import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync4, readdirSync as readdirSync3 } from "fs";
+import { join as join6 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -25907,7 +25948,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -25915,7 +25956,7 @@ class AgentChannel {
   readTranscriptTail(sid) {
     let fd;
     try {
-      const path2 = join5(this.projectsHashDir, `${sid}.jsonl`);
+      const path2 = join6(this.projectsHashDir, `${sid}.jsonl`);
       const size = statSync4(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
@@ -25938,7 +25979,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -25952,7 +25993,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync4(join5(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -26008,9 +26049,9 @@ class AgentChannel {
     }
   }
   listJsonlFiles() {
-    if (!existsSync6(this.projectsHashDir))
+    if (!existsSync7(this.projectsHashDir))
       return [];
-    return readdirSync2(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join5(this.projectsHashDir, f));
+    return readdirSync3(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join6(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -26490,11 +26531,11 @@ async function handleRespondToPermission(input, ctx) {
 }
 
 // mcp/server.ts
-import { homedir as homedir2 } from "os";
+import { homedir as homedir3 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join6(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync3(pkgPath, "utf8")).version;
+    const pkgPath = join7(import.meta.dir, "..", "package.json");
+    return JSON.parse(readFileSync4(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -26529,7 +26570,7 @@ for ($i = 0; $i -lt 8; $i++) {
     let name = "";
     let ppid = 0;
     try {
-      const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         break;
@@ -26556,13 +26597,13 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join6(projectDir, ".orchestrator-state");
+  const stateDir = join7(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join6(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join7(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync7(perPidFile)) {
-        const raw = readFileSync3(perPidFile, "utf8").trim();
+      if (existsSync8(perPidFile)) {
+        const raw = readFileSync4(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -26572,15 +26613,15 @@ function getFallbackSessionId() {
       }
     } catch {}
   }
-  const file = join6(stateDir, "active-session");
+  const file = join7(stateDir, "active-session");
   try {
-    if (existsSync7(file)) {
-      const raw = readFileSync3(file, "utf8").trim();
+    if (existsSync8(file)) {
+      const raw = readFileSync4(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join6(stateDir, `active-session-${claudePid}`);
-          if (!existsSync7(perPidFile)) {
+          const perPidFile = join7(stateDir, `active-session-${claudePid}`);
+          if (!existsSync8(perPidFile)) {
             try {
               writeFileSync2(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
@@ -26884,8 +26925,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join6(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync7(fallbackFile);
+    const fallbackFile = join7(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync8(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -26917,7 +26958,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
   try {
-    const channelStateDir = join6(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const channelStateDir = join7(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
     const alertStats = alertEmissionStats(channelStateDir);
     if (alertStats.length > 0) {
       lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
@@ -28146,7 +28187,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join6(homedir2(), ".claude", "projects", projectHash);
+  const projectsHashDir = join7(homedir3(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -28162,7 +28203,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join7(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -28308,7 +28349,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join6(process.env.CLAUDE_CONFIG_DIR || join6(homedir2(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
@@ -28393,7 +28434,7 @@ function isPidAliveAsClaudeExe(pid, expectedCreationTime) {
       } catch {
         return false;
       }
-      const stat = readFileSync3(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         return false;

@@ -78,14 +78,34 @@ describe("0.33.0: retraction propagation surfaces", () => {
     // The no-links case is the dangerous one: an empty block reads as "nothing
     // else carries this claim", which is the exact false completion signal.
     const out = formatPropagationSurfaces(db, OLD, []);
-    expect(out).toContain("CANNOT SEE");
+    expect(out.toLowerCase()).toContain("not reachable");
     expect(out.toLowerCase()).toContain("memory");
     expect(out.toLowerCase()).toContain("published");
   });
 
-  test("names memory files specifically - that is where the real miss happened", () => {
-    const out = formatPropagationSurfaces(db, OLD, []);
+  test("names the memory FILES when they match - a filename gets fixed", () => {
+    const out = formatPropagationSurfaces(db, OLD, [], [
+      "polar-mor-account.md",
+      "entitlements.md",
+    ]);
+    expect(out).toContain("polar-mor-account.md");
+    expect(out).toContain("entitlements.md");
+  });
+
+  test("a keyword MISS is reported as a miss, not as an all-clear", () => {
+    // The regression this guards: promoting "category" to "filename" must not
+    // silence the reminder when the scan finds nothing. The match is keyword
+    // overlap, so a paraphrase of the same claim scores zero - and paraphrase
+    // is the normal case for a file written months earlier. Silence here would
+    // be worst exactly for polar-mor-account.md, the file this exists for.
+    const out = formatPropagationSurfaces(db, OLD, [], []);
     expect(out).toContain("MEMORY.md");
+    expect(out.toLowerCase()).toContain("not an all-clear");
+  });
+
+  test("does NOT emit the keyword-miss caveat when files were actually named", () => {
+    const out = formatPropagationSurfaces(db, OLD, [], ["polar-mor-account.md"]);
+    expect(out.toLowerCase()).not.toContain("not an all-clear");
   });
 
   test("lists notes that point AT the retracted note", () => {
