@@ -98,6 +98,18 @@ describe("0.32.1: refractory floor survives what it has to survive", () => {
     // So: force file-backed for the duration, and ASSERT THE PRECONDITION.
     // A durability test that cannot tell which storage it exercised is not a
     // durability test.
+    //
+    // BLAST RADIUS AUDITED 2026-07-28, and the answer is reassuring: SEVEN test
+    // files assign that env var, and they are exactly the seven that consume
+    // agent_channel_state. Nothing inherits it by accident and then believes it
+    // is exercising file-backed storage - every consumer opts in deliberately,
+    // because :memory: is what they all want. This test is the only one that
+    // needs the opposite, which is why it is the only one that opts out.
+    //
+    // The residual risk is a FUTURE test that wants file-backed storage and
+    // does not know the var is already set by a file loaded earlier. The guard
+    // against that is the precondition assertion below, not vigilance - copy
+    // this pattern rather than assuming a fresh stateDir means a fresh file.
     const saved = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY;
     delete process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY;
     try {
