@@ -9,10 +9,10 @@
 process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { AgentChannel, DEPART_GRACE_TICKS, classifyAbsence, classifyIngress, parseIngressTail, INGRESS_STALE_THRESHOLD_MS, type ChannelNotification } from "../../mcp/engine/agent_channel";
+import { AgentChannel, DEPART_GRACE_TICKS, classifyAbsence, classifyIngress, parseIngressTail, INGRESS_STALE_THRESHOLD_MS, INGRESS_REFRACTORY_MS, type ChannelNotification } from "../../mcp/engine/agent_channel";
 import {
   writeSession,
   readSessions,
@@ -650,8 +650,25 @@ describe("ingress-death detection (integration) - WI 19294811", () => {
 
     // A genuinely-new parked delivery re-arms and fires a SECOND ingress_suspect
     // (proves ingressEmitted was cleared on recovery, not merely suppressed).
-    qop(jsonl, "enqueue", now - 6 * 60_000);
-    runIngress(chan, now);
+    //
+    // 0.31.7: the clock is advanced past INGRESS_REFRACTORY_MS here. The
+    // property under test - episode state CLEARS on recovery rather than being
+    // permanently suppressed - is unchanged and still asserted. What changed is
+    // that emission now also has a TIME floor, so a re-arm inside the refractory
+    // window is deliberately silent. Every earlier phase of this test runs at
+    // the same `now`, which is why it began failing: zero elapsed time.
+    // Rationale in agent_channel.ts - the detector is 0-for-7 and firing #7
+    // re-asked a question PA had answered 22 minutes earlier.
+    const later = now + INGRESS_REFRACTORY_MS;
+    qop(jsonl, "enqueue", later - 6 * 60_000);
+    // The 0.31.6 fleet-dormant gate compares the SIMULATED `now` against REAL
+    // file mtimes. Advancing the clock 30 minutes therefore makes every peer
+    // transcript look 30 minutes stale and suppresses as "fleet asleep" - an
+    // artifact of simulating time with real files, not a product behaviour
+    // (in production both clocks are real). Age the file forward to match.
+    const laterSec = later / 1000;
+    utimesSync(jsonl, laterSec, laterSec);
+    runIngress(chan, later);
     expect(eventsOfType(received, "ingress_suspect", peer.id8).length).toBe(2);
   });
 

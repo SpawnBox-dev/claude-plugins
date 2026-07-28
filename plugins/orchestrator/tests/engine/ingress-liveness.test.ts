@@ -3,6 +3,8 @@ import {
   classifyIngress,
   isFleetDormant,
   FLEET_DORMANT_THRESHOLD_MS,
+  ingressRefractoryElapsed,
+  INGRESS_REFRACTORY_MS,
 } from "../../mcp/engine/agent_channel";
 
 // ===========================================================================
@@ -127,5 +129,57 @@ describe("fleet-dormant suppression", () => {
   test("the threshold is well above the 3-minute delivery window it guards", () => {
     // Otherwise a normal pause between turns would suppress a genuine park.
     expect(T).toBeGreaterThan(3 * 60_000);
+  });
+});
+
+// ===========================================================================
+// 0.31.7: refractory floor - the alert must remember it just asked.
+//
+// Firing #7 (0-for-7) refired on PA 22 minutes after PA had answered a direct
+// address and closed #6. Measured AT THE MOMENT IT FIRED: PA's transcript was
+// 2 seconds old and six of seven sessions had produced output within 20s. The
+// subject was demonstrably alive and the fleet demonstrably awake - so this is
+// a class the 0.31.6 dormant suppressor correctly does NOT catch.
+//
+// Cause: the episode dedup clears whenever a verdict goes healthy, so the
+// alert re-arms and re-asks immediately, forever. SA-c5b207e0's framing: the
+// subject's own recent output is far stronger proof of liveness than an
+// unprocessed delivery is proof of the opposite - and their honest admission
+// that they skipped the triage because they "judged it safe" is the alert
+// training exactly the behaviour it must not train.
+// ===========================================================================
+describe("ingress refractory floor", () => {
+  const R = INGRESS_REFRACTORY_MS;
+  const now = 1_000_000_000_000;
+
+  test("first ever firing is allowed", () => {
+    expect(ingressRefractoryElapsed(undefined, now)).toBe(true);
+  });
+
+  test("SUPPRESSES a refire moments after the last one - the reported bug", () => {
+    // 22 minutes, the exact gap between firings #6 and #7.
+    expect(ingressRefractoryElapsed(now - 22 * 60_000, now)).toBe(false);
+  });
+
+  test("allows a genuinely new episode once the window elapses", () => {
+    expect(ingressRefractoryElapsed(now - R, now)).toBe(true);
+    expect(ingressRefractoryElapsed(now - R - 1, now)).toBe(true);
+  });
+
+  test("boundary is exact", () => {
+    expect(ingressRefractoryElapsed(now - (R - 1), now)).toBe(false);
+  });
+
+  test("the window is longer than the delivery threshold it guards", () => {
+    // Otherwise the alert could re-ask within a single ambiguous episode.
+    expect(R).toBeGreaterThan(3 * 60_000);
+  });
+
+  test("is INDEPENDENT of fleet dormancy - they catch different classes", () => {
+    // #7 fired with the fleet awake, so the dormant suppressor must not be
+    // what stops it; and an overnight firing has no prior emit to refract
+    // against. Each covers what the other cannot.
+    expect(isFleetDormant([2_000, 5_000, 11_000])).toBe(false);
+    expect(ingressRefractoryElapsed(now - 60_000, now)).toBe(false);
   });
 });

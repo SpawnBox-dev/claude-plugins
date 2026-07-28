@@ -167,6 +167,40 @@ export const FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 /** PURE: is the whole fleet quiet, rather than this one peer? `peerTurnAges`
  *  are ms-since-last-transcript-write for every OTHER live session. Exported
  *  for tests. */
+// 0.31.7: REFRACTORY FLOOR - the alert must remember it just asked.
+//
+// SA-c5b207e0, on firing #7 (0-for-7): it refired on PA 22 minutes after PA had
+// answered a direct address and closed firing #6 as a false alarm. No
+// intervening state change, nothing new to discriminate on. MEASURED at the
+// moment it fired: PA's transcript had been written 2 SECONDS earlier and six
+// of seven sessions had produced output within 20s - so the subject was
+// demonstrably alive and the fleet demonstrably awake. (This also confirms the
+// 0.31.6 dormant suppressor is correctly scoped: it did not and should not
+// have caught this one.)
+//
+// The episode dedup clears the moment a verdict goes healthy, so the alert can
+// re-arm and re-ask immediately, forever, at whatever interval the threshold
+// implies - and every ask costs a peer a turn. c5b207e0's framing is the right
+// one: the subject's own recent OUTPUT is far stronger proof of liveness than
+// an unprocessed delivery is proof of the opposite, and a detector that fires
+// often enough to be ignored is worse than one that fires less and is trusted.
+//
+// Their own honest note is the reason this is a real defect rather than an
+// annoyance: they declined to run step 1 this time and said plainly that
+// "I judged it safe to skip" is not something the triage should have to rely
+// on. That is the alert training the exact behaviour it must not train.
+export const INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
+
+/** PURE: may we emit for this session again yet? Exported for tests. */
+export function ingressRefractoryElapsed(
+  lastEmitMs: number | undefined,
+  now: number,
+  refractoryMs = INGRESS_REFRACTORY_MS
+): boolean {
+  if (lastEmitMs === undefined) return true;
+  return now - lastEmitMs >= refractoryMs;
+}
+
 export function isFleetDormant(
   peerTurnAges: number[],
   thresholdMs = FLEET_DORMANT_THRESHOLD_MS
@@ -403,6 +437,9 @@ export class AgentChannel {
    *  an ingress_suspect for (emit once per parked episode; cleared when the peer
    *  drains its queue / produces a real turn, or departs). */
   private ingressEmitted = new Set<string>();
+  /** 0.31.7: last emit time per session, for the refractory floor below. NOT
+   *  cleared when the episode re-arms - that is the whole point. */
+  private ingressLastEmit = new Map<string, number>();
   /** Wall-clock ms of the last ingress scan; throttles the tail reads to
    *  INGRESS_CHECK_INTERVAL_MS (the scan is heavier than the egress statSync). */
   private lastIngressCheckAt = 0;
@@ -834,7 +871,13 @@ export class AgentChannel {
         transcriptMtimeMs,
       });
       if (verdict === "ingress_suspect") {
-        if (!this.ingressEmitted.has(sid)) {
+        // Refractory floor sits OUTSIDE the episode dedup on purpose: the
+        // episode flag is cleared whenever the verdict goes healthy, which is
+        // precisely how the alert re-asked a question it had just had answered.
+        if (
+          !this.ingressEmitted.has(sid) &&
+          ingressRefractoryElapsed(this.ingressLastEmit.get(sid), now)
+        ) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60_000);
           this.emit({
             // 0.30.77: DOWNGRADED FROM DIAGNOSIS TO QUESTION, and the cheapest
@@ -865,16 +908,39 @@ export class AgentChannel {
               `a long build, extended thinking, or a session deliberately keeping its ` +
               `output low all look IDENTICAL to a park from out here. Every firing of this ` +
               `alert so far has been a false alarm.\n` +
-              `TRIAGE, in order - do NOT skip to the last step:\n` +
-              `  1. ADDRESS IT: post "@${entry.id8} are you there?" and wait ONE turn. A ` +
-              `busy-but-healthy session answers; a parked one cannot. This is the whole ` +
-              `test - if it can answer at all, it was never parked.\n` +
-              `  2. If silent, check its transcript mtime (~/.claude/projects/<hash>/` +
-              `${entry.session_id}.jsonl). Still growing = alive, working, not parked.\n` +
-              `  3. ONLY after silence to a direct address AND a frozen transcript, ask ` +
-              `the user to check that terminal for an open menu/prompt (Enter/Escape, then ` +
-              `/mcp). Asking a human to interrupt a working terminal is the expensive ` +
-              `error here, and it is the one this alert has actually caused.\n` +
+              // 0.31.7: BRANCH ON NEED rather than enforce an order.
+              //
+              // The 0.30.77 text numbered these 1-2-3 and said "do NOT skip".
+              // SA-b14fafa3's correction, from firing #7: the costs are not
+              // comparable, so a fixed order is wrong for the common case.
+              // ADDRESSING SPENDS A PEER'S TURN and makes them stop and answer.
+              // TRANSCRIPT MTIME COSTS NOBODY ANYTHING, is instant, and is
+              // conclusive for liveness. When a reader needs ONLY liveness, the
+              // free check should come first.
+              //
+              // PA had already been reasoning exactly this way - praising one
+              // session for choosing mtime because it needed only liveness, and
+              // another for addressing because it had a question pending. But
+              // THAT JUDGEMENT LIVED IN PA'S HEAD, NOT IN THE ALERT, and
+              // non-PA readers only ever have the text. Same lesson as putting
+              // the base rate in the alert: encode the reasoning where the
+              // reader is.
+              `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:\n` +
+              `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` +
+              `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, ` +
+              `conclusive: still growing = alive and working, not parked. Costs nobody a ` +
+              `turn. Sample twice a few seconds apart if you want growth rather than age.\n` +
+              `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` +
+              `there?"). Liveness rides along free with the answer you already wanted, so ` +
+              `asking costs nothing extra. A busy-but-healthy session answers; a parked ` +
+              `one cannot.\n` +
+              `  * IT ANSWERED RECENTLY -> do nothing. A session that produced output ` +
+              `minutes ago is alive, and re-asking spends a peer's turn to learn what you ` +
+              `already know.\n` +
+              `  ONLY after a FROZEN transcript AND silence to a direct address should you ` +
+              `ask the user to check that terminal (Enter/Escape, then /mcp). Asking a ` +
+              `human to interrupt a working terminal is the expensive error here, and it ` +
+              `is the one this alert has actually caused.\n` +
               `Note: the subject cannot see this message. If it needs to know, tell it.`,
             meta: {
               from_session: entry.session_id,
@@ -887,6 +953,7 @@ export class AgentChannel {
             },
           });
           this.ingressEmitted.add(sid);
+          this.ingressLastEmit.set(sid, now);
         }
       } else {
         // healthy (queue drained / no orphan) or pending (too recent) -> not

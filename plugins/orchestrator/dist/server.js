@@ -25485,6 +25485,12 @@ var INGRESS_STALE_THRESHOLD_MS = 180000;
 var INGRESS_TAIL_BYTES = 131072;
 var INGRESS_CHECK_INTERVAL_MS = 30000;
 var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
+var INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
+function ingressRefractoryElapsed(lastEmitMs, now3, refractoryMs = INGRESS_REFRACTORY_MS) {
+  if (lastEmitMs === undefined)
+    return true;
+  return now3 - lastEmitMs >= refractoryMs;
+}
 function isFleetDormant(peerTurnAges, thresholdMs = FLEET_DORMANT_THRESHOLD_MS) {
   if (peerTurnAges.length === 0)
     return false;
@@ -25581,6 +25587,7 @@ class AgentChannel {
   sizeAtStale = new Map;
   egressEmitted = new Set;
   ingressEmitted = new Set;
+  ingressLastEmit = new Map;
   lastIngressCheckAt = 0;
   systemEventsLastSeenId = 0;
   heartbeatFailures = 0;
@@ -25810,14 +25817,15 @@ class AgentChannel {
         transcriptMtimeMs
       });
       if (verdict === "ingress_suspect") {
-        if (!this.ingressEmitted.has(sid)) {
+        if (!this.ingressEmitted.has(sid) && ingressRefractoryElapsed(this.ingressLastEmit.get(sid), now3)) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60000);
           this.emit({
             content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here. Every firing of this ` + `alert so far has been a false alarm.
-` + `TRIAGE, in order - do NOT skip to the last step:
-` + `  1. ADDRESS IT: post "@${entry.id8} are you there?" and wait ONE turn. A ` + `busy-but-healthy session answers; a parked one cannot. This is the whole ` + `test - if it can answer at all, it was never parked.
-` + `  2. If silent, check its transcript mtime (~/.claude/projects/<hash>/` + `${entry.session_id}.jsonl). Still growing = alive, working, not parked.
-` + `  3. ONLY after silence to a direct address AND a frozen transcript, ask ` + `the user to check that terminal for an open menu/prompt (Enter/Escape, then ` + `/mcp). Asking a human to interrupt a working terminal is the expensive ` + `error here, and it is the one this alert has actually caused.
+` + `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:
+` + `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` + `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, ` + `conclusive: still growing = alive and working, not parked. Costs nobody a ` + `turn. Sample twice a few seconds apart if you want growth rather than age.
+` + `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` + `there?"). Liveness rides along free with the answer you already wanted, so ` + `asking costs nothing extra. A busy-but-healthy session answers; a parked ` + `one cannot.
+` + `  * IT ANSWERED RECENTLY -> do nothing. A session that produced output ` + `minutes ago is alive, and re-asking spends a peer's turn to learn what you ` + `already know.
+` + `  ONLY after a FROZEN transcript AND silence to a direct address should you ` + `ask the user to check that terminal (Enter/Escape, then /mcp). Asking a ` + `human to interrupt a working terminal is the expensive error here, and it ` + `is the one this alert has actually caused.
 ` + `Note: the subject cannot see this message. If it needs to know, tell it.`,
             meta: {
               from_session: entry.session_id,
@@ -25830,6 +25838,7 @@ class AgentChannel {
             }
           });
           this.ingressEmitted.add(sid);
+          this.ingressLastEmit.set(sid, now3);
         }
       } else {
         this.ingressEmitted.delete(sid);
