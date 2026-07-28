@@ -50,7 +50,7 @@ import { handleHookEvent, buildHookEnvelope, HOOK_EVENTS, type HookEvent } from 
 import { AgentChannel } from "./engine/agent_channel";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
-import { appendSystemEvent } from "./engine/agent_channel_state";
+import { appendSystemEvent, alertEmissionStats } from "./engine/agent_channel_state";
 import { getLiveSessions } from "./engine/live_sessions";
 import { handleRespondToPermission, RespondToPermissionInputSchema } from "./tools/permission";
 import { homedir } from "node:os";
@@ -728,6 +728,39 @@ server.tool(
         lines.push(`  - Last error: ${xsHealth.last_error}`);
       }
       lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
+    }
+
+    // 0.32.3: liveness-detector firing rate. Reported because the answer to
+    // "is this alert still crying wolf?" was previously assembled from agents'
+    // recollection across days - see alertEmissionStats. Rate only; nothing
+    // here knows whether a firing was CORRECT, and it must not imply it does.
+    try {
+      // Same path the AgentChannel constructor uses (see its instantiation).
+      // Resolved the same way the AgentChannel constructor resolves it - the
+      // cache dir must NOT be used, it is wiped on /plugin update.
+      const channelStateDir = join(
+        process.env.ORCHESTRATOR_PROJECT_ROOT ||
+          process.env.CLAUDE_PROJECT_DIR ||
+          process.cwd(),
+        ".orchestrator-state",
+        "agent-channel"
+      );
+      const alertStats = alertEmissionStats(channelStateDir);
+      if (alertStats.length > 0) {
+        lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
+        for (const a of alertStats.slice(0, 6)) {
+          const when = new Date(a.last_emit_ms).toISOString().replace("T", " ").slice(0, 16);
+          const span =
+            a.first_emit_ms && a.emit_count > 1
+              ? ` over ${Math.max(1, Math.round((a.last_emit_ms - a.first_emit_ms) / 3_600_000))}h`
+              : "";
+          lines.push(
+            `  - ${a.alert_kind} -> ${a.subject_session.slice(0, 8)}: ${a.emit_count}x${span}, last ${when}Z`
+          );
+        }
+      }
+    } catch {
+      // Channel DB unavailable (no fleet yet). Not a status failure.
     }
 
     return { content: [{ type: "text" as const, text: lines.join("\n") }] };

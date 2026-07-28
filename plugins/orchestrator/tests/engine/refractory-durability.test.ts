@@ -8,6 +8,7 @@ import {
   lastSystemEventFrom,
   appendSystemEvent,
   closeAgentChannelDb,
+  alertEmissionStats,
 } from "../../mcp/engine/agent_channel_state";
 import {
   compactGraceActive,
@@ -225,5 +226,62 @@ describe("0.32.2: the alert states that its reader is the only recipient", () =>
     // Must not merely inform - it has to close the loop either way, otherwise
     // a reader who declines to triage leaves no trace that nobody did.
     expect(t).toMatch(/say|declare|out loud/);
+  });
+});
+
+// ===========================================================================
+// 0.32.3: make the detector's own track record queryable.
+//
+// ingress_suspect is on record as 0-for-8. That record was assembled by agents
+// REMEMBERING, across days and three sessions, and re-derived by hand every
+// time anyone asked. egress_suspect has no known record at all. These alerts
+// are MCP notifications and were never written anywhere, so every tuning
+// argument restarted from anecdote - which is most of why this detector took
+// eight firings to diagnose.
+// ===========================================================================
+describe("0.32.3: alert emission stats", () => {
+  let stateDir: string;
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), "orch-stats-"));
+  });
+  afterEach(() => teardown(stateDir));
+
+  const S = "d4c8dda8-80e2-4427-8588-8f4f979a2120";
+
+  test("counts repeat firings against the same subject", () => {
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 1_000);
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 2_000);
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 3_000);
+    const [row] = alertEmissionStats(stateDir, "ingress_suspect");
+    expect(row.emit_count).toBe(3);
+    expect(row.last_emit_ms).toBe(3_000);
+  });
+
+  test("first_emit is the FIRST, not the latest - that is what makes it a rate", () => {
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 1_000);
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 9_000);
+    const [row] = alertEmissionStats(stateDir, "ingress_suspect");
+    expect(row.first_emit_ms).toBe(1_000);
+    expect(row.last_emit_ms).toBe(9_000);
+  });
+
+  test("separates kinds and subjects rather than pooling them", () => {
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 1_000);
+    setAlertLastEmit(stateDir, "egress_suspect", S, 1_000);
+    setAlertLastEmit(stateDir, "ingress_suspect", "other", 1_000);
+    expect(alertEmissionStats(stateDir).length).toBe(3);
+    expect(alertEmissionStats(stateDir, "egress_suspect").length).toBe(1);
+  });
+
+  test("counting must not weaken the floor it rides on", () => {
+    // The count is a passenger. If bumping it ever reset last_emit_ms the
+    // suppressor would silently regress, so pin them together.
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 5_000);
+    setAlertLastEmit(stateDir, "ingress_suspect", S, 6_000);
+    expect(getAlertLastEmit(stateDir, "ingress_suspect", S)).toBe(6_000);
+  });
+
+  test("empty on a fresh fleet - no rows, no crash, no phantom zero row", () => {
+    expect(alertEmissionStats(stateDir)).toEqual([]);
   });
 });

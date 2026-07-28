@@ -1087,11 +1087,72 @@ export function setAlertLastEmit(
   atMs: number,
 ): void {
   const db = getDb(stateDir);
+  // 0.32.3: keep first-emit and a count alongside the floor, so the detector's
+  // own track record is QUERYABLE instead of anecdotal. See alertEmissionStats.
+  ensureColumns(db, "alert_refractory", {
+    first_emit_ms: "INTEGER",
+    emit_count: "INTEGER",
+  });
   prep(
     db,
-    `INSERT OR REPLACE INTO alert_refractory (alert_kind, subject_session, last_emit_ms)
-     VALUES (?, ?, ?)`,
-  ).run(alertKind, subjectSession, atMs);
+    `INSERT INTO alert_refractory (alert_kind, subject_session, last_emit_ms, first_emit_ms, emit_count)
+     VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT(alert_kind, subject_session) DO UPDATE SET
+       last_emit_ms = excluded.last_emit_ms,
+       first_emit_ms = COALESCE(alert_refractory.first_emit_ms, excluded.first_emit_ms),
+       emit_count = COALESCE(alert_refractory.emit_count, 0) + 1`,
+  ).run(alertKind, subjectSession, atMs, atMs);
+}
+
+/**
+ * 0.32.3: how often has each alert actually fired, and against whom?
+ *
+ * WHY THIS EXISTS. `ingress_suspect` is on record as 0-for-8 - eight firings,
+ * every one a false alarm. That record was assembled by AGENTS REMEMBERING,
+ * across days and several sessions, and re-derived by hand every time someone
+ * asked. Meanwhile `egress_suspect` has no known record at all, because these
+ * alerts are MCP notifications and were never written anywhere. An alert whose
+ * own false-positive rate cannot be queried is one nobody can argue about with
+ * evidence - every tuning discussion restarts from anecdote, which is most of
+ * why this detector took eight firings and three sessions' recollection to
+ * diagnose.
+ *
+ * This is deliberately the cheapest thing that answers the question: two
+ * columns on the row the refractory already writes. No new table, no new write
+ * path, no retention policy to get wrong. It reports FIRING RATE, not
+ * correctness - nothing here knows whether a firing was right, and it should
+ * not pretend to.
+ */
+export function alertEmissionStats(
+  stateDir: string,
+  alertKind?: string,
+): Array<{
+  alert_kind: string;
+  subject_session: string;
+  emit_count: number;
+  first_emit_ms: number | null;
+  last_emit_ms: number;
+}> {
+  const db = getDb(stateDir);
+  ensureColumns(db, "alert_refractory", {
+    first_emit_ms: "INTEGER",
+    emit_count: "INTEGER",
+  });
+  const sql = alertKind
+    ? `SELECT alert_kind, subject_session, COALESCE(emit_count, 1) AS emit_count,
+              first_emit_ms, last_emit_ms
+       FROM alert_refractory WHERE alert_kind = ? ORDER BY last_emit_ms DESC`
+    : `SELECT alert_kind, subject_session, COALESCE(emit_count, 1) AS emit_count,
+              first_emit_ms, last_emit_ms
+       FROM alert_refractory ORDER BY last_emit_ms DESC`;
+  const stmt = prep(db, sql);
+  return (alertKind ? stmt.all(alertKind) : stmt.all()) as Array<{
+    alert_kind: string;
+    subject_session: string;
+    emit_count: number;
+    first_emit_ms: number | null;
+    last_emit_ms: number;
+  }>;
 }
 
 /**

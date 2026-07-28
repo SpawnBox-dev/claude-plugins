@@ -23453,8 +23453,30 @@ function getAlertLastEmit(stateDir, alertKind, subjectSession) {
 }
 function setAlertLastEmit(stateDir, alertKind, subjectSession, atMs) {
   const db = getDb(stateDir);
-  prep(db, `INSERT OR REPLACE INTO alert_refractory (alert_kind, subject_session, last_emit_ms)
-     VALUES (?, ?, ?)`).run(alertKind, subjectSession, atMs);
+  ensureColumns(db, "alert_refractory", {
+    first_emit_ms: "INTEGER",
+    emit_count: "INTEGER"
+  });
+  prep(db, `INSERT INTO alert_refractory (alert_kind, subject_session, last_emit_ms, first_emit_ms, emit_count)
+     VALUES (?, ?, ?, ?, 1)
+     ON CONFLICT(alert_kind, subject_session) DO UPDATE SET
+       last_emit_ms = excluded.last_emit_ms,
+       first_emit_ms = COALESCE(alert_refractory.first_emit_ms, excluded.first_emit_ms),
+       emit_count = COALESCE(alert_refractory.emit_count, 0) + 1`).run(alertKind, subjectSession, atMs, atMs);
+}
+function alertEmissionStats(stateDir, alertKind) {
+  const db = getDb(stateDir);
+  ensureColumns(db, "alert_refractory", {
+    first_emit_ms: "INTEGER",
+    emit_count: "INTEGER"
+  });
+  const sql = alertKind ? `SELECT alert_kind, subject_session, COALESCE(emit_count, 1) AS emit_count,
+              first_emit_ms, last_emit_ms
+       FROM alert_refractory WHERE alert_kind = ? ORDER BY last_emit_ms DESC` : `SELECT alert_kind, subject_session, COALESCE(emit_count, 1) AS emit_count,
+              first_emit_ms, last_emit_ms
+       FROM alert_refractory ORDER BY last_emit_ms DESC`;
+  const stmt = prep(db, sql);
+  return alertKind ? stmt.all(alertKind) : stmt.all();
 }
 function lastSystemEventFrom(stateDir, eventTypes, fromSession) {
   if (eventTypes.length === 0)
@@ -26846,6 +26868,18 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     }
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
+  try {
+    const channelStateDir = join6(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const alertStats = alertEmissionStats(channelStateDir);
+    if (alertStats.length > 0) {
+      lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
+      for (const a of alertStats.slice(0, 6)) {
+        const when = new Date(a.last_emit_ms).toISOString().replace("T", " ").slice(0, 16);
+        const span = a.first_emit_ms && a.emit_count > 1 ? ` over ${Math.max(1, Math.round((a.last_emit_ms - a.first_emit_ms) / 3600000))}h` : "";
+        lines.push(`  - ${a.alert_kind} -> ${a.subject_session.slice(0, 8)}: ${a.emit_count}x${span}, last ${when}Z`);
+      }
+    }
+  } catch {}
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
