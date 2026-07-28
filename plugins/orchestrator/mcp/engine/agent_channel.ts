@@ -218,6 +218,35 @@ export const MTIME_DELIBERATELY_UNUSED =
  * the suppressor has traded noise for silence, and silence is the worse failure
  * because nothing reports it.
  */
+/**
+ * 0.36.1: why the direct address must stay in the triage, said inside the alert.
+ *
+ * The 0.34.0 wording claimed the triage checks "cannot see" transport death,
+ * which reads as "do not bother addressing them" - the opposite of correct,
+ * and I wrote it. SA-90bf73bd's structural point is the reason it matters:
+ * idle-and-healthy and idle-and-unreachable are identical under every PASSIVE
+ * signal, because in both cases the subject is correctly doing nothing. Only
+ * an ACTIVE probe separates them, since it creates an event the subject must
+ * process.
+ *
+ * PA demonstrated exactly that cell live at 16:04Z - flat transcript, fresh
+ * heartbeat, zero channel events, entirely healthy - and the ambiguity was
+ * resolved by a human prompting a probe. That human dependency is the thing
+ * worth removing.
+ *
+ * Keep this resistant to the obvious "optimisation": addressing looks
+ * expensive beside two file reads, and it is the only step that reaches the
+ * cell nothing else can.
+ */
+export const INGRESS_ACTIVE_PROBE_NOTE =
+  `THE IDLE CASE NEEDS AN ACTIVE PROBE. A session that is idle-and-healthy and ` +
+  `one that is idle-and-unreachable look IDENTICAL to every check that only ` +
+  `watches - flat transcript, fresh heartbeat, no output - because both are ` +
+  `correctly doing nothing. Addressing it is what separates them: it makes an ` +
+  `event the subject has to process, so an answer proves reachability and ` +
+  `SILENCE IS THE POSITIVE RESULT, not a failed check. Escalate to "/mcp" at ` +
+  `that terminal only after silence to a direct address.`;
+
 export const INGRESS_SOLE_RECIPIENT_NOTE =
   `You are very likely the ONLY session that received this - the alert now ` +
   `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` +
@@ -1027,9 +1056,26 @@ export class AgentChannel {
               // transcript state is a weak signal here, not an inverted one.
               // The only check that reaches transport failure is /mcp at the
               // terminal, which is why it is named rather than buried.
-              `IF THIS IS TRANSPORT DEATH (the confirmed real case), the checks below ` +
-              `cannot see it: an address is never delivered, and the transcript may look ` +
-              `either way. Only "/mcp" at that terminal distinguishes it.\n` +
+              // 0.36.1: REWORDED. The 0.34.0 text said the checks below
+              // "cannot see" transport death, which reads as "do not bother
+              // addressing them" - the opposite of what to do, and I wrote it.
+              //
+              // Addressing IS the discriminator. SA-90bf73bd's structural
+              // point: idle-healthy and idle-unreachable are identical under
+              // every PASSIVE signal - transcript flat either way, heartbeat
+              // fresh either way, zero channel events either way - because in
+              // both cases the subject is correctly doing nothing. Only an
+              // ACTIVE probe separates them, because it CREATES an event the
+              // subject must process. A healthy idle session answers with no
+              // human involved; an unreachable one structurally cannot.
+              //
+              // So silence in response to a direct address is not a failed
+              // check, it is the POSITIVE result - and it is the only cheap
+              // signal that earns escalating to /mcp. Do not let anyone
+              // optimise the address out of the triage as the expensive step:
+              // it looks costly next to two file reads, and it is the only one
+              // that resolves the cell nothing else reaches.
+              INGRESS_ACTIVE_PROBE_NOTE + "\n" +
               // 0.31.7: BRANCH ON NEED rather than enforce an order.
               //
               // The 0.30.77 text numbered these 1-2-3 and said "do NOT skip".

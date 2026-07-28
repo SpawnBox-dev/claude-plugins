@@ -25677,6 +25677,7 @@ var INGRESS_CHECK_INTERVAL_MS = 30000;
 var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 var INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
 var MTIME_DELIBERATELY_UNUSED = "classifyIngress: transcriptMtimeMs is accepted and DELIBERATELY NOT USED. " + "The enqueue itself writes to the target's transcript, so mtime >= enqueue " + "holds by construction for parked and healthy sessions alike - gating on it " + "would silently disable the detector, and a permanently-silent watchdog " + "reads as 'no problems'. Rejected mechanism, guarded by " + "tests/engine/ingress-liveness.test.ts. Do not 'complete' this.";
+var INGRESS_ACTIVE_PROBE_NOTE = `THE IDLE CASE NEEDS AN ACTIVE PROBE. A session that is idle-and-healthy and ` + `one that is idle-and-unreachable look IDENTICAL to every check that only ` + `watches - flat transcript, fresh heartbeat, no output - because both are ` + `correctly doing nothing. Addressing it is what separates them: it makes an ` + `event the subject has to process, so an answer proves reachability and ` + `SILENCE IS THE POSITIVE RESULT, not a failed check. Escalate to "/mcp" at ` + `that terminal only after silence to a direct address.`;
 var INGRESS_SOLE_RECIPIENT_NOTE = `You are very likely the ONLY session that received this - the alert now ` + `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` + `was told or is already looking. Resolve it or say out loud that you are not.`;
 function ingressRefractoryElapsed(lastEmitMs, now3, refractoryMs = INGRESS_REFRACTORY_MS) {
   if (lastEmitMs === undefined)
@@ -26031,7 +26032,7 @@ class AgentChannel {
           this.emit({
             content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here.
 ` + priorCountLine + `AT LEAST ONE PAST FIRING WAS REAL: on 2026-07-28 a session's MCP transport ` + `died for 58 minutes while the session itself kept running. Treat this as ` + `open until you have evidence, not as presumed noise.
-` + `IF THIS IS TRANSPORT DEATH (the confirmed real case), the checks below ` + `cannot see it: an address is never delivered, and the transcript may look ` + `either way. Only "/mcp" at that terminal distinguishes it.
+` + INGRESS_ACTIVE_PROBE_NOTE + `
 ` + `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:
 ` + `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` + `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, ` + `conclusive: still growing = alive and working, not parked. Costs nobody a ` + `turn. Sample twice a few seconds apart if you want growth rather than age.
 ` + `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` + `there?"). Liveness rides along free with the answer you already wanted, so ` + `asking costs nothing extra. A busy-but-healthy session answers; a parked ` + `one cannot.
