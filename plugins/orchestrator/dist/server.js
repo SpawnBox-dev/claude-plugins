@@ -23125,6 +23125,12 @@ function getDb(stateDir) {
       ts TEXT NOT NULL,
       payload TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS alert_refractory (
+      alert_kind TEXT NOT NULL,
+      subject_session TEXT NOT NULL,
+      last_emit_ms INTEGER NOT NULL,
+      PRIMARY KEY (alert_kind, subject_session)
+    );
     CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
   ensureColumns(db, "sessions", {
@@ -23438,6 +23444,30 @@ function readNewSystemEvents(stateDir, lastSeenId) {
   const events = rows.map(rowToSystemEvent);
   const newSeenId = rows.length > 0 ? rows[rows.length - 1].id : lastSeenId;
   return { events, newSeenId };
+}
+function getAlertLastEmit(stateDir, alertKind, subjectSession) {
+  const db = getDb(stateDir);
+  const row = prep(db, `SELECT last_emit_ms FROM alert_refractory
+     WHERE alert_kind = ? AND subject_session = ?`).get(alertKind, subjectSession);
+  return row?.last_emit_ms;
+}
+function setAlertLastEmit(stateDir, alertKind, subjectSession, atMs) {
+  const db = getDb(stateDir);
+  prep(db, `INSERT OR REPLACE INTO alert_refractory (alert_kind, subject_session, last_emit_ms)
+     VALUES (?, ?, ?)`).run(alertKind, subjectSession, atMs);
+}
+function lastSystemEventFrom(stateDir, eventTypes, fromSession) {
+  if (eventTypes.length === 0)
+    return;
+  const db = getDb(stateDir);
+  const placeholders = eventTypes.map(() => "?").join(", ");
+  const row = prep(db, `SELECT ts FROM system_events
+     WHERE from_session = ? AND event_type IN (${placeholders})
+     ORDER BY id DESC LIMIT 1`).get(fromSession, ...eventTypes);
+  if (!row)
+    return;
+  const ms = new Date(row.ts).getTime();
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 // mcp/engine/live_sessions.ts
@@ -25523,6 +25553,16 @@ var INGRESS_TAIL_BYTES = 131072;
 var INGRESS_CHECK_INTERVAL_MS = 30000;
 var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 var INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
+var COMPACT_GRACE_MS = 30 * 60 * 1000;
+var COMPACT_EVENT_TYPES = [
+  "pa_compact_recovery",
+  "post_compact_recovery"
+];
+function compactGraceActive(lastCompactMs, now3, graceMs = COMPACT_GRACE_MS) {
+  if (lastCompactMs === undefined)
+    return false;
+  return now3 - lastCompactMs < graceMs;
+}
 function ingressRefractoryElapsed(lastEmitMs, now3, refractoryMs = INGRESS_REFRACTORY_MS) {
   if (lastEmitMs === undefined)
     return true;
@@ -25854,7 +25894,17 @@ class AgentChannel {
         transcriptMtimeMs
       });
       if (verdict === "ingress_suspect") {
-        if (!this.ingressEmitted.has(sid) && ingressRefractoryElapsed(this.ingressLastEmit.get(sid), now3)) {
+        let lastEmit;
+        let lastCompact;
+        try {
+          lastEmit = getAlertLastEmit(this.projectStateDir, "ingress_suspect", sid);
+          lastCompact = lastSystemEventFrom(this.projectStateDir, COMPACT_EVENT_TYPES, sid);
+        } catch {
+          lastEmit = this.ingressLastEmit.get(sid);
+        }
+        if (lastEmit === undefined)
+          lastEmit = this.ingressLastEmit.get(sid);
+        if (!this.ingressEmitted.has(sid) && ingressRefractoryElapsed(lastEmit, now3) && !compactGraceActive(lastCompact, now3)) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60000);
           this.emit({
             content: `[ingress_suspect] ${entry.name} (${entry.id8}) MIGHT be stuck - this is a ` + `QUESTION, NOT A DIAGNOSIS. Heartbeat is fresh but a channel delivery has ` + `sat unprocessed for >${mins}min. That is genuinely ambiguous: a long turn, ` + `a long build, extended thinking, or a session deliberately keeping its ` + `output low all look IDENTICAL to a park from out here. Every firing of this ` + `alert so far has been a false alarm.
@@ -25876,6 +25926,9 @@ class AgentChannel {
           });
           this.ingressEmitted.add(sid);
           this.ingressLastEmit.set(sid, now3);
+          try {
+            setAlertLastEmit(this.projectStateDir, "ingress_suspect", sid, now3);
+          } catch {}
         }
       } else {
         this.ingressEmitted.delete(sid);

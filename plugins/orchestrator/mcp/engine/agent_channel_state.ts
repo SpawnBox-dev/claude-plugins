@@ -341,6 +341,12 @@ function getDb(stateDir: string): Database {
       ts TEXT NOT NULL,
       payload TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS alert_refractory (
+      alert_kind TEXT NOT NULL,
+      subject_session TEXT NOT NULL,
+      last_emit_ms INTEGER NOT NULL,
+      PRIMARY KEY (alert_kind, subject_session)
+    );
     CREATE INDEX IF NOT EXISTS system_events_id_idx ON system_events(id);
   `);
   // PA-coherence primitive: additive columns on PRE-EXISTING DBs (the CREATE
@@ -1029,4 +1035,93 @@ export function readNewSystemEvents(
 export function clearSystemEvents(stateDir: string): void {
   const db = getDb(stateDir);
   prep(db, `DELETE FROM system_events`).run();
+}
+
+// === alert_refractory (0.32.1) ===
+//
+// A REFRACTORY FLOOR HELD IN PROCESS MEMORY IS NOT A REFRACTORY FLOOR.
+//
+// 0.31.7 added a 30-minute floor to stop ingress_suspect re-asking a question
+// it had just had answered, and kept the last-emit time in a `Map` on the
+// AgentChannel instance. The unit tests passed - and they still do, because
+// they exercise the pure predicate (`ingressRefractoryElapsed`), which was
+// never the broken part. The STORAGE was.
+//
+// Two ways in-memory state defeated it, both observed live 2026-07-28 when
+// three firings landed on one subject inside fifty minutes:
+//
+//   1. CROSS-PROCESS. There is no leader election on the channel tick - every
+//      session's MCP process independently evaluates every peer and can emit.
+//      Each process owned a private Map, so N live sessions granted N separate
+//      allowances for the same subject. With six sessions awake the effective
+//      floor was ~5 minutes, not 30.
+//   2. RESTART. `/reload-plugins` builds a fresh process, so the Map came back
+//      empty and the floor reset to zero mid-episode.
+//
+// Both are invisible from inside one process, which is why the suppressor
+// looked correct in review and in tests. The fix is to put the timestamp
+// somewhere all the emitters can see it: the same WAL-mode SQLite the sessions
+// registry and the event bus already share.
+//
+// Keyed by (alert_kind, subject_session) rather than by subject alone so a
+// future alert type gets its own floor for free instead of borrowing this one.
+
+export function getAlertLastEmit(
+  stateDir: string,
+  alertKind: string,
+  subjectSession: string,
+): number | undefined {
+  const db = getDb(stateDir);
+  const row = prep(
+    db,
+    `SELECT last_emit_ms FROM alert_refractory
+     WHERE alert_kind = ? AND subject_session = ?`,
+  ).get(alertKind, subjectSession) as { last_emit_ms: number } | undefined;
+  return row?.last_emit_ms;
+}
+
+export function setAlertLastEmit(
+  stateDir: string,
+  alertKind: string,
+  subjectSession: string,
+  atMs: number,
+): void {
+  const db = getDb(stateDir);
+  prep(
+    db,
+    `INSERT OR REPLACE INTO alert_refractory (alert_kind, subject_session, last_emit_ms)
+     VALUES (?, ?, ?)`,
+  ).run(alertKind, subjectSession, atMs);
+}
+
+/**
+ * 0.32.1: most-recent timestamp of any of `eventTypes` emitted BY a session.
+ *
+ * Proposed by SA-c5b207e0 from three ingress_suspect firings on one subject in
+ * under an hour: `pa_compact_recovery` for that session had already been
+ * published sixteen minutes before the alert fired. The system knew why the
+ * session was quiet and alarmed about it anyway.
+ *
+ * Reading the bus beats recording a new marker. The event is already written,
+ * already cross-process, and already durable - a parallel marker would be one
+ * more thing to keep in sync, and would miss compactions that happened before
+ * this code existed. Returns undefined when the subject has no such event.
+ */
+export function lastSystemEventFrom(
+  stateDir: string,
+  eventTypes: string[],
+  fromSession: string,
+): number | undefined {
+  if (eventTypes.length === 0) return undefined;
+  const db = getDb(stateDir);
+  const placeholders = eventTypes.map(() => "?").join(", ");
+  const row = prep(
+    db,
+    `SELECT ts FROM system_events
+     WHERE from_session = ? AND event_type IN (${placeholders})
+     ORDER BY id DESC LIMIT 1`,
+  ).get(fromSession, ...eventTypes) as { ts: string } | undefined;
+  if (!row) return undefined;
+  const ms = new Date(row.ts).getTime();
+  return Number.isFinite(ms) ? ms : undefined;
 }

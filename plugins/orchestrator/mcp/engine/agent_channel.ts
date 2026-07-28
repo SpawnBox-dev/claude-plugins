@@ -33,6 +33,9 @@ import {
   setHotPathStatus,
   setKeepClean,
   type SessionEntry,
+  getAlertLastEmit,
+  setAlertLastEmit,
+  lastSystemEventFrom,
 } from "./agent_channel_state";
 
 // NOTE: The MCP channels contract (https://code.claude.com/docs/en/channels-reference)
@@ -190,6 +193,34 @@ export const FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 // "I judged it safe to skip" is not something the triage should have to rely
 // on. That is the alert training the exact behaviour it must not train.
 export const INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
+
+/**
+ * 0.32.1: grace window after a subject's own compaction event.
+ *
+ * A context rebuild is long, silent, and completely normal - the textbook
+ * shape this detector mistakes for a park. Crucially the subject ANNOUNCES it
+ * on the shared bus, so this costs no new instrumentation. Sized to match the
+ * refractory: both answer "how long should one explained quiet period buy?".
+ */
+export const COMPACT_GRACE_MS = 30 * 60 * 1000;
+
+/** Event types that mean "this session is rebuilding context, of course it is
+ *  quiet". Both directions of the compact-recovery handshake count. */
+export const COMPACT_EVENT_TYPES = [
+  "pa_compact_recovery",
+  "post_compact_recovery",
+];
+
+/** Pure predicate, mirroring ingressRefractoryElapsed so both suppressors are
+ *  testable without a clock or a database. */
+export function compactGraceActive(
+  lastCompactMs: number | undefined,
+  now: number,
+  graceMs = COMPACT_GRACE_MS,
+): boolean {
+  if (lastCompactMs === undefined) return false;
+  return now - lastCompactMs < graceMs;
+}
 
 /** PURE: may we emit for this session again yet? Exported for tests. */
 export function ingressRefractoryElapsed(
@@ -437,8 +468,15 @@ export class AgentChannel {
    *  an ingress_suspect for (emit once per parked episode; cleared when the peer
    *  drains its queue / produces a real turn, or departs). */
   private ingressEmitted = new Set<string>();
-  /** 0.31.7: last emit time per session, for the refractory floor below. NOT
-   *  cleared when the episode re-arms - that is the whole point. */
+  /** 0.31.7 / 0.32.1: last emit time per session, for the refractory floor
+   *  below. NOT cleared when the episode re-arms - that is the whole point.
+   *
+   *  0.32.1 moved the authoritative copy into `alert_refractory` in the shared
+   *  agent_channel.db. This Map is now only a same-process read-through cache;
+   *  it MUST NOT be the decision input on its own. See the long comment on
+   *  alert_refractory: every session's MCP evaluates every peer, so a private
+   *  Map handed each of N processes its own 30-minute allowance, and a plugin
+   *  reload reset all of them to zero. */
   private ingressLastEmit = new Map<string, number>();
   /** Wall-clock ms of the last ingress scan; throttles the tail reads to
    *  INGRESS_CHECK_INTERVAL_MS (the scan is heavier than the egress statSync). */
@@ -874,9 +912,27 @@ export class AgentChannel {
         // Refractory floor sits OUTSIDE the episode dedup on purpose: the
         // episode flag is cleared whenever the verdict goes healthy, which is
         // precisely how the alert re-asked a question it had just had answered.
+        // 0.32.1: DURABLE floor + compaction grace. Both read shared state so
+        // every emitter sees the same answer; the in-memory Map is a fallback
+        // only for the case where the DB read throws.
+        let lastEmit: number | undefined;
+        let lastCompact: number | undefined;
+        try {
+          lastEmit = getAlertLastEmit(this.projectStateDir, "ingress_suspect", sid);
+          lastCompact = lastSystemEventFrom(
+            this.projectStateDir,
+            COMPACT_EVENT_TYPES,
+            sid,
+          );
+        } catch {
+          lastEmit = this.ingressLastEmit.get(sid);
+        }
+        if (lastEmit === undefined) lastEmit = this.ingressLastEmit.get(sid);
+
         if (
           !this.ingressEmitted.has(sid) &&
-          ingressRefractoryElapsed(this.ingressLastEmit.get(sid), now)
+          ingressRefractoryElapsed(lastEmit, now) &&
+          !compactGraceActive(lastCompact, now)
         ) {
           const mins = Math.round(INGRESS_STALE_THRESHOLD_MS / 60_000);
           this.emit({
@@ -954,6 +1010,13 @@ export class AgentChannel {
           });
           this.ingressEmitted.add(sid);
           this.ingressLastEmit.set(sid, now);
+          try {
+            setAlertLastEmit(this.projectStateDir, "ingress_suspect", sid, now);
+          } catch {
+            // Durable write failed - the in-memory copy above still throttles
+            // this process. Degrade to 0.31.7 behaviour rather than lose the
+            // alert entirely.
+          }
         }
       } else {
         // healthy (queue drained / no orphan) or pending (too recent) -> not
