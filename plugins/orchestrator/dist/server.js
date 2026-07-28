@@ -21663,6 +21663,37 @@ function resolveNoteId(db, idOrPrefix) {
 }
 
 // mcp/tools/supersede.ts
+function formatPropagationSurfaces(db, oldId, codeRefs) {
+  const inbound = db.query(`SELECT n.id, n.type, substr(n.content, 1, 90) AS snippet
+       FROM links l JOIN notes n ON n.id = l.from_note_id
+       WHERE l.to_note_id = ?
+         AND l.relationship != 'supersedes'
+         AND n.id != ?
+         AND n.superseded_by IS NULL
+       ORDER BY CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END
+       LIMIT 6`).all(oldId, oldId);
+  const lines = [];
+  if (inbound.length > 0) {
+    lines.push(`  NOTES THAT POINT AT THE RETRACTED ONE (may restate the claim):`);
+    for (const r of inbound) {
+      lines.push(`    - ${r.id.slice(0, 8)} [${r.type}]: "${r.snippet.replace(/\s+/g, " ")}"`);
+    }
+  }
+  if (codeRefs.length > 0) {
+    lines.push(`  FILES THE RETRACTED NOTE POINTED AT: ${codeRefs.join(", ")}`);
+  }
+  const known = lines.length > 0 ? lines.join(`
+`) + `
+` : "";
+  return `
+
+[PROPAGATE THE RETRACTION - a correction is not done until every ` + `surface carrying it is updated]
+` + known + "  SURFACES THIS TOOL CANNOT SEE - check them yourself, this is where the " + `class actually bites:
+` + "    - memory files (MEMORY.md and the auto-memory topic files) - the " + `highest-traffic surface, and the one that has actually been missed
+` + `    - docs/ and specs that state the same claim
+` + "    - anything already PUBLISHED (Discord, landing copy, release notes) - " + `superseding a note cannot reach those
+` + "  If a surface is fine as-is, that is a real answer. Leaving it " + "unchecked is not.";
+}
 async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
   if (!input.new_id && !(input.new_content && input.new_type)) {
     return {
@@ -21812,11 +21843,28 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
        VALUES (?, ?, ?, 'supersedes', 'strong', ?)`, [generateId(), newId, input.old_id, timestamp]);
   })();
   const reasonNote = input.reason ? ` Reason: ${input.reason}.` : "";
+  let propagation = "";
+  try {
+    const refRow = db.query(`SELECT code_refs FROM notes WHERE id = ?`).get(input.old_id);
+    let refs = [];
+    if (refRow?.code_refs) {
+      try {
+        const parsed = JSON.parse(refRow.code_refs);
+        if (Array.isArray(parsed))
+          refs = parsed.filter((r) => typeof r === "string");
+      } catch {
+        refs = refRow.code_refs.split(",").map((r) => r.trim()).filter(Boolean);
+      }
+    }
+    propagation = formatPropagationSurfaces(db, input.old_id, refs);
+  } catch {
+    propagation = "";
+  }
   return {
     superseded: true,
     old_id: input.old_id,
     new_id: newId,
-    message: `Superseded "${input.old_id}" with "${newId}".${reasonNote}`
+    message: `Superseded "${input.old_id}" with "${newId}".${reasonNote}${propagation}`
   };
 }
 

@@ -26,6 +26,84 @@ export interface SupersedeResult {
   message: string;
 }
 
+
+/**
+ * 0.33.0: A RETRACTION IS NOT DONE UNTIL EVERY SURFACE CARRYING THE CLAIM IS
+ * UPDATED.
+ *
+ * THE CLASS THIS ADDRESSES, and why it is neither of the other two:
+ * PA, 2026-07-28. A checkout retraction was applied to work item f8a55926, to
+ * the warden ledger, and to a checkpoint - and `polar-mor-account.md`, the
+ * durable memory file every future session reads, kept the un-retracted
+ * version including a flatly false claim. Retrieval worked. Authorship worked.
+ * The correction was written correctly, more than once. It still failed,
+ * because NOTHING ENUMERATES THE SURFACES THAT CARRY A CLAIM, so "done" meant
+ * "done in the places I happened to think of."
+ *
+ * That is distinct from writing past a note you were shown (0.32.0's class)
+ * and from asserting something never in the KB at all. Those are failures to
+ * consult or to verify. This is a failure of COMPLETION, and it is the one
+ * that leaves a false statement live in the highest-traffic surface while
+ * every artifact you looked at says you fixed it.
+ *
+ * WHY supersede IS THE TRIGGER: it is the explicit "this was wrong / has been
+ * replaced" act. It is deliberate and comparatively rare, so firing on every
+ * one cannot train the dismissal reflex that an always-on check does - the
+ * base-rate constraint PA and SA-5a433456 both insisted on.
+ *
+ * HONESTY ABOUT COVERAGE - the load-bearing part. This lists what the KB can
+ * PROVE carries the claim (inbound links, work items, the note's own
+ * code_refs) and then NAMES the surfaces it cannot see (memory files, docs,
+ * specs, and anything already published). A checklist that silently omits the
+ * category the original bug lived in would be worse than none, because it
+ * would confer exactly the false sense of completion that caused this.
+ */
+export function formatPropagationSurfaces(
+  db: Database,
+  oldId: string,
+  codeRefs: string[]
+): string {
+  const inbound = db
+    .query(
+      `SELECT n.id, n.type, substr(n.content, 1, 90) AS snippet
+       FROM links l JOIN notes n ON n.id = l.from_note_id
+       WHERE l.to_note_id = ?
+         AND l.relationship != 'supersedes'
+         AND n.id != ?
+         AND n.superseded_by IS NULL
+       ORDER BY CASE l.strength WHEN 'strong' THEN 0 ELSE 1 END
+       LIMIT 6`
+    )
+    .all(oldId, oldId) as Array<{ id: string; type: string; snippet: string }>;
+
+  const lines: string[] = [];
+  if (inbound.length > 0) {
+    lines.push(`  NOTES THAT POINT AT THE RETRACTED ONE (may restate the claim):`);
+    for (const r of inbound) {
+      lines.push(`    - ${r.id.slice(0, 8)} [${r.type}]: "${r.snippet.replace(/\s+/g, " ")}"`);
+    }
+  }
+  if (codeRefs.length > 0) {
+    lines.push(`  FILES THE RETRACTED NOTE POINTED AT: ${codeRefs.join(", ")}`);
+  }
+
+  const known = lines.length > 0 ? lines.join("\n") + "\n" : "";
+  return (
+    "\n\n[PROPAGATE THE RETRACTION - a correction is not done until every " +
+    "surface carrying it is updated]\n" +
+    known +
+    "  SURFACES THIS TOOL CANNOT SEE - check them yourself, this is where the " +
+    "class actually bites:\n" +
+    "    - memory files (MEMORY.md and the auto-memory topic files) - the " +
+    "highest-traffic surface, and the one that has actually been missed\n" +
+    "    - docs/ and specs that state the same claim\n" +
+    "    - anything already PUBLISHED (Discord, landing copy, release notes) - " +
+    "superseding a note cannot reach those\n" +
+    "  If a surface is fine as-is, that is a real answer. Leaving it " +
+    "unchecked is not."
+  );
+}
+
 export async function handleSupersede(
   projectDb: Database,
   globalDb: Database,
@@ -244,10 +322,30 @@ export async function handleSupersede(
   })();
 
   const reasonNote = input.reason ? ` Reason: ${input.reason}.` : "";
+
+  // Best-effort: a propagation hint must never fail the supersede itself.
+  let propagation = "";
+  try {
+    const refRow = db
+      .query(`SELECT code_refs FROM notes WHERE id = ?`)
+      .get(input.old_id) as { code_refs: string | null } | undefined;
+    let refs: string[] = [];
+    if (refRow?.code_refs) {
+      try {
+        const parsed = JSON.parse(refRow.code_refs);
+        if (Array.isArray(parsed)) refs = parsed.filter((r) => typeof r === "string");
+      } catch {
+        refs = refRow.code_refs.split(",").map((r) => r.trim()).filter(Boolean);
+      }
+    }
+    propagation = formatPropagationSurfaces(db, input.old_id, refs);
+  } catch {
+    propagation = "";
+  }
   return {
     superseded: true,
     old_id: input.old_id,
     new_id: newId,
-    message: `Superseded "${input.old_id}" with "${newId}".${reasonNote}`,
+    message: `Superseded "${input.old_id}" with "${newId}".${reasonNote}${propagation}`,
   };
 }
