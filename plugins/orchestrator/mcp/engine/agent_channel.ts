@@ -204,6 +204,27 @@ export const INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
  */
 export const COMPACT_GRACE_MS = 30 * 60 * 1000;
 
+/**
+ * 0.32.2: the refractory floor became FLEET-WIDE in 0.32.1, and that changes
+ * who is responsible - so the alert has to say so.
+ *
+ * Each session's MCP process emits over its OWN transport, so an alert reaches
+ * exactly one session. Before 0.32.1 each process kept a private floor, so
+ * every session eventually got its own copy and any of them could triage.
+ * Now the first emit suppresses every other process for the window, which is
+ * the point (that duplication was most of the noise) but has a sharp edge:
+ * exactly ONE session is told, and if it assumes the fleet was told too,
+ * nobody triages and the suppressor has converted noise into silence.
+ *
+ * Diffusion of responsibility is the predictable failure when a group appears
+ * to share a duty that has in fact been assigned to one member. The reader
+ * cannot know the floor is shared unless the text says it, so it says it.
+ */
+export const INGRESS_SOLE_RECIPIENT_NOTE =
+  `You are very likely the ONLY session that received this - the alert now ` +
+  `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` +
+  `was told or is already looking. Resolve it or say out loud that you are not.`;
+
 /** Event types that mean "this session is rebuilding context, of course it is
  *  quiet". Both directions of the compact-recovery handshake count. */
 export const COMPACT_EVENT_TYPES = [
@@ -997,7 +1018,9 @@ export class AgentChannel {
               `ask the user to check that terminal (Enter/Escape, then /mcp). Asking a ` +
               `human to interrupt a working terminal is the expensive error here, and it ` +
               `is the one this alert has actually caused.\n` +
-              `Note: the subject cannot see this message. If it needs to know, tell it.`,
+              `Note: the subject cannot see this message. If it needs to know, tell it.
+` +
+              INGRESS_SOLE_RECIPIENT_NOTE,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,

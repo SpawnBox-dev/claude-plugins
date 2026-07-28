@@ -25554,6 +25554,7 @@ var INGRESS_CHECK_INTERVAL_MS = 30000;
 var FLEET_DORMANT_THRESHOLD_MS = 15 * 60 * 1000;
 var INGRESS_REFRACTORY_MS = 30 * 60 * 1000;
 var COMPACT_GRACE_MS = 30 * 60 * 1000;
+var INGRESS_SOLE_RECIPIENT_NOTE = `You are very likely the ONLY session that received this - the alert now ` + `suppresses fleet-wide for 30min after one emit, so do not assume a peer ` + `was told or is already looking. Resolve it or say out loud that you are not.`;
 var COMPACT_EVENT_TYPES = [
   "pa_compact_recovery",
   "post_compact_recovery"
@@ -25913,7 +25914,8 @@ class AgentChannel {
 ` + `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` + `there?"). Liveness rides along free with the answer you already wanted, so ` + `asking costs nothing extra. A busy-but-healthy session answers; a parked ` + `one cannot.
 ` + `  * IT ANSWERED RECENTLY -> do nothing. A session that produced output ` + `minutes ago is alive, and re-asking spends a peer's turn to learn what you ` + `already know.
 ` + `  ONLY after a FROZEN transcript AND silence to a direct address should you ` + `ask the user to check that terminal (Enter/Escape, then /mcp). Asking a ` + `human to interrupt a working terminal is the expensive error here, and it ` + `is the one this alert has actually caused.
-` + `Note: the subject cannot see this message. If it needs to know, tell it.`,
+` + `Note: the subject cannot see this message. If it needs to know, tell it.
+` + INGRESS_SOLE_RECIPIENT_NOTE,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,

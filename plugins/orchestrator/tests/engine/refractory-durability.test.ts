@@ -13,6 +13,7 @@ import {
   compactGraceActive,
   COMPACT_GRACE_MS,
   ingressRefractoryElapsed,
+  INGRESS_SOLE_RECIPIENT_NOTE,
 } from "../../mcp/engine/agent_channel";
 
 // ===========================================================================
@@ -207,5 +208,22 @@ describe("0.32.1: compaction grace reads the published reason", () => {
     expect(
       lastSystemEventFrom(stateDir, ["pa_compact_recovery"], SUBJECT)
     ).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// 0.32.2: making the floor fleet-wide reassigns responsibility. Say so.
+// ===========================================================================
+describe("0.32.2: the alert states that its reader is the only recipient", () => {
+  test("names the sole-recipient fact AND asks for an explicit hand-off", () => {
+    // A shared floor means the first emit silences every other process, so
+    // exactly one session hears about it. If that session assumes the fleet
+    // was told, the suppressor has traded noise for silence - which is the
+    // worse of the two failures, because nothing reports it.
+    const t = INGRESS_SOLE_RECIPIENT_NOTE.toLowerCase();
+    expect(t).toContain("only session");
+    // Must not merely inform - it has to close the loop either way, otherwise
+    // a reader who declines to triage leaves no trace that nobody did.
+    expect(t).toMatch(/say|declare|out loud/);
   });
 });
