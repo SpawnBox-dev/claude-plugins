@@ -18,6 +18,21 @@ If the M flag isn't there after a source change, you forgot to rebuild. Do not c
 
 **Automated backstop:** `tests/dist-freshness.test.ts` FAILS in the suite when `dist/server.js` is older than the newest `mcp/` source file - so a stale bundle can no longer pass `bun test` and reach a commit. If that test fails, the fix is always `bun run build` (risk `206a0af3`: this exact staleness made 0.30.56-0.30.65's code inert at runtime for a month; caught by a code-reviewer on a flap-code change).
 
+### Do not write files through a shell heredoc in this environment
+
+**Use `Write` for new files and `Edit` for changes. Not `python - << 'PY'`, not `cat > file << 'EOF'`.**
+
+This is a tooling rule earned four times in one session (2026-07-28), each time costing more than the defect being fixed:
+
+- A Python heredoc **truncated `orient.ts` to 0 bytes** - `io.open(p,"w")` truncates before the `UnicodeEncodeError` fires on a lone surrogate, so the failure destroys the file and then reports.
+- A collapsed `\\` -> `\` made TypeScript read `\r` as a control character and "proved" a `normalizeCodeRef` bug **that did not exist** - real reasoning time spent chasing a defect the tooling invented.
+- `lines.join("\n")` in an anchor string arrived as a literal newline, so the match silently failed.
+- The same collapse twice more inside `.split("\n")`, producing unterminated string literals in a test file.
+
+**Why it is not a care problem:** Git Bash on Windows, plus Python reading from stdin, plus backslash-bearing TypeScript is three escaping layers, and **each one silently REWRITES the content instead of failing.** You get a plausible-looking file, not an error. Every instance above ended in falling back to `Write`/`Edit` anyway - after paying for the attempt.
+
+If a shell script is genuinely required: a quoted delimiter (`<< 'PY'`), `errors="surrogatepass"`, and `String.raw` each close one layer. The reliable move is not to open the layers.
+
 ### Publish checklist (the bump-and-ship flow)
 
 Publishing = the marketplace registry picks up whatever is on `main`. Do ALL of these in ONE changeset, in order - skipping the build is the trap above:
