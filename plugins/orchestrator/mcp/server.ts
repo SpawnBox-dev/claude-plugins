@@ -24,6 +24,7 @@ import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
 import { resolveNoteId } from "./tools/id_resolver";
+import { supersededSuffix } from "./tools/recall";
 import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, codeRefsInput } from "./utils";
@@ -1072,9 +1073,28 @@ server.tool(
     if (result.detail) {
       const age = formatAge(result.detail.updated_at);
       const src = result.detail.source_session ? ` by:${result.detail.source_session.slice(0, 8)}` : "";
-      const supSuffix = result.detail.superseded_by
-        ? ` [SUPERSEDED by ${result.detail.superseded_by}]`
-        : "";
+      // 0.36.0: a SELF-supersede is corruption, not a supersede, and it must
+      // not render as one.
+      //
+      // Detail-mode lookup deliberately returns superseded notes - that is
+      // correct, you often want to read a retired note by id. It labels them
+      // `[SUPERSEDED by <id>]`. But when the id is the note's OWN, that label
+      // reads as an ordinary retirement unless the reader compares two UUIDs by
+      // eye, and the note is simultaneously invisible to every search-mode
+      // query (which filters superseded_by IS NOT NULL). So the one surface
+      // that can still see the damage describes it as normal.
+      //
+      // Found via SA-df343a05, checking for exactly this defect and reaching
+      // for `lookup({id})` - the path that returns the note regardless. Their
+      // result was genuinely clean, but the method could not have told them
+      // otherwise. SA-5a433456's rule is the general fix and is worth stating
+      // here: to check for a SILENT-DISAPPEARANCE defect, search for what
+      // should be there rather than confirming what is.
+      //
+      // The write path can no longer create this (0.33.2 refuses it), but rows
+      // written by earlier builds persist - and the fleet is still on 0.31.3,
+      // where the defect is live. Detection has to survive the fix.
+      const supSuffix = supersededSuffix(result.detail.id, result.detail.superseded_by);
       text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
       if (!summaryMode && result.detail.code_refs && result.detail.code_refs.length > 0) {
         text += `\ncode_refs: [${result.detail.code_refs.join(", ")}]`;

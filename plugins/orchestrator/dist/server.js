@@ -22257,6 +22257,14 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     message: "Provide either a query, an id, or a type/tag filter to recall notes."
   };
 }
+function supersededSuffix(id, supersededBy) {
+  if (!supersededBy)
+    return "";
+  if (supersededBy === id) {
+    return ` [CORRUPT: SELF-SUPERSEDED - this note points at ITSELF as its own ` + `replacement, so it is hidden from every search while still returning by ` + `id. Repair with update_note({id, ...}) to clear it, or supersede_note ` + `against a real replacement.]`;
+  }
+  return ` [SUPERSEDED by ${supersededBy}]`;
+}
 
 // mcp/engine/composer.ts
 var STALE_DAYS = 30;
@@ -27209,7 +27217,7 @@ server.tool("lookup", "Search what the team already knows about this code/decisi
   if (result.detail) {
     const age = formatAge(result.detail.updated_at);
     const src = result.detail.source_session ? ` by:${result.detail.source_session.slice(0, 8)}` : "";
-    const supSuffix = result.detail.superseded_by ? ` [SUPERSEDED by ${result.detail.superseded_by}]` : "";
+    const supSuffix = supersededSuffix(result.detail.id, result.detail.superseded_by);
     text += `
 
 **${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;

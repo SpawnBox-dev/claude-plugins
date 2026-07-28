@@ -582,3 +582,42 @@ export async function handleRecall(
     message: "Provide either a query, an id, or a type/tag filter to recall notes.",
   };
 }
+
+/**
+ * 0.36.0: how a superseded note is labelled in detail-mode lookup - and why a
+ * SELF-supersede gets its own label rather than the ordinary one.
+ *
+ * Detail mode deliberately returns superseded notes; reading a retired note by
+ * id is a legitimate thing to want, and the `[SUPERSEDED by <id>]` suffix
+ * carries the context. But a note whose superseded_by is its OWN id is not
+ * retired, it is CORRUPT: it is hidden from every search-mode query (all of
+ * which filter superseded notes) while still returning by id, and it points at
+ * itself as its own replacement. Rendered with the ordinary label, the only
+ * surface that can still see the damage describes it as normal - the reader
+ * would have to compare two UUIDs by eye to notice.
+ *
+ * Found because SA-df343a05 went looking for exactly this defect and reached
+ * for `lookup({id})`, the path that returns the note either way. Their result
+ * was genuinely clean, but the method could not have told them otherwise.
+ * SA-5a433456's rule is the general form: to check for a SILENT-DISAPPEARANCE
+ * defect, search for what SHOULD be there rather than confirming what is.
+ *
+ * The write path can no longer create this (supersede refuses it since
+ * 0.33.2), but rows written by earlier builds persist, and the fleet is still
+ * on 0.31.3 where the defect is live. Detection must outlive the fix.
+ */
+export function supersededSuffix(
+  id: string,
+  supersededBy: string | null | undefined
+): string {
+  if (!supersededBy) return "";
+  if (supersededBy === id) {
+    return (
+      ` [CORRUPT: SELF-SUPERSEDED - this note points at ITSELF as its own ` +
+      `replacement, so it is hidden from every search while still returning by ` +
+      `id. Repair with update_note({id, ...}) to clear it, or supersede_note ` +
+      `against a real replacement.]`
+    );
+  }
+  return ` [SUPERSEDED by ${supersededBy}]`;
+}
