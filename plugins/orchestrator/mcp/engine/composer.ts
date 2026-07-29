@@ -532,6 +532,17 @@ export function composeBriefing(
         .all()
         .map(toSummary)
     : [];
+  // ORDER BY created_at ASC IS LOAD-BEARING - do not "improve" it to priority
+  // or recency. SA-90bf73bd's observation after the enumeration: the six span
+  // 62 to 105 days, and THE ATTENTION THEY GOT RAN OPPOSITE TO THEIR AGE. The
+  // NEWEST (ce4b8d34, 62d) surfaced by accident and anchored an hour of fleet
+  // discussion; the OLDEST (57d18231, 105d - world corruption and datapack
+  // loss, community-reported) went unmentioned until someone listed the set.
+  // So the hidden items were not uniformly hidden: whichever one happened to
+  // get mentioned became the one that felt urgent.
+  // Oldest-first, with the [open Nd] count rendered beside it, deliberately
+  // INVERTS the attention order that produced the neglect. Every field here is
+  // already sorted by severity (all critical) and none by accident of mention.
 
   // R3.3: curation candidates - maintenance-worthy notes surfaced at briefing time
   const curation_candidates = include("curation_candidates")
