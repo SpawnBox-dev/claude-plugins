@@ -183,6 +183,24 @@ Every advisory this plugin emits competes for the same scarce attention, and a b
 
 Note the triggers added in 0.30.75-0.30.85 use **fixed** text. They are state-gated so they fire rarely, which mitigates habituation - but if any starts getting filtered, remedy 2 is the cheap next step.
 
+### WHERE to put a guard (decide this BEFORE deciding the wording)
+
+On 2026-07-29 five sessions independently broke a rule **that was in their context at the time**. Not forgotten - present, and inert:
+
+- I wrote the heredoc rule into this file, an anti-pattern note AND a code comment, then broke it twice - the second time while fixing the first.
+- `b14fafa3` named asymmetric scrutiny and violated it one paragraph later.
+- `df343a05` held a first-hand refutation in its own transcript and never retrieved it.
+- PA wrote "two unverified quantities agreeing is not resolution", then resolved two unverified quantities in the next message.
+- `90bf73bd` guessed three method-shaped assumptions in a row with the anti-method-assumption nudge **on screen each time**, and separately hit a `/tmp` trap it had documented the day before.
+
+**So the failure is not insufficient reminding, and a tenth reminder is not neutral - it dilutes the nudges that still work.** `60f2fdc2` diagnosed decay-to-chrome 106 days ago and three remedies are already on file for that one cause. Rank the surfaces before adding anything:
+
+1. **A TEST OR GATE - strongest.** It runs unprompted and can return "no" without anyone remembering it exists. `tests/hook-wiring.test.ts` is the worked example: 0.37.0's guard shipped inert behind thirteen green tests because they all exercised a pure function; the wiring test asserts the config instead and was proved to fail against the shipped bundle before being trusted.
+2. **ATTACHED TO THE MOMENT OF THE ACTION - weaker but real.** A pre-flight line inside the skill step that performs the work, or a caveat inside the tool output that carries the risk. `df343a05`'s refinement, and it matters: **a skill file is read ONCE per session at the moment work starts, so it cannot habituate the way repeating text does.** `90bf73bd` adds that several checks attach to a QUERY rather than a build step - "result count equals your limit means truncated", "derive the count yourself", "introspect the field name rather than guessing it" - and those still fire at the right instant.
+3. **AN EVERY-TURN NUDGE - fires at every instant, which is the same as none.** Reserve it for state-changed, specific, actionable content (rules 1 and 2 below). It is the wrong home for a general discipline.
+
+**If a discipline cannot be attached to a test, a query, or the step that performs the action, it probably cannot be mechanised - and saying so honestly beats shipping a reminder that trains dismissal.** The corollary bites: declining to add a nudge is usually the correct application of this section, and the only version of it that is not self-refuting.
+
 **Six rules, each earned from a live failure:**
 
 1. **Fire on STATE CHANGE, not on a tick.** The loop-close nudge fired ~30 times across ~40 turns naming the same work item; PA stopped reading it by turn ten and said outright that if it had ever named a *different* item, it would have been missed. The sibling roster rendered 5-15 times per turn. Both are now content-keyed: identical repeat suppressed, any real change renders immediately, with a floor so a static state cannot vanish entirely.
