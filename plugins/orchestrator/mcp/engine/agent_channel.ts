@@ -20,6 +20,7 @@
 import { openSync, readSync, closeSync, existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
 import { parseAddressing } from "./addressing";
+import { lastCleanShutdownMs, readLifecycleTail, restartExplainsSilence } from "./restart_witness";
 import { filterEvent, type FilteredEvent } from "./agent_channel_filter";
 import {
   readSessions,
@@ -790,7 +791,38 @@ export class AgentChannel {
         // X" nudge for a session that recovers on its own is a benign cost;
         // suppressing it would risk muting a real egress-death. The self-heal
         // path is covered by tests (agent_channel_flap egress self-heal case).
-        if (!this.egressEmitted.has(sid)) {
+        // 0.41.0: A RESTART IS NOT A DEATH, and the log says which it was.
+        //
+        // This alert's own triage asks "did anything just restart the MCP
+        // servers? Then expect this and wait it out" - a correct discriminator
+        // addressed to a reader who cannot see a reload run in someone else's
+        // terminal. The restart record can.
+        //
+        // Cost that prompted it (2026-07-29): a rolling /plugin update across
+        // seven sessions produced a benign firing one second into each process
+        // handoff. The first pulled four sessions into transcript sampling and
+        // 45-second re-reads to establish what the log states outright, with
+        // four more reloads still queued.
+        //
+        // KEYS ON THE SHUTDOWN LINE. PA described the signature as a clean
+        // shutdown followed by a start; both events are real, but only the
+        // SHUTDOWN line carries a timestamp - measured, 0 of 34 start lines
+        // have an `at=` field and 23 of 23 shutdown lines do. A first version
+        // parsed the start line and would have returned null forever.
+        //
+        // DIRECTION IS LOAD-BEARING (PA's framing): key on the BENIGN-case
+        // signal to SUPPRESS, never on the failure-case signal to ALERT. A
+        // restart writes a start line; an egress death writes nothing at all -
+        // PA's 58-minute outage had no start line and no shutdown line, just a
+        // live process with a severed transport. So ABSENCE of evidence falls
+        // through to alerting, which fails SAFE. Keying on the failure signal
+        // would fail SILENT, going quiet exactly when it mattered. Same reason
+        // readLifecycleTail returns "" on any error rather than throwing.
+        const restartedRecently = restartExplainsSilence(
+          lastCleanShutdownMs(readLifecycleTail(), sid),
+          now,
+        );
+        if (!this.egressEmitted.has(sid) && !restartedRecently) {
           this.emit({
             // 0.30.93: KEEP THE SIGNAL, DROP THE DIAGNOSIS. The accepted
             // false-positive decision above stands and is deliberately NOT

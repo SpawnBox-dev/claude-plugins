@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join7 } from "path";
-import { existsSync as existsSync8, readFileSync as readFileSync4, writeFileSync as writeFileSync2, statSync as statSync5 } from "fs";
+import { resolve, join as join8 } from "path";
+import { existsSync as existsSync9, readFileSync as readFileSync4, writeFileSync as writeFileSync2, statSync as statSync6 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -25545,8 +25545,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync4, readdirSync as readdirSync3 } from "fs";
-import { join as join6 } from "path";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync5, readdirSync as readdirSync3 } from "fs";
+import { join as join7 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -25605,6 +25605,63 @@ function parseAddressing(content, sender, sessions) {
     override_command,
     unresolved_addresses: unresolved
   };
+}
+
+// mcp/engine/restart_witness.ts
+import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync4 } from "fs";
+import { join as join6 } from "path";
+import { homedir as homedir3 } from "os";
+var RESTART_WINDOW_MS = 4 * 60 * 1000;
+function lifecycleLogPath() {
+  return join6(process.env.CLAUDE_CONFIG_DIR || join6(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+}
+function lastCleanShutdownMs(logTail, sessionId) {
+  let latest = null;
+  for (const line of logTail.split(`
+`)) {
+    if (!line.includes("shutdown triggered="))
+      continue;
+    if (!line.includes(sessionId))
+      continue;
+    const m = line.match(/at=(\S+)/);
+    if (!m)
+      continue;
+    const ts = Date.parse(m[1]);
+    if (!Number.isFinite(ts))
+      continue;
+    if (latest === null || ts > latest)
+      latest = ts;
+  }
+  return latest;
+}
+function restartExplainsSilence(lastRestart, now3, windowMs = RESTART_WINDOW_MS) {
+  if (lastRestart === null)
+    return false;
+  const age = now3 - lastRestart;
+  if (age < 0)
+    return true;
+  return age < windowMs;
+}
+function readLifecycleTail(bytes = 64 * 1024, path2 = lifecycleLogPath()) {
+  try {
+    if (!existsSync7(path2))
+      return "";
+    const size = statSync4(path2).size;
+    const start = Math.max(0, size - bytes);
+    const len = size - start;
+    if (len <= 0)
+      return "";
+    const fd = openSync(path2, "r");
+    try {
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, start);
+      return buf.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
 }
 
 // mcp/engine/agent_channel_filter.ts
@@ -25955,7 +26012,8 @@ class AgentChannel {
         graceTicks: DEPART_GRACE_TICKS
       });
       if (verdict === "egress_suspect") {
-        if (!this.egressEmitted.has(sid)) {
+        const restartedRecently = restartExplainsSilence(lastCleanShutdownMs(readLifecycleTail(), sid), now3);
+        if (!this.egressEmitted.has(sid) && !restartedRecently) {
           this.emit({
             content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` + `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` + `egress dropped), and it is also exactly what a RESTARTING transport looks ` + `like for a few seconds.
 ` + `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` + `restart or a self-healing wedge is back by then; a real egress death is not. ` + `This measurement can be accurate about a moment that has already passed.
@@ -26000,7 +26058,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -26008,21 +26066,21 @@ class AgentChannel {
   readTranscriptTail(sid) {
     let fd;
     try {
-      const path2 = join6(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync4(path2).size;
+      const path2 = join7(this.projectsHashDir, `${sid}.jsonl`);
+      const size = statSync5(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
         return "";
-      fd = openSync(path2, "r");
+      fd = openSync2(path2, "r");
       const chunk = Buffer.allocUnsafe(length);
-      const n = readSync(fd, chunk, 0, length, start);
+      const n = readSync2(fd, chunk, 0, length, start);
       return chunk.subarray(0, n).toString("utf8");
     } catch {
       return null;
     } finally {
       if (fd !== undefined)
-        closeSync(fd);
+        closeSync2(fd);
     }
   }
   detectIngress(current, now3) {
@@ -26031,7 +26089,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -26045,7 +26103,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync4(join6(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -26110,9 +26168,9 @@ class AgentChannel {
     }
   }
   listJsonlFiles() {
-    if (!existsSync7(this.projectsHashDir))
+    if (!existsSync8(this.projectsHashDir))
       return [];
-    return readdirSync3(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join6(this.projectsHashDir, f));
+    return readdirSync3(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join7(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -26246,7 +26304,7 @@ class AgentChannel {
   processFile(file, sessions, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync4(file);
+      stat = statSync5(file);
     } catch {
       return false;
     }
@@ -26264,16 +26322,16 @@ class AgentChannel {
     let buf;
     let fd;
     try {
-      fd = openSync(file, "r");
+      fd = openSync2(file, "r");
       const length = stat.size - lastOffset;
       const chunk = Buffer.allocUnsafe(length);
-      const bytesRead = readSync(fd, chunk, 0, length, lastOffset);
+      const bytesRead = readSync2(fd, chunk, 0, length, lastOffset);
       buf = chunk.subarray(0, bytesRead).toString("utf8");
     } catch {
       return false;
     } finally {
       if (fd !== undefined)
-        closeSync(fd);
+        closeSync2(fd);
     }
     const lines = buf.split(`
 `);
@@ -26592,10 +26650,10 @@ async function handleRespondToPermission(input, ctx) {
 }
 
 // mcp/server.ts
-import { homedir as homedir3 } from "os";
+import { homedir as homedir4 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join7(import.meta.dir, "..", "package.json");
+    const pkgPath = join8(import.meta.dir, "..", "package.json");
     return JSON.parse(readFileSync4(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
@@ -26658,12 +26716,12 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join7(projectDir, ".orchestrator-state");
+  const stateDir = join8(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join7(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join8(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync8(perPidFile)) {
+      if (existsSync9(perPidFile)) {
         const raw = readFileSync4(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
@@ -26674,15 +26732,15 @@ function getFallbackSessionId() {
       }
     } catch {}
   }
-  const file = join7(stateDir, "active-session");
+  const file = join8(stateDir, "active-session");
   try {
-    if (existsSync8(file)) {
+    if (existsSync9(file)) {
       const raw = readFileSync4(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join7(stateDir, `active-session-${claudePid}`);
-          if (!existsSync8(perPidFile)) {
+          const perPidFile = join8(stateDir, `active-session-${claudePid}`);
+          if (!existsSync9(perPidFile)) {
             try {
               writeFileSync2(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
@@ -26974,7 +27032,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   try {
     const self = process.argv[1];
     if (self) {
-      bundleStamp = ` - bundle ${statSync5(self).mtime.toISOString()}`;
+      bundleStamp = ` - bundle ${statSync6(self).mtime.toISOString()}`;
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
@@ -26986,8 +27044,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join7(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync8(fallbackFile);
+    const fallbackFile = join8(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync9(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -27019,7 +27077,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
   try {
-    const channelStateDir = join7(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const channelStateDir = join8(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
     const alertStats = alertEmissionStats(channelStateDir);
     if (alertStats.length > 0) {
       lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
@@ -28267,7 +28325,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join7(homedir3(), ".claude", "projects", projectHash);
+  const projectsHashDir = join8(homedir4(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -28283,7 +28341,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join7(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join8(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -28429,7 +28487,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
