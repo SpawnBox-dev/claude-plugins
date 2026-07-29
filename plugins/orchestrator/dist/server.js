@@ -24354,13 +24354,9 @@ function handlePreToolUse(ctx, args) {
   if (args.tool_name === "Bash") {
     const cmd = args.payload?.command ?? "";
     if (detectsRiskyHeredoc(cmd)) {
-      return {
-        permissionDecision: "allow",
-        additionalContext: codeRefsHint ? `${HEREDOC_WARNING}
-
-${codeRefsHint}` : HEREDOC_WARNING
-      };
+      return { permissionDecision: "allow", additionalContext: HEREDOC_WARNING };
     }
+    return {};
   }
   const turn = ctx.tracker.getCurrentTurn(args.session_id);
   if (turn < 2) {
@@ -28165,7 +28161,8 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
   agent_id: exports_external.string().optional(),
   file_path: exports_external.string().optional(),
   user_prompt: exports_external.string().optional(),
-  tool_input_id: exports_external.string().optional()
+  tool_input_id: exports_external.string().optional(),
+  command: exports_external.string().optional()
 }, async (args) => {
   if (!sessionTracker) {
     return { content: [{ type: "text", text: "{}" }] };
@@ -28178,6 +28175,8 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
     payload.user_prompt = args.user_prompt;
   if (args.tool_input_id)
     payload.tool_input_id = args.tool_input_id;
+  if (args.command)
+    payload.command = args.command;
   const result = handleHookEvent({ db, tracker: sessionTracker }, {
     event: args.event,
     session_id: args.session_id,

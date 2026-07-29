@@ -2250,6 +2250,11 @@ server.tool(
     file_path: z.string().optional(),
     user_prompt: z.string().optional(),
     tool_input_id: z.string().optional(),
+    // 0.38.0: the Bash command line, for the heredoc guard. Declared here
+    // BECAUSE THIS BOUNDARY SILENTLY DROPS WHAT IT DOES NOT DECLARE - the
+    // schema builds `payload` from named fields only, so an undeclared key
+    // never reaches the handler and the feature reading it can never fire.
+    command: z.string().optional(),
   },
   async (args) => {
     if (!sessionTracker) {
@@ -2260,6 +2265,7 @@ server.tool(
     if (args.file_path) payload.file_path = args.file_path;
     if (args.user_prompt) payload.user_prompt = args.user_prompt;
     if (args.tool_input_id) payload.tool_input_id = args.tool_input_id;
+    if (args.command) payload.command = args.command;
     const result = handleHookEvent(
       { db, tracker: sessionTracker },
       {

@@ -57,6 +57,22 @@
             }
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:orchestrator:core",
+            "tool": "_hook_event",
+            "input": {
+              "event": "PreToolUse",
+              "session_id": "${session_id}",
+              "tool_name": "${tool_name}",
+              "command": "${tool_input.command}"
+            }
+          }
+        ]
       }
     ],
     "PostToolUse": [

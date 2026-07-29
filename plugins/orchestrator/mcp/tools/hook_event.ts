@@ -1138,16 +1138,18 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
   // the sacrosanct-lockout shape". A loud warning at the moment of use is the
   // whole ask - SA-90bf73bd's point is that a rule stored as knowledge loses to
   // a tool already in hand, so the remedy has to be here rather than in docs.
+  //
+  // SCOPED HARD TO THE HEREDOC CHECK, then RETURN. Bash is the most-used tool
+  // in a session, so letting it fall through to the turn>=2 "no orchestrator
+  // tool this turn" nag below would multiply nudge volume across the fleet -
+  // the exact habituation failure that rules 1 and 3 of the nudge-design
+  // section exist to prevent. Bash gets this one check and nothing else.
   if (args.tool_name === "Bash") {
     const cmd = (args.payload?.command as string | undefined) ?? "";
     if (detectsRiskyHeredoc(cmd)) {
-      return {
-        permissionDecision: "allow",
-        additionalContext: codeRefsHint
-          ? `${HEREDOC_WARNING}\n\n${codeRefsHint}`
-          : HEREDOC_WARNING,
-      };
+      return { permissionDecision: "allow", additionalContext: HEREDOC_WARNING };
     }
+    return {};
   }
 
   // Option-B escalation preserved from the legacy bash hook: nag turn 2-3
