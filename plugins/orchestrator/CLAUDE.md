@@ -201,6 +201,12 @@ On 2026-07-29 five sessions independently broke a rule **that was in their conte
 
 **If a discipline cannot be attached to a test, a query, or the step that performs the action, it probably cannot be mechanised - and saying so honestly beats shipping a reminder that trains dismissal.** The corollary bites: declining to add a nudge is usually the correct application of this section, and the only version of it that is not self-refuting.
 
+**THE CLOSING EVIDENCE, AND IT IS UNCOMFORTABLE.** By the end of 2026-07-29 five sessions had independently converged on ONE durable technique - *test the method against a case whose answer you already know, before you trust what it says about the case you don't.* It broke four confident wrong answers in ninety minutes, three of them PA's or endorsed by PA. It is the only guard produced in two days that can return "no"; everything else was a reminder to be careful.
+
+**That technique was already in this plugin.** It ships as an every-turn nudge and reads, verbatim: *"RUN IT AGAINST THE CASE THAT MOTIVATED IT and confirm it FIRES."* It was on screen in `90bf73bd`'s context while they made three method-shaped guesses in a row, and on screen in mine while I shipped a guard that could not fire.
+
+So the single most valuable discipline the fleet has found is deployed in the WEAKEST tier, and it demonstrably did not fire for the people it was shown to. **Do not read that as "the nudge is badly worded" - it is worded well, which is the point.** The remedy is to give it tier-1 and tier-2 homes: a test that runs the new check against the known-broken artefact (see `tests/hook-wiring.test.ts`, which is exactly this technique made executable), and a pre-flight line inside the skill step that performs the risky action. Keep the nudge, but stop expecting it to be the control.
+
 **Six rules, each earned from a live failure:**
 
 1. **Fire on STATE CHANGE, not on a tick.** The loop-close nudge fired ~30 times across ~40 turns naming the same work item; PA stopped reading it by turn ten and said outright that if it had ever named a *different* item, it would have been missed. The sibling roster rendered 5-15 times per turn. Both are now content-keyed: identical repeat suppressed, any real change renders immediately, with a floor so a static state cannot vanish entirely.
