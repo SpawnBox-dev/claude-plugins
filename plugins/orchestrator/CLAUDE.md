@@ -205,7 +205,15 @@ On 2026-07-29 five sessions independently broke a rule **that was in their conte
 
 **That technique was already in this plugin.** It ships as an every-turn nudge and reads, verbatim: *"RUN IT AGAINST THE CASE THAT MOTIVATED IT and confirm it FIRES."* It was on screen in `90bf73bd`'s context while they made three method-shaped guesses in a row, and on screen in mine while I shipped a guard that could not fire.
 
-So the single most valuable discipline the fleet has found is deployed in the WEAKEST tier, and it demonstrably did not fire for the people it was shown to. **Do not read that as "the nudge is badly worded" - it is worded well, which is the point.** The remedy is to give it tier-1 and tier-2 homes: a test that runs the new check against the known-broken artefact (see `tests/hook-wiring.test.ts`, which is exactly this technique made executable), and a pre-flight line inside the skill step that performs the risky action. Keep the nudge, but stop expecting it to be the control.
+So the single most valuable discipline the fleet has found is deployed in the WEAKEST tier, and it demonstrably did not fire for the people it was shown to. **Do not read that as "the nudge is badly worded" - it is worded well, which is the point.** And it is not that subordinates skim: PA had the same text on screen while building a control that could only return "yes". Six sessions, four wrong answers, one nudge firing continuously throughout, zero prevented.
+
+**PA's framing is the one to keep: A GUARD THAT FIRES UNCONDITIONALLY IS INDISTINGUISHABLE FROM NO GUARD.** This project already shipped the product analogue - a tray indicator lit whenever the icon was visible, which therefore told nobody anything. The every-turn nudge is that light: always on, so never read.
+
+**What actually converted, and the difference is precise.** Not "run a positive control" as a standing reminder, but: *"`diag-7862c2ed-f20` exists, from the same reporter, in the same week - find it with your method."* That was **a named case, addressed to one session, delivered at the moment its conclusion was about to ship.** Specific, timed, falsifiable. The nudge is none of the three.
+
+**So the test for any new advisory is whether it can observe that the thing it warns about is actually happening.** If it cannot, it is documentation with a delivery schedule. The version of this nudge that would have worked does not fire every turn - it fires when a session is about to report a null, a count, or a clean result, and it names what to test against.
+
+The remedy is tier-1 and tier-2 homes: a test that runs the new check against the known-broken artefact (see `tests/hook-wiring.test.ts`, which is exactly this technique made executable), and a pre-flight line inside the skill step that performs the risky action. Keep the nudge, but stop expecting it to be the control.
 
 **Six rules, each earned from a live failure:**
 
