@@ -238,15 +238,39 @@ export const MTIME_DELIBERATELY_UNUSED =
  * Keep this resistant to the obvious "optimisation": addressing looks
  * expensive beside two file reads, and it is the only step that reaches the
  * cell nothing else can.
+ *
+ * 0.41.2 - CORRECTED MY OWN OVER-CLAIM. The 0.36.1 text said "SILENCE IS THE
+ * POSITIVE RESULT, not a failed check." I meant "do not dismiss silence as the
+ * check having failed." It reads as "silence proves unreachable", which is
+ * exactly the over-trust SA-5a433456 flagged: SILENCE HAS THREE CAUSES THAT
+ * LOOK IDENTICAL - broken ingress, broken egress, or a long turn. Only one is
+ * a fault. So the correct asymmetry is A REPLY IS CONCLUSIVE, SILENCE IS NOT:
+ * a reply resolves it, silence leaves it open and earns a second look.
+ *
+ * Their sharper observation, now stated in the text: THE RELAY IS THE TEST.
+ * The alert already instructs the observer "the subject cannot see this
+ * message, if it needs to know, tell it" - and that relay is a self-verifying
+ * probe. If the subject reads it, ingress works BY CONSTRUCTION; if it answers,
+ * egress works too. One message settles both directions, which makes
+ * ingress_suspect structurally luckier than egress_suspect: its recommended
+ * action happens to be its own test, where egress needed a separate log to
+ * consult (0.41.0). They reached for a filesystem check first and it answered
+ * a question nobody had asked - hence naming the relay explicitly here.
  */
 export const INGRESS_ACTIVE_PROBE_NOTE =
   `THE IDLE CASE NEEDS AN ACTIVE PROBE. A session that is idle-and-healthy and ` +
   `one that is idle-and-unreachable look IDENTICAL to every check that only ` +
   `watches - flat transcript, fresh heartbeat, no output - because both are ` +
   `correctly doing nothing. Addressing it is what separates them: it makes an ` +
-  `event the subject has to process, so an answer proves reachability and ` +
-  `SILENCE IS THE POSITIVE RESULT, not a failed check. Escalate to "/mcp" at ` +
-  `that terminal only after silence to a direct address.`;
+  `event the subject has to process, and the relay IS the test - if the ` +
+  `subject reads it, ingress works BY CONSTRUCTION; if it answers, egress ` +
+  `works too. One message settles both directions.\n` +
+  `THE ASYMMETRY MATTERS: A REPLY IS CONCLUSIVE, SILENCE IS NOT. Silence has ` +
+  `three causes that look identical - broken ingress, broken egress, or a long ` +
+  `turn. So a reply RESOLVES this; silence leaves it OPEN and earns a second ` +
+  `look, never a conclusion. Escalate to "/mcp" at that terminal only after ` +
+  `silence to a direct address, and say you are escalating on silence rather ` +
+  `than on a confirmed fault.`;
 
 export const INGRESS_SOLE_RECIPIENT_NOTE =
   `You are very likely the ONLY session that received this - the alert now ` +

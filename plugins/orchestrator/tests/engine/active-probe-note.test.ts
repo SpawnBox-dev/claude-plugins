@@ -33,11 +33,33 @@ describe("0.36.1: the alert keeps the active probe in the triage", () => {
     expect(t).toContain("idle-and-unreachable");
   });
 
-  test("frames silence as the POSITIVE result, not a failed check", () => {
-    // The load-bearing inversion. A reader who treats silence as "the check
-    // didn't work" learns nothing from it; a reader who treats it as the
-    // finding escalates correctly.
-    expect(INGRESS_ACTIVE_PROBE_NOTE).toContain("SILENCE IS THE POSITIVE RESULT");
+  test("names the relay as the TEST, not merely a courtesy", () => {
+    // SA-5a433456's observation: the alert already tells the observer to relay
+    // to the subject, and that relay is self-verifying. If the subject reads
+    // it, ingress works by construction; if it answers, egress works too. One
+    // message settles both directions - which is cheaper than any suppressor
+    // and needs no window to tune.
+    expect(t).toContain("relay is the test");
+    expect(t).toContain("by construction");
+  });
+
+  test("A REPLY IS CONCLUSIVE, SILENCE IS NOT - corrects a 0.36.1 over-claim", () => {
+    // The 0.36.1 wording said "SILENCE IS THE POSITIVE RESULT, not a failed
+    // check." Intended as "don't dismiss silence as the check having failed";
+    // it reads as "silence proves unreachable." Silence has THREE causes that
+    // look identical - broken ingress, broken egress, or a long turn - and
+    // only one is a fault. A reader who concludes from silence escalates a
+    // healthy busy session to a human, which is the expensive error this whole
+    // alert was rewritten to stop.
+    expect(t).toContain("a reply is conclusive, silence is not");
+    expect(t).toContain("three causes");
+    // Must not have regressed to the absolute phrasing.
+    expect(INGRESS_ACTIVE_PROBE_NOTE).not.toContain("SILENCE IS THE POSITIVE RESULT");
+  });
+
+  test("escalation is framed as acting on silence, not on a confirmed fault", () => {
+    // So the human being interrupted is told the truth about why.
+    expect(t).toContain("escalating on silence rather than on a confirmed fault");
   });
 
   test("explains WHY passive checks cannot resolve it", () => {
