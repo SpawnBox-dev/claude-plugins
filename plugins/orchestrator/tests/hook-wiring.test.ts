@@ -66,6 +66,62 @@ describe("0.38.0: hook wiring reaches the handlers that read it", () => {
     expect(editBlock!.hooks[0]?.input?.file_path).toBe("${tool_input.file_path}");
   });
 
+  test("EVERY field EVERY event sends is declared AND copied - all ten events", () => {
+    // Generalised from the PreToolUse-only version after an audit found no
+    // other instance of the 0.37.0 defect. A one-off audit answers the question
+    // once; this keeps answering it. Cheap, because the invariant is uniform:
+    // a field that reaches the handler must be (a) sent by hooks.json, (b)
+    // declared in the schema, and (c) copied into payload - and (b) and (c)
+    // are separate steps that fail independently and silently.
+    //
+    // Fields consumed at the TOP LEVEL of args rather than through payload
+    // (event, session_id, tool_name, agent_id) need only (a) and (b).
+    const declared = new Set(
+      Array.from(serverSrc.matchAll(/^\s{4}(\w+):\s*z\.(?:string|enum)\(/gm), (m) => m[1])
+    );
+    const copied = new Set(
+      Array.from(serverSrc.matchAll(/payload\.(\w+) = args\.\w+/g), (m) => m[1])
+    );
+    const topLevel = new Set(["event", "session_id", "tool_name", "agent_id"]);
+
+    const problems: string[] = [];
+    for (const [event, blocks] of Object.entries(hooks.hooks as Record<string, Block[]>)) {
+      for (const block of blocks) {
+        for (const hook of block.hooks) {
+          for (const field of Object.keys(hook.input ?? {})) {
+            if (!declared.has(field)) problems.push(`${event}.${field}: NOT DECLARED in schema`);
+            else if (!topLevel.has(field) && !copied.has(field)) {
+              problems.push(`${event}.${field}: declared but NEVER COPIED into payload`);
+            }
+          }
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test("every payload field the HANDLERS read is sent by some event", () => {
+    // The inverse question, and the one that actually catches an inert feature.
+    // Asking "is anything broken?" found nothing for two days; asking "for each
+    // field the code reads, is it delivered?" found the heredoc guard in one
+    // pass. Searching for an absence always finds one - search instead for what
+    // would be there if the wiring existed.
+    const hookSrc = readFileSync(join(ROOT, "mcp", "tools", "hook_event.ts"), "utf-8");
+    const read = new Set(
+      Array.from(hookSrc.matchAll(/payload\??\.(\w+)/g), (m) => m[1])
+    );
+    const sent = new Set<string>();
+    for (const blocks of Object.values(hooks.hooks as Record<string, Block[]>)) {
+      for (const block of blocks) {
+        for (const hook of block.hooks) {
+          for (const f of Object.keys(hook.input ?? {})) sent.add(f);
+        }
+      }
+    }
+    const undelivered = [...read].filter((f) => !sent.has(f));
+    expect(undelivered).toEqual([]);
+  });
+
   test("EVERY input field any PreToolUse block sends is DECLARED in the schema", () => {
     // Layer 2. The zod schema drops undeclared keys silently, so a field can be
     // wired in hooks.json, arrive at the server, and vanish before the handler.
