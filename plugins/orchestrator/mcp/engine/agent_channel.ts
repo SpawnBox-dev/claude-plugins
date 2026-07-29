@@ -822,7 +822,39 @@ export class AgentChannel {
           lastCleanShutdownMs(readLifecycleTail(), sid),
           now,
         );
+        // 0.41.1: COUNT WHAT THIS SUPPRESSES, or its effect is unmeasurable.
+        //
+        // 0.41.0 shipped a suppressor with no record of what it suppressed.
+        // Within the hour SA-c5b207e0 asked the obvious question - "how many
+        // firings were GENERATED in that window?" - and it could not be
+        // answered from anywhere: egress emissions were never recorded (only
+        // ingress_suspect wrote to alert_refractory), and suppressions were
+        // recorded nowhere at all. So "suppressed five" and "there were two and
+        // it caught two" were indistinguishable, and PA's A/B had to be
+        // downgraded from 5-vs-0 to 1-of-5-vs-0-of-5 on c5b207e0's own count.
+        //
+        // That is note 6e65f50f - absence of complaints is not evidence when
+        // nothing records the events - committed by its author one day later,
+        // in a mechanism whose entire purpose is to make events NOT happen. A
+        // suppressor is the one kind of code where silence is the intended
+        // output, so it is the one kind that most needs a counter.
+        //
+        // Both sides now write to alert_refractory (0.32.3), so generated =
+        // emitted + suppressed, and system_status renders both. Cheap: one row
+        // per (kind, subject), already surfaced, no new store.
+        if (restartedRecently) {
+          try {
+            setAlertLastEmit(this.projectStateDir, "egress_suspect_suppressed", sid, now);
+          } catch {
+            // Counting must never break the detector it measures.
+          }
+        }
         if (!this.egressEmitted.has(sid) && !restartedRecently) {
+          try {
+            setAlertLastEmit(this.projectStateDir, "egress_suspect", sid, now);
+          } catch {
+            /* as above */
+          }
           this.emit({
             // 0.30.93: KEEP THE SIGNAL, DROP THE DIAGNOSIS. The accepted
             // false-positive decision above stands and is deliberately NOT

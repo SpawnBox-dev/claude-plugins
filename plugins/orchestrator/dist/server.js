@@ -26013,7 +26013,15 @@ class AgentChannel {
       });
       if (verdict === "egress_suspect") {
         const restartedRecently = restartExplainsSilence(lastCleanShutdownMs(readLifecycleTail(), sid), now3);
+        if (restartedRecently) {
+          try {
+            setAlertLastEmit(this.projectStateDir, "egress_suspect_suppressed", sid, now3);
+          } catch {}
+        }
         if (!this.egressEmitted.has(sid) && !restartedRecently) {
+          try {
+            setAlertLastEmit(this.projectStateDir, "egress_suspect", sid, now3);
+          } catch {}
           this.emit({
             content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` + `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` + `egress dropped), and it is also exactly what a RESTARTING transport looks ` + `like for a few seconds.
 ` + `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` + `restart or a self-healing wedge is back by then; a real egress death is not. ` + `This measurement can be accurate about a moment that has already passed.
