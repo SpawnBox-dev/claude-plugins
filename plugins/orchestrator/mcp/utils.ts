@@ -322,3 +322,40 @@ export function parseTagList(raw: string | null | undefined): string[] {
 export function normalizeTagString(raw: string | null | undefined): string {
   return parseTagList(raw).join(",");
 }
+
+/**
+ * 0.40.0: ADDITIVE tag update - union of existing and new, order preserved,
+ * case-insensitive dedupe.
+ *
+ * WHY THIS EXISTS. `update_note` and `update_work_item` both take `tags`, and
+ * both REPLACE the string wholesale. `content` has exactly the same hazard and
+ * got an additive counterpart in 0.30.72 (`append_content`) after a near-clobber
+ * - but `tags` never did. One axis protected, the identical sibling left open.
+ *
+ * The near-miss that surfaced it (SA-df343a05, 2026-07-29): they passed a
+ * non-existent `add_tags` parameter, which the non-strict schema silently
+ * swallowed while returning a success-shaped result. The obvious recovery is to
+ * retry with `tags` - and that would have wiped `discord_sourced`, the
+ * reporter's handle, and a `discord_thread:<id>` linkage off a CRITICAL
+ * data-loss work item while trying to ANNOTATE it. Destroying the reporter
+ * linkage on a bug report is unrecoverable in the KB; the thread id is the only
+ * pointer back to the human.
+ *
+ * The documented workaround was read-modify-write, which is precisely the thing
+ * an agent skips under time pressure, and which races another session anyway.
+ */
+export function mergeTags(
+  existing: string | null | undefined,
+  additions: string | null | undefined
+): string {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of [...parseTagList(existing), ...parseTagList(additions)]) {
+    const key = t.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out.join(",");
+}

@@ -20377,6 +20377,18 @@ function parseTagList(raw) {
 function normalizeTagString(raw) {
   return parseTagList(raw).join(",");
 }
+function mergeTags(existing, additions) {
+  const out = [];
+  const seen = new Set;
+  for (const t of [...parseTagList(existing), ...parseTagList(additions)]) {
+    const key = t.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out.join(",");
+}
 
 // mcp/engine/deduplicator.ts
 var MIN_SHARED_KEYWORDS = 3;
@@ -27496,11 +27508,12 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   content: exports_external.string().optional().describe("New content (REPLACES existing)."),
   append_content: exports_external.string().min(1).max(20000).optional().describe("Timestamped segment to append to existing content. Preferred over `content` for additive updates - no read-before-write required. Keywords are re-extracted; embeddings are NOT refreshed (use `content` for full rewrites when semantic search currency matters). Max 20000 characters per append - for larger additions, chunk into multiple calls or use `content` for a full rewrite."),
   context: exports_external.string().optional().describe("New context (replaces existing)"),
-  tags: exports_external.string().optional().describe("New tags (replaces existing)"),
+  tags: exports_external.string().optional().describe("New tags - REPLACES the existing set wholesale. Use `add_tags` to annotate without dropping provenance tags another session set."),
+  add_tags: exports_external.string().optional().describe("ADDITIVE: comma-separated tags to MERGE into the existing set (union, deduped case-insensitively, order preserved). Prefer this over `tags` whenever you are annotating rather than redefining - `tags` replaces wholesale and will silently drop provenance tags another session set, such as a reporter handle or a discord_thread:<id> linkage. Mutually exclusive with `tags`."),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
   code_refs: codeRefsInput("Replace the note's code_refs breadcrumb array. Pass [] to clear; omit to leave unchanged. See note() code_refs for format."),
   session_id: exports_external.string().optional().describe("Session ID - attributed to the revision snapshot.")
-}, async ({ id, content, append_content, context, tags, confidence, code_refs, session_id }) => {
+}, async ({ id, content, append_content, context, tags, add_tags, confidence, code_refs, session_id }) => {
   session_id = resolveSessionId(session_id);
   if (session_id)
     registerSessionOnce(session_id);
@@ -27526,6 +27539,9 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   if (append_content !== undefined && content !== undefined) {
     return { content: [{ type: "text", text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
   }
+  if (add_tags !== undefined && tags !== undefined) {
+    return { content: [{ type: "text", text: `Cannot provide both tags and add_tags - they are mutually exclusive. Use tags to REPLACE the whole set, add_tags to MERGE into it.` }] };
+  }
   const NOTE_CONTENT_HARD_CHARS2 = 50000;
   if (content !== undefined && content.length > NOTE_CONTENT_HARD_CHARS2) {
     return { content: [{ type: "text", text: `Note content rewrite is ${content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Primitives should stay primitive (decision 3b962e67). Split into multiple linked notes.` }] };
@@ -27548,6 +27564,8 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     updates.push("context");
   if (tags !== undefined)
     updates.push("tags");
+  if (add_tags !== undefined)
+    updates.push("add_tags");
   if (confidence)
     updates.push("confidence");
   if (code_refs !== undefined)
@@ -27556,7 +27574,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     return { content: [{ type: "text", text: "No fields to update." }] };
   }
   const timestamp = now();
-  const willWriteMainFields = content !== undefined || context !== undefined || tags !== undefined || !!confidence;
+  const willWriteMainFields = content !== undefined || context !== undefined || tags !== undefined || add_tags !== undefined || !!confidence;
   const willWriteCodeRefs = code_refs !== undefined;
   if (willWriteMainFields || willWriteCodeRefs) {
     snapshotRevision(db, id, session_id ?? null);
@@ -27575,7 +27593,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
          WHERE id = ?`, [
       newContent,
       newContext ?? null,
-      tags != null ? normalizeTagString(tags) : row.tags,
+      add_tags != null ? mergeTags(row.tags, add_tags) : tags != null ? normalizeTagString(tags) : row.tags,
       newKeywords ? newKeywords.join(",") : row.keywords,
       confidence ?? row.confidence ?? "medium",
       timestamp,
@@ -27794,11 +27812,12 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   content: exports_external.string().optional().describe("REPLACES the description WHOLESALE - the prior text is gone. To add to a work item without destroying prior enrichment, use `append_content` instead."),
   append_content: exports_external.string().min(1).max(20000).optional().describe("Timestamped segment to append to the existing description. Preferred over `content` for additive updates - no read-before-write, no risk of clobbering enrichment written by another session. Mutually exclusive with `content`. Max 20000 chars per append."),
   tags: exports_external.string().optional().describe("Replace the full tag string (comma-separated). Existing tags are overwritten - read-modify-write if you only want to add/remove one."),
+  add_tags: exports_external.string().optional().describe("ADDITIVE: comma-separated tags to MERGE into the existing set (union, deduped case-insensitively, order preserved). Prefer this over `tags` whenever you are annotating rather than redefining - `tags` replaces wholesale and will silently drop provenance tags another session set, such as a reporter handle or a discord_thread:<id> linkage. Mutually exclusive with `tags`."),
   context: exports_external.string().optional().describe("Updated context (replaces existing; empty string clears)"),
   confidence: exports_external.enum(["low", "medium", "high"]).optional(),
   code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
-}, async ({ id, status, priority, due_date, content, append_content, tags, context, confidence, code_refs, blocked_by }) => {
+}, async ({ id, status, priority, due_date, content, append_content, tags, add_tags, context, confidence, code_refs, blocked_by }) => {
   const projectDb2 = getProjectDb();
   const resolved = resolveNoteId(projectDb2, id);
   if (resolved.ambiguous) {
@@ -27820,6 +27839,9 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   }
   if (append_content !== undefined && content !== undefined) {
     return { content: [{ type: "text", text: `Cannot provide both content and append_content - they are mutually exclusive. Use content for full rewrites, append_content for additive updates.` }] };
+  }
+  if (add_tags !== undefined && tags !== undefined) {
+    return { content: [{ type: "text", text: `Cannot provide both tags and add_tags - they are mutually exclusive. Use tags to REPLACE the whole set, add_tags to MERGE into it.` }] };
   }
   const timestamp = now();
   const setFragments = [];
@@ -27858,6 +27880,12 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     setFragments.push("tags = ?");
     bindValues.push(normTags);
     changes.push(`tags: ${row.tags ?? "none"} -> ${normTags || "cleared"}`);
+  }
+  if (add_tags !== undefined) {
+    const merged = mergeTags(row.tags, add_tags);
+    setFragments.push("tags = ?");
+    bindValues.push(merged);
+    changes.push(`add_tags: ${row.tags ?? "none"} -> ${merged}`);
   }
   if (context !== undefined) {
     const newCtx = context === "" ? null : context;
