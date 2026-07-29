@@ -147,6 +147,7 @@ export function composeBriefing(
       recently_completed: [],
       overdue_work: [],
       upcoming_work: [],
+      critical_work: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
@@ -493,6 +494,45 @@ export function composeBriefing(
       .map(toSummary);
   }
 
+  // 0.39.0: CRITICAL work, regardless of status - the same defect as
+  // upcoming_work above, on a different orthogonal axis.
+  //
+  // 0.30.74 established that letting `status` gate the visibility of a DATE is
+  // wrong, because deadlines do not care about workflow state. SEVERITY does
+  // not either, and the same gate was still hiding it: the active sweep is
+  // `status IN ('active','planned')`, so a `critical` item sitting in
+  // `proposed` is invisible to the question every session actually asks.
+  //
+  // FOUND 2026-07-29, and the discovery route is the lesson. PA's warden
+  // claimed a work item's stored priority was `high` when the row says
+  // `critical`; correcting that one row took an hour. Nobody asked HOW MANY
+  // until the end - the answer was one query: 61 critical work_items, SIX of
+  // them in `proposed`, hidden for up to 105 days. The oldest is a
+  // community-reported world-corruption and datapack-loss bug (2026-04-15);
+  // another is a Bedrock UDP bug with a named reporter. TWO OF THE SIX HAVE A
+  // PERSON OUTSIDE THE FLEET WAITING, which is a different severity from an
+  // internal umbrella going stale.
+  //
+  // Deliberately NOT status-filtered beyond done/resolved, and deliberately
+  // capped: this is a small set by construction (critical is rare), so it
+  // cannot become the noise that rules 1 and 3 of the nudge-design section
+  // warn about. It renders at session start - read once, per the surface
+  // ranking in CLAUDE.md - not on every turn.
+  const criticalWork = include("work_items")
+    ? projectDb
+        .query(
+          `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
+           FROM notes
+           WHERE type = 'work_item' AND priority = 'critical'
+           AND (status IS NULL OR status NOT IN ('active', 'planned', 'done'))
+           AND resolved = 0
+           ORDER BY created_at ASC
+           LIMIT 10`
+        )
+        .all()
+        .map(toSummary)
+    : [];
+
   // R3.3: curation candidates - maintenance-worthy notes surfaced at briefing time
   const curation_candidates = include("curation_candidates")
     ? fetchCurationCandidates(projectDb)
@@ -520,6 +560,7 @@ export function composeBriefing(
     recently_completed: recentlyCompleted,
     overdue_work: overdueWork,
     upcoming_work: upcomingWork,
+    critical_work: criticalWork,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,

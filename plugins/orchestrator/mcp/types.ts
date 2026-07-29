@@ -212,6 +212,8 @@ export interface Briefing {
   /** 0.30.74: dated commitments due SOON, regardless of workflow status. See
    *  composer.ts for why status must not gate this. */
   upcoming_work: NoteSummary[];
+  /** 0.39.0: critical work_items hidden from the active sweep by their status. */
+  critical_work: NoteSummary[];
   neglected_areas: string[];
   drift_warning: string | null;
   user_model_summary: string[];

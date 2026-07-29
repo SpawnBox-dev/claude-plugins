@@ -22350,6 +22350,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
       recently_completed: [],
       overdue_work: [],
       upcoming_work: [],
+      critical_work: [],
       neglected_areas: [],
       drift_warning: null,
       user_model_summary: [],
@@ -22480,6 +22481,13 @@ function composeBriefing(projectDb2, globalDb2, sections) {
          ORDER BY due_date ASC
          LIMIT 10`).all(todayStr, horizon).map(toSummary);
   }
+  const criticalWork = include("work_items") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, status, priority, due_date, code_refs
+           FROM notes
+           WHERE type = 'work_item' AND priority = 'critical'
+           AND (status IS NULL OR status NOT IN ('active', 'planned', 'done'))
+           AND resolved = 0
+           ORDER BY created_at ASC
+           LIMIT 10`).all().map(toSummary) : [];
   const curation_candidates = include("curation_candidates") ? fetchCurationCandidates(projectDb2) : [];
   const suggestedFocus = overdueWork.length > 0 ? truncate(overdueWork[0].content, 100) : activeWork.length > 0 ? truncate(activeWork[0].content, 100) : openThreads.length > 0 ? truncate(openThreads[0].content, 100) : null;
   const totalActive = openThreads.length + activeWork.length + overdueWork.length;
@@ -22492,6 +22500,7 @@ function composeBriefing(projectDb2, globalDb2, sections) {
     recently_completed: recentlyCompleted,
     overdue_work: overdueWork,
     upcoming_work: upcomingWork,
+    critical_work: criticalWork,
     neglected_areas: neglectedAreas,
     drift_warning: driftWarning,
     user_model_summary: userModelSummary,
@@ -22846,6 +22855,16 @@ function formatBriefing(briefing, checkpoint, globalPatterns, event, sections) {
         const st = item.status ? ` (${item.status})` : "";
         lines.push(`- [DUE] ${pri}${st} **${item.id}** ${truncate(item.content, 120)}${formatDueDate(item.due_date)}`);
       }
+      lines.push("");
+    }
+    if (briefing.critical_work.length > 0) {
+      lines.push("## CRITICAL - hidden from the active sweep by status");
+      for (const item of briefing.critical_work) {
+        const st = item.status ? `(${item.status})` : "(no status)";
+        const age = Math.floor((Date.now() - new Date(item.created_at).getTime()) / 86400000);
+        lines.push(`- ${st} **${item.id}** ${truncate(item.content, 120)} [open ${age}d]`);
+      }
+      lines.push("  -> Triage or re-status these. `critical` + a status outside active/planned means nobody is seeing them.");
       lines.push("");
     }
     if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {

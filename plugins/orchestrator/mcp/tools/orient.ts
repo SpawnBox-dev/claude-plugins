@@ -219,6 +219,30 @@ function formatBriefing(
       lines.push("");
     }
 
+    // 0.39.0: CRITICAL items the status filter would hide, rendered before the
+    // status-filtered lists for the same reason UPCOMING is - severity, like a
+    // date, is orthogonal to workflow state, and letting status gate it is the
+    // defect rather than a policy.
+    //
+    // These were invisible for up to 105 days: six critical work_items sat in
+    // `proposed` while every session's orienting question ("what's active?")
+    // filtered them out. Two have a community reporter waiting on the other
+    // end. The count was one query away for the entire time.
+    if (briefing.critical_work.length > 0) {
+      lines.push("## CRITICAL - hidden from the active sweep by status");
+      for (const item of briefing.critical_work) {
+        const st = item.status ? `(${item.status})` : "(no status)";
+        const age = Math.floor(
+          (Date.now() - new Date(item.created_at).getTime()) / 86400000
+        );
+        lines.push(`- ${st} **${item.id}** ${truncate(item.content, 120)} [open ${age}d]`);
+      }
+      lines.push(
+        "  -> Triage or re-status these. `critical` + a status outside active/planned means nobody is seeing them."
+      );
+      lines.push("");
+    }
+
     if (briefing.active_work.length > 0 || briefing.blocked_work.length > 0) {
       lines.push("## Work Items");
       if (briefing.active_work.length > 0) {
