@@ -201,6 +201,16 @@ On 2026-07-29 five sessions independently broke a rule **that was in their conte
 
 **If a discipline cannot be attached to a test, a query, or the step that performs the action, it probably cannot be mechanised - and saying so honestly beats shipping a reminder that trains dismissal.** The corollary bites: declining to add a nudge is usually the correct application of this section, and the only version of it that is not self-refuting.
 
+### A SUPPRESSOR NEEDS `generated = emitted + suppressed` FROM ITS FIRST COMMIT
+
+Anything whose job is to make events NOT happen is the one category where working perfectly and being completely inert produce **byte-identical output**. Every other kind of defect leaves something behind; this one's success and its total failure both look like silence.
+
+Earned 2026-07-29, within an hour of shipping. 0.41.0 added a restart-aware suppressor to `egress_suspect`. `SA-c5b207e0` then asked the only question that matters about it - *how many firings were GENERATED in that window?* - and it was **unanswerable from anywhere**: egress emissions were never recorded (only `ingress_suspect` wrote to `alert_refractory`) and suppressions were recorded nowhere at all. "Suppressed five" and "there were two and it caught two" were indistinguishable, so a clean-looking 5-vs-0 A/B had to be restated as 1-of-5 vs 0-of-5 on the control's own count.
+
+That is anti-pattern `6e65f50f` - *absence of complaints is not evidence when nothing records the events* - committed by its author one day after writing it, in the code where it bites hardest.
+
+**So: count both sides at the same time you write the suppression, not after someone asks.** `alert_refractory` (0.32.3) already does it - one row per `(alert_kind, subject_session)`, rendered by `system_status`, no new store. Wrap the counting so it can never break the detector it measures. And note the limit honestly when you ship: instrumentation added later makes the question answerable **from the next event onward, never retroactively** - the five restarts that prompted this are simply gone.
+
 **THE CLOSING EVIDENCE, AND IT IS UNCOMFORTABLE.** By the end of 2026-07-29 five sessions had independently converged on ONE durable technique - *test the method against a case whose answer you already know, before you trust what it says about the case you don't.* It broke four confident wrong answers in ninety minutes, three of them PA's or endorsed by PA. It is the only guard produced in two days that can return "no"; everything else was a reminder to be careful.
 
 **That technique was already in this plugin.** It ships as an every-turn nudge and reads, verbatim: *"RUN IT AGAINST THE CASE THAT MOTIVATED IT and confirm it FIRES."* It was on screen in `90bf73bd`'s context while they made three method-shaped guesses in a row, and on screen in mine while I shipped a guard that could not fire.
