@@ -43,6 +43,8 @@ Publishing = the marketplace registry picks up whatever is on `main`. Do ALL of 
 4. `git add -A` including `dist/server.js` - confirm `git status -s dist/server.js` shows `M` whenever an mcp/ file changed.
 5. Commit + push to `main`. Fleet adoption is `/plugin update` + `/mcp` reconnect (or session restart) per terminal.
 
+**If this ship removes a friction, grep the work items for that friction before you write the commit message.** A fix does not know which item it closed: it is written from the complaint in front of you, while the item it resolves was filed by someone else, months earlier, in different vocabulary. Worked example - `pending_id` shipped in 0.30.72 as a *re-transmission cost* fix, and silently satisfied P7 of `83abac38`, a CRITICAL item filed 99 days earlier whose entire premise was that curation costs more than capture. Nobody connected them, so the strongest argument for the feature never entered its record and the item stayed critical describing a solved problem. One search, and the commit message is the natural place to name the item. Full pattern in `c103d20c`.
+
 ### MANDATORY: Every Turn
 
 <EXTREMELY_IMPORTANT>
