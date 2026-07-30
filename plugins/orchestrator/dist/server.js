@@ -23152,6 +23152,74 @@ function handlePrepare(projectDb2, globalDb2, input) {
   return { package: pkg, autonomy: autonomyResult.score, formatted };
 }
 
+// mcp/engine/stalled_claim.ts
+var BLOCKER_MARKERS = [
+  /\bneeds?\s+(?:the\s+)?(?:human|user|jarid|his|her|their)\b/i,
+  /\bwaiting on\s+(?:the\s+)?(?:human|user|jarid)\b/i,
+  /\bonly\s+(?:the\s+)?(?:human|user|jarid)\b.{0,20}\bcan\b/i,
+  /\brequires?\s+(?:the\s+)?(?:human|user|jarid)\b/i,
+  /\bblocked on\b/i,
+  /\bawaiting\b/i,
+  /\bnot (?:yet )?(?:verified|retried|attempted|checked)\b/i,
+  /\bunverified\b/i,
+  /\bunknown\b/i,
+  /\bcould not (?:be )?(?:determined|established|resolved)\b/i,
+  /\bgave up\b/i
+];
+function tokens(line) {
+  return new Set(line.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 3));
+}
+function sameClaim(a, b, threshold = 0.5) {
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (ta.size === 0 || tb.size === 0)
+    return false;
+  let shared = 0;
+  for (const t of ta)
+    if (tb.has(t))
+      shared++;
+  const union3 = ta.size + tb.size - shared;
+  return union3 > 0 && shared / union3 >= threshold;
+}
+function extractBlockerLines(text) {
+  const out = [];
+  for (const raw of text.split(`
+`)) {
+    const line = raw.replace(/^[-*\s]+/, "").trim();
+    if (line.length < 12)
+      continue;
+    if (BLOCKER_MARKERS.some((re) => re.test(line)))
+      out.push(line);
+  }
+  return out;
+}
+function findRestatedBlockers(previousCheckpoint, newCheckpoint) {
+  if (!previousCheckpoint)
+    return [];
+  const prior = extractBlockerLines(previousCheckpoint);
+  if (prior.length === 0)
+    return [];
+  const out = [];
+  for (const line of extractBlockerLines(newCheckpoint)) {
+    if (prior.some((p) => sameClaim(p, line)))
+      out.push({ text: line });
+  }
+  return out;
+}
+function formatStalledClaimAdvisory(claims) {
+  if (claims.length === 0)
+    return "";
+  const lines = claims.map((c) => `  - "${c.text.slice(0, 150)}"`).join(`
+`);
+  return `
+
+[RESTATED BLOCKER - carried forward unchanged from your last checkpoint]
+` + lines + `
+This was already blocked last checkpoint and is blocked again in the same words. ` + `A restated blocker is a claim that has stopped being examined - not necessarily wrong, ` + `but no longer derived.
+` + `Before it hardens: RE-ENUMERATE ASSETS, not approaches. What do you now hold - ` + `authenticated sessions, open tabs, credentials, tools, files, a peer's running stack - ` + `that you did not hold when you first wrote this? The instinct when blocked is to retry ` + `the approach; the unlock is usually combining two assets you already have.
+` + `Then answer one question: WHAT CHANGED SINCE I LAST ASSERTED THIS? If nothing did and ` + `the wall is real, say so explicitly with the routes you ruled out - that is a fine ` + `answer and it survives this check. Real instances of it being WRONG: a file "search ` + `timed out, not retried" restated five times, where the directory was a sibling of the ` + `one being searched; and "needs the human's machine" carried a full day by a session ` + `already running on that machine.`;
+}
+
 // mcp/engine/live_sessions.ts
 import { existsSync as existsSync6 } from "fs";
 import { join as join4 } from "path";
@@ -27493,6 +27561,14 @@ ${ns.map((s) => `- ${s}`).join(`
 `)}`);
   const content = parts.join(`
 `);
+  let priorCheckpoint = null;
+  try {
+    const row = session_id ? getProjectDb().query(`SELECT content FROM notes WHERE type = 'checkpoint' AND source_session = ?
+             ORDER BY created_at DESC LIMIT 1`).get(session_id) : null;
+    priorCheckpoint = row?.content ?? null;
+  } catch {
+    priorCheckpoint = null;
+  }
   const result = await handleRemember(getProjectDb(), getGlobalDb(), {
     content,
     type: "checkpoint",
@@ -27500,10 +27576,16 @@ ${ns.map((s) => `- ${s}`).join(`
     tags: "checkpoint",
     session_id
   }, embeddingClient);
+  let stalled = "";
+  try {
+    stalled = formatStalledClaimAdvisory(findRestatedBlockers(priorCheckpoint, content));
+  } catch {
+    stalled = "";
+  }
   return {
     content: [{
       type: "text",
-      text: result.stored ? `Progress saved (${result.note_id}). Next session will recover from here.` : `Progress updated (existing checkpoint promoted).`
+      text: (result.stored ? `Progress saved (${result.note_id}). Next session will recover from here.` : `Progress updated (existing checkpoint promoted).`) + stalled
     }]
   };
 });

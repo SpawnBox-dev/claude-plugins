@@ -25,6 +25,7 @@ import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
 import { resolveNoteId } from "./tools/id_resolver";
 import { supersededSuffix } from "./tools/recall";
+import { findRestatedBlockers, formatStalledClaimAdvisory } from "./engine/stalled_claim";
 import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, mergeTags, codeRefsInput } from "./utils";
@@ -1235,6 +1236,26 @@ server.tool(
     if (ns?.length) parts.push(`\n## Next Steps\n${ns.map(s => `- ${s}`).join("\n")}`);
 
     const content = parts.join("\n");
+
+    // 0.42.0: read the PREVIOUS checkpoint before writing the new one, so a
+    // blocker restated unchanged can be caught. This is the only surface with
+    // both the text and the prior state - hooks cannot see assistant output
+    // (Stop receives only event + session_id), so restatement is mechanically
+    // detectable here and nowhere else. Best-effort: a failed read must never
+    // cost someone their checkpoint.
+    let priorCheckpoint: string | null = null;
+    try {
+      const row = (session_id
+        ? getProjectDb().query(
+            `SELECT content FROM notes WHERE type = 'checkpoint' AND source_session = ?
+             ORDER BY created_at DESC LIMIT 1`
+          ).get(session_id)
+        : null) as { content: string } | null;
+      priorCheckpoint = row?.content ?? null;
+    } catch {
+      priorCheckpoint = null;
+    }
+
     const result = await handleRemember(getProjectDb(), getGlobalDb(), {
       content,
       type: "checkpoint",
@@ -1243,12 +1264,25 @@ server.tool(
       session_id,
     }, embeddingClient);
 
+    // Advisory only, appended to a SUCCESSFUL save. Never blocks: losing a
+    // checkpoint costs more than any nudge saves, and PA's discriminator is
+    // that the guidance must demand the enumeration rather than forbid the
+    // hand-back - agents grind forever on real walls otherwise.
+    let stalled = "";
+    try {
+      stalled = formatStalledClaimAdvisory(
+        findRestatedBlockers(priorCheckpoint, content)
+      );
+    } catch {
+      stalled = "";
+    }
+
     return {
       content: [{
         type: "text" as const,
-        text: result.stored
+        text: (result.stored
           ? `Progress saved (${result.note_id}). Next session will recover from here.`
-          : `Progress updated (existing checkpoint promoted).`,
+          : `Progress updated (existing checkpoint promoted).`) + stalled,
       }],
     };
   }
