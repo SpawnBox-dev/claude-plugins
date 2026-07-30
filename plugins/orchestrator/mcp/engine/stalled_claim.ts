@@ -10,22 +10,49 @@
  * text saying someone else will have to do this. THE COSTLIEST UNDER-TRYING
  * FAILURE IS INVISIBLE TO THE DETECTOR BUILT FOR UNDER-TRYING.
  *
- * FOUR REAL INSTANCES IN ONE DAY, from three lanes:
+ * REAL INSTANCES, one day, three lanes:
  *   - FALSE (PA): a spreadsheet handed back while an authenticated browser
  *     session AND the download URL were both already held. Thirty seconds once
  *     they were combined.
- *   - TRUE (PA): a PDF, hours later. Attachment MCP carries metadata only, URL
- *     cookie-guarded, programmatic click landed nothing. Routes enumerated,
- *     not-tried list empty, residual value priced. A real wall.
  *   - FALSE (SA-5a433456): "server_hash far-end verification needs Jarid's
- *     machine", carried a full DAY through a checkpoint and three status
- *     reports. Done in twenty minutes once the asset - an agent session on his
- *     machine with CDP access - was enumerated against the task. Emitted no
- *     struggle signal of any kind, because there was no struggle: not blocked,
- *     MISTAKEN ABOUT WHO COULD ACT.
+ *     machine", carried a full DAY. Done in twenty minutes once the asset - an
+ *     agent session ALREADY ON THAT MACHINE with CDP access - was enumerated
+ *     against the task. Emitted no struggle signal at all, because there was
+ *     no struggle: not blocked, MISTAKEN ABOUT WHO COULD ACT.
  *   - FALSE (SA-df343a05): "the file search timed out and was not retried",
  *     restated five times over hours. The directory was a sibling of the one
  *     being searched. One `ls` of the parent.
+ *   - TRUE, and the only one still standing (SA-df343a05): UNKNOWN on the
+ *     `charged` price. Third-party system, the comparator's own deployment
+ *     state unverified, no route held reads it - reasons named. This is the
+ *     shouldn't-fire exemplar.
+ *
+ * A CASE WAS CITED HERE AS A TRUE WALL AND HAS BEEN REMOVED, because the facts
+ * were overturned within hours of shipping. PA's PDF hand-back had its routes
+ * enumerated and its not-tried list declared empty; SA-b14fafa3 then found two
+ * untried routes on external re-examination, the preview route worked, and the
+ * document was read. It is still a valid shouldn't-fire case on FUNCTION -
+ * first statement, enumeration attached - but calling it a real wall would
+ * enshrine a falsified claim in a header that doubles as a teaching example.
+ * Fixtures age like any other stored claim.
+ *
+ * COVERAGE LIMIT, stated because it was over-claimed on the day of shipping:
+ * SA-5a433456's instance WOULD NOT HAVE FIRED on the run that actually
+ * happened. Verified against the live DB - the blocker is in checkpoint
+ * ff12646a and NOT in its predecessor 5f727692, because the hardening happened
+ * across TURNS (four or five status reports and a work item over a day) while
+ * reaching save_progress exactly once. Its test fixture is a CONSTRUCTED
+ * two-checkpoint case, not the historical one.
+ *
+ * The gap that implies, in their words: the agents most likely to harden a
+ * false blocker are the ones who checkpoint RARELY, because the claim repeats
+ * in prose many times between saves and every save looks like the first.
+ * Survivable rather than fatal - across sessions and compactions a long-lived
+ * false blocker eventually lands in two checkpoints, so it is a DELAY not a
+ * miss - and save_progress remains the only surface holding both the words and
+ * the prior state. Deliberately NOT extended to work-item writes yet: that is
+ * a second surface with its own false-positive profile and no evidence behind
+ * it.
  *
  * WHY THIS KEYS ON REPETITION AND NOT ON PHRASING. SA-df343a05's caution, and
  * it is the design constraint: "verified at one source of three" and "remains

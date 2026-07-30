@@ -37,7 +37,17 @@ const CP_DF_FIRST =
 const CP_DF_RESTATED =
   "## Work State\nMore comparator work.\n\n## Open Questions\n- advertised price verified at one source of three, the file search timed out and was not retried";
 
-describe("0.42.0: fires on the real false hand-backs", () => {
+describe("0.42.0: fires on the real false hand-backs (CONSTRUCTED two-checkpoint cases)", () => {
+  // COVERAGE LABEL, corrected after over-claiming it on the day of shipping.
+  // These fixtures are the real WORDING, arranged into the two-checkpoint shape
+  // the detector needs. They are not replays of the historical runs.
+  //
+  // Verified against the live DB: SA-5a433456's blocker appears in checkpoint
+  // ff12646a and NOT in its predecessor 5f727692 - it reached save_progress
+  // exactly once while hardening across four or five status reports and a work
+  // item. So the detector WOULD NOT have fired on what actually happened. The
+  // honest claim is "would catch it on the second checkpoint", not "would have
+  // caught it".
   test("SA-5a433456's 'needs Jarid's machine', restated a second time", () => {
     const hits = findRestatedBlockers(CP_5A_FIRST, CP_5A_RESTATED);
     expect(hits.length).toBe(1);
