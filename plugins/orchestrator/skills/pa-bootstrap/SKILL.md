@@ -293,10 +293,17 @@ Spawn it in the BACKGROUND via the Agent tool:
   `$CLAUDE_PROJECT_DIR/.orchestrator-state/warden-ledger.md`) and tell it to
   run its **singleton guard FIRST**, then begin its loop: read any prior
   ledger at that path, bank each active session's transcript position, do a
-  first pass, write the ledger (heartbeat line first), then self-arm its
-  timer at `<=150s`. Restating the absolute path is load-bearing - without it
+  first pass, and write the ledger (heartbeat line first, declaring
+  `loop=poke-driven`). Restating the absolute path is load-bearing - without it
   the warden may default to its scratchpad and the ledger dies with your
   session (incident 9d9a448d). The brief carries the rest of the duties.
+- **Do NOT tell it to self-arm a timer.** A self-arm timer is a NO-OP once the
+  warden goes dormant at the end of a pass - the timer's completion cannot
+  re-invoke a dormant subagent. **YOUR poll-and-poke IS the liveness loop**
+  (`agents/context-warden.md` steps 1 and 5 refute the earlier self-timed model
+  with first-hand evidence from two warden instances). Poll its ledger mtime
+  every few minutes and SendMessage-POKE it when you want another pass; the poke
+  is the mechanism that actually revives it.
 
 If a warden ledger already exists from a prior PA (the path is stable
 across restarts), the new warden picks up from it. This is the ONE subagent
@@ -305,10 +312,30 @@ PA spawns (see Hard rules).
 **Liveness, singleton, and teardown (from incident 9d9a448d):**
 - **Liveness = ledger mtime, NOT TaskList.** TaskList does NOT enumerate
   named background agents (it returned "No tasks found" while two wardens
-  ran). A healthy warden writes the ledger every `<=150s`, so a ledger mtime
-  older than ~7 min during an active fleet means it is dead/stuck - respawn.
-  The plugin ALSO nudges you deterministically when the ledger goes
-  absent/stale (WI 6430ebf6), so you don't have to remember to check.
+  ran).
+- **A GROWING MTIME IS NOT A FAULT, AND THIS SECTION USED TO SAY IT WAS.** The
+  old text here read "older than ~7 min means it is dead/stuck - respawn". That
+  is WRONG and it was actively dangerous: a poke-driven warden's mtime grows
+  between pokes BY DESIGN, and passes legitimately run 15-19 minutes apart
+  (observed 2026-08-06, zero missed content). Three sources agree against the
+  old rule - the code raised `WARDEN_STALE_THRESHOLD_MS` from 420_000 to
+  900_000 *precisely because* ~7 min caused three premature respawns in one
+  session (notes f41f21bf / c8d00f21); `agents/context-warden.md` refutes the
+  self-timed model outright; and the deployed nudge now says verbatim "it is
+  IDLE AWAITING YOUR POKE by design, not stalled ... Do NOT respawn on this
+  signal alone." A PA following the old line tonight would have killed a
+  healthy warden at least twice, and each kill risks the name-collision
+  hazard below.
+- **So: POKE FIRST, NEVER RESPAWN FIRST.** A stale-looking ledger means "time to
+  poke your warden", not "your warden is dead". Respawn only after a poke has
+  gone unanswered - and note that a big-delta pass reads the whole fleet's
+  transcripts for many minutes BEFORE it writes, so mtime is frozen mid-pass
+  and cannot distinguish slow from dead on its own.
+- The plugin ALSO nudges you deterministically when the ledger goes
+  absent/stale (WI 6430ebf6), so you don't have to remember to check. **If that
+  nudge and this file ever disagree, TRUST THE NUDGE** - it is generated from
+  the live constant and the warden's own declared `loop=` mode, whereas this
+  file is hand-maintained and has already drifted once.
 - **Singleton.** The warden self-guards duplicates via the ledger heartbeat
   mutex, but the Agent tool auto-suffixes a name collision to
   `context-warden-2` rather than rejecting - so if you respawn, KILL THE OLD
