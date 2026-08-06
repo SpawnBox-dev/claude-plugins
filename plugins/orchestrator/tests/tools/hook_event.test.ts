@@ -12,6 +12,7 @@ import {
   buildPaCompactAdvisoryEvent,
   POST_COMPACT_RECOVERY_EVENT,
   PA_COMPACT_RECOVERY_EVENT,
+  POST_COMPACT_TOOL_EVICTION_NOTE,
   HOOK_EVENTS,
   composeWardenNudgeText,
   turnsSinceMarker,
@@ -19,6 +20,23 @@ import {
   type HookEventResponse,
 } from "../../mcp/tools/hook_event";
 import { now } from "../../mcp/utils";
+
+/**
+ * The "no literal undefined/null" guards below exist to catch `${undefined}` /
+ * `${null}` INTERPOLATION LEAKS from a missing task, checkpoint or peer field.
+ * 0.43.0 added POST_COMPACT_TOOL_EVICTION_NOTE, which deliberately contains the
+ * word "undefined" because it QUOTES the harness error string it is teaching
+ * readers to recognise ("required, received undefined") - naming that exact
+ * string is the whole reason the note works, so softening it would defeat it.
+ *
+ * Strip that one known-static constant before asserting, rather than deleting
+ * or loosening the assertion: every DYNAMIC part of the message keeps its full
+ * leak detection, and the single exemption is explicit and greppable instead of
+ * being a silently weakened guard.
+ */
+function withoutStaticNotes(msg: string): string {
+  return msg.split(POST_COMPACT_TOOL_EVICTION_NOTE).join("");
+}
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1056,8 +1074,8 @@ describe("hook_event dispatcher", () => {
       });
       expect(msg.toLowerCase()).toContain("compact");
       expect(msg).toContain("task four");
-      expect(msg).not.toContain("undefined");
-      expect(msg).not.toContain("null");
+      expect(withoutStaticNotes(msg)).not.toContain("undefined");
+      expect(withoutStaticNotes(msg)).not.toContain("null");
     });
 
     test("composer: currentTask is hedged as possibly-stale, not asserted authoritatively (167ffbaf-xs cosmetic follow-up)", () => {
@@ -1183,7 +1201,7 @@ describe("hook_event dispatcher", () => {
 
       expect(r.systemMessage).toBeDefined();
       expect(r.systemMessage!.toLowerCase()).toContain("compact");
-      expect(r.systemMessage).not.toContain("undefined");
+      expect(withoutStaticNotes(r.systemMessage ?? "")).not.toContain("undefined");
     });
 
     // WI 2ad3240e review (P2, SA-0c230dcf): the no-fresh-synthetic fallback must
@@ -1419,8 +1437,8 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
       // roster with both SAs; null task rendered safely
       expect(msg).toContain("SA-aaaaaaaa: backend lows sweep");
       expect(msg).toContain("SA-bbbbbbbb: (no task set)");
-      expect(msg).not.toContain("null");
-      expect(msg).not.toContain("undefined");
+      expect(withoutStaticNotes(msg)).not.toContain("null");
+      expect(withoutStaticNotes(msg)).not.toContain("undefined");
       // PA is the source of the advisory, not a recipient of "check in with PA"
       expect(lc).not.toContain("check in with pa");
       // informs PA the SA advisories were auto-emitted on its behalf
@@ -1495,8 +1513,8 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
         peers: [],
       });
       expect(msg).not.toContain("Other active subordinates");
-      expect(msg).not.toContain("undefined");
-      expect(msg).not.toContain("null");
+      expect(withoutStaticNotes(msg)).not.toContain("undefined");
+      expect(withoutStaticNotes(msg)).not.toContain("null");
       expect(msg.toLowerCase()).toContain("highest-loss zone");
     });
 

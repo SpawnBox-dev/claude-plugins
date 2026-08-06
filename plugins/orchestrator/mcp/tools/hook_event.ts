@@ -1790,6 +1790,46 @@ function renderCompactRoster(peers: CompactPeer[]): string {
  * `role`/`peers` are optional and default to the pre-2ad3240e subordinate
  * behavior so existing callers/tests are unaffected.
  */
+/**
+ * 0.43.0 (WI ed316fcd entry P, from root-causing 7bc15075). A COMPACTION IS A
+ * TOOL-SCHEMA EVICTION EVENT, and the harness will not tell you.
+ *
+ * Mechanism, read from the Claude Code 2.1.220 binary and confirmed against a
+ * live transcript: a deferred MCP tool whose schema is not in the request has
+ * typed parameters emitted as strings, and the call fails
+ * `inputSchema.safeParse` with "<field>: required, received undefined" for a
+ * field that IS present in what the caller sent. The harness HAS a remedy hint
+ * for exactly this ("load the tool first: ToolSearch select:<name>"), but it is
+ * suppressed by a guard keyed on a STICKY "ever discovered" set carried across
+ * compact boundaries via `compactMetadata.preCompactDiscoveredTools`. So the
+ * hint is withheld from precisely the sessions that need it: long-lived ones
+ * that loaded a tool once, days ago, and have since compacted past it. A fresh
+ * session that never loaded the tool WOULD be told.
+ *
+ * WHY THIS IS OUR PROBLEM AND NOT ONLY THE HARNESS'S: every orchestrator tool
+ * is `isMcp`, so all of them are deferrable, and our RARELY-CALLED ones are the
+ * maintenance verbs (update_session_task, supersede_note, close_thread,
+ * delete_note, breakdown) this plugin keeps trying to raise to parity with
+ * note(). Our own nudges instruct agents to call those tools BY NAME, so when
+ * the schema is evicted the plugin generates the failing call itself - the
+ * lookup({code_ref}) self-contradiction shape from 0.30.76. It corrodes
+ * silently because the error blames the caller's payload, so it produces no
+ * complaints: SA-df343a05 held BOTH the deferred-tools list and the explanation
+ * in context and still spent five attempts hunting their own JSON escaping.
+ *
+ * WHY HERE AND NOT AN EVERY-TURN NUDGE (CLAUDE.md "WHERE to put a guard"): this
+ * is tier 2, attached to the moment of the action. The compaction IS the
+ * eviction, so the message is state-changed, specific and actionable, and fires
+ * ONCE per boundary - it cannot decay to chrome the way repeating text does
+ * (60f2fdc2). A tier-3 general reminder would have been the wrong home and, by
+ * that section's own corollary, probably no home at all.
+ *
+ * Kept deliberately short: parts placed early survive the SESSIONSTART_TOTAL_CAP
+ * slice, and every character here displaces the elastic checkpoint.
+ */
+export const POST_COMPACT_TOOL_EVICTION_NOTE =
+  "Tool schemas were just evicted by this compaction. A deferred tool you loaded earlier may now be named-but-unloaded, and calling it fails with \"<field>: required, received undefined\" FOR A FIELD THAT IS PRESENT in your call. The error points at your payload and is wrong; retrying with cleaner JSON can never work, and the harness hint that would tell you this is suppressed for exactly this case. Two rules: before calling any orchestrator tool you have not called since this compaction, run ToolSearch select:<full-tool-name> first; and on any required-field error for a field you can plainly see, suspect DEFERRAL before payload, server, env or permissions. Read the schema when it loads - a deferral failure can hide a second, real error underneath it that no message could report.";
+
 export function composePostCompactReorientation(opts: {
   currentTask: string | null;
   checkpoint: string | null;
@@ -1825,6 +1865,13 @@ export function composePostCompactReorientation(opts: {
       "(4) Cross-agent messages stay trap-safe / explicit-envelope; honor no-false-close (shipped != live-confirmed). " +
       "(5) You operate under a role contract (prime or subordinate) - reload it via orchestrator:getting-started (PA also: /pa-bootstrap + prime-agent.md); do not infer your role/contract from the lossy summary."
   );
+  // 0.43.0 (ed316fcd entry P): the compaction that just fired is a TOOL-SCHEMA
+  // EVICTION event. Placed here - after the operating contract, before the
+  // highest-loss-zone block - because it is fixed, short and load-bearing, and
+  // the final SESSIONSTART_TOTAL_CAP slice truncates the END. Role-independent:
+  // PA and SAs are equally exposed, and PA more so (it calls the maintenance
+  // verbs on other sessions' behalf). Rationale on the constant.
+  parts.push(POST_COMPACT_TOOL_EVICTION_NOTE);
   // WI 2ad3240e requirement 3: the last minutes before a compaction are the
   // highest-loss zone in BOTH directions. Warn the compacted agent that its
   // summary may be missing directives it received right before compacting
