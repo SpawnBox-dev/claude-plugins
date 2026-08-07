@@ -22383,12 +22383,12 @@ function composeBriefing(projectDb2, globalDb2, sections) {
   const openThreads = include("open_threads") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
-           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+           ORDER BY updated_at DESC, COALESCE(signal, 0) DESC
            LIMIT 5`).all().map(toSummary) : [];
   const recentDecisions = include("decisions") ? projectDb2.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type = 'decision'
-           ORDER BY COALESCE(signal, 0) DESC, created_at DESC
+           ORDER BY created_at DESC, COALESCE(signal, 0) DESC
            LIMIT 5`).all().map(toSummary) : [];
   let neglectedAreas = [];
   if (include("neglected")) {

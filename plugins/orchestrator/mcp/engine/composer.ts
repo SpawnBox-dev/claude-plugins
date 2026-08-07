@@ -160,32 +160,62 @@ export function composeBriefing(
     };
   }
 
-  // Open threads: unresolved open_threads and commitments, last 5.
-  // R3.2: signal as secondary sort so hot threads float above cold at the
-  // same update time.
+  // Open threads: unresolved open_threads and commitments, LAST 5 by recency.
+  //
+  // 0.43.3: same inversion as recent_decisions, found by sweeping for it rather
+  // than by a second report. R3.2's comment said "signal as SECONDARY sort so
+  // hot threads float above cold AT THE SAME UPDATE TIME"; the SQL had signal
+  // PRIMARY. Because `signal` is REAL DEFAULT 0, a newly-opened thread starts
+  // at zero and is buried until it accumulates deposits.
+  //
+  // MEASURED on the live project DB 2026-08-07: the five rows returned were all
+  // last touched in MARCH 2026 with signal 74-99, while every July thread
+  // (signal 0-3) was invisible. For a section whose entire job is "what is
+  // still open", surfacing only the oldest five is close to the opposite of
+  // useful - a thread opened this week could not appear no matter how urgent.
   const openThreads = include("open_threads")
     ? projectDb
         .query(
           `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type IN ('open_thread', 'commitment') AND resolved = 0
-           ORDER BY COALESCE(signal, 0) DESC, updated_at DESC
+           ORDER BY updated_at DESC, COALESCE(signal, 0) DESC
            LIMIT 5`
         )
         .all()
         .map(toSummary)
     : [];
 
-  // Recent decisions: last 5.
-  // R3.2: signal as secondary sort so hot decisions surface above cold at
-  // the same creation time.
+  // RECENT decisions: last 5, ordered by RECENCY.
+  //
+  // R3.2's stated intent was "signal as SECONDARY sort so hot decisions surface
+  // above cold AT THE SAME CREATION TIME". The SQL did the inverse - signal
+  // PRIMARY, created_at as the tiebreaker - and 0.43.3 corrects it to match the
+  // comment, the section's name, and the identical pattern used correctly for
+  // work items in server.ts ("priority tier remains the primary sort; signal is
+  // the tiebreaker").
+  //
+  // WHY THIS WAS NOT COSMETIC. `signal` is `REAL DEFAULT 0`, so a decision is
+  // born at zero and only accumulates by being surfaced. With signal primary,
+  // a new decision had to out-accumulate months of deposits before it could
+  // enter the top 5 - so the section could NEVER show a recent decision.
+  // Measured on the live project DB 2026-08-07: the five rows returned were all
+  // from MARCH 2026 with signal 66-71, while the newest decision in the KB
+  // (minted that morning, signal 0) was nowhere. Every briefing since March had
+  // been presenting preview-era decisions under the heading "Recent Decisions".
+  //
+  // Found because PA relied on briefing-push to deliver a fresh standing ruling
+  // to a future session, then MEASURED whether it actually appeared. It did
+  // not. The label made a currency claim the ordering never honoured, and
+  // nothing about reading the section could reveal that - the rows look like
+  // decisions, because they are.
   const recentDecisions = include("decisions")
     ? projectDb
         .query(
           `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
            FROM notes
            WHERE type = 'decision'
-           ORDER BY COALESCE(signal, 0) DESC, created_at DESC
+           ORDER BY created_at DESC, COALESCE(signal, 0) DESC
            LIMIT 5`
         )
         .all()
