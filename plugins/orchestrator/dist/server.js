@@ -20389,6 +20389,12 @@ function mergeTags(existing, additions) {
   }
   return out.join(",");
 }
+function noteBadge(note) {
+  if (note.type === "work_item") {
+    return `${note.priority ?? "no-priority"}/${note.status ?? "no-status"}`;
+  }
+  return note.confidence ?? "unknown";
+}
 
 // mcp/engine/deduplicator.ts
 var MIN_SHARED_KEYWORDS = 3;
@@ -27406,7 +27412,7 @@ server.tool("lookup", "Search what the team already knows about this code/decisi
     const supSuffix = supersededSuffix(result.detail.id, result.detail.superseded_by);
     text += `
 
-**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
+**${result.detail.type}** (${noteBadge(result.detail)}) updated:${age}${src}${supSuffix}`;
     if (!summaryMode && result.detail.code_refs && result.detail.code_refs.length > 0) {
       text += `
 code_refs: [${result.detail.code_refs.join(", ")}]`;
@@ -27491,7 +27497,7 @@ ${hidden} more linked note(s) not shown. Call lookup({id:"${result.detail.id}", 
         const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
         const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
         text += `
-- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+- **${r.id}** [${r.type}/${noteBadge(r)}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
         if (r.code_refs && r.code_refs.length > 0) {
           text += `
     code_refs: [${r.code_refs.join(", ")}]`;

@@ -359,3 +359,48 @@ export function mergeTags(
   }
   return out.join(",");
 }
+
+/**
+ * 0.43.2 (ed316fcd entry Q): the badge rendered after a note's type in lookup
+ * output. `confidence` for every type EXCEPT work_item, which gets
+ * priority/status.
+ *
+ * WHY WORK_ITEM IS DIFFERENT. `create_work_item` hardcodes confidence="high" on
+ * every row it writes, so the confidence badge carries ZERO information for
+ * this type - every work item ever created rendered "(high)" regardless of what
+ * it actually is. Meanwhile PRIORITY, the field that orders the human's queue,
+ * was not visible in lookup output at all.
+ *
+ * WHAT THAT COST, 2026-08-07: two experienced sessions independently read the
+ * hardcoded "(high)" as priority and filed a priority-drift bug - "I asked for
+ * medium, the tool echoed medium, the record says high, and there are zero
+ * revisions." Both stored priorities were in fact exactly as requested. One
+ * session offered a supporting correlation (both items had ~25 auto-links)
+ * that was real and causally irrelevant, and would have sent the next reader
+ * into the cascade code.
+ *
+ * THE PART THAT MAKES THIS A DISPLAY BUG RATHER THAN TWO CARELESS READERS:
+ * the second session RE-VERIFIED the first's report using `lookup` - the same
+ * renderer - and got the identical misread. The verification step ran, returned
+ * clean, and confirmed the error. An instrument defect survives
+ * verification-by-the-same-instrument, so the only discriminator available was
+ * dropping below the renderer and querying the columns directly. A display that
+ * can do that to two careful readers in one morning is the defect.
+ *
+ * Fields are already SELECTed on both the detail and list paths, so this is
+ * purely a rendering change - no query or schema work.
+ */
+export function noteBadge(note: {
+  type: string;
+  confidence?: string | null;
+  priority?: string | null;
+  status?: string | null;
+}): string {
+  if (note.type === "work_item") {
+    // Explicit placeholders rather than silently omitting a missing half: a
+    // blank reads as "no priority set" when it may mean "not selected by this
+    // query", which is the ambiguity this whole change exists to remove.
+    return `${note.priority ?? "no-priority"}/${note.status ?? "no-status"}`;
+  }
+  return note.confidence ?? "unknown";
+}

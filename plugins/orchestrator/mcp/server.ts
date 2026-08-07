@@ -28,7 +28,7 @@ import { supersededSuffix } from "./tools/recall";
 import { findRestatedBlockers, formatStalledClaimAdvisory } from "./engine/stalled_claim";
 import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
-import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, mergeTags, codeRefsInput } from "./utils";
+import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, mergeTags, noteBadge, codeRefsInput } from "./utils";
 import { createAutoLinks } from "./engine/linker";
 import { EmbeddingClient } from "./engine/embeddings";
 
@@ -1096,7 +1096,7 @@ server.tool(
       // written by earlier builds persist - and the fleet is still on 0.31.3,
       // where the defect is live. Detection has to survive the fix.
       const supSuffix = supersededSuffix(result.detail.id, result.detail.superseded_by);
-      text += `\n\n**${result.detail.type}** (${result.detail.confidence}) updated:${age}${src}${supSuffix}`;
+      text += `\n\n**${result.detail.type}** (${noteBadge(result.detail)}) updated:${age}${src}${supSuffix}`;
       if (!summaryMode && result.detail.code_refs && result.detail.code_refs.length > 0) {
         text += `\ncode_refs: [${result.detail.code_refs.join(", ")}]`;
       }
@@ -1169,7 +1169,7 @@ server.tool(
           const age = formatAge(r.updated_at);
           const src = r.source_session ? ` by:${r.source_session.slice(0, 8)}` : "";
           const supSuffix = r.superseded_by ? ` [SUPERSEDED by ${r.superseded_by}]` : "";
-          text += `\n- **${r.id}** [${r.type}/${r.confidence}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
+          text += `\n- **${r.id}** [${r.type}/${noteBadge(r)}] updated:${age}${src}${tagStr}${supSuffix} ${r.content}${annotationMarker(r.id)}`;
           if (r.code_refs && r.code_refs.length > 0) {
             text += `\n    code_refs: [${r.code_refs.join(", ")}]`;
           }
