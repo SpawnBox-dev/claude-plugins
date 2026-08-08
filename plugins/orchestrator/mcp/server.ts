@@ -385,6 +385,64 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     // No port file or unreadable - proceed with spawn
   }
 
+  // 0.45.2 - SPAWN LOCK. Without it the reuse check is a race: N MCP servers
+  // starting in the same instant (exactly what /reload-plugins does across a
+  // fleet) all read "no port file", all decide to spawn, and each loads its
+  // own ~1.5GB model. The last writer wins the port file and the rest become
+  // orphans nobody will ever kill, because adopters deliberately never kill a
+  // sidecar they did not start. That is the failure that halted this machine.
+  //
+  // Only the lock HOLDER may spawn. Everyone else waits for the winner to
+  // publish a port and adopts it. A lock older than LOCK_STALE_MS is treated
+  // as abandoned (the holder crashed mid-spawn) and taken over, so a dead
+  // process can never wedge the fleet into permanently having no sidecar.
+  const lockFile = portFile + ".lock";
+  const LOCK_STALE_MS = 90_000;
+  let holdsLock = false;
+  const releaseSpawnLock = () => {
+    if (!holdsLock) return;
+    holdsLock = false;
+    try { require("node:fs").unlinkSync(lockFile); } catch { /* already gone */ }
+  };
+  try {
+    const { openSync, closeSync } = await import("node:fs");
+    try {
+      // "wx" fails if the file exists - the atomic test-and-set we need.
+      closeSync(openSync(lockFile, "wx"));
+      holdsLock = true;
+    } catch {
+      const age = Date.now() - (statSync(lockFile).mtimeMs || 0);
+      if (age > LOCK_STALE_MS) {
+        try { const { unlinkSync } = await import("node:fs"); unlinkSync(lockFile); } catch {}
+        try { closeSync(openSync(lockFile, "wx")); holdsLock = true; } catch {}
+      }
+    }
+  } catch {
+    // Lock machinery unavailable - fall through and spawn, preserving old
+    // behaviour rather than leaving the session with no embeddings at all.
+    holdsLock = true;
+  }
+
+  if (!holdsLock) {
+    // Someone else is spawning. Wait for their port, then adopt it.
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const p = parseInt((await Bun.file(portFile).text()).trim(), 10);
+        if (!isNaN(p) && p > 0) {
+          const c = new EmbeddingClient(`http://127.0.0.1:${p}`);
+          if (await c.isAvailable()) {
+            console.error(`[embed] Adopted sidecar on port ${p} spawned by a peer (waited ${i + 1}s)`);
+            return c;
+          }
+        }
+      } catch {
+        // Not published yet - keep waiting.
+      }
+    }
+    console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
+  }
+
   // No reusable sidecar found - clean the stale port file (if any) and spawn fresh.
   try {
     const { unlinkSync } = await import("node:fs");
@@ -460,10 +518,14 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       `[embed] Sidecar unavailable (${sidecarError}): install uv (https://docs.astral.sh/uv/) for automatic embedding support, ` +
       "or install Python with: pip install -r sidecar/requirements.txt"
     );
+    releaseSpawnLock();
     return null;
   }
 
   sidecarProcess = result.proc;
+  // Release only AFTER the port file is published, so a waiter that sees the
+  // lock gone is guaranteed to find a port rather than racing us to spawn.
+  releaseSpawnLock();
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
 

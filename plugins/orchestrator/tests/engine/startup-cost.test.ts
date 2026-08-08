@@ -117,3 +117,33 @@ describe("0.45.1: WIRING - the sidecar port file is version-independent", () => 
     expect(/portFile\s*=\s*resolve\(\s*sidecarStateDir/.test(SERVER)).toBe(true);
   });
 });
+
+describe("0.45.2: WIRING - only one process may spawn a sidecar", () => {
+  const SERVER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "server.ts"), "utf8");
+
+  test("spawn is gated by an atomic lock", () => {
+    // Without this, N MCP servers starting together (what /reload-plugins does
+    // across a fleet) each load their own ~1.5GB model. "wx" is the atomic
+    // test-and-set: it fails if the file already exists.
+    expect(SERVER).toContain("lockFile");
+    expect(/openSync\(lockFile,\s*"wx"\)/.test(SERVER)).toBe(true);
+  });
+
+  test("losers wait for the winner's port instead of spawning", () => {
+    expect(/if \(!holdsLock\)/.test(SERVER)).toBe(true);
+    expect(SERVER).toContain("Adopted sidecar on port");
+  });
+
+  test("a stale lock is reclaimable, so a crash cannot wedge the fleet", () => {
+    expect(SERVER).toContain("LOCK_STALE_MS");
+  });
+
+  test("the lock is released on BOTH the success and failure paths", () => {
+    // Leaking it on failure would block every peer for LOCK_STALE_MS - they
+    // would each wait 60s and then spawn anyway, which is the bug this lock
+    // exists to prevent. Two invocations: the spawn-failed return, and the
+    // success path just before the client is handed back.
+    const calls = [...SERVER.matchAll(/^\s*releaseSpawnLock\(\);/gm)];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+  });
+});

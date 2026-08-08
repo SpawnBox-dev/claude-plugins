@@ -27017,6 +27017,54 @@ async function startSidecar() {
       }
     }
   } catch {}
+  const lockFile = portFile + ".lock";
+  const LOCK_STALE_MS = 90000;
+  let holdsLock = false;
+  const releaseSpawnLock = () => {
+    if (!holdsLock)
+      return;
+    holdsLock = false;
+    try {
+      __require("fs").unlinkSync(lockFile);
+    } catch {}
+  };
+  try {
+    const { openSync: openSync3, closeSync: closeSync3 } = await import("fs");
+    try {
+      closeSync3(openSync3(lockFile, "wx"));
+      holdsLock = true;
+    } catch {
+      const age = Date.now() - (statSync7(lockFile).mtimeMs || 0);
+      if (age > LOCK_STALE_MS) {
+        try {
+          const { unlinkSync: unlinkSync2 } = await import("fs");
+          unlinkSync2(lockFile);
+        } catch {}
+        try {
+          closeSync3(openSync3(lockFile, "wx"));
+          holdsLock = true;
+        } catch {}
+      }
+    }
+  } catch {
+    holdsLock = true;
+  }
+  if (!holdsLock) {
+    for (let i = 0;i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const p = parseInt((await Bun.file(portFile).text()).trim(), 10);
+        if (!isNaN(p) && p > 0) {
+          const c = new EmbeddingClient(`http://127.0.0.1:${p}`);
+          if (await c.isAvailable()) {
+            console.error(`[embed] Adopted sidecar on port ${p} spawned by a peer (waited ${i + 1}s)`);
+            return c;
+          }
+        }
+      } catch {}
+    }
+    console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
+  }
   try {
     const { unlinkSync: unlinkSync2 } = await import("fs");
     unlinkSync2(portFile);
@@ -27068,9 +27116,11 @@ async function startSidecar() {
       sidecarError = "sidecar process failed to start";
     }
     console.error(`[embed] Sidecar unavailable (${sidecarError}): install uv (https://docs.astral.sh/uv/) for automatic embedding support, or install Python with: pip install -r sidecar/requirements.txt`);
+    releaseSpawnLock();
     return null;
   }
   sidecarProcess = result.proc;
+  releaseSpawnLock();
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
 var PERMISSION_RELAY_ENABLED = process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
