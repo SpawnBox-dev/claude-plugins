@@ -221,9 +221,13 @@ describe("0.44.0 defect 3: backfill repairs STALE embeddings, not just missing o
     const client = new EmbeddingClient("http://127.0.0.1:0");
     (client as any).embed = async (texts: string[]) => texts.map(() => new Float32Array([0.9]));
 
-    const res = await client.backfill(db);
-    // Pre-fix this returned 0: the WHERE clause only saw NULL rows, so a stale
-    // vector was skipped forever and staleness was permanent.
+    // 0.45.1: the stale sweep is now OPT-IN. It must be requested explicitly,
+    // because the automatic startup backfill calls this same function and a
+    // default-on sweep turned every session start into a full-backlog job.
+    // The repair CAPABILITY is what this test guards, and it still exists.
+    const res = await client.backfill(db, 8, { includeStale: true });
+    // Pre-0.44.0 this returned 0 even when asked: the WHERE clause only saw
+    // NULL rows, so a stale vector was skipped forever.
     expect(res.embedded).toBeGreaterThan(0);
     const row = db.query("SELECT embedded_at FROM embeddings WHERE note_id = ?").get(created.note_id!) as any;
     expect(row.embedded_at > "2020-01-01T00:00:00.000Z").toBe(true);

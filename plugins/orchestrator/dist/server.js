@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join8 } from "path";
-import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync7 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync7, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -20586,12 +20586,11 @@ class EmbeddingClient {
        VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
     return true;
   }
-  async backfill(db, batchSize = 8) {
+  async backfill(db, batchSize = 8, opts = {}) {
+    const staleClause = opts.includeStale ? ` OR e.embedded_at IS NULL OR e.embedded_at < n.updated_at` : ``;
     const allRows = db.query(`SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL
-            OR e.embedded_at IS NULL
-            OR e.embedded_at < n.updated_at`).all();
+         WHERE e.note_id IS NULL${staleClause}`).all();
     const result = {
       embedded: 0,
       failed: 0,
@@ -27001,7 +27000,12 @@ async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const portFile = resolve(pluginRoot, ".sidecar-port");
+  const sidecarStateDir = join8(homedir4(), ".claude", "orchestrator");
+  try {
+    if (!existsSync9(sidecarStateDir))
+      mkdirSync4(sidecarStateDir, { recursive: true });
+  } catch {}
+  const portFile = resolve(sidecarStateDir, "sidecar.port");
   try {
     const content = await Bun.file(portFile).text();
     const existingPort = parseInt(content.trim(), 10);

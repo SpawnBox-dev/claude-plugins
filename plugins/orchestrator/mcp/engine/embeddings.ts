@@ -130,14 +130,39 @@ export class EmbeddingClient {
    * column; comparing against a marker-parse silently misses full-`content`
    * rewrites, which leave no marker.
    */
-  async backfill(db: Database, batchSize: number = 8): Promise<BackfillResult> {
+  async backfill(
+    db: Database,
+    batchSize: number = 8,
+    opts: { includeStale?: boolean } = {},
+  ): Promise<BackfillResult> {
+    // 0.45.1 - THE STALE SWEEP IS OPT-IN, AND THIS DEFAULT IS LOAD-BEARING.
+    //
+    // backfill() runs AUTOMATICALLY on every MCP server startup (server.ts,
+    // three call sites). Historically it selected only rows with NO embedding,
+    // which on an established KB is ~zero work - a startup no-op.
+    //
+    // 0.44.0 widened the predicate to include STALE rows so the staleness
+    // backlog could be repaired. That silently converted the startup no-op
+    // into a full-backlog job: 1350 notes on this KB, fired by EVERY session
+    // on EVERY start, each note costing seconds of CPU-bound ONNX inference in
+    // a shared Python sidecar. 0.44.1 then raised the timeout and shrank the
+    // batch, which made it worse in practice - it stopped failing fast at 30s
+    // and started grinding successfully for hours. Measured live: one sidecar
+    // at 1.8GB RSS and 617 CPU-seconds within minutes of a plugin reload, on a
+    // machine that had already been brought to a halt once.
+    //
+    // Repairing a backlog is a DELIBERATE maintenance action, not something a
+    // process does to its user on startup. Startup fills only what is MISSING
+    // (bounded, near-zero on an established KB); the stale sweep is requested
+    // explicitly by the repair path.
+    const staleClause = opts.includeStale
+      ? ` OR e.embedded_at IS NULL OR e.embedded_at < n.updated_at`
+      : ``;
     const allRows = db
       .query(
         `SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL
-            OR e.embedded_at IS NULL
-            OR e.embedded_at < n.updated_at`
+         WHERE e.note_id IS NULL${staleClause}`
       )
       .all() as Array<{ id: string; content: string }>;
 

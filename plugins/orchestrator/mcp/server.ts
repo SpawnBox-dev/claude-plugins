@@ -1,5 +1,5 @@
 import { resolve, join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -337,7 +337,32 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const portFile = resolve(pluginRoot, ".sidecar-port");
+
+  // 0.45.1 - THE PORT FILE MUST NOT LIVE UNDER pluginRoot.
+  //
+  // pluginRoot is the VERSION-SPECIFIC plugin cache directory
+  // (.../plugins/cache/<market>/orchestrator/<version>/). Keeping the port
+  // file there scoped the whole "reuse an existing sidecar" mechanism per
+  // VERSION, so every release started a new generation: each session's MCP
+  // looked in the new version's folder, found nothing, and spawned another
+  // ~1.5GB Python sidecar - while adopters deliberately never kill a sidecar
+  // they did not start ("let it outlive us"), so the old ones stayed resident.
+  //
+  // Observed on this machine after three releases in one afternoon: ELEVEN
+  // .sidecar-port files, one per installed version, each on a different port,
+  // and a system brought to a halt by concurrent python processes. The reuse
+  // logic was correct; its SCOPE was wrong.
+  //
+  // A stable per-user path means one sidecar for the whole fleet across all
+  // versions and upgrades. ~/.claude/orchestrator/ already exists as this
+  // plugin's durable per-user state dir (mcp-lifecycle.log lives there).
+  const sidecarStateDir = join(homedir(), ".claude", "orchestrator");
+  try {
+    if (!existsSync(sidecarStateDir)) mkdirSync(sidecarStateDir, { recursive: true });
+  } catch {
+    // Fall through - resolve() below still yields a usable path attempt.
+  }
+  const portFile = resolve(sidecarStateDir, "sidecar.port");
 
   // Reuse an existing healthy sidecar if one is already running. Each Claude
   // session spawns its own MCP server process, so without reuse we end up with
