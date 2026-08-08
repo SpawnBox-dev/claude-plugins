@@ -1,15 +1,68 @@
 import type { Database } from "bun:sqlite";
 import { now, extractKeywords, generateId } from "../utils";
+import type { EmbeddingClient } from "../engine/embeddings";
 
 export interface AppendResult {
   appended: boolean;
   message: string;
+  /**
+   * The in-flight embedding refresh, when a client was supplied. Exposed so
+   * callers (and tests) can await it; production call sites deliberately do
+   * not, matching the fire-and-forget shape used elsewhere.
+   */
+  embedding?: Promise<boolean>;
+}
+
+/**
+ * Re-embed a note after its content changed. THE single choke point for that
+ * guarantee - route every content mutation through here.
+ *
+ * 0.44.0: four separate write paths used to mutate content and leave the
+ * vector alone, so the text was FTS-findable and invisible to semantic search
+ * (insights 44d445bb, 1ad2c09d). The bias was directional and flattering: the
+ * most-maintained notes read emptiest to concept search, because maintenance
+ * means appends. 715 of 7083 notes were measurably affected.
+ *
+ * On failure the stale vector is REMOVED rather than retained. A vector that
+ * no longer matches its text is worse than no vector at all, because backfill
+ * can repair a missing one - and, since 0.44.0, a stale one too.
+ */
+export function refreshNoteEmbedding(
+  db: Database,
+  id: string,
+  content: string,
+  embeddingClient?: EmbeddingClient | null
+): Promise<boolean> | undefined {
+  if (!embeddingClient) return undefined;
+  // Best-effort by contract: a refresh must NEVER break the content write that
+  // triggered it. Callers are duck-typed in places (tests and older call sites
+  // pass a partial `{ embed }` object), so a missing method would otherwise
+  // throw SYNCHRONOUSLY - before any promise exists, which means .catch()
+  // cannot see it and the whole note write fails. Guard the shape, and wrap
+  // the call so a sync throw degrades to "no embedding" like every other
+  // failure mode in EmbeddingClient.
+  if (typeof (embeddingClient as Partial<EmbeddingClient>).embedIfAvailable !== "function") {
+    return undefined;
+  }
+  try {
+    return embeddingClient.embedIfAvailable(db, id, content).catch(() => {
+      try {
+        embeddingClient.removeEmbedding(db, id);
+      } catch {
+        /* removal is itself best-effort */
+      }
+      return false;
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 export function appendToNoteContent(
   db: Database,
   id: string,
-  appendContent: string
+  appendContent: string,
+  embeddingClient?: EmbeddingClient | null
 ): AppendResult {
   const row = db.query("SELECT content FROM notes WHERE id = ?").get(id) as { content: string } | null;
   if (!row) {
@@ -22,7 +75,10 @@ export function appendToNoteContent(
     `UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`,
     [newContent, newKeywords, timestamp, id]
   );
-  return { appended: true, message: `Appended to note "${id}".` };
+  // Embed the FULL post-append body, not the delta: the vector has to cover
+  // what the note now says, or the appended text stays invisible.
+  const embedding = refreshNoteEmbedding(db, id, newContent, embeddingClient);
+  return { appended: true, message: `Appended to note "${id}".`, embedding };
 }
 
 export function snapshotRevision(

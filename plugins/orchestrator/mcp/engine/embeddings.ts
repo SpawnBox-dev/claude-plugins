@@ -81,17 +81,32 @@ export class EmbeddingClient {
   }
 
   /**
-   * Find all notes without embeddings, batch embed them, and store.
-   * Loops through all un-embedded notes in chunks. Continues past
-   * failed batches (logs error, skips to next batch).
+   * Find all notes whose embedding is MISSING or STALE, batch embed them, and
+   * store. Loops in chunks, continues past failed batches (logs, skips).
    * Returns the total count of newly embedded notes.
+   *
+   * 0.44.0: this used to select `WHERE e.note_id IS NULL` - missing rows only.
+   * A stale row is present, so it was skipped forever and staleness was
+   * PERMANENT once created; nothing in the codebase re-embedded. That made
+   * this the reason defects 1/2/4 could not self-heal (insight 44d445bb).
+   *
+   * The staleness predicate is `embedded_at < updated_at`, which deliberately
+   * OVER-selects: updated_at also moves on tags-only, status-only and
+   * code_refs-only edits that leave the embeddable text unchanged. That is the
+   * right trade here - re-embedding is idempotent and merely costs sidecar
+   * time, whereas under-selecting would leave real staleness in place. Do NOT
+   * "tighten" this into a content-equality check without a content_hash
+   * column; comparing against a marker-parse silently misses full-`content`
+   * rewrites, which leave no marker.
    */
   async backfill(db: Database, batchSize: number = 32): Promise<number> {
     const allRows = db
       .query(
         `SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL`
+         WHERE e.note_id IS NULL
+            OR e.embedded_at IS NULL
+            OR e.embedded_at < n.updated_at`
       )
       .all() as Array<{ id: string; content: string }>;
 

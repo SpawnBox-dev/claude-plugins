@@ -636,7 +636,7 @@ export async function handleRemember(
       `  note({ pending_id: "${pendingId}", resolution: { action: "accept_new" } })\n\n` +
       "Choose one:\n" +
       `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different\n` +
-      `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new\n` +
+      `  - resolution: { action: "update_existing", target_id: "ID" }  -- APPENDS your content to the target as a timestamped segment; no new note is created. Pass ONLY the delta - do NOT pre-merge the target's existing body into your content, or the shared text lands twice.\n` +
       `  - resolution: { action: "supersede_existing", target_id: "ID", reason?: "..." }  -- new note supersedes target (preserves history)\n` +
       `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved\n` +
       `\n(Any field you pass alongside pending_id overrides the stashed one, so you can amend while committing. ` +
@@ -725,7 +725,16 @@ export async function handleRemember(
     if (action === "update_existing") {
       // Caller's content is additive - append to target instead of creating
       // a new note. This matches R1.6 append_content semantics.
-      appendToNoteContent(db, targetId, input.content);
+      //
+      // 0.44.0: pass the embedding client. This branch is the odd one out -
+      // its three siblings (accept_new, supersede_existing, close_existing)
+      // all route through insertNote and embed there, while this one called
+      // the append helper directly and inherited nothing. That made it the
+      // most perverse instance of the staleness family: the gate fires
+      // BECAUSE embedding similarity crossed a bar, then merges knowledge in
+      // and left the target's vector describing only its pre-merge content -
+      // degrading the very index that triggered it. See insight 1ad2c09d.
+      appendToNoteContent(db, targetId, input.content, embeddingClient);
       return {
         stored: false,
         note_id: targetId,

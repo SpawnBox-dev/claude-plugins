@@ -20587,7 +20587,9 @@ class EmbeddingClient {
   async backfill(db, batchSize = 32) {
     const allRows = db.query(`SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
-         WHERE e.note_id IS NULL`).all();
+         WHERE e.note_id IS NULL
+            OR e.embedded_at IS NULL
+            OR e.embedded_at < n.updated_at`).all();
     if (allRows.length === 0)
       return 0;
     let totalEmbedded = 0;
@@ -21031,7 +21033,24 @@ function handleCheckSimilar(db, queryVector, input) {
 }
 
 // mcp/tools/update_note_helpers.ts
-function appendToNoteContent(db, id, appendContent) {
+function refreshNoteEmbedding(db, id, content, embeddingClient) {
+  if (!embeddingClient)
+    return;
+  if (typeof embeddingClient.embedIfAvailable !== "function") {
+    return;
+  }
+  try {
+    return embeddingClient.embedIfAvailable(db, id, content).catch(() => {
+      try {
+        embeddingClient.removeEmbedding(db, id);
+      } catch {}
+      return false;
+    });
+  } catch {
+    return;
+  }
+}
+function appendToNoteContent(db, id, appendContent, embeddingClient) {
   const row = db.query("SELECT content FROM notes WHERE id = ?").get(id);
   if (!row) {
     return { appended: false, message: `No note found with id "${id}".` };
@@ -21043,7 +21062,8 @@ function appendToNoteContent(db, id, appendContent) {
 ${appendContent}`;
   const newKeywords = extractKeywords(newContent).join(",");
   db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
-  return { appended: true, message: `Appended to note "${id}".` };
+  const embedding = refreshNoteEmbedding(db, id, newContent, embeddingClient);
+  return { appended: true, message: `Appended to note "${id}".`, embedding };
 }
 function snapshotRevision(db, noteId, sessionId) {
   const row = db.query(`SELECT content, context, tags, keywords, confidence, code_refs FROM notes WHERE id = ?`).get(noteId);
@@ -21467,7 +21487,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
 
 ` + `Choose one:
 ` + `  - resolution: { action: "accept_new" }  -- both notes stand, adjacent-but-different
-` + `  - resolution: { action: "update_existing", target_id: "ID" }  -- update the target instead of creating new
+` + `  - resolution: { action: "update_existing", target_id: "ID" }  -- APPENDS your content to the target as a timestamped segment; no new note is created. Pass ONLY the delta - do NOT pre-merge the target's existing body into your content, or the shared text lands twice.
 ` + `  - resolution: { action: "supersede_existing", target_id: "ID", reason?: "..." }  -- new note supersedes target (preserves history)
 ` + `  - resolution: { action: "close_existing", target_id: "ID", reason?: "..." }  -- new note and close target as resolved
 ` + `
@@ -21533,7 +21553,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "update_existing") {
-      appendToNoteContent(db, targetId, input.content);
+      appendToNoteContent(db, targetId, input.content, embeddingClient);
       return {
         stored: false,
         note_id: targetId,
@@ -27311,7 +27331,7 @@ server.tool("note", "Capture knowledge not already known. Use when something new
     action: exports_external.enum(["accept_new", "update_existing", "supersede_existing", "close_existing"]),
     target_id: exports_external.string().optional().describe("Required for update_existing / supersede_existing / close_existing actions. The id of the near-duplicate candidate being acted on."),
     reason: exports_external.string().optional().describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread.")
-  }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
+  }).optional().describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (APPENDS your content to the target as a timestamped segment - no new note is created; pass ONLY the delta and do NOT pre-merge the target's existing body into your content, or the shared text lands twice); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
   code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries.")
 }, async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs, pending_id }) => {
   session_id = resolveSessionId(session_id);
@@ -27711,7 +27731,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   }
   const updates = [];
   if (append_content !== undefined) {
-    appendToNoteContent(db, id, append_content);
+    appendToNoteContent(db, id, append_content, embeddingClient);
     updates.push("append_content");
     row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`).get(id);
   }
@@ -27756,10 +27776,8 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
       timestamp,
       id
     ]);
-    if (content !== undefined && embeddingClient) {
-      embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
-        embeddingClient.removeEmbedding(db, id);
-      });
+    if (content !== undefined) {
+      refreshNoteEmbedding(db, id, newContent, embeddingClient);
     }
   }
   if (willWriteCodeRefs) {
@@ -28029,7 +28047,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     changes.push("content updated");
   }
   if (append_content !== undefined) {
-    appendToNoteContent(projectDb2, id, append_content);
+    appendToNoteContent(projectDb2, id, append_content, embeddingClient);
     changes.push("append_content");
   }
   if (tags !== undefined) {
@@ -28062,6 +28080,9 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
       setFragments.push("resolved = 1");
     bindValues.push(id);
     projectDb2.run(`UPDATE notes SET ${setFragments.join(", ")} WHERE id = ?`, bindValues);
+  }
+  if (content) {
+    refreshNoteEmbedding(projectDb2, id, content, embeddingClient);
   }
   if (code_refs !== undefined) {
     const codeRefsJson = stringifyCodeRefs(code_refs);

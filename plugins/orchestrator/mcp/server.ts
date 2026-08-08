@@ -22,7 +22,7 @@ import { handleOrient, getCrossSessionHealth } from "./tools/orient";
 import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
-import { appendToNoteContent, snapshotRevision } from "./tools/update_note_helpers";
+import { appendToNoteContent, snapshotRevision, refreshNoteEmbedding } from "./tools/update_note_helpers";
 import { resolveNoteId } from "./tools/id_resolver";
 import { supersededSuffix } from "./tools/recall";
 import { findRestatedBlockers, formatStalledClaimAdvisory } from "./engine/stalled_claim";
@@ -950,7 +950,7 @@ server.tool(
           .describe("Why this resolution was chosen. Becomes context on supersede, or resolution text on close_thread."),
       })
       .optional()
-      .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (update the target instead of creating new); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
+      .describe("Required when note() detects near-duplicate candidates (embedding similarity >= 0.75 for types: decision, convention, anti_pattern). Omit when there are no candidates, and the write proceeds normally. When candidates exist, agent must choose: accept_new (candidates are adjacent but genuinely different - both stand); update_existing (APPENDS your content to the target as a timestamped segment - no new note is created; pass ONLY the delta and do NOT pre-merge the target's existing body into your content, or the shared text lands twice); supersede_existing (create new and mark target as superseded, preserves history); close_existing (create new and mark target as resolved)."),
     code_refs: codeRefsInput("Array of file or module paths this note points at (e.g. ['mcp/server.ts', 'src/core/backup/']). Breadcrumbs for code navigation - not line numbers or symbols (code indexers handle those). Used for reverse-index lookup ({code_ref: 'path'}) so agents can find notes about a file they're editing. Paths are normalized: leading './' stripped, backslashes converted to forward slashes, trimmed. Trailing slash preserved (distinguishes file vs directory ref). Each path: 1-500 chars; array max 50 entries."),
   },
   async ({ content, type, context, tags, scope, dimension, session_id, resolution, code_refs, pending_id }) => {
@@ -1440,7 +1440,10 @@ server.tool(
     const updates: string[] = [];
 
     if (append_content !== undefined) {
-      appendToNoteContent(db, id, append_content);
+      // 0.44.0: pass the client so the append re-embeds. Pre-fix the only
+      // refresh in this handler sat behind `content !== undefined` below,
+      // which this branch could never satisfy - defect 1 of insight 44d445bb.
+      appendToNoteContent(db, id, append_content, embeddingClient);
       updates.push("append_content");
       // Re-read row so any fall-through UPDATE sees the appended content
       row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
@@ -1505,10 +1508,8 @@ server.tool(
         ]
       );
 
-      if (content !== undefined && embeddingClient) {
-        embeddingClient.embedIfAvailable(db, id, newContent).catch(() => {
-          embeddingClient!.removeEmbedding(db, id);
-        });
+      if (content !== undefined) {
+        refreshNoteEmbedding(db, id, newContent, embeddingClient);
       }
     }
 
@@ -1900,7 +1901,7 @@ server.tool(
     // helper update_note uses, so timestamp format and keyword re-extraction
     // stay identical across both tools.
     if (append_content !== undefined) {
-      appendToNoteContent(projectDb, id, append_content);
+      appendToNoteContent(projectDb, id, append_content, embeddingClient);
       changes.push("append_content");
     }
     if (tags !== undefined) {
@@ -1937,6 +1938,23 @@ server.tool(
       if (status === "done") setFragments.push("resolved = 1");
       bindValues.push(id);
       projectDb.run(`UPDATE notes SET ${setFragments.join(", ")} WHERE id = ?`, bindValues);
+    }
+
+    // 0.44.0: refresh the embedding after a full `content` rewrite. This
+    // handler previously contained NO embedding call on any path, which
+    // falsified the workaround the fleet was actually using - sessions did
+    // full rewrites of work items believing it bought semantic currency (see
+    // 7c30b7e1's `full-rewrite-for-embedding-refresh` tag) and it never did.
+    // The append branch above is covered inside appendToNoteContent.
+    // THIS GUARD MUST STAY IDENTICAL TO THE `if (content)` WRITE GUARD ABOVE.
+    // It looks like it should be `content !== undefined` for consistency with
+    // the update_note path, and that would be a BUG here: the write itself is
+    // falsy-guarded, so content === "" skips the UPDATE and leaves the stored
+    // description intact. Re-embedding on "" would then point the vector at an
+    // empty body while the note still says something - manufacturing exactly
+    // the staleness this release fixes. Change both guards together or neither.
+    if (content) {
+      refreshNoteEmbedding(projectDb, id, content, embeddingClient);
     }
 
     // R5: code_refs replacement. Separate parameterized UPDATE so we don't
