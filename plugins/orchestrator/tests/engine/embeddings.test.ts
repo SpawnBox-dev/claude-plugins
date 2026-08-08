@@ -181,8 +181,8 @@ describe("EmbeddingClient", () => {
       insertNote(db, { content: "note about testing" });
 
       const client = new EmbeddingClient("http://localhost:9999");
-      const count = await client.backfill(db);
-      expect(count).toBe(3);
+      const res = await client.backfill(db);
+      expect(res.embedded).toBe(3);
 
       // Verify all have embeddings now
       const rows = db.query("SELECT COUNT(*) as cnt FROM embeddings").get() as {
@@ -200,8 +200,10 @@ describe("EmbeddingClient", () => {
     insertNote(db, { content: "orphan note" });
 
     const client = new EmbeddingClient("http://localhost:1");
-    const count = await client.backfill(db);
-    expect(count).toBe(0);
+    const res = await client.backfill(db);
+    expect(res.embedded).toBe(0);
+    // 0.44.1: a down sidecar is a FAILURE, not a clean no-op - the result must say so.
+    expect(res.failed).toBeGreaterThan(0);
   });
 
   test("removeEmbedding deletes from DB", () => {

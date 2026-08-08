@@ -1,6 +1,29 @@
 import type { Database } from "bun:sqlite";
 
 /**
+ * Per-request ceiling for a /embed call.
+ *
+ * 0.44.1: was an inline 30_000, which made backfill's old batch of 32
+ * structurally impossible. MEASURED on the live 7083-note KB (CPU ONNX bge-m3):
+ * batch=8 -> 24.7s, batch=16 -> 34.0s, batch=32 -> 92.4s, on payloads totalling
+ * only ~12.7KB. So the cost is model time, not bytes, and 30s left a batch of 8
+ * almost no headroom while guaranteeing 16 and 32 could never succeed.
+ */
+const EMBED_TIMEOUT_MS = 120_000;
+
+/** What a backfill pass actually did. See backfill() for why this is not a number. */
+export interface BackfillResult {
+  /** Notes successfully embedded and written. */
+  embedded: number;
+  /** Notes that were selected for repair but lost to a failed batch. */
+  failed: number;
+  /** Notes selected by the staleness predicate this run. */
+  attempted: number;
+  batchesTotal: number;
+  batchesFailed: number;
+}
+
+/**
  * Client for the Python embedding sidecar (ONNX bge-m3).
  *
  * All methods gracefully degrade: they return null/false/0 when the
@@ -40,7 +63,7 @@ export class EmbeddingClient {
   async embed(texts: string[]): Promise<Float32Array[] | null> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 30_000);
+      const timeout = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
       const res = await fetch(`${this.baseUrl}/embed`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -83,7 +106,15 @@ export class EmbeddingClient {
   /**
    * Find all notes whose embedding is MISSING or STALE, batch embed them, and
    * store. Loops in chunks, continues past failed batches (logs, skips).
-   * Returns the total count of newly embedded notes.
+   *
+   * RETURNS A RESULT OBJECT, NOT A COUNT (0.44.1). It used to return a bare
+   * number, and that number could not distinguish "nothing needed repair" from
+   * "every single batch failed" - both are zero. That is exactly what happened
+   * on the first live repair run: all batches timed out, backfill logged to
+   * stderr and returned 0, and the run read as a clean no-op. A check that
+   * cannot say no is indistinguishable from one that found nothing. Callers
+   * that care about repair actually happening must inspect `failed` /
+   * `batchesFailed`, not just `embedded`.
    *
    * 0.44.0: this used to select `WHERE e.note_id IS NULL` - missing rows only.
    * A stale row is present, so it was skipped forever and staleness was
@@ -99,7 +130,7 @@ export class EmbeddingClient {
    * column; comparing against a marker-parse silently misses full-`content`
    * rewrites, which leave no marker.
    */
-  async backfill(db: Database, batchSize: number = 32): Promise<number> {
+  async backfill(db: Database, batchSize: number = 8): Promise<BackfillResult> {
     const allRows = db
       .query(
         `SELECT n.id, n.content FROM notes n
@@ -110,9 +141,15 @@ export class EmbeddingClient {
       )
       .all() as Array<{ id: string; content: string }>;
 
-    if (allRows.length === 0) return 0;
+    const result: BackfillResult = {
+      embedded: 0,
+      failed: 0,
+      attempted: allRows.length,
+      batchesTotal: Math.ceil(allRows.length / batchSize),
+      batchesFailed: 0,
+    };
+    if (allRows.length === 0) return result;
 
-    let totalEmbedded = 0;
     const stmt = db.prepare(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`
@@ -126,6 +163,8 @@ export class EmbeddingClient {
         const vectors = await this.embed(texts);
         if (!vectors || vectors.length !== batch.length) {
           console.error(`[embed] Backfill batch ${i / batchSize + 1} returned unexpected result, skipping ${batch.length} notes`);
+          result.failed += batch.length;
+          result.batchesFailed++;
           continue;
         }
 
@@ -134,14 +173,16 @@ export class EmbeddingClient {
           const blob = Buffer.from(vectors[j].buffer);
           stmt.run(batch[j].id, blob, "bge-m3", ts);
         }
-        totalEmbedded += batch.length;
+        result.embedded += batch.length;
       } catch (err) {
         console.error(`[embed] Backfill batch ${i / batchSize + 1} failed, skipping ${batch.length} notes:`, err);
+        result.failed += batch.length;
+        result.batchesFailed++;
         continue;
       }
     }
 
-    return totalEmbedded;
+    return result;
   }
 
   /**

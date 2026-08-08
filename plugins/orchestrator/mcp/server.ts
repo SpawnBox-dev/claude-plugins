@@ -2837,6 +2837,29 @@ process.stdin.on("close", () => shutdownOnce("stdin-close"));
 process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
 process.on("SIGINT", () => shutdownOnce("SIGINT"));
 process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
+// 0.44.1: a dead stdio pipe must not kill this process.
+//
+// Found by SA-622e7298 (DISCORD lane): 808 EPIPE uncaughtExceptions across
+// multiple PIDs in the lifecycle log. The subtlety is that emitLifecycleLine
+// ALREADY wraps its stderr write in try/catch - so this is not a missing
+// guard, it is a guard aimed at the wrong half of the failure.
+// `process.stderr.write` on a broken pipe raises EPIPE ASYNCHRONOUSLY, as an
+// 'error' event on the stream. With no listener attached, Node/Bun promotes
+// that to uncaughtException - and the handler below calls shutdownOnce. So a
+// benign "our reader went away" TERMINATES the server, which is itself the
+// alive-but-unreachable state the egress_suspect detector then reports. The
+// failure manufactures the very condition it looks like.
+//
+// Exact mirror of the 0.44.0 append-embedding bug: that had `.catch()` for the
+// async path and threw synchronously; this has try/catch for the sync path and
+// fails asynchronously. A best-effort side effect needs BOTH guards or it can
+// kill its host. See anti_pattern 798f741b.
+//
+// Swallowing is correct here: if stdio is gone there is nowhere to report it,
+// and the durable lifecycle FILE (written first, by design) still records it.
+process.stderr.on("error", () => {});
+process.stdout.on("error", () => {});
+
 process.on("uncaughtException", (err) => {
   emitLifecycle(
     `[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} ` +

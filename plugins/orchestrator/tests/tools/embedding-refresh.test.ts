@@ -221,10 +221,10 @@ describe("0.44.0 defect 3: backfill repairs STALE embeddings, not just missing o
     const client = new EmbeddingClient("http://127.0.0.1:0");
     (client as any).embed = async (texts: string[]) => texts.map(() => new Float32Array([0.9]));
 
-    const n = await client.backfill(db);
+    const res = await client.backfill(db);
     // Pre-fix this returned 0: the WHERE clause only saw NULL rows, so a stale
     // vector was skipped forever and staleness was permanent.
-    expect(n).toBeGreaterThan(0);
+    expect(res.embedded).toBeGreaterThan(0);
     const row = db.query("SELECT embedded_at FROM embeddings WHERE note_id = ?").get(created.note_id!) as any;
     expect(row.embedded_at > "2020-01-01T00:00:00.000Z").toBe(true);
   });

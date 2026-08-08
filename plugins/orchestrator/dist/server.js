@@ -20534,6 +20534,8 @@ function maximalMarginalRelevance(items, topK, lambda = 0.7) {
 }
 
 // mcp/engine/embeddings.ts
+var EMBED_TIMEOUT_MS = 120000;
+
 class EmbeddingClient {
   baseUrl;
   constructor(baseUrl) {
@@ -20558,7 +20560,7 @@ class EmbeddingClient {
   async embed(texts) {
     try {
       const controller = new AbortController;
-      const timeout = setTimeout(() => controller.abort(), 30000);
+      const timeout = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
       const res = await fetch(`${this.baseUrl}/embed`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -20584,15 +20586,21 @@ class EmbeddingClient {
        VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
     return true;
   }
-  async backfill(db, batchSize = 32) {
+  async backfill(db, batchSize = 8) {
     const allRows = db.query(`SELECT n.id, n.content FROM notes n
          LEFT JOIN embeddings e ON n.id = e.note_id
          WHERE e.note_id IS NULL
             OR e.embedded_at IS NULL
             OR e.embedded_at < n.updated_at`).all();
+    const result = {
+      embedded: 0,
+      failed: 0,
+      attempted: allRows.length,
+      batchesTotal: Math.ceil(allRows.length / batchSize),
+      batchesFailed: 0
+    };
     if (allRows.length === 0)
-      return 0;
-    let totalEmbedded = 0;
+      return result;
     const stmt = db.prepare(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`);
     for (let i = 0;i < allRows.length; i += batchSize) {
@@ -20602,6 +20610,8 @@ class EmbeddingClient {
         const vectors = await this.embed(texts);
         if (!vectors || vectors.length !== batch.length) {
           console.error(`[embed] Backfill batch ${i / batchSize + 1} returned unexpected result, skipping ${batch.length} notes`);
+          result.failed += batch.length;
+          result.batchesFailed++;
           continue;
         }
         const ts = new Date().toISOString();
@@ -20609,13 +20619,15 @@ class EmbeddingClient {
           const blob = Buffer.from(vectors[j].buffer);
           stmt.run(batch[j].id, blob, "bge-m3", ts);
         }
-        totalEmbedded += batch.length;
+        result.embedded += batch.length;
       } catch (err) {
         console.error(`[embed] Backfill batch ${i / batchSize + 1} failed, skipping ${batch.length} notes:`, err);
+        result.failed += batch.length;
+        result.batchesFailed++;
         continue;
       }
     }
-    return totalEmbedded;
+    return result;
   }
   removeEmbedding(db, noteId) {
     db.run("DELETE FROM embeddings WHERE note_id = ?", [noteId]);
@@ -26121,10 +26133,12 @@ class AgentChannel {
           } catch {}
           this.emit({
             content: `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` + `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` + `egress dropped), and it is also exactly what a RESTARTING transport looks ` + `like for a few seconds.
-` + `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` + `restart or a self-healing wedge is back by then; a real egress death is not. ` + `This measurement can be accurate about a moment that has already passed.
-` + `  2. Did anything just restart the MCP servers (/reload-plugins, /mcp, a ` + `plugin update)? Then expect this and wait it out.
-` + `  3. Only after it persists across two readings, tell the user to run /mcp in ` + `THAT terminal. Asking a human to repair a session that is already fine is the ` + `expensive error here, and it has happened.
-` + `  Note the subject cannot see this message.`,
+` + `  BASE RATE: 0 of the last 8 firings were a real fault. Start from "this is ` + `probably fine" and make it earn escalation.
+` + `  1. FREE CHECK FIRST - did this session POST to the channel after the alert ` + `timestamp above? If yes it is reachable, and you are done. Costs nothing; you ` + `already have the messages.
+` + `  2. ADDRESS THEM DIRECTLY - "@SA-${entry.id8} are you there?" - and wait ONE ` + `turn. This is the only ACTIVE probe and the only step that resolves the ` + `genuinely ambiguous case. No passive re-reading can do this, however many ` + `times you repeat it.
+` + `  3. Known wait-out causes, expect this and do nothing: anything that just ` + `restarted the MCP servers (/reload-plugins, /mcp, a plugin update), OR a bulk ` + `sidecar job in flight (an embedding backfill / repair saturates the shared ` + `sidecar and starves heartbeats fleet-wide - latency and liveness are the same ` + `bug in a single-threaded runtime).
+` + `  4. LAST RESORT, only after an unanswered direct address: tell the user to ` + `run /mcp in THAT terminal. Asking a human to repair a session that is already ` + `fine is the expensive error here, and it has happened.
+` + `  Note the subject cannot see this message - step 2 means addressing them in ` + `your own terminal output, turn-final.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,
@@ -28634,6 +28648,8 @@ process.stdin.on("close", () => shutdownOnce("stdin-close"));
 process.on("SIGTERM", () => shutdownOnce("SIGTERM"));
 process.on("SIGINT", () => shutdownOnce("SIGINT"));
 process.on("SIGHUP", () => shutdownOnce("SIGHUP"));
+process.stderr.on("error", () => {});
+process.stdout.on("error", () => {});
 process.on("uncaughtException", (err) => {
   emitLifecycle(`[orchestrator] uncaughtException at=${new Date().toISOString()} pid=${process.pid} msg=${err instanceof Error ? err.message : String(err)}
 stack=${err instanceof Error ? err.stack ?? "<no stack>" : "<not an Error>"}

@@ -900,20 +900,41 @@ export class AgentChannel {
             // state reported as a persistent one. Re-sampling thirty seconds
             // later separates them, and is especially worth it right after
             // anything restarted the transport.
+            // 0.44.1: this text used to gate on two PASSIVE readings and then
+            // route straight to "tell the user to run /mcp", never mentioning
+            // the one step that actually resolves the ambiguous case. That
+            // contradicted the liveness method note (e24d8156): passive checks
+            // only ever NARROW - an idle session is byte-for-byte identical to
+            // a deaf one - and addressing the subject is the sole ACTIVE probe.
+            // A reader under time pressure follows the text in front of them,
+            // so an alert that outranks its method note in the moment must
+            // carry the method note's procedure. See open_thread ed971934,
+            // written by the session that followed the weaker path and was
+            // right by luck rather than by method.
             content:
               `[egress_suspect] ${entry.name} (${entry.id8}) - heartbeat is down but its ` +
               `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` +
               `egress dropped), and it is also exactly what a RESTARTING transport looks ` +
               `like for a few seconds.\n` +
-              `  1. RE-SAMPLE before doing anything - wait ~30s and re-read the roster. A ` +
-              `restart or a self-healing wedge is back by then; a real egress death is not. ` +
-              `This measurement can be accurate about a moment that has already passed.\n` +
-              `  2. Did anything just restart the MCP servers (/reload-plugins, /mcp, a ` +
-              `plugin update)? Then expect this and wait it out.\n` +
-              `  3. Only after it persists across two readings, tell the user to run /mcp in ` +
-              `THAT terminal. Asking a human to repair a session that is already fine is the ` +
-              `expensive error here, and it has happened.\n` +
-              `  Note the subject cannot see this message.`,
+              `  BASE RATE: 0 of the last 8 firings were a real fault. Start from "this is ` +
+              `probably fine" and make it earn escalation.\n` +
+              `  1. FREE CHECK FIRST - did this session POST to the channel after the alert ` +
+              `timestamp above? If yes it is reachable, and you are done. Costs nothing; you ` +
+              `already have the messages.\n` +
+              `  2. ADDRESS THEM DIRECTLY - "@SA-${entry.id8} are you there?" - and wait ONE ` +
+              `turn. This is the only ACTIVE probe and the only step that resolves the ` +
+              `genuinely ambiguous case. No passive re-reading can do this, however many ` +
+              `times you repeat it.\n` +
+              `  3. Known wait-out causes, expect this and do nothing: anything that just ` +
+              `restarted the MCP servers (/reload-plugins, /mcp, a plugin update), OR a bulk ` +
+              `sidecar job in flight (an embedding backfill / repair saturates the shared ` +
+              `sidecar and starves heartbeats fleet-wide - latency and liveness are the same ` +
+              `bug in a single-threaded runtime).\n` +
+              `  4. LAST RESORT, only after an unanswered direct address: tell the user to ` +
+              `run /mcp in THAT terminal. Asking a human to repair a session that is already ` +
+              `fine is the expensive error here, and it has happened.\n` +
+              `  Note the subject cannot see this message - step 2 means addressing them in ` +
+              `your own terminal output, turn-final.`,
             meta: {
               from_session: entry.session_id,
               from_id8: entry.id8,
