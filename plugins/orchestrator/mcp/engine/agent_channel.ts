@@ -20,6 +20,7 @@
 import { openSync, readSync, closeSync, existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
 import { parseAddressing } from "./addressing";
+import { readLatestRename } from "./session_rename";
 import { lastCleanShutdownMs, readLifecycleTail, restartExplainsSilence } from "./restart_witness";
 import { filterEvent, type FilteredEvent } from "./agent_channel_filter";
 import {
@@ -556,6 +557,10 @@ export class AgentChannel {
    *  to 0 on MCP restart, so each fresh process replays the full event
    *  history once before advancing. */
   private systemEventsLastSeenId = 0;
+  /** Size of our own transcript at the last /rename scan, so an unchanged
+   *  file costs a stat() and nothing more (c086c27b). */
+  private lastRenameScanSize: number | undefined = undefined;
+
   /** Consecutive heartbeat-write failures. Reset on success. Used to
    *  escalate stderr log level + suppress repetitive warnings. */
   private heartbeatFailures = 0;
@@ -606,6 +611,12 @@ export class AgentChannel {
           `reaper pruned us, or fresh install. Re-registering.\n`,
       );
     }
+
+    // c086c27b: adopt any /rename BEFORE the first registry write, so a
+    // renamed session never appears in the roster under its launch-time
+    // timestamp at all. Ordered AFTER the name-preservation branch above so a
+    // rename outranks a restored prior name (see resolveSessionName).
+    this.syncRenameIntoName();
 
     writeSession(this.projectStateDir, {
       ...this.selfSession,
@@ -675,8 +686,41 @@ export class AgentChannel {
    * further reduces the probability of a write failure escaping this
    * try/catch in the first place.
    */
+  /**
+   * c086c27b: adopt a `/rename` into the registry name.
+   *
+   * `name` is otherwise a launch-time snapshot from ORCHESTRATOR_AGENT_NAME
+   * (the launchers default it to `SA-<timestamp>`), so a user who renames a
+   * session right after launch - the standing habit here - never saw it in the
+   * roster. The heartbeat already re-upserts `name` every 30s, so correcting
+   * `selfSession.name` is enough; nothing about the write path changes.
+   *
+   * Cheap by construction: the transcript is only re-read when its SIZE has
+   * changed since the last check, and the parse short-circuits on lines that
+   * don't contain the phrase.
+   */
+  private syncRenameIntoName(): void {
+    try {
+      const path = join(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const { name, size } = readLatestRename(path, this.lastRenameScanSize);
+      this.lastRenameScanSize = size;
+      if (name && name !== this.selfSession.name) {
+        process.stderr.write(
+          `agent-channel: adopting /rename "${name}" over ` +
+            `"${this.selfSession.name}" (session ${this.selfSession.id8})\n`,
+        );
+        this.selfSession = { ...this.selfSession, name };
+      }
+    } catch {
+      // Best-effort: a missing/locked transcript must never disturb the
+      // heartbeat. (Guarded here as well as inside readLatestRename - see
+      // anti_pattern 798f741b on best-effort side effects killing their host.)
+    }
+  }
+
   private heartbeat(): void {
     try {
+      this.syncRenameIntoName();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString(),

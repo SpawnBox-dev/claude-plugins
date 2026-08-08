@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join8 } from "path";
-import { existsSync as existsSync9, readFileSync as readFileSync4, writeFileSync as writeFileSync2, statSync as statSync6 } from "fs";
+import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync7 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -25653,7 +25653,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync5, readdirSync as readdirSync3 } from "fs";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync6, readdirSync as readdirSync3 } from "fs";
 import { join as join7 } from "path";
 
 // mcp/engine/addressing.ts
@@ -25715,8 +25715,56 @@ function parseAddressing(content, sender, sessions) {
   };
 }
 
+// mcp/engine/session_rename.ts
+import { statSync as statSync4, readFileSync as readFileSync4 } from "fs";
+var RENAME_RE = /The user named this session "([^"]*)"\. This may indicate the session's focus or intent\./g;
+function isInsideChannelEnvelope(content, index) {
+  const before = content.slice(0, index);
+  return before.lastIndexOf("<channel") > before.lastIndexOf("</channel>");
+}
+function parseLatestRename(transcriptText) {
+  let found = null;
+  for (const line of transcriptText.split(`
+`)) {
+    if (!line || line.indexOf("named this session") === -1)
+      continue;
+    let rec;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec?.type !== "user" || rec?.message?.role !== "user")
+      continue;
+    const content = rec?.message?.content;
+    if (typeof content !== "string")
+      continue;
+    RENAME_RE.lastIndex = 0;
+    let m;
+    while ((m = RENAME_RE.exec(content)) !== null) {
+      if (isInsideChannelEnvelope(content, m.index))
+        continue;
+      const name = m[1].trim();
+      if (name)
+        found = name;
+    }
+  }
+  return found;
+}
+function readLatestRename(transcriptPath, knownSize) {
+  try {
+    const size = statSync4(transcriptPath).size;
+    if (knownSize !== undefined && size === knownSize) {
+      return { name: null, size };
+    }
+    return { name: parseLatestRename(readFileSync4(transcriptPath, "utf8")), size };
+  } catch {
+    return { name: null, size: knownSize ?? -1 };
+  }
+}
+
 // mcp/engine/restart_witness.ts
-import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync4 } from "fs";
+import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync5 } from "fs";
 import { join as join6 } from "path";
 import { homedir as homedir3 } from "os";
 var RESTART_WINDOW_MS = 4 * 60 * 1000;
@@ -25754,7 +25802,7 @@ function readLifecycleTail(bytes = 64 * 1024, path2 = lifecycleLogPath()) {
   try {
     if (!existsSync7(path2))
       return "";
-    const size = statSync4(path2).size;
+    const size = statSync5(path2).size;
     const start = Math.max(0, size - bytes);
     const len = size - start;
     if (len <= 0)
@@ -25997,6 +26045,7 @@ class AgentChannel {
   ingressLastEmit = new Map;
   lastIngressCheckAt = 0;
   systemEventsLastSeenId = 0;
+  lastRenameScanSize = undefined;
   heartbeatFailures = 0;
   constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
     this.projectStateDir = projectStateDir;
@@ -26017,6 +26066,7 @@ class AgentChannel {
       process.stderr.write(`agent-channel: self not in sessions.json on start ` + `(session_id=${this.selfSession.session_id}, ` + `name=${this.selfSession.name}). Likely prior MCP restart after ` + `reaper pruned us, or fresh install. Re-registering.
 `);
     }
+    this.syncRenameIntoName();
     writeSession(this.projectStateDir, {
       ...this.selfSession,
       last_heartbeat_at: new Date().toISOString()
@@ -26045,8 +26095,21 @@ class AgentChannel {
       setKeepClean(this.projectStateDir, sid, fields.keep_clean);
     }
   }
+  syncRenameIntoName() {
+    try {
+      const path2 = join7(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const { name, size } = readLatestRename(path2, this.lastRenameScanSize);
+      this.lastRenameScanSize = size;
+      if (name && name !== this.selfSession.name) {
+        process.stderr.write(`agent-channel: adopting /rename "${name}" over ` + `"${this.selfSession.name}" (session ${this.selfSession.id8})
+`);
+        this.selfSession = { ...this.selfSession, name };
+      }
+    } catch {}
+  }
   heartbeat() {
     try {
+      this.syncRenameIntoName();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString()
@@ -26177,7 +26240,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -26186,7 +26249,7 @@ class AgentChannel {
     let fd;
     try {
       const path2 = join7(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync5(path2).size;
+      const size = statSync6(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
@@ -26208,7 +26271,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -26222,7 +26285,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync5(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -26423,7 +26486,7 @@ class AgentChannel {
   processFile(file, sessions, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync5(file);
+      stat = statSync6(file);
     } catch {
       return false;
     }
@@ -26773,7 +26836,7 @@ import { homedir as homedir4 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
     const pkgPath = join8(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync4(pkgPath, "utf8")).version;
+    return JSON.parse(readFileSync5(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -26808,7 +26871,7 @@ for ($i = 0; $i -lt 8; $i++) {
     let name = "";
     let ppid = 0;
     try {
-      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         break;
@@ -26841,7 +26904,7 @@ function getFallbackSessionId() {
     const perPidFile = join8(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync9(perPidFile)) {
-        const raw = readFileSync4(perPidFile, "utf8").trim();
+        const raw = readFileSync5(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -26854,7 +26917,7 @@ function getFallbackSessionId() {
   const file = join8(stateDir, "active-session");
   try {
     if (existsSync9(file)) {
-      const raw = readFileSync4(file, "utf8").trim();
+      const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
@@ -27151,7 +27214,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   try {
     const self = process.argv[1];
     if (self) {
-      bundleStamp = ` - bundle ${statSync6(self).mtime.toISOString()}`;
+      bundleStamp = ` - bundle ${statSync7(self).mtime.toISOString()}`;
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
@@ -28708,7 +28771,7 @@ function isPidAliveAsClaudeExe(pid, expectedCreationTime) {
       } catch {
         return false;
       }
-      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         return false;
