@@ -222,16 +222,51 @@ export async function findRelatedNotesHybrid(
     for (const r of rows) signalById.set(r.id, r.note_signal);
   }
 
-  // 2. Vector search: fetch all embeddings, compute cosine similarity, rank
+  // 2. Vector search. 0.46.0: score each note by its BEST-MATCHING PASSAGE
+  // (max-pool over note_chunks) instead of by a single whole-note vector.
+  //
+  // A document average cannot answer "which note contains this idea?" - every
+  // specific claim inside a long note is washed out. Measured 2026-08-08:
+  // paraphrase probes ranked the correct note #205-#3247 of 7148 under the old
+  // scheme while keyword ranked the same notes #1; chunked max-pool won 5/5
+  // probes in a controlled A/B. Max-pool (not mean) is the point: one strongly
+  // matching passage should surface the note, and averaging would re-introduce
+  // exactly the dilution being fixed.
+  //
+  // Falls back to the note-level `embeddings` row for any note with no chunks
+  // yet, so search keeps working during a partial backfill rather than
+  // silently dropping un-chunked notes out of the vector leg.
+  const chunkRows = db
+    .query(`SELECT note_id, vector FROM note_chunks`)
+    .all() as Array<{ note_id: string; vector: Buffer }>;
+
+  const best = new Map<string, number>();
+  for (const row of chunkRows) {
+    const sim = cosineSimilarity(queryVector, blobToVector(row.vector as Buffer));
+    const prev = best.get(row.note_id);
+    if (prev === undefined || sim > prev) best.set(row.note_id, sim);
+  }
+
   const embRows = db
     .query(`SELECT e.note_id, e.vector FROM embeddings e`)
     .all() as Array<{ note_id: string; vector: Buffer }>;
 
   const vecScores: Array<{ id: string; similarity: number }> = [];
+  const seen = new Set<string>();
   for (const row of embRows) {
+    seen.add(row.note_id);
+    const chunked = best.get(row.note_id);
+    if (chunked !== undefined) {
+      vecScores.push({ id: row.note_id, similarity: chunked });
+      continue;
+    }
     const vec = blobToVector(row.vector as Buffer);
-    const sim = cosineSimilarity(queryVector, vec);
-    vecScores.push({ id: row.note_id, similarity: sim });
+    vecScores.push({ id: row.note_id, similarity: cosineSimilarity(queryVector, vec) });
+  }
+  // Notes that have chunks but no note-level row would otherwise be invisible.
+  // Set membership, not a scan - this runs per query over the whole corpus.
+  for (const [id, sim] of best) {
+    if (!seen.has(id)) vecScores.push({ id, similarity: sim });
   }
 
   // Sort descending by similarity and assign ranks

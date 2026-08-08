@@ -381,6 +381,35 @@ CREATE INDEX IF NOT EXISTS idx_permission_audit_requested_at ON permission_audit
 CREATE INDEX IF NOT EXISTS idx_permission_audit_verdict ON permission_audit(verdict);
 `,
   },
+  {
+    version: 22,
+    name: "create_note_chunks",
+    // 0.46.0: passage-level vectors. Belongs in MIGRATIONS (not
+    // GLOBAL_MIGRATIONS) because BOTH databases hold notes and both are
+    // searched - getMigrations("global") returns MIGRATIONS + GLOBAL_MIGRATIONS.
+    //
+    // The single-vector-per-note design could not represent a long multi-topic
+    // note. Measured 2026-08-08: paraphrase probes ranked the correct note
+    // #205-#3247 of 7148 while keyword ranked the same notes #1, and the
+    // tokenizer discarded everything past 512 tokens on 3402 of 7148 notes.
+    // A note now scores as its BEST chunk (5/5 probes improved in a controlled
+    // A/B, mean rank 63 -> 32).
+    //
+    // `embeddings` is intentionally KEPT: it holds the note-level vector still
+    // used by the near-duplicate gate and auto-linker, where whole-document
+    // comparison is the right question. This table serves retrieval.
+    sql: `
+CREATE TABLE IF NOT EXISTS note_chunks (
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    model TEXT NOT NULL,
+    embedded_at TEXT NOT NULL,
+    PRIMARY KEY (note_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
+`,
+  },
 ];
 
 /**

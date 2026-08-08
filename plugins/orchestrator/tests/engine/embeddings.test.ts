@@ -91,7 +91,7 @@ describe("EmbeddingClient", () => {
     const originalFetch = globalThis.fetch;
     // Mock both health check and embed
     let callCount = 0;
-    globalThis.fetch = (async (url: string) => {
+    globalThis.fetch = (async (url: string, init?: any) => {
       const urlStr = typeof url === "string" ? url : (url as any).toString();
       if (urlStr.includes("/health")) {
         return new Response(
@@ -99,10 +99,16 @@ describe("EmbeddingClient", () => {
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
       }
-      return new Response(JSON.stringify({ vectors: [mockVector] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
+      // 0.46.0: return ONE VECTOR PER INPUT TEXT, as the real sidecar does.
+      // This used to return a single vector regardless of input, which only
+      // worked while embedIfAvailable sent exactly one text. It now sends the
+      // note plus its chunks, and a fixture that ignores its input silently
+      // fails the length check.
+      const texts: string[] = JSON.parse(init?.body ?? '{"texts":[]}').texts ?? [];
+      return new Response(
+        JSON.stringify({ vectors: texts.map(() => mockVector) }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     }) as any;
 
     try {

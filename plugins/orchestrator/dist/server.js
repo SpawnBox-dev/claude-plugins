@@ -19900,6 +19900,21 @@ CREATE INDEX IF NOT EXISTS idx_permission_audit_source ON permission_audit(sourc
 CREATE INDEX IF NOT EXISTS idx_permission_audit_requested_at ON permission_audit(requested_at);
 CREATE INDEX IF NOT EXISTS idx_permission_audit_verdict ON permission_audit(verdict);
 `
+  },
+  {
+    version: 22,
+    name: "create_note_chunks",
+    sql: `
+CREATE TABLE IF NOT EXISTS note_chunks (
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    model TEXT NOT NULL,
+    embedded_at TEXT NOT NULL,
+    PRIMARY KEY (note_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
+`
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -20533,6 +20548,53 @@ function maximalMarginalRelevance(items, topK, lambda = 0.7) {
   return selected;
 }
 
+// mcp/engine/chunking.ts
+var CHUNK_TARGET_CHARS = 1500;
+var CHUNK_OVERLAP_CHARS = 200;
+var MIN_SPLIT_CHARS = CHUNK_TARGET_CHARS + CHUNK_OVERLAP_CHARS;
+function findBreak(text, from, limit) {
+  const window = text.slice(from, from + limit);
+  const floor = Math.floor(limit * 0.6);
+  const para = window.lastIndexOf(`
+
+`);
+  if (para >= floor)
+    return from + para + 2;
+  for (const re of [/\.\s/g, /\n/g, /\s/g]) {
+    let best = -1;
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(window)) !== null) {
+      if (m.index >= floor)
+        best = m.index + m[0].length;
+    }
+    if (best >= floor)
+      return from + best;
+  }
+  return from + limit;
+}
+function chunkText(text) {
+  const trimmed = text?.trim() ?? "";
+  if (!trimmed)
+    return [];
+  if (trimmed.length <= MIN_SPLIT_CHARS)
+    return [trimmed];
+  const chunks = [];
+  let pos = 0;
+  while (pos < trimmed.length) {
+    const remaining = trimmed.length - pos;
+    if (remaining <= CHUNK_TARGET_CHARS + CHUNK_OVERLAP_CHARS) {
+      chunks.push(trimmed.slice(pos).trim());
+      break;
+    }
+    const end = findBreak(trimmed, pos, CHUNK_TARGET_CHARS);
+    chunks.push(trimmed.slice(pos, end).trim());
+    const next = Math.max(end - CHUNK_OVERLAP_CHARS, pos + 1);
+    pos = next;
+  }
+  return chunks.filter((c) => c.length > 0);
+}
+
 // mcp/engine/embeddings.ts
 var EMBED_TIMEOUT_MS = 120000;
 
@@ -20577,13 +20639,21 @@ class EmbeddingClient {
     }
   }
   async embedIfAvailable(db, noteId, content) {
-    const vectors = await this.embed([content]);
-    if (!vectors || vectors.length === 0)
+    const chunks = chunkText(content);
+    if (chunks.length === 0)
       return false;
-    const vector = vectors[0];
-    const blob = Buffer.from(vector.buffer);
+    const vectors = await this.embed([content, ...chunks]);
+    if (!vectors || vectors.length !== chunks.length + 1)
+      return false;
+    const ts = new Date().toISOString();
     db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
-       VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
+       VALUES (?, ?, ?, ?)`, [noteId, Buffer.from(vectors[0].buffer), "bge-m3", ts]);
+    db.run(`DELETE FROM note_chunks WHERE note_id = ?`, [noteId]);
+    const stmt = db.prepare(`INSERT INTO note_chunks (note_id, chunk_index, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?, ?)`);
+    for (let i = 0;i < chunks.length; i++) {
+      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), "bge-m3", ts);
+    }
     return true;
   }
   async backfill(db, batchSize = 8, opts = {}) {
@@ -20628,8 +20698,43 @@ class EmbeddingClient {
     }
     return result;
   }
+  async backfillChunks(db, batchSize = 8, limit) {
+    const rows = db.query(`SELECT n.id, n.content FROM notes n
+         WHERE NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_id = n.id)
+         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`).all();
+    const result = {
+      embedded: 0,
+      failed: 0,
+      attempted: rows.length,
+      batchesTotal: Math.ceil(rows.length / batchSize),
+      batchesFailed: 0
+    };
+    if (rows.length === 0)
+      return result;
+    for (let i = 0;i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      try {
+        for (const note of batch) {
+          const ok = await this.embedIfAvailable(db, note.id, note.content);
+          if (ok)
+            result.embedded++;
+          else {
+            result.failed++;
+          }
+        }
+      } catch (err) {
+        console.error(`[embed] Chunk backfill batch ${i / batchSize + 1} failed:`, err);
+        result.failed += batch.length;
+        result.batchesFailed++;
+      }
+    }
+    return result;
+  }
   removeEmbedding(db, noteId) {
     db.run("DELETE FROM embeddings WHERE note_id = ?", [noteId]);
+    try {
+      db.run("DELETE FROM note_chunks WHERE note_id = ?", [noteId]);
+    } catch {}
   }
 }
 function blobToVector(blob) {
@@ -20783,12 +20888,30 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
     for (const r of rows)
       signalById.set(r.id, r.note_signal);
   }
+  const chunkRows = db.query(`SELECT note_id, vector FROM note_chunks`).all();
+  const best = new Map;
+  for (const row of chunkRows) {
+    const sim = cosineSimilarity(queryVector, blobToVector(row.vector));
+    const prev = best.get(row.note_id);
+    if (prev === undefined || sim > prev)
+      best.set(row.note_id, sim);
+  }
   const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e`).all();
   const vecScores = [];
+  const seen = new Set;
   for (const row of embRows) {
+    seen.add(row.note_id);
+    const chunked = best.get(row.note_id);
+    if (chunked !== undefined) {
+      vecScores.push({ id: row.note_id, similarity: chunked });
+      continue;
+    }
     const vec = blobToVector(row.vector);
-    const sim = cosineSimilarity(queryVector, vec);
-    vecScores.push({ id: row.note_id, similarity: sim });
+    vecScores.push({ id: row.note_id, similarity: cosineSimilarity(queryVector, vec) });
+  }
+  for (const [id, sim] of best) {
+    if (!seen.has(id))
+      vecScores.push({ id, similarity: sim });
   }
   vecScores.sort((a, b) => b.similarity - a.similarity);
   const vecRanks = new Map;

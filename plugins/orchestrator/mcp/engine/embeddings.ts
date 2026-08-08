@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { chunkText } from "./chunking";
 
 /**
  * Per-request ceiling for a /embed call.
@@ -88,17 +89,41 @@ export class EmbeddingClient {
     noteId: string,
     content: string
   ): Promise<boolean> {
-    const vectors = await this.embed([content]);
-    if (!vectors || vectors.length === 0) return false;
+    // 0.46.0: embed PASSAGES, not just the whole note.
+    //
+    // The note-level vector is still written to `embeddings` - the
+    // near-duplicate gate and auto-linker ask "is this whole note like that
+    // whole note?", which is a document-level question. But RETRIEVAL asks
+    // "which note contains this idea?", and a document average cannot answer
+    // it: measured 2026-08-08, paraphrase probes ranked the correct note
+    // #205-#3247 of 7148 while keyword ranked the same notes #1. Chunking won
+    // 5/5 probes in a controlled A/B (mean rank 63 -> 32 within a 300-note
+    // subset). Chunks also fit inside the tokenizer's 512-token window, which
+    // was silently truncating 3402 of 7148 notes.
+    const chunks = chunkText(content);
+    if (chunks.length === 0) return false;
 
-    const vector = vectors[0];
-    const blob = Buffer.from(vector.buffer);
+    // One call: note-level vector first, then every chunk.
+    const vectors = await this.embed([content, ...chunks]);
+    if (!vectors || vectors.length !== chunks.length + 1) return false;
 
+    const ts = new Date().toISOString();
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, blob, "bge-m3", new Date().toISOString()]
+      [noteId, Buffer.from(vectors[0].buffer), "bge-m3", ts]
     );
+
+    // Replace wholesale - a shortened note must not keep its old tail chunks,
+    // or deleted text stays searchable forever.
+    db.run(`DELETE FROM note_chunks WHERE note_id = ?`, [noteId]);
+    const stmt = db.prepare(
+      `INSERT INTO note_chunks (note_id, chunk_index, vector, model, embedded_at)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), "bge-m3", ts);
+    }
 
     return true;
   }
@@ -211,10 +236,71 @@ export class EmbeddingClient {
   }
 
   /**
+   * Give existing notes passage vectors (0.46.0 migration path).
+   *
+   * DELIBERATE, NOT AUTOMATIC. This is the lesson from 0.44.0/0.45.1: a
+   * startup path that quietly sweeps the whole corpus is how a plugin brings a
+   * machine to its knees. Nothing calls this on its own - it is invoked by an
+   * explicit maintenance run, and search degrades gracefully in the meantime
+   * because notes without chunks still score off their note-level vector.
+   *
+   * RESUMABLE BY CONSTRUCTION: the population is "notes with no chunk rows",
+   * re-evaluated at call time. Interrupt it, run it again, and it picks up
+   * where it stopped - no cursor to persist and no frozen work-list to go
+   * stale while the fleet keeps writing.
+   *
+   * `limit` bounds a single run so it can be done in sessions rather than one
+   * multi-hour block.
+   */
+  async backfillChunks(
+    db: Database,
+    batchSize: number = 8,
+    limit?: number,
+  ): Promise<BackfillResult> {
+    const rows = db
+      .query(
+        `SELECT n.id, n.content FROM notes n
+         WHERE NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_id = n.id)
+         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`
+      )
+      .all() as Array<{ id: string; content: string }>;
+
+    const result: BackfillResult = {
+      embedded: 0,
+      failed: 0,
+      attempted: rows.length,
+      batchesTotal: Math.ceil(rows.length / batchSize),
+      batchesFailed: 0,
+    };
+    if (rows.length === 0) return result;
+
+    // Longest notes first: they are the ones the old whole-note vector served
+    // worst, so an interrupted run still delivers the biggest wins.
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
+      try {
+        for (const note of batch) {
+          const ok = await this.embedIfAvailable(db, note.id, note.content);
+          if (ok) result.embedded++;
+          else { result.failed++; }
+        }
+      } catch (err) {
+        console.error(`[embed] Chunk backfill batch ${i / batchSize + 1} failed:`, err);
+        result.failed += batch.length;
+        result.batchesFailed++;
+      }
+    }
+    return result;
+  }
+
+  /**
    * Remove the embedding for a note.
    */
   removeEmbedding(db: Database, noteId: string): void {
     db.run("DELETE FROM embeddings WHERE note_id = ?", [noteId]);
+    // Chunks are ON DELETE CASCADE from notes, but a note that merely lost its
+    // embedding (a failed refresh) must not keep stale passages behind.
+    try { db.run("DELETE FROM note_chunks WHERE note_id = ?", [noteId]); } catch { /* pre-migration db */ }
   }
 }
 
