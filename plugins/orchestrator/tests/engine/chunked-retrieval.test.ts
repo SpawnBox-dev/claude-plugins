@@ -198,3 +198,27 @@ describe("0.47.0: model identity is single-sourced and enforced", () => {
     expect(EMB).toContain("ACTIVE_EMBED_MODEL, ts");
   });
 });
+
+describe("0.47.1: a sidecar must serve the RIGHT model to be adopted", () => {
+  const SERVER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "server.ts"), "utf8");
+  const PY = readFileSync(join(import.meta.dir, "..", "..", "sidecar", "embed_server.py"), "utf8");
+
+  test("reuse verifies the vector DIMENSION, not just health", () => {
+    // Across a model change the OLD sidecar is still alive and still healthy,
+    // so a health-only check adopts it and every vector written is produced by
+    // the previous model while tagged with the new one.
+    expect(SERVER).toContain("ACTIVE_EMBED_DIM");
+    expect(/dim === ACTIVE_EMBED_DIM/.test(SERVER)).toBe(true);
+  });
+
+  test("a wrong-model sidecar is refused rather than adopted", () => {
+    expect(SERVER).toContain("Not adopting it");
+  });
+
+  test("/health reports the model actually loaded, not a literal", () => {
+    // It returned "bge-m3" regardless of --model, so a sidecar serving
+    // bge-small still announced itself as bge-m3.
+    expect(PY).toContain('"model": _model_id');
+    expect(/"model": "bge-m3"/.test(PY)).toBe(false);
+  });
+});

@@ -30,7 +30,7 @@ import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, mergeTags, noteBadge, codeRefsInput } from "./utils";
 import { createAutoLinks } from "./engine/linker";
-import { EmbeddingClient, ACTIVE_EMBED_MODEL_REPO } from "./engine/embeddings";
+import { EmbeddingClient, ACTIVE_EMBED_MODEL_REPO, ACTIVE_EMBED_MODEL, ACTIVE_EMBED_DIM } from "./engine/embeddings";
 
 // 0.30.31: read plugin version from package.json at module load so the
 // McpServer registration field + startup banner self-sync with the
@@ -375,10 +375,29 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     if (!isNaN(existingPort) && existingPort > 0) {
       const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
       if (await client.isAvailable()) {
-        console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
-        // Do NOT set sidecarProcess - we didn't start it, so we must not kill
-        // it on our exit. Let it outlive us so sibling sessions keep working.
-        return client;
+        // 0.47.1: HEALTHY IS NOT ENOUGH - it must serve the RIGHT MODEL.
+        //
+        // Across a model change the old sidecar is still alive and still
+        // healthy, so the reuse path adopted it happily and every vector
+        // written was produced by the PREVIOUS model while being tagged with
+        // the new one. That is the exact corruption ACTIVE_EMBED_MODEL exists
+        // to prevent, arriving through the one door that never checked.
+        //
+        // Dimension is the honest signal: it is a property of the loaded
+        // weights, whereas /health's model NAME was a hardcoded literal until
+        // this same release fixed it. Checking both means an old sidecar (with
+        // a lying name) is still rejected on dimension.
+        const dim = (await client.embed(["model check"]))?.[0]?.length ?? 0;
+        if (dim === ACTIVE_EMBED_DIM) {
+          console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
+          // Do NOT set sidecarProcess - we didn't start it, so we must not kill
+          // it on our exit. Let it outlive us so sibling sessions keep working.
+          return client;
+        }
+        console.error(
+          `[embed] Sidecar on port ${existingPort} serves dim=${dim}, expected ${ACTIVE_EMBED_DIM} ` +
+          `(${ACTIVE_EMBED_MODEL}). Not adopting it - spawning the correct model instead.`,
+        );
       }
     }
   } catch {

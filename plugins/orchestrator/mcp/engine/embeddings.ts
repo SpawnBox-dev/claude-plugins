@@ -42,6 +42,14 @@ export const ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
  */
 export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
 
+/**
+ * Vector width of ACTIVE_EMBED_MODEL. Used to VERIFY a sidecar before adopting
+ * it, because dimension is a property of the weights actually loaded, while
+ * the model NAME reported by /health was a hardcoded literal until 0.47.1 and
+ * therefore not trustworthy on an older sidecar.
+ */
+export const ACTIVE_EMBED_DIM = 384;
+
 /** What a backfill pass actually did. See backfill() for why this is not a number. */
 export interface BackfillResult {
   /** Notes successfully embedded and written. */

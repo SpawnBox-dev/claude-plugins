@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Minimal Python HTTP server wrapping ONNX bge-m3 for text embedding.
+Minimal Python HTTP server wrapping an ONNX sentence-embedding model.
 
 Usage:
-    python embed_server.py --port-file /tmp/embed.port [--port 0] [--model BAAI/bge-m3]
+    python embed_server.py --port-file /tmp/embed.port [--port 0] [--model BAAI/bge-small-en-v1.5]
 
 Endpoints:
-    GET  /health -> {"status": "ready", "model": "bge-m3", "dim": 768}
+    GET  /health -> {"status": "ready", "model": "<loaded model id>", "dim": 384}
     POST /embed  -> {"vectors": [[...], [...]]}  (input: {"texts": ["...", "..."]})
 """
 
@@ -38,12 +38,14 @@ _tokenizer: Tokenizer = None
 _input_names: list[str] = []
 _output_name: str = ""
 _embedding_dim: int = 0
+_model_id: str = ""
 
 
 def load_model(model_id: str) -> None:
     """Download (cached) and load the ONNX model + tokenizer."""
-    global _session, _tokenizer, _input_names, _output_name, _embedding_dim
+    global _session, _tokenizer, _input_names, _output_name, _embedding_dim, _model_id
 
+    _model_id = model_id
     t0 = time.monotonic()
     log.info("Downloading/caching model %s ...", model_id)
 
@@ -154,9 +156,16 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
+            # Report the model ACTUALLY LOADED, not a hardcoded literal.
+            # This said "bge-m3" regardless of --model, so a sidecar serving
+            # bge-small-en-v1.5 still announced itself as bge-m3 (caught
+            # 2026-08-08 only because dim=384 contradicted it). Callers use
+            # /health to decide whether an existing sidecar is safe to adopt;
+            # a lie here means adopting a sidecar of the wrong model and
+            # writing vectors tagged with a model that did not produce them.
             self._send_json(200, {
                 "status": "ready",
-                "model": "bge-m3",
+                "model": _model_id,
                 "dim": _embedding_dim,
             })
         else:

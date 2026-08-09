@@ -20601,6 +20601,7 @@ function chunkText(text) {
 var EMBED_TIMEOUT_MS = 120000;
 var ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
 var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
+var ACTIVE_EMBED_DIM = 384;
 
 class EmbeddingClient {
   baseUrl;
@@ -27139,8 +27140,12 @@ async function startSidecar() {
     if (!isNaN(existingPort) && existingPort > 0) {
       const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
       if (await client.isAvailable()) {
-        console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
-        return client;
+        const dim = (await client.embed(["model check"]))?.[0]?.length ?? 0;
+        if (dim === ACTIVE_EMBED_DIM) {
+          console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
+          return client;
+        }
+        console.error(`[embed] Sidecar on port ${existingPort} serves dim=${dim}, expected ${ACTIVE_EMBED_DIM} ` + `(${ACTIVE_EMBED_MODEL}). Not adopting it - spawning the correct model instead.`);
       }
     }
   } catch {}
