@@ -23597,7 +23597,8 @@ function getDb(stateDir) {
       liveness_expires_at TEXT,
       hot_path_status TEXT,
       keep_clean INTEGER,
-      client_unreachable_since TEXT
+      client_unreachable_since TEXT,
+      instance TEXT
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -23639,7 +23640,8 @@ function getDb(stateDir) {
     liveness_expires_at: "TEXT",
     hot_path_status: "TEXT",
     keep_clean: "INTEGER",
-    client_unreachable_since: "TEXT"
+    client_unreachable_since: "TEXT",
+    instance: "TEXT"
   });
   dbCache.set(stateDir, db);
   return db;
@@ -23684,6 +23686,8 @@ function rowToEntry(r) {
     entry.keep_clean = r.keep_clean !== 0;
   if (r.client_unreachable_since !== null)
     entry.client_unreachable_since = r.client_unreachable_since;
+  if (r.instance !== null)
+    entry.instance = r.instance;
   return entry;
 }
 function setClientUnreachableSince(stateDir, session_id, iso) {
@@ -23736,7 +23740,8 @@ function readSessions(stateDir) {
   migrateSessionsLegacy(stateDir, db);
   const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, liveness_state, liveness_ts,
-            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since
+            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
+            instance
      FROM sessions`).all();
   return rows.map(rowToEntry);
 }
@@ -23745,8 +23750,8 @@ function writeSession(stateDir, entry) {
     return;
   const db = getDb(stateDir);
   prep(db, `INSERT INTO sessions
-       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
        id8 = excluded.id8,
        role = excluded.role,
@@ -23754,7 +23759,8 @@ function writeSession(stateDir, entry) {
        started_at = excluded.started_at,
        last_heartbeat_at = excluded.last_heartbeat_at,
        current_task = excluded.current_task,
-       kind = excluded.kind`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null);
+       kind = excluded.kind,
+       instance = excluded.instance`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null, entry.instance ?? null);
 }
 function setWarmContext(stateDir, session_id, tags) {
   const db = getDb(stateDir);
@@ -23771,6 +23777,12 @@ function setKeepClean(stateDir, session_id, keep) {
 function removeSession(stateDir, session_id) {
   const db = getDb(stateDir);
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
+}
+function removeOwnSession(stateDir, session_id, instance) {
+  const db = getDb(stateDir);
+  prep(db, `DELETE FROM sessions
+      WHERE session_id = ?
+        AND (instance IS NULL OR instance = ?)`).run(session_id, instance);
 }
 function migrateOverrideStateLegacy(stateDir, db) {
   const legacyPath = join4(stateDir, STATE_FILE);
@@ -26187,6 +26199,7 @@ function classifyAbsence(opts) {
     return "departed";
   return "pending";
 }
+var INSTANCE_TOKEN = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 var CLIENT_STALE_MS = 15 * 60000;
 var CLIENT_ALERT_REFRACTORY_MS = 30 * 60000;
 function classifyClientTransport(opts) {
@@ -26344,6 +26357,7 @@ class AgentChannel {
 `);
     }
     this.syncRenameIntoName();
+    this.selfSession = { ...this.selfSession, instance: INSTANCE_TOKEN };
     writeSession(this.projectStateDir, {
       ...this.selfSession,
       last_heartbeat_at: new Date().toISOString()
@@ -26358,7 +26372,7 @@ class AgentChannel {
       clearInterval(this.timer);
     if (this.heartbeatTimer)
       clearInterval(this.heartbeatTimer);
-    removeSession(this.projectStateDir, this.selfSession.session_id);
+    removeOwnSession(this.projectStateDir, this.selfSession.session_id, INSTANCE_TOKEN);
   }
   declareSelf(fields) {
     const sid = this.selfSession.session_id;

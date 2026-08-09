@@ -27,6 +27,7 @@ import {
   readSessions,
   writeSession,
   removeSession,
+  removeOwnSession,
   readOverrideState,
   readOffsets,
   writeAllOffsets,
@@ -131,6 +132,20 @@ export function classifyAbsence(opts: {
  * filewatcher round-trip plus filesystem-mtime slack. Kept at minutes anyway:
  * an alert that cries wolf is one the fleet learns to ignore (60f2fdc2).
  */
+/**
+ * Identifies THIS MCP process's ownership of its session row (WI e0f426c2).
+ *
+ * A plugin reload starts the new MCP for a session before stopping the old one,
+ * so both are briefly alive under the same session_id. Without this, the old
+ * instance's shutdown deletes the row its replacement just wrote, and the
+ * session goes invisible to the fleet until something re-registers it.
+ *
+ * Process-scoped and opaque: pid alone is not enough because pids are reused.
+ */
+const INSTANCE_TOKEN = `${process.pid}-${Date.now().toString(36)}-${Math.random()
+  .toString(36)
+  .slice(2, 10)}`;
+
 export const CLIENT_STALE_MS = 15 * 60_000;
 
 /** Minimum gap between client_transport_suspect emissions per subject. Matches
@@ -739,6 +754,11 @@ export class AgentChannel {
     // rename outranks a restored prior name (see resolveSessionName).
     this.syncRenameIntoName();
 
+    // Stamp ownership BEFORE the first write, so every subsequent heartbeat
+    // (which spreads selfSession) carries it too and our shutdown can tell
+    // "still our row" from "a reload's replacement owns it now" (WI e0f426c2).
+    this.selfSession = { ...this.selfSession, instance: INSTANCE_TOKEN };
+
     writeSession(this.projectStateDir, {
       ...this.selfSession,
       last_heartbeat_at: new Date().toISOString(),
@@ -757,7 +777,13 @@ export class AgentChannel {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    removeSession(this.projectStateDir, this.selfSession.session_id);
+    // Guarded: only delete the row if THIS process still owns it. A reload's
+    // new instance may already have taken it over (WI e0f426c2).
+    removeOwnSession(
+      this.projectStateDir,
+      this.selfSession.session_id,
+      INSTANCE_TOKEN,
+    );
   }
 
   /** PA-coherence primitive (Phase 3): write this session's SELF-declared

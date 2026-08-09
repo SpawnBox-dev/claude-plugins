@@ -110,6 +110,9 @@ export interface SessionEntry {
    *  landed. last_heartbeat_at is SERVER-driven and stays fresh even when the
    *  client cannot reach the server; this is the other half of that pair. */
   client_unreachable_since?: string | null;
+  /** WI e0f426c2: opaque token identifying the PROCESS that owns this
+   *  registration, so a departing instance cannot delete its successor's row. */
+  instance?: string | null;
 }
 
 export interface OverrideState {
@@ -319,7 +322,8 @@ function getDb(stateDir: string): Database {
       liveness_expires_at TEXT,
       hot_path_status TEXT,
       keep_clean INTEGER,
-      client_unreachable_since TEXT
+      client_unreachable_since TEXT,
+      instance TEXT
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -369,6 +373,10 @@ function getDb(stateDir: string): Database {
     // hours invisibly. This records when the CLIENT last landed a tool call,
     // so a peer can compare the two.
     client_unreachable_since: "TEXT",
+    // WI e0f426c2: which PROCESS owns this registration. A reload starts the
+    // new MCP for the same session_id BEFORE stopping the old one, so the old
+    // one's shutdown would otherwise delete the row its replacement just wrote.
+    instance: "TEXT",
   });
   dbCache.set(stateDir, db);
   return db;
@@ -412,6 +420,7 @@ interface SessionRow {
   hot_path_status: string | null;
   keep_clean: number | null;
   client_unreachable_since: string | null;
+  instance: string | null;
 }
 
 function rowToEntry(r: SessionRow): SessionEntry {
@@ -444,6 +453,7 @@ function rowToEntry(r: SessionRow): SessionEntry {
   if (r.hot_path_status !== null) entry.hot_path_status = r.hot_path_status;
   if (r.keep_clean !== null) entry.keep_clean = r.keep_clean !== 0;
   if (r.client_unreachable_since !== null) entry.client_unreachable_since = r.client_unreachable_since;
+  if (r.instance !== null) entry.instance = r.instance;
   return entry;
 }
 
@@ -540,7 +550,8 @@ export function readSessions(stateDir: string): SessionEntry[] {
     db,
     `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, liveness_state, liveness_ts,
-            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since
+            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
+            instance
      FROM sessions`,
   ).all() as SessionRow[];
   return rows.map(rowToEntry);
@@ -560,8 +571,8 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
   prep(
     db,
     `INSERT INTO sessions
-       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
        id8 = excluded.id8,
        role = excluded.role,
@@ -569,7 +580,8 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
        started_at = excluded.started_at,
        last_heartbeat_at = excluded.last_heartbeat_at,
        current_task = excluded.current_task,
-       kind = excluded.kind`,
+       kind = excluded.kind,
+       instance = excluded.instance`,
   ).run(
     entry.session_id,
     entry.id8,
@@ -579,6 +591,7 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
     entry.last_heartbeat_at,
     entry.current_task ?? null,
     entry.kind ?? null,
+    entry.instance ?? null,
   );
 }
 
@@ -642,9 +655,44 @@ export function setSessionLiveness(
   ).run(opts.state, opts.observedAt, expiresAt, session_id, opts.observedAt);
 }
 
+/**
+ * Remove a PEER's registration - the reaper path, where we are deliberately
+ * evicting someone else's row and have no idea which process wrote it. Stays
+ * unguarded on purpose; `removeOwnSession` is the one that needs the guard.
+ */
 export function removeSession(stateDir: string, session_id: string): void {
   const db = getDb(stateDir);
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
+}
+
+/**
+ * Remove OUR OWN registration on shutdown - but only if it is still ours
+ * (WI e0f426c2).
+ *
+ * Claude Code reloads a plugin by starting the NEW MCP for a session and THEN
+ * stopping the old one. Both share the session_id, so an unguarded
+ * `DELETE WHERE session_id = ?` in the old instance's shutdown deletes the row
+ * the new instance just registered. Registration is once-per-process, so only
+ * the heartbeat's UPSERT heals it - and on 2026-08-09 the heartbeat was itself
+ * broken (fb41a98), so the two defects compounded into 2.5 hours of a session
+ * being INVISIBLE to the fleet while looking perfectly healthy from outside.
+ *
+ * The `instance` guard makes the delete a no-op once someone else owns the row.
+ * A NULL instance (row written by a pre-0.55.x MCP) is treated as ours so a
+ * mixed-version fleet still cleans up after itself.
+ */
+export function removeOwnSession(
+  stateDir: string,
+  session_id: string,
+  instance: string,
+): void {
+  const db = getDb(stateDir);
+  prep(
+    db,
+    `DELETE FROM sessions
+      WHERE session_id = ?
+        AND (instance IS NULL OR instance = ?)`,
+  ).run(session_id, instance);
 }
 
 // === override_state (global_pause + sa_pause tables) ===
