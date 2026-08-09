@@ -106,6 +106,10 @@ export interface SessionEntry {
   hot_path_status?: string | null;
   /** Self-declared pollution flag: "do NOT steer me, keeping context clean." */
   keep_clean?: boolean | null;
+  /** WI d4873dfc: ISO-8601 of the last tool call the CLIENT successfully
+   *  landed. last_heartbeat_at is SERVER-driven and stays fresh even when the
+   *  client cannot reach the server; this is the other half of that pair. */
+  client_unreachable_since?: string | null;
 }
 
 export interface OverrideState {
@@ -314,7 +318,8 @@ function getDb(stateDir: string): Database {
       liveness_ts TEXT,
       liveness_expires_at TEXT,
       hot_path_status TEXT,
-      keep_clean INTEGER
+      keep_clean INTEGER,
+      client_unreachable_since TEXT
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -358,6 +363,12 @@ function getDb(stateDir: string): Database {
     liveness_expires_at: "TEXT",
     hot_path_status: "TEXT",
     keep_clean: "INTEGER",
+    // WI d4873dfc: the CLIENT-driven liveness signal. last_heartbeat_at is
+    // written by the session's own MCP process (server-driven) and stays fresh
+    // even when the client cannot reach it - which is exactly how PA lost ~12
+    // hours invisibly. This records when the CLIENT last landed a tool call,
+    // so a peer can compare the two.
+    client_unreachable_since: "TEXT",
   });
   dbCache.set(stateDir, db);
   return db;
@@ -400,6 +411,7 @@ interface SessionRow {
   liveness_expires_at: string | null;
   hot_path_status: string | null;
   keep_clean: number | null;
+  client_unreachable_since: string | null;
 }
 
 function rowToEntry(r: SessionRow): SessionEntry {
@@ -431,7 +443,28 @@ function rowToEntry(r: SessionRow): SessionEntry {
   if (r.liveness_expires_at !== null) entry.liveness_expires_at = r.liveness_expires_at;
   if (r.hot_path_status !== null) entry.hot_path_status = r.hot_path_status;
   if (r.keep_clean !== null) entry.keep_clean = r.keep_clean !== 0;
+  if (r.client_unreachable_since !== null) entry.client_unreachable_since = r.client_unreachable_since;
   return entry;
+}
+
+/**
+ * Record that this session's CLIENT successfully landed a tool call (WI
+ * d4873dfc). Written by the session's own heartbeat, and only when the verdict
+ * CHANGES, so a healthy fleet pays nothing for it.
+ *
+ * A dedicated setter, like the other observer/self-declared fields, so a
+ * heartbeat's writeSession can never clobber it with a stale value.
+ */
+export function setClientUnreachableSince(
+  stateDir: string,
+  session_id: string,
+  iso: string | null,
+): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET client_unreachable_since = ? WHERE session_id = ?`).run(
+    iso,
+    session_id,
+  );
 }
 
 function migrateSessionsLegacy(stateDir: string, db: Database): void {
@@ -507,7 +540,7 @@ export function readSessions(stateDir: string): SessionEntry[] {
     db,
     `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, liveness_state, liveness_ts,
-            liveness_expires_at, hot_path_status, keep_clean
+            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since
      FROM sessions`,
   ).all() as SessionRow[];
   return rows.map(rowToEntry);

@@ -34,6 +34,7 @@ import {
   setWarmContext,
   setHotPathStatus,
   setKeepClean,
+  setClientUnreachableSince,
   type SessionEntry,
   getAlertLastEmit,
   setAlertLastEmit,
@@ -66,7 +67,10 @@ export interface ChannelNotification {
       | "post_compact_recovery"
       | "pa_compact_recovery"
       | "egress_suspect"
-      | "ingress_suspect";
+      | "ingress_suspect"
+      // WI d4873dfc: server alive, client unreachable - invisible to every
+      // other alert because they all key on the heartbeat, which stays fresh.
+      | "client_transport_suspect";
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -116,6 +120,92 @@ export function classifyAbsence(opts: {
   // No growth yet, still inside the grace window - wait (a real reconnect or a
   // first post-stale turn may still arrive).
   return "pending";
+}
+
+/**
+ * How long after WE EMIT to a peer we wait for that peer's transcript to show
+ * any sign of life before calling its client unreachable (WI d4873dfc).
+ *
+ * Deliberately generous. Delivery is evidenced at ENQUEUE, not at processing,
+ * so this does not need to cover a long turn - it only needs to cover the
+ * filewatcher round-trip plus filesystem-mtime slack. Kept at minutes anyway:
+ * an alert that cries wolf is one the fleet learns to ignore (60f2fdc2).
+ */
+export const CLIENT_STALE_MS = 15 * 60_000;
+
+/** Minimum gap between client_transport_suspect emissions per subject. Matches
+ *  the other suspect alerts so a persistent drop nags once per window rather
+ *  than every tick. */
+export const CLIENT_ALERT_REFRACTORY_MS = 30 * 60_000;
+
+/**
+ * Detect "healthy server, unreachable client" - the state that cost PA roughly
+ * twelve hours and that NO existing detector can see.
+ *
+ * MEASURED 2026-08-09: PA's MCP server heartbeated normally through BOTH
+ * reported outages (pid 17968 across the ~12h one; pid 33520 across the
+ * 74-minute one, uptime climbing 1500 -> 4800 without a gap). The server was
+ * never the problem. Claude Code's MCP client had stopped reaching it, and the
+ * remedy - /mcp - takes seconds once someone knows.
+ *
+ * WHY egress_suspect CANNOT COVER THIS: it keys on a STALE heartbeat, and here
+ * the heartbeat is the one thing that stays perfectly fresh. The single
+ * healthy signal is the signal being measured.
+ *
+ * THE DISCRIMINATOR IS UNDELIVERED MAIL, NOT IDLENESS.
+ *
+ * The first draft of this detector keyed on "no tool calls WHILE the transcript
+ * keeps growing" and was WRONG - refuted by the incident it was written for.
+ * Measured on PA's own transcript: during the 11.37-hour freeze (02:31:18Z ->
+ * 13:53:40Z) it recorded ZERO entries, and the last entry before it was a
+ * COMPLETED assistant turn, not a mid-turn one. So the outage presented as:
+ * heartbeat fresh, no tool calls, transcript frozen, last turn clean - which is
+ * pixel-for-pixel what an IDLE session looks like. On those signals the two
+ * states are not merely hard to separate, they are IDENTICAL, and no threshold
+ * tuning can fix that. (Same shape as the 2026-07-28 ingress fixture, whose
+ * note already warned: deafness produces silence.)
+ *
+ * What actually separates them is whether anything was SENT. At 02:34:56Z -
+ * three minutes into the freeze - SA-d4db6493 addressed PA turn-final. PA's
+ * transcript shows nothing for the next 11.4 hours. Mail was sent and never
+ * arrived; that is deafness, and idleness cannot fake it.
+ *
+ * SO IT IS DETECTED WHERE BOTH SIGNALS EXIST: IN THE SESSION'S OWN SERVER.
+ *
+ * Delivery is PULL-based - a session's own server reads its peers' transcripts
+ * and injects into its own harness over the MCP transport. That makes the
+ * server the only party holding both halves of the evidence:
+ *  - msSinceEmit       - it emitted a notification to its harness, and knows when.
+ *  - deliveryObserved  - its OWN transcript grew afterwards, or did not.
+ *
+ * A harness that receives an injection writes it down immediately, as a
+ * queue-operation entry, at ENQUEUE - independent of whether a turn is running
+ * to process it (verified: 584 such entries in PA's transcript that day, 0
+ * during the freeze). So growth after an emit proves the transport carried it.
+ * Silence after an emit is the transport failing, and NOTHING ELSE produces it:
+ * an idle harness still writes, a mid-long-turn harness still writes.
+ *
+ * That is why this replaces a threshold race against turn latency with a
+ * question that has a real answer. It costs one thing: the server cannot tell
+ * its own harness what it found, because that is the broken path. It publishes
+ * to the shared state dir instead, and PEERS surface it - see the tick loop.
+ *
+ * PURE for TDD; the stat/publish glue lives in the heartbeat.
+ */
+export function classifyClientTransport(opts: {
+  /** null when nothing has been emitted, so no delivery is owed. */
+  msSinceEmit: number | null;
+  /** our own transcript grew after that emit. */
+  deliveryObserved: boolean;
+}): "client_transport_suspect" | "healthy" {
+  // Owed nothing, so silence proves nothing. Absence of evidence must not
+  // become evidence of a drop - the trap the first draft fell into.
+  if (opts.msSinceEmit === null) return "healthy";
+  // It landed. Idle or busy, the harness is demonstrably reachable.
+  if (opts.deliveryObserved) return "healthy";
+  // Sent too recently to conclude anything.
+  if (opts.msSinceEmit < CLIENT_STALE_MS) return "healthy";
+  return "client_transport_suspect";
 }
 
 // Ingress-death detection (WI 19294811) - the INVERSE of egress. A session
@@ -561,6 +651,18 @@ export class AgentChannel {
    *  file costs a stat() and nothing more (c086c27b). */
   private lastRenameScanSize: number | undefined = undefined;
 
+  /** WI d4873dfc: last value written to the registry, so an unchanged verdict
+   *  costs no write on the fleet's most write-contended database. */
+  private publishedUnreachableSince: string | null = null;
+
+  /** WI d4873dfc: when we emitted an injection whose delivery is not yet
+   *  evidenced, and how large our own transcript was then. Null = nothing owed. */
+  private pendingEmitAt: number | null = null;
+  private selfSizeAtEmit: number | null = null;
+
+  /** WI d4873dfc: per-peer refractory floor for client_transport_suspect. */
+  private clientTransportLastEmit = new Map<string, number>();
+
   /** Consecutive heartbeat-write failures. Reset on success. Used to
    *  escalate stderr log level + suppress repetitive warnings. */
   private heartbeatFailures = 0;
@@ -569,11 +671,30 @@ export class AgentChannel {
     private projectStateDir: string, // <project>/.orchestrator-state/agent-channel/
     private projectsHashDir: string, // ~/.claude/projects/<hash>/
     private selfSession: SessionEntry, // this instance's own session
-    private emit: EmitFn,
+    private rawEmit: EmitFn,
     /** Optional. SA's MCP injects when receiving permission_request notifications
      *  from CC; PA's MCP leaves it undefined. */
     private permissionRelay?: PermissionRelayLike,
   ) {}
+
+  /**
+   * Every injection into our own harness goes through here so WI d4873dfc can
+   * time it. `rawEmit` fires the notification; this records that delivery is
+   * now OWED, and the heartbeat later checks whether it arrived.
+   *
+   * OLDEST-UNSATISFIED, not latest. Stamping every emit would restart the clock
+   * on each one, so a session emitting steadily through an outage would never
+   * cross the threshold - the detector would be silent precisely when traffic
+   * is heaviest. Same reason the ingress check tracks the oldest ORPHAN enqueue
+   * rather than the most recent.
+   */
+  private emit(ev: Parameters<EmitFn>[0]): void {
+    if (this.pendingEmitAt === null) {
+      this.pendingEmitAt = Date.now();
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id);
+    }
+    this.rawEmit(ev);
+  }
 
   start(): void {
     // 0.30.32 (ghost-session fix): prefer prior name from sessions.json when
@@ -718,9 +839,60 @@ export class AgentChannel {
     }
   }
 
+  /**
+   * WI d4873dfc: decide whether our own harness is still receiving us, and
+   * publish the verdict for PEERS to surface.
+   *
+   * Runs on the heartbeat because that is the one timer guaranteed to keep
+   * running while the transport is down - the server is healthy throughout;
+   * only its link to the harness is severed.
+   *
+   * We cannot report this to our own user: that is the broken path. Writing to
+   * the shared state dir is the delivery route that still works, and peers read
+   * the registry every tick.
+   */
+  private checkOwnTransport(): void {
+    const owed = this.pendingEmitAt;
+    if (owed !== null) {
+      const size = this.peerTranscriptSize(this.selfSession.session_id);
+      // Any growth since the emit proves the harness wrote it down, so the
+      // transport carried it. Clearing here is what makes the detector
+      // self-standing-down on recovery.
+      if (size !== null && this.selfSizeAtEmit !== null && size > this.selfSizeAtEmit) {
+        this.pendingEmitAt = null;
+        this.selfSizeAtEmit = null;
+      }
+    }
+    const verdict = classifyClientTransport({
+      msSinceEmit: this.pendingEmitAt === null ? null : Date.now() - this.pendingEmitAt,
+      deliveryObserved: this.pendingEmitAt === null,
+    });
+    const since =
+      verdict === "client_transport_suspect"
+        ? new Date(this.pendingEmitAt!).toISOString()
+        : null;
+    if (since === this.publishedUnreachableSince) return; // no needless writes
+    this.publishedUnreachableSince = since;
+    try {
+      setClientUnreachableSince(
+        this.projectStateDir,
+        this.selfSession.session_id,
+        since,
+      );
+    } catch {
+      /* best-effort: never break the heartbeat over telemetry */
+    }
+  }
+
   private heartbeat(): void {
     try {
       this.syncRenameIntoName();
+      // Publish the client-side liveness half. last_heartbeat_at below proves
+      // the SERVER is alive; this proves the HARNESS can still hear it. A peer
+      // reading both is the only way to see "healthy server, unreachable
+      // client" - the state that cost PA ~12 hours because every existing
+      // detector keys on the heartbeat, which stays fresh throughout.
+      this.checkOwnTransport();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString(),
@@ -1080,6 +1252,52 @@ export class AgentChannel {
 
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id) continue; // peer-side only
+
+      // ── WI d4873dfc: healthy server, unreachable client ──────────────────
+      // The peer DIAGNOSES ITSELF - only its own server can see both halves
+      // (it emitted; its own transcript never grew). It cannot tell its own
+      // user, because that is the very path that is broken, so it publishes
+      // here and we are the ones who can still be heard.
+      try {
+        const since = entry.client_unreachable_since
+          ? Date.parse(entry.client_unreachable_since)
+          : NaN;
+        if (!Number.isNaN(since)) {
+          const lastEmit = this.clientTransportLastEmit.get(sid);
+          if (lastEmit === undefined || now - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
+            this.clientTransportLastEmit.set(sid, now);
+            const waitMin = Math.round((now - since) / 60_000);
+            this.emit({
+              content:
+                `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP SERVER is ` +
+                `alive and heartbeating, but a message sent ${waitMin} minutes ago NEVER ` +
+                `LANDED: its transcript has not been written to since.\n` +
+                `  A healthy session records an incoming message the moment it is delivered, ` +
+                `even while idle or mid-turn. Silence after a send means it cannot RECEIVE - a ` +
+                `client-side transport drop, not a crash. Every other liveness alert keys on ` +
+                `the heartbeat, which stays perfectly fresh here, so this is the only signal ` +
+                `that sees it.\n` +
+                `  REMEDY: /mcp in THAT terminal reconnects it. It takes seconds.\n` +
+                `  BEFORE ESCALATING: a session deliberately working without orchestrator ` +
+                `tools looks identical from out here. Address it first - a reply proves the ` +
+                `client is fine and this was noise.\n` +
+                `  Note the subject cannot see this message.`,
+              meta: {
+                from_session: entry.session_id,
+                from_id8: entry.id8,
+                from_role: entry.role,
+                from_name: entry.name,
+                from_task: entry.current_task ?? null,
+                event_type: "client_transport_suspect",
+                ts: new Date(now).toISOString(),
+              },
+            });
+          }
+        }
+      } catch {
+        /* detector is best-effort; never break the tick */
+      }
+
       const tail = this.readTranscriptTail(sid);
       // Transient read failure (file lock / I/O blip): skip WITHOUT clearing the
       // dedup flag, so a momentary blip can't re-arm and double-emit the same

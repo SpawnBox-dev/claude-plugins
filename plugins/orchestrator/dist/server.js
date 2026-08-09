@@ -23589,7 +23589,8 @@ function getDb(stateDir) {
       liveness_ts TEXT,
       liveness_expires_at TEXT,
       hot_path_status TEXT,
-      keep_clean INTEGER
+      keep_clean INTEGER,
+      client_unreachable_since TEXT
     );
     CREATE TABLE IF NOT EXISTS global_pause (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -23630,7 +23631,8 @@ function getDb(stateDir) {
     liveness_ts: "TEXT",
     liveness_expires_at: "TEXT",
     hot_path_status: "TEXT",
-    keep_clean: "INTEGER"
+    keep_clean: "INTEGER",
+    client_unreachable_since: "TEXT"
   });
   dbCache.set(stateDir, db);
   return db;
@@ -23673,7 +23675,13 @@ function rowToEntry(r) {
     entry.hot_path_status = r.hot_path_status;
   if (r.keep_clean !== null)
     entry.keep_clean = r.keep_clean !== 0;
+  if (r.client_unreachable_since !== null)
+    entry.client_unreachable_since = r.client_unreachable_since;
   return entry;
+}
+function setClientUnreachableSince(stateDir, session_id, iso) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET client_unreachable_since = ? WHERE session_id = ?`).run(iso, session_id);
 }
 function migrateSessionsLegacy(stateDir, db) {
   const legacyPath = join4(stateDir, SESSIONS_FILE);
@@ -23721,7 +23729,7 @@ function readSessions(stateDir) {
   migrateSessionsLegacy(stateDir, db);
   const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, liveness_state, liveness_ts,
-            liveness_expires_at, hot_path_status, keep_clean
+            liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since
      FROM sessions`).all();
   return rows.map(rowToEntry);
 }
@@ -26172,6 +26180,17 @@ function classifyAbsence(opts) {
     return "departed";
   return "pending";
 }
+var CLIENT_STALE_MS = 15 * 60000;
+var CLIENT_ALERT_REFRACTORY_MS = 30 * 60000;
+function classifyClientTransport(opts) {
+  if (opts.msSinceEmit === null)
+    return "healthy";
+  if (opts.deliveryObserved)
+    return "healthy";
+  if (opts.msSinceEmit < CLIENT_STALE_MS)
+    return "healthy";
+  return "client_transport_suspect";
+}
 var INGRESS_STALE_THRESHOLD_MS = 180000;
 var INGRESS_TAIL_BYTES = 131072;
 var INGRESS_CHECK_INTERVAL_MS = 30000;
@@ -26272,7 +26291,7 @@ class AgentChannel {
   projectStateDir;
   projectsHashDir;
   selfSession;
-  emit;
+  rawEmit;
   permissionRelay;
   timer = null;
   heartbeatTimer = null;
@@ -26286,13 +26305,24 @@ class AgentChannel {
   lastIngressCheckAt = 0;
   systemEventsLastSeenId = 0;
   lastRenameScanSize = undefined;
+  publishedUnreachableSince = null;
+  pendingEmitAt = null;
+  selfSizeAtEmit = null;
+  clientTransportLastEmit = new Map;
   heartbeatFailures = 0;
-  constructor(projectStateDir, projectsHashDir, selfSession, emit, permissionRelay) {
+  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
     this.selfSession = selfSession;
-    this.emit = emit;
+    this.rawEmit = rawEmit;
     this.permissionRelay = permissionRelay;
+  }
+  emit(ev) {
+    if (this.pendingEmitAt === null) {
+      this.pendingEmitAt = Date.now();
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id);
+    }
+    this.rawEmit(ev);
   }
   start() {
     const priorEntry = readSessions(this.projectStateDir).find((s) => s.session_id === this.selfSession.session_id);
@@ -26347,9 +26377,31 @@ class AgentChannel {
       }
     } catch {}
   }
+  checkOwnTransport() {
+    const owed = this.pendingEmitAt;
+    if (owed !== null) {
+      const size = this.peerTranscriptSize(this.selfSession.session_id);
+      if (size !== null && this.selfSizeAtEmit !== null && size > this.selfSizeAtEmit) {
+        this.pendingEmitAt = null;
+        this.selfSizeAtEmit = null;
+      }
+    }
+    const verdict = classifyClientTransport({
+      msSinceEmit: this.pendingEmitAt === null ? null : Date.now() - this.pendingEmitAt,
+      deliveryObserved: this.pendingEmitAt === null
+    });
+    const since = verdict === "client_transport_suspect" ? new Date(this.pendingEmitAt).toISOString() : null;
+    if (since === this.publishedUnreachableSince)
+      return;
+    this.publishedUnreachableSince = since;
+    try {
+      setClientUnreachableSince(this.projectStateDir, this.selfSession.session_id, since);
+    } catch {}
+  }
   heartbeat() {
     try {
       this.syncRenameIntoName();
+      this.checkOwnTransport();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString()
@@ -26519,6 +26571,32 @@ class AgentChannel {
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id)
         continue;
+      try {
+        const since = entry.client_unreachable_since ? Date.parse(entry.client_unreachable_since) : NaN;
+        if (!Number.isNaN(since)) {
+          const lastEmit = this.clientTransportLastEmit.get(sid);
+          if (lastEmit === undefined || now3 - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
+            this.clientTransportLastEmit.set(sid, now3);
+            const waitMin = Math.round((now3 - since) / 60000);
+            this.emit({
+              content: `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP SERVER is ` + `alive and heartbeating, but a message sent ${waitMin} minutes ago NEVER ` + `LANDED: its transcript has not been written to since.
+` + `  A healthy session records an incoming message the moment it is delivered, ` + `even while idle or mid-turn. Silence after a send means it cannot RECEIVE - a ` + `client-side transport drop, not a crash. Every other liveness alert keys on ` + `the heartbeat, which stays perfectly fresh here, so this is the only signal ` + `that sees it.
+` + `  REMEDY: /mcp in THAT terminal reconnects it. It takes seconds.
+` + `  BEFORE ESCALATING: a session deliberately working without orchestrator ` + `tools looks identical from out here. Address it first - a reply proves the ` + `client is fine and this was noise.
+` + `  Note the subject cannot see this message.`,
+              meta: {
+                from_session: entry.session_id,
+                from_id8: entry.id8,
+                from_role: entry.role,
+                from_name: entry.name,
+                from_task: entry.current_task ?? null,
+                event_type: "client_transport_suspect",
+                ts: new Date(now3).toISOString()
+              }
+            });
+          }
+        }
+      } catch {}
       const tail = this.readTranscriptTail(sid);
       if (tail == null)
         continue;
