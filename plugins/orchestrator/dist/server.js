@@ -20805,7 +20805,12 @@ class EmbeddingClient {
   }
 }
 function blobToVector(blob) {
-  const copy = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
+  const BPE = Float32Array.BYTES_PER_ELEMENT;
+  if (blob.byteOffset % BPE === 0 && blob.byteLength % BPE === 0) {
+    return new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / BPE);
+  }
+  const usable = blob.byteLength - blob.byteLength % BPE;
+  const copy = blob.buffer.slice(blob.byteOffset, blob.byteOffset + usable);
   return new Float32Array(copy);
 }
 
