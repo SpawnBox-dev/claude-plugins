@@ -12,6 +12,36 @@ import { chunkText } from "./chunking";
  */
 const EMBED_TIMEOUT_MS = 120_000;
 
+/**
+ * The model whose vectors are CURRENTLY VALID. Stored on every row and
+ * required to match at query time.
+ *
+ * 0.47.0 switched from bge-m3 (1024-dim, multilingual, ~1.8GB resident) to
+ * bge-small-en-v1.5 (384-dim, English, ~130MB). Measured on a 300-note subset
+ * with identical probes and chunking, mean rank of the correct note:
+ *   whole-note bge-m3   63.2
+ *   chunked    bge-m3   32.0
+ *   chunked    bge-small 11.4   <- two probes at #1
+ * plus 82ms/chunk vs 575ms. The multilingual model was spending its capacity
+ * on cross-lingual structure this English-only corpus never uses.
+ *
+ * Vectors from different models share no coordinate system, so rows written by
+ * an older model must be IGNORED rather than compared. Search filters on this
+ * value; un-matching notes simply fall back to keyword until re-embedded.
+ */
+export const ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
+
+/**
+ * HuggingFace repo for ACTIVE_EMBED_MODEL, passed explicitly to the sidecar.
+ *
+ * Passing it makes THIS file authoritative. The Python default and this
+ * constant would otherwise be two independent sources of truth for the same
+ * decision, and a drift between them writes rows tagged with one model that
+ * were actually produced by another - silently poisoning the corpus with
+ * mixed, incomparable vectors that all claim to be comparable.
+ */
+export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
+
 /** What a backfill pass actually did. See backfill() for why this is not a number. */
 export interface BackfillResult {
   /** Notes successfully embedded and written. */
@@ -111,7 +141,7 @@ export class EmbeddingClient {
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, Buffer.from(vectors[0].buffer), "bge-m3", ts]
+      [noteId, Buffer.from(vectors[0].buffer), ACTIVE_EMBED_MODEL, ts]
     );
 
     // Replace wholesale - a shortened note must not keep its old tail chunks,
@@ -122,7 +152,7 @@ export class EmbeddingClient {
        VALUES (?, ?, ?, ?, ?)`
     );
     for (let i = 0; i < chunks.length; i++) {
-      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), "bge-m3", ts);
+      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), ACTIVE_EMBED_MODEL, ts);
     }
 
     return true;
@@ -221,7 +251,7 @@ export class EmbeddingClient {
         const ts = new Date().toISOString();
         for (let j = 0; j < batch.length; j++) {
           const blob = Buffer.from(vectors[j].buffer);
-          stmt.run(batch[j].id, blob, "bge-m3", ts);
+          stmt.run(batch[j].id, blob, ACTIVE_EMBED_MODEL, ts);
         }
         result.embedded += batch.length;
       } catch (err) {

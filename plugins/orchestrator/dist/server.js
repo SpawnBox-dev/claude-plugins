@@ -20480,6 +20480,8 @@ function mergeDuplicates(db) {
 
 // mcp/engine/hybrid_search.ts
 function cosineSimilarity(a, b) {
+  if (a.length !== b.length)
+    return 0;
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -20597,6 +20599,8 @@ function chunkText(text) {
 
 // mcp/engine/embeddings.ts
 var EMBED_TIMEOUT_MS = 120000;
+var ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
+var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
 
 class EmbeddingClient {
   baseUrl;
@@ -20647,12 +20651,12 @@ class EmbeddingClient {
       return false;
     const ts = new Date().toISOString();
     db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
-       VALUES (?, ?, ?, ?)`, [noteId, Buffer.from(vectors[0].buffer), "bge-m3", ts]);
+       VALUES (?, ?, ?, ?)`, [noteId, Buffer.from(vectors[0].buffer), ACTIVE_EMBED_MODEL, ts]);
     db.run(`DELETE FROM note_chunks WHERE note_id = ?`, [noteId]);
     const stmt = db.prepare(`INSERT INTO note_chunks (note_id, chunk_index, vector, model, embedded_at)
        VALUES (?, ?, ?, ?, ?)`);
     for (let i = 0;i < chunks.length; i++) {
-      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), "bge-m3", ts);
+      stmt.run(noteId, i, Buffer.from(vectors[i + 1].buffer), ACTIVE_EMBED_MODEL, ts);
     }
     return true;
   }
@@ -20686,7 +20690,7 @@ class EmbeddingClient {
         const ts = new Date().toISOString();
         for (let j = 0;j < batch.length; j++) {
           const blob = Buffer.from(vectors[j].buffer);
-          stmt.run(batch[j].id, blob, "bge-m3", ts);
+          stmt.run(batch[j].id, blob, ACTIVE_EMBED_MODEL, ts);
         }
         result.embedded += batch.length;
       } catch (err) {
@@ -20888,7 +20892,7 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
     for (const r of rows)
       signalById.set(r.id, r.note_signal);
   }
-  const chunkRows = db.query(`SELECT note_id, vector FROM note_chunks`).all();
+  const chunkRows = db.query(`SELECT note_id, vector FROM note_chunks WHERE model = ?`).all(ACTIVE_EMBED_MODEL);
   const best = new Map;
   for (const row of chunkRows) {
     const sim = cosineSimilarity(queryVector, blobToVector(row.vector));
@@ -20896,7 +20900,7 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
     if (prev === undefined || sim > prev)
       best.set(row.note_id, sim);
   }
-  const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e`).all();
+  const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e WHERE e.model = ?`).all(ACTIVE_EMBED_MODEL);
   const vecScores = [];
   const seen = new Set;
   for (const row of embRows) {
@@ -27192,7 +27196,7 @@ async function startSidecar() {
     const { unlinkSync: unlinkSync2 } = await import("fs");
     unlinkSync2(portFile);
   } catch {}
-  const baseArgs = ["--port", "0", "--port-file", portFile];
+  const baseArgs = ["--port", "0", "--port-file", portFile, "--model", ACTIVE_EMBED_MODEL_REPO];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {

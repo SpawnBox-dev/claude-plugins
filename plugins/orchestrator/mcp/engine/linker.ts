@@ -6,7 +6,7 @@ import {
   reciprocalRankFusion,
   maximalMarginalRelevance,
 } from "../engine/hybrid_search";
-import { blobToVector } from "../engine/embeddings";
+import { blobToVector, ACTIVE_EMBED_MODEL } from "../engine/embeddings";
 import { signalBoost, confidenceMultiplier } from "./signal";
 import { MIN_SHARED_KEYWORDS } from "./deduplicator";
 
@@ -236,9 +236,14 @@ export async function findRelatedNotesHybrid(
   // Falls back to the note-level `embeddings` row for any note with no chunks
   // yet, so search keeps working during a partial backfill rather than
   // silently dropping un-chunked notes out of the vector leg.
+  // 0.47.0: only vectors from the ACTIVE model are comparable. Rows written by
+  // a previous model share no coordinate system with the current query vector,
+  // and they are not even the same length - so they are excluded here rather
+  // than scored. After a model change the vector leg simply goes quiet until
+  // the re-embed runs, and BM25 carries retrieval in the meantime.
   const chunkRows = db
-    .query(`SELECT note_id, vector FROM note_chunks`)
-    .all() as Array<{ note_id: string; vector: Buffer }>;
+    .query(`SELECT note_id, vector FROM note_chunks WHERE model = ?`)
+    .all(ACTIVE_EMBED_MODEL) as Array<{ note_id: string; vector: Buffer }>;
 
   const best = new Map<string, number>();
   for (const row of chunkRows) {
@@ -248,8 +253,8 @@ export async function findRelatedNotesHybrid(
   }
 
   const embRows = db
-    .query(`SELECT e.note_id, e.vector FROM embeddings e`)
-    .all() as Array<{ note_id: string; vector: Buffer }>;
+    .query(`SELECT e.note_id, e.vector FROM embeddings e WHERE e.model = ?`)
+    .all(ACTIVE_EMBED_MODEL) as Array<{ note_id: string; vector: Buffer }>;
 
   const vecScores: Array<{ id: string; similarity: number }> = [];
   const seen = new Set<string>();

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
-import { EmbeddingClient, blobToVector } from "../../mcp/engine/embeddings";
+import { EmbeddingClient, blobToVector, ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
 
 function insertNote(
@@ -129,7 +129,7 @@ describe("EmbeddingClient", () => {
         .query("SELECT * FROM embeddings WHERE note_id = ?")
         .get(noteId) as any;
       expect(row).not.toBeNull();
-      expect(row.model).toBe("bge-m3");
+      expect(row.model).toBe(ACTIVE_EMBED_MODEL);
       expect(row.note_id).toBe(noteId);
 
       // Verify the vector can be recovered

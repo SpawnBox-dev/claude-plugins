@@ -196,7 +196,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ONNX embedding HTTP server")
     parser.add_argument("--port", type=int, default=0, help="Listen port (0 = dynamic)")
     parser.add_argument("--port-file", required=True, help="File to write assigned port")
-    parser.add_argument("--model", default="BAAI/bge-m3", help="HuggingFace model ID")
+    parser.add_argument("--model", default="BAAI/bge-small-en-v1.5", help="HuggingFace model ID")
     args = parser.parse_args()
 
     load_model(args.model)

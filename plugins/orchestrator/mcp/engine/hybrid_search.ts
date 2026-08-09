@@ -19,6 +19,15 @@ export interface MMRItem {
  * Returns dot(a,b) / (||a|| * ||b||), or 0 if either norm is 0.
  */
 export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  // 0.47.0: DIMENSION MISMATCH IS NOT COMPARABLE - say so instead of
+  // computing something. This loop iterates a.length, so a 384-dim query
+  // against a 1024-dim stored vector silently scored on the first 384
+  // components (a meaningless number that still ranks), and the reverse
+  // direction read past the end and produced NaN. Neither errors. Vectors
+  // from different models share no coordinate system at all, so the only
+  // honest answer is "no similarity signal".
+  if (a.length !== b.length) return 0;
+
   let dot = 0;
   let normA = 0;
   let normB = 0;

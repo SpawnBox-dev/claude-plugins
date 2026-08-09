@@ -30,7 +30,7 @@ import { cascadeResolution } from "./tools/cascade";
 import { composeUserProfile } from "./engine/composer";
 import { generateId, now, extractKeywords, formatAge, stringifyCodeRefs, parseTagList, normalizeTagString, mergeTags, noteBadge, codeRefsInput } from "./utils";
 import { createAutoLinks } from "./engine/linker";
-import { EmbeddingClient } from "./engine/embeddings";
+import { EmbeddingClient, ACTIVE_EMBED_MODEL_REPO } from "./engine/embeddings";
 
 // 0.30.31: read plugin version from package.json at module load so the
 // McpServer registration field + startup banner self-sync with the
@@ -451,7 +451,11 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     // File may not exist, that's fine
   }
 
-  const baseArgs = ["--port", "0", "--port-file", portFile];
+  // 0.47.0: pass the model explicitly so mcp/engine/embeddings.ts is the single
+  // source of truth. Relying on the sidecar's own default would let the two
+  // drift, and a drift writes rows tagged with one model that were produced by
+  // another - mixed, incomparable vectors that all claim to be comparable.
+  const baseArgs = ["--port", "0", "--port-file", portFile, "--model", ACTIVE_EMBED_MODEL_REPO];
 
   // Try uvx first (handles Python + deps automatically, longer timeout for first-run downloads)
   let result = await trySpawn(

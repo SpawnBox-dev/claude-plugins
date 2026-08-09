@@ -163,3 +163,38 @@ describe("0.46.0: backfillChunks is deliberate and resumable", () => {
     expect(SERVER).not.toContain("backfillChunks");
   });
 });
+
+describe("0.47.0: model identity is single-sourced and enforced", () => {
+  const EMB = readFileSync(join(import.meta.dir, "..", "..", "mcp", "engine", "embeddings.ts"), "utf8");
+  const LINKER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "engine", "linker.ts"), "utf8");
+  const SERVER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "server.ts"), "utf8");
+  const PY = readFileSync(join(import.meta.dir, "..", "..", "sidecar", "embed_server.py"), "utf8");
+
+  test("the TS repo constant matches the sidecar default", () => {
+    // Two sources of truth for the same decision means a drift writes rows
+    // tagged with one model but produced by another - mixed vectors that all
+    // claim to be comparable.
+    const ts = EMB.match(/ACTIVE_EMBED_MODEL_REPO = "([^"]+)"/);
+    const py = PY.match(/--model", default="([^"]+)"/);
+    expect(ts).not.toBeNull();
+    expect(py).not.toBeNull();
+    expect(ts![1]).toBe(py![1]);
+  });
+
+  test("the sidecar is launched with an explicit model", () => {
+    expect(SERVER).toContain("ACTIVE_EMBED_MODEL_REPO");
+    expect(/"--model", ACTIVE_EMBED_MODEL_REPO/.test(SERVER)).toBe(true);
+  });
+
+  test("BOTH vector queries filter on the active model", () => {
+    // A vector from a previous model is not merely worse - it is a different
+    // coordinate system and a different length.
+    expect(/FROM note_chunks WHERE model = \?/.test(LINKER)).toBe(true);
+    expect(/FROM embeddings e WHERE e\.model = \?/.test(LINKER)).toBe(true);
+  });
+
+  test("stored rows are tagged with the active model, never a literal", () => {
+    expect(EMB).not.toContain('"bge-m3", ts');
+    expect(EMB).toContain("ACTIVE_EMBED_MODEL, ts");
+  });
+});
