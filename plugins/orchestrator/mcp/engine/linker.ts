@@ -390,6 +390,68 @@ export async function findRelatedNotesHybrid(
     finalIds = candidateTopK.map((r) => r.id).slice(0, limit);
   }
 
+  // 4b. SEMANTIC RESERVE (0.49.0). Guarantee room for the strongest pure-meaning
+  // matches, which the fusion above structurally cannot surface.
+  //
+  // MEASURED on the live 7148-note KB: a note that was the #2 BEST SEMANTIC
+  // MATCH IN THE ENTIRE CORPUS did not appear in the top 6. It went vector #2
+  // -> RRF #11 -> #19 after the signal/confidence boost -> cut by
+  // `candidateTopK = slice(0, limit*2)`.
+  //
+  // Two structural suppressors, neither a bug in itself:
+  //  - RRF gives a note that appears in BOTH lists two contributions (up to
+  //    ~0.033) and a vector-only note one (max 1/61 = 0.0164). Only the ~18
+  //    FTS hits are even eligible for the bonus, so a pure-semantic match can
+  //    never outrank a mediocre dual-list note however good its cosine.
+  //  - The boost then multiplies by signal, which is EARNED BY BEING SURFACED.
+  //    A note that has never surfaced cannot earn it - the absorbing state this
+  //    codebase already found in briefing ordering (ed316fcd entry R).
+  //
+  // Net effect: semantic-only discovery - the entire reason the embedding model
+  // exists - was being discarded at fusion. This mirrors the GLOBAL_RESERVED
+  // remedy in recall.ts ("without reserved slots, the larger DB drowns them
+  // out"): the same drowned-minority-list shape, the same fix.
+  //
+  // Deliberately SMALL: reserve at most 2 of `limit`, and only for notes that
+  // pass the same superseded / code_ref filters as any other result. Keyword
+  // still owns the majority of every result set.
+  const SEMANTIC_RESERVED = Math.min(2, Math.max(0, limit - 1));
+  if (SEMANTIC_RESERVED > 0 && vecScores.length > 0) {
+    for (const cand of vecScores.slice(0, SEMANTIC_RESERVED)) {
+      if (finalIds.includes(cand.id)) continue;
+      if (!noteById.has(cand.id)) {
+        const row = db
+          .query(
+            `SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
+                    COALESCE(signal, 0) AS note_signal
+             FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"} ${hybridCodeRefClause}`,
+          )
+          .get(...(hybridLikeParam !== null ? [cand.id, hybridLikeParam] : [cand.id])) as any;
+        if (!row) continue; // filtered out - respect the caller's constraints
+        noteById.set(row.id, {
+          id: row.id,
+          type: row.type as NoteSummary["type"],
+          content: row.content,
+          confidence: row.confidence as NoteSummary["confidence"],
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          source_session: row.source_session,
+          superseded_by: row.superseded_by ?? null,
+          keywords: row.keywords ? row.keywords.split(",").map((k: string) => k.trim()) : [],
+          tags: row.tags ?? null,
+          status: (row.status as NoteSummary["status"]) ?? null,
+          priority: (row.priority as NoteSummary["priority"]) ?? null,
+          due_date: row.due_date ?? null,
+          code_refs: parseCodeRefs(row.code_refs ?? null),
+        });
+      }
+      // Displace from the TAIL, never the head: the top hybrid result is the
+      // one both signals agree on and must not be evicted by this.
+      if (finalIds.length >= limit) finalIds.pop();
+      finalIds.push(cand.id);
+    }
+  }
+
   // 5. Build final NoteSummary list preserving order
   const results: NoteSummary[] = [];
   for (const id of finalIds) {

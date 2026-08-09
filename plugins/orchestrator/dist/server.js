@@ -21053,6 +21053,39 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
   } else {
     finalIds = candidateTopK.map((r) => r.id).slice(0, limit);
   }
+  const SEMANTIC_RESERVED = Math.min(2, Math.max(0, limit - 1));
+  if (SEMANTIC_RESERVED > 0 && vecScores.length > 0) {
+    for (const cand of vecScores.slice(0, SEMANTIC_RESERVED)) {
+      if (finalIds.includes(cand.id))
+        continue;
+      if (!noteById.has(cand.id)) {
+        const row = db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, keywords, tags, status, priority, due_date, superseded_by, code_refs,
+                    COALESCE(signal, 0) AS note_signal
+             FROM notes WHERE id = ?${includeSuperseded ? "" : " AND superseded_by IS NULL"} ${hybridCodeRefClause}`).get(...hybridLikeParam !== null ? [cand.id, hybridLikeParam] : [cand.id]);
+        if (!row)
+          continue;
+        noteById.set(row.id, {
+          id: row.id,
+          type: row.type,
+          content: row.content,
+          confidence: row.confidence,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          source_session: row.source_session,
+          superseded_by: row.superseded_by ?? null,
+          keywords: row.keywords ? row.keywords.split(",").map((k) => k.trim()) : [],
+          tags: row.tags ?? null,
+          status: row.status ?? null,
+          priority: row.priority ?? null,
+          due_date: row.due_date ?? null,
+          code_refs: parseCodeRefs(row.code_refs ?? null)
+        });
+      }
+      if (finalIds.length >= limit)
+        finalIds.pop();
+      finalIds.push(cand.id);
+    }
+  }
   const results = [];
   for (const id of finalIds) {
     const note = noteById.get(id);
