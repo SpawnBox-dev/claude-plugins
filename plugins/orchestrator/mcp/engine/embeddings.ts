@@ -325,13 +325,21 @@ export class EmbeddingClient {
     batchSize: number = 8,
     limit?: number,
   ): Promise<BackfillResult> {
+    // 0.51.0: select notes with no chunks FOR THE ACTIVE MODEL, not merely no
+    // chunks at all. A model switch leaves every note fully chunked under the
+    // PREVIOUS model, so the old predicate matched nothing and the migration
+    // silently did zero work while reporting a clean run - the same
+    // success-shaped no-op class fixed in 0.44.1. Now a model change is
+    // self-healing: the same opt-in call migrates the corpus.
     const rows = db
       .query(
         `SELECT n.id, n.content FROM notes n
-         WHERE NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_id = n.id)
+         WHERE NOT EXISTS (
+           SELECT 1 FROM note_chunks c WHERE c.note_id = n.id AND c.model = ?
+         )
          ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`
       )
-      .all() as Array<{ id: string; content: string }>;
+      .all(ACTIVE_EMBED_MODEL) as Array<{ id: string; content: string }>;
 
     const result: BackfillResult = {
       embedded: 0,

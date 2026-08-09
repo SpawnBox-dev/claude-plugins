@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { applyMigrations } from "../../mcp/db/schema";
-import { EmbeddingClient } from "../../mcp/engine/embeddings";
+import { EmbeddingClient, ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
 import { CHUNK_TARGET_CHARS } from "../../mcp/engine/chunking";
 
@@ -235,5 +235,28 @@ describe("0.47.1: a sidecar must serve the RIGHT model to be adopted", () => {
     // bge-small still announced itself as bge-m3.
     expect(PY).toContain('"model": _model_id');
     expect(/"model": "bge-m3"/.test(PY)).toBe(false);
+  });
+});
+
+describe("0.51.0: a MODEL CHANGE is self-healing", () => {
+  test("backfillChunks re-embeds notes whose chunks are from a previous model", async () => {
+    const db = makeDb();
+    const id = insertNote(db, "a note that was chunked under an older model");
+    const ts = now();
+    // Fully chunked, but under a DIFFERENT model - which is exactly the state
+    // a model switch leaves behind. The old predicate ("no chunks at all")
+    // matched nothing here, so the migration reported a clean run having done
+    // zero work.
+    db.run(
+      "INSERT INTO note_chunks (note_id, chunk_index, vector, model, embedded_at) VALUES (?, 0, ?, ?, ?)",
+      [id, Buffer.from(new Float32Array([0.1]).buffer), "some-older-model", ts]
+    );
+
+    const res = await stubClient().backfillChunks(db);
+    expect(res.attempted).toBe(1);
+    expect(res.embedded).toBe(1);
+
+    const rows = db.query("SELECT model FROM note_chunks WHERE note_id = ?").all(id) as any[];
+    expect(rows.every((r) => r.model === ACTIVE_EMBED_MODEL)).toBe(true);
   });
 });

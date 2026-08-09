@@ -20768,8 +20768,10 @@ class EmbeddingClient {
   }
   async backfillChunks(db, batchSize = 8, limit) {
     const rows = db.query(`SELECT n.id, n.content FROM notes n
-         WHERE NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_id = n.id)
-         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`).all();
+         WHERE NOT EXISTS (
+           SELECT 1 FROM note_chunks c WHERE c.note_id = n.id AND c.model = ?
+         )
+         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`).all(ACTIVE_EMBED_MODEL);
     const result = {
       embedded: 0,
       failed: 0,
