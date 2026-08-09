@@ -892,12 +892,23 @@ export class AgentChannel {
       // reading both is the only way to see "healthy server, unreachable
       // client" - the state that cost PA ~12 hours because every existing
       // detector keys on the heartbeat, which stays fresh throughout.
-      this.checkOwnTransport();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString(),
       };
       writeSession(this.projectStateDir, updated);
+      // 0.55.0 - ORDER IS LOAD-BEARING, AND 0.54.0 GOT IT WRONG. This ran
+      // BEFORE writeSession, inside this same try. Anything it threw took the
+      // registry write with it, and a session that stops writing `sessions` is
+      // not degraded - it is INVISIBLE: peers drop it from the roster, so its
+      // output stops mirroring to PA entirely while its process looks perfectly
+      // healthy in the lifecycle log. A telemetry probe must never be able to
+      // do that, so it now runs AFTER the write and owns its own failure.
+      try {
+        this.checkOwnTransport();
+      } catch {
+        /* detector is best-effort; the heartbeat above already landed */
+      }
       if (this.heartbeatFailures > 0) {
         process.stderr.write(
           `agent-channel: heartbeat recovered after ` +

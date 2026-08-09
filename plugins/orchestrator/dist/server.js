@@ -21070,6 +21070,7 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
     finalIds = candidateTopK.map((r) => r.id).slice(0, limit);
   }
   const SEMANTIC_RESERVED = Math.min(2, Math.max(0, limit - 1));
+  let injected = 0;
   if (SEMANTIC_RESERVED > 0 && vecScores.length > 0) {
     for (const cand of vecScores.slice(0, SEMANTIC_RESERVED)) {
       if (finalIds.includes(cand.id))
@@ -21097,9 +21098,15 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
           code_refs: parseCodeRefs(row.code_refs ?? null)
         });
       }
-      if (finalIds.length >= limit)
-        finalIds.pop();
+      if (finalIds.length >= limit) {
+        const victim = finalIds.length - 1 - injected;
+        if (victim >= 0)
+          finalIds.splice(victim, 1);
+        else
+          finalIds.pop();
+      }
       finalIds.push(cand.id);
+      injected++;
     }
   }
   const results = [];
@@ -26401,12 +26408,14 @@ class AgentChannel {
   heartbeat() {
     try {
       this.syncRenameIntoName();
-      this.checkOwnTransport();
       const updated = {
         ...this.selfSession,
         last_heartbeat_at: new Date().toISOString()
       };
       writeSession(this.projectStateDir, updated);
+      try {
+        this.checkOwnTransport();
+      } catch {}
       if (this.heartbeatFailures > 0) {
         process.stderr.write(`agent-channel: heartbeat recovered after ` + `${this.heartbeatFailures} consecutive failure(s)
 `);
