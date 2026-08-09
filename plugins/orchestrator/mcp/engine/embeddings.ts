@@ -16,20 +16,31 @@ const EMBED_TIMEOUT_MS = 120_000;
  * The model whose vectors are CURRENTLY VALID. Stored on every row and
  * required to match at query time.
  *
- * 0.47.0 switched from bge-m3 (1024-dim, multilingual, ~1.8GB resident) to
- * bge-small-en-v1.5 (384-dim, English, ~130MB). Measured on a 300-note subset
- * with identical probes and chunking, mean rank of the correct note:
- *   whole-note bge-m3   63.2
- *   chunked    bge-m3   32.0
- *   chunked    bge-small 11.4   <- two probes at #1
- * plus 82ms/chunk vs 575ms. The multilingual model was spending its capacity
- * on cross-lingual structure this English-only corpus never uses.
+ * 0.47.0 replaced bge-m3 (1024-dim, MULTILINGUAL, ~1.8GB resident) with
+ * bge-small-en-v1.5, because the multilingual model spent its capacity on
+ * cross-lingual structure this English-only corpus never uses. That was the
+ * right direction and the wrong stopping point.
+ *
+ * 0.51.0 moved small -> BASE, on a held-out probe set (800-note subset, same
+ * chunking, same pooling, same query instruction - only the model differs):
+ *
+ *   model        dim  ms/chunk   PARA R@6  PARA R@20   SPAN R@6
+ *   bge-small    384        73      63.2%      78.9%      91.1%
+ *   bge-base     768       169      73.7%      89.5%      92.7%
+ *
+ * +10.5 points on the metric that matters (paraphrase recall) with NO span
+ * regression. The costs are real and accepted: ~2.3x embed time (a one-time
+ * ~49 min corpus re-embed) and ~2x query-scoring latency from the wider
+ * vectors. Still 4x smaller resident than the bge-m3 this replaced.
+ *
+ * DO NOT assume bigger keeps winning - bge-m3 is larger than both and lost to
+ * both. Capacity only helps when it is spent on THIS corpus's properties.
  *
  * Vectors from different models share no coordinate system, so rows written by
  * an older model must be IGNORED rather than compared. Search filters on this
  * value; un-matching notes simply fall back to keyword until re-embedded.
  */
-export const ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
+export const ACTIVE_EMBED_MODEL = "bge-base-en-v1.5";
 
 /**
  * HuggingFace repo for ACTIVE_EMBED_MODEL, passed explicitly to the sidecar.
@@ -40,7 +51,7 @@ export const ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
  * were actually produced by another - silently poisoning the corpus with
  * mixed, incomparable vectors that all claim to be comparable.
  */
-export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
+export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-base-en-v1.5";
 
 /**
  * Vector width of ACTIVE_EMBED_MODEL. Used to VERIFY a sidecar before adopting
@@ -48,7 +59,7 @@ export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
  * the model NAME reported by /health was a hardcoded literal until 0.47.1 and
  * therefore not trustworthy on an older sidecar.
  */
-export const ACTIVE_EMBED_DIM = 384;
+export const ACTIVE_EMBED_DIM = 768;
 
 /**
  * Instruction prepended to a SEARCH QUERY before embedding. Passages are

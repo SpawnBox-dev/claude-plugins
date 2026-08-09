@@ -20661,9 +20661,9 @@ function chunkText(text) {
 
 // mcp/engine/embeddings.ts
 var EMBED_TIMEOUT_MS = 120000;
-var ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
-var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
-var ACTIVE_EMBED_DIM = 384;
+var ACTIVE_EMBED_MODEL = "bge-base-en-v1.5";
+var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-base-en-v1.5";
+var ACTIVE_EMBED_DIM = 768;
 var QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: ";
 
 class EmbeddingClient {

@@ -3,10 +3,10 @@
 Minimal Python HTTP server wrapping an ONNX sentence-embedding model.
 
 Usage:
-    python embed_server.py --port-file /tmp/embed.port [--port 0] [--model BAAI/bge-small-en-v1.5]
+    python embed_server.py --port-file /tmp/embed.port [--port 0] [--model BAAI/bge-base-en-v1.5]
 
 Endpoints:
-    GET  /health -> {"status": "ready", "model": "<loaded model id>", "dim": 384}
+    GET  /health -> {"status": "ready", "model": "<loaded model id>", "dim": 768}
     POST /embed  -> {"vectors": [[...], [...]]}  (input: {"texts": ["...", "..."]})
 """
 
@@ -205,7 +205,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="ONNX embedding HTTP server")
     parser.add_argument("--port", type=int, default=0, help="Listen port (0 = dynamic)")
     parser.add_argument("--port-file", required=True, help="File to write assigned port")
-    parser.add_argument("--model", default="BAAI/bge-small-en-v1.5", help="HuggingFace model ID")
+    parser.add_argument("--model", default="BAAI/bge-base-en-v1.5", help="HuggingFace model ID")
     args = parser.parse_args()
 
     load_model(args.model)
