@@ -104,11 +104,21 @@ describe("0.46.0: WIRING - retrieval scores by best passage", () => {
     expect(LINKER).toContain("FROM note_chunks");
   });
 
-  test("it MAX-pools rather than averaging", () => {
-    // Averaging chunk scores would re-create the dilution this fixes: one
-    // strongly-matching passage must be able to surface the note.
-    expect(/sim > prev/.test(LINKER)).toBe(true);
-    expect(LINKER).not.toContain("/ chunkCount");
+  test("it is MAX-DOMINANT, blended with mean (0.50.0 refinement)", () => {
+    // 0.46.0 asserted pure max-pooling, reasoning that averaging would
+    // re-create the dilution chunking exists to fix. MEASUREMENT REFINED THAT
+    // RATHER THAN OVERTURNING IT: on a held-out probe set, pure MEAN was much
+    // worse than pure max (span R@6 66.7% vs 77.1%), so the instinct held -
+    // but 0.6*max + 0.4*mean beat BOTH, on both probe sets.
+    //
+    // The guard therefore keeps the load-bearing half of the original claim -
+    // max must DOMINATE - while allowing the measured blend. A future change
+    // that lets mean win is the regression this still catches.
+    expect(/a\.max > /.test(LINKER) || /sim > cur\.max/.test(LINKER)).toBe(true);
+    const wMax = Number(LINKER.match(/CHUNK_MAX_WEIGHT = ([\d.]+)/)?.[1] ?? 0);
+    const wMean = Number(LINKER.match(/CHUNK_MEAN_WEIGHT = ([\d.]+)/)?.[1] ?? 1);
+    expect(wMax).toBeGreaterThan(wMean);
+    expect(wMax + wMean).toBeCloseTo(1, 5);
   });
 
   test("notes without chunks still fall back to the note-level vector", () => {

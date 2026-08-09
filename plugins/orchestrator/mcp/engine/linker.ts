@@ -7,8 +7,14 @@ import {
   maximalMarginalRelevance,
 } from "../engine/hybrid_search";
 import { blobToVector, ACTIVE_EMBED_MODEL } from "../engine/embeddings";
+
 import { signalBoost, confidenceMultiplier } from "./signal";
 import { MIN_SHARED_KEYWORDS } from "./deduplicator";
+/** Passage-pooling weights. See findRelatedNotesHybrid for the measurements
+ *  that chose them, and why a three-signal blend was rejected despite winning
+ *  the semantic probe set. */
+export const CHUNK_MAX_WEIGHT = 0.6;
+export const CHUNK_MEAN_WEIGHT = 0.4;
 
 /**
  * Infer relationship type based on note types.
@@ -245,11 +251,34 @@ export async function findRelatedNotesHybrid(
     .query(`SELECT note_id, vector FROM note_chunks WHERE model = ?`)
     .all(ACTIVE_EMBED_MODEL) as Array<{ note_id: string; vector: Buffer }>;
 
-  const best = new Map<string, number>();
+  // 0.50.0: blend BEST passage with MEAN passage instead of max alone.
+  //
+  // Max alone lets a single lucky passage carry a note, and ignores whether
+  // the rest of the note agrees. Mean alone dilutes (it is what the old
+  // whole-note vector effectively did). Measured on a held-out probe set,
+  // 0.6*max + 0.4*mean beat both, and beat every three-signal variant that
+  // also mixed in the whole-note vector.
+  //
+  // THE WEIGHTS ARE NOT TASTE. A three-signal blend won the paraphrase set
+  // outright (median 42 -> 16) and REGRESSED verbatim-span retrieval 77.1% ->
+  // 68.8% R@6. Optimising on the semantic set alone would have shipped that.
+  // 0.6/0.4 is the configuration that is non-negative on spans AND better on
+  // paraphrases: span R@6 77.6% -> 78.1%, paraphrase median 45 -> 26,
+  // paraphrase recall@20 31.6% -> 42.1%.
+  const agg = new Map<string, { max: number; sum: number; n: number }>();
   for (const row of chunkRows) {
     const sim = cosineSimilarity(queryVector, blobToVector(row.vector as Buffer));
-    const prev = best.get(row.note_id);
-    if (prev === undefined || sim > prev) best.set(row.note_id, sim);
+    const cur = agg.get(row.note_id);
+    if (cur === undefined) agg.set(row.note_id, { max: sim, sum: sim, n: 1 });
+    else {
+      if (sim > cur.max) cur.max = sim;
+      cur.sum += sim;
+      cur.n++;
+    }
+  }
+  const best = new Map<string, number>();
+  for (const [id, a] of agg) {
+    best.set(id, CHUNK_MAX_WEIGHT * a.max + CHUNK_MEAN_WEIGHT * (a.sum / a.n));
   }
 
   const embRows = db

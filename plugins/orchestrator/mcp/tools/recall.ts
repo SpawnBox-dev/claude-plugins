@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Note, NoteSummary, NoteType, NoteRevision } from "../types";
 import { findRelatedNotes, findRelatedNotesHybrid } from "../engine/linker";
 import type { EmbeddingClient } from "../engine/embeddings";
+import { QUERY_INSTRUCTION } from "../engine/embeddings";
 import { parseCodeRefs } from "../utils";
 import { resolveNoteId } from "./id_resolver";
 
@@ -348,7 +349,12 @@ export async function handleRecall(
     let queryVector: Float32Array | undefined;
     if (embeddingClient) {
       try {
-        const vecs = await embeddingClient.embed([input.query]);
+        // 0.50.0: BGE is trained asymmetrically - the QUERY side carries a
+        // retrieval instruction, the passage side does not. We embedded both
+        // bare, which put the query in the wrong region of the space. This is
+        // the search path, so the instruction belongs here; the near-duplicate
+        // gate compares passage-to-passage and must stay symmetric.
+        const vecs = await embeddingClient.embed([QUERY_INSTRUCTION + input.query]);
         if (vecs && vecs.length > 0) {
           queryVector = vecs[0];
         }

@@ -20664,6 +20664,7 @@ var EMBED_TIMEOUT_MS = 120000;
 var ACTIVE_EMBED_MODEL = "bge-small-en-v1.5";
 var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
 var ACTIVE_EMBED_DIM = 384;
+var QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: ";
 
 class EmbeddingClient {
   baseUrl;
@@ -20866,6 +20867,8 @@ function confidenceMultiplier(confidence) {
 }
 
 // mcp/engine/linker.ts
+var CHUNK_MAX_WEIGHT = 0.6;
+var CHUNK_MEAN_WEIGHT = 0.4;
 function inferRelationship(fromType, toType) {
   if (fromType === "decision" && toType === "open_thread")
     return "related_to";
@@ -20961,12 +20964,22 @@ async function findRelatedNotesHybrid(db, query, limit = 10, queryVector, mmrLam
       signalById.set(r.id, r.note_signal);
   }
   const chunkRows = db.query(`SELECT note_id, vector FROM note_chunks WHERE model = ?`).all(ACTIVE_EMBED_MODEL);
-  const best = new Map;
+  const agg = new Map;
   for (const row of chunkRows) {
     const sim = cosineSimilarity(queryVector, blobToVector(row.vector));
-    const prev = best.get(row.note_id);
-    if (prev === undefined || sim > prev)
-      best.set(row.note_id, sim);
+    const cur = agg.get(row.note_id);
+    if (cur === undefined)
+      agg.set(row.note_id, { max: sim, sum: sim, n: 1 });
+    else {
+      if (sim > cur.max)
+        cur.max = sim;
+      cur.sum += sim;
+      cur.n++;
+    }
+  }
+  const best = new Map;
+  for (const [id, a] of agg) {
+    best.set(id, CHUNK_MAX_WEIGHT * a.max + CHUNK_MEAN_WEIGHT * (a.sum / a.n));
   }
   const embRows = db.query(`SELECT e.note_id, e.vector FROM embeddings e WHERE e.model = ?`).all(ACTIVE_EMBED_MODEL);
   const vecScores = [];
@@ -22408,7 +22421,7 @@ async function handleRecall(projectDb2, globalDb2, input, embeddingClient) {
     let queryVector;
     if (embeddingClient) {
       try {
-        const vecs = await embeddingClient.embed([input.query]);
+        const vecs = await embeddingClient.embed([QUERY_INSTRUCTION + input.query]);
         if (vecs && vecs.length > 0) {
           queryVector = vecs[0];
         }

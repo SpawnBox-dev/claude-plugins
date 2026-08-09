@@ -139,3 +139,26 @@ describe("0.49.0: WIRING", () => {
     expect(/finalIds\.pop\(\)/.test(LINKER)).toBe(true);
   });
 });
+
+describe("0.50.0: query instruction is applied to SEARCH only", () => {
+  const EMB = readFileSync(join(import.meta.dir, "..", "..", "mcp", "engine", "embeddings.ts"), "utf8");
+  const RECALL = readFileSync(join(import.meta.dir, "..", "..", "mcp", "tools", "recall.ts"), "utf8");
+  const CHECK = readFileSync(join(import.meta.dir, "..", "..", "mcp", "tools", "check_similar.ts"), "utf8");
+  const REMEMBER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "tools", "remember.ts"), "utf8");
+
+  test("the instruction exists and is prepended on the search path", () => {
+    // BGE is trained asymmetrically: query carries an instruction, passages do
+    // not. We embedded both bare, putting the query in the wrong region.
+    expect(EMB).toContain("QUERY_INSTRUCTION");
+    expect(/embed\(\[QUERY_INSTRUCTION \+ input\.query\]\)/.test(RECALL)).toBe(true);
+  });
+
+  test("it is NOT applied to document-to-document comparison", () => {
+    // The near-duplicate gate and the relevance push compare passage to
+    // passage. Prefixing one side would break the symmetry they depend on -
+    // this is the half that is easy to get wrong by applying the constant
+    // everywhere it compiles.
+    expect(CHECK).not.toContain("QUERY_INSTRUCTION");
+    expect(REMEMBER).not.toContain("QUERY_INSTRUCTION");
+  });
+});

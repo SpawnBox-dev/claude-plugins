@@ -50,6 +50,25 @@ export const ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-small-en-v1.5";
  */
 export const ACTIVE_EMBED_DIM = 384;
 
+/**
+ * Instruction prepended to a SEARCH QUERY before embedding. Passages are
+ * embedded bare.
+ *
+ * BGE models are trained ASYMMETRICALLY for retrieval: the query side carries
+ * this instruction, the document side does not. We were embedding both bare,
+ * which puts the query in the wrong region of the space.
+ *
+ * APPLY ONLY TO SEARCH. Document-to-document comparison (the near-duplicate
+ * gate, auto-linking) is SYMMETRIC - both sides are passages - so prefixing
+ * there would break the very symmetry it depends on.
+ *
+ * Measured on a held-out probe set (192 verbatim-span + 19 hand-written
+ * paraphrase probes, none written into the KB): combined with the pooling
+ * blend below, paraphrase median rank 45 -> 26 and recall@20 31.6% -> 42.1%,
+ * with span retrieval non-negative (R@6 77.6% -> 78.1%).
+ */
+export const QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: ";
+
 /** What a backfill pass actually did. See backfill() for why this is not a number. */
 export interface BackfillResult {
   /** Notes successfully embedded and written. */
