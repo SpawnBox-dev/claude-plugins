@@ -1466,9 +1466,18 @@ export class AgentChannel {
               // reader is.
               `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:\n` +
               `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` +
-              `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, ` +
-              `conclusive: still growing = alive and working, not parked. Costs nobody a ` +
-              `turn. Sample twice a few seconds apart if you want growth rather than age.\n` +
+              `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, costs ` +
+              `nobody a turn. Sample twice a few seconds apart: GROWTH proves alive and ` +
+              `working, not parked.\n` +
+              `    IT ONLY PROVES ONE DIRECTION. A FROZEN transcript does NOT prove parked ` +
+              `- a session whose MCP transport has dropped is healthy, working and frozen ` +
+              `too (measured: 11.37h, 2026-08-09). Frozen means "still unknown", never ` +
+              `"confirmed parked".\n` +
+              `    AND IT IS TRIAGE ONLY, NEVER A GATE ON THIS ALERT. Emit-time gating on ` +
+              `mtime is contaminated by construction - the enqueue itself writes into the ` +
+              `target's transcript - so it would silently disable this detector rather than ` +
+              `sharpen it. Grep MTIME_DELIBERATELY_UNUSED before proposing it; it has been ` +
+              `re-derived twice.\n` +
               `  * NEED SOMETHING FROM THEM ANYWAY -> address them ("@${entry.id8} are you ` +
               `there?"). Liveness rides along free with the answer you already wanted, so ` +
               `asking costs nothing extra. A busy-but-healthy session answers; a parked ` +
