@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { handleCheckSimilar } from "../../mcp/tools/check_similar";
 import { generateId, now } from "../../mcp/utils";
+import { ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 
 function makeDb(): Database {
   const db = new Database(":memory:");
@@ -36,8 +37,8 @@ function insertEmbedding(db: Database, noteId: string, vector: Float32Array): vo
   const blob = Buffer.from(vector.buffer);
   db.run(
     `INSERT INTO embeddings (note_id, vector, model, embedded_at)
-     VALUES (?, ?, 'bge-m3', ?)`,
-    [noteId, blob, now()]
+     VALUES (?, ?, ?, ?)`,
+    [noteId, blob, ACTIVE_EMBED_MODEL, now()]
   );
 }
 

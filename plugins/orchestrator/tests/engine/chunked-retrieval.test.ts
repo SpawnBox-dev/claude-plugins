@@ -159,8 +159,13 @@ describe("0.46.0: backfillChunks is deliberate and resumable", () => {
   test("NOTHING calls it automatically - it is opt-in only", () => {
     // The 0.44.0 lesson: a sweep wired into startup is how this plugin halted
     // a machine twice in one day.
+    //
+    // Match a CALL, not the identifier. The first version of this guard
+    // rejected any mention, so naming backfillChunks in a status message -
+    // exactly where a user needs to be told how to fix stale vectors - tripped
+    // it. A guard that forbids talking about the thing is too blunt to keep.
     const SERVER = readFileSync(join(import.meta.dir, "..", "..", "mcp", "server.ts"), "utf8");
-    expect(SERVER).not.toContain("backfillChunks");
+    expect(/\.backfillChunks\s*\(/.test(SERVER)).toBe(false);
   });
 });
 

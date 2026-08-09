@@ -754,10 +754,21 @@ server.tool(
     const projectNotes = (projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
     const globalNotes = (globalDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
 
-    // Embedding coverage
+    // Embedding coverage. 0.47.2: count only rows the CURRENT model can use.
+    // Counting every row regardless of model reported 100% coverage
+    // immediately after a model switch, when in fact NONE of those vectors
+    // were usable - search was silently keyword-only while status claimed full
+    // health. A coverage number that cannot go down when coverage is lost is
+    // not a status, it is decoration.
     let embeddedCount = 0;
+    let staleModelCount = 0;
     try {
-      embeddedCount = (projectDb.query("SELECT COUNT(*) as cnt FROM embeddings").get() as any).cnt;
+      embeddedCount = (projectDb
+        .query("SELECT COUNT(*) as cnt FROM embeddings WHERE model = ?")
+        .get(ACTIVE_EMBED_MODEL) as any).cnt;
+      staleModelCount = (projectDb
+        .query("SELECT COUNT(*) as cnt FROM embeddings WHERE model <> ?")
+        .get(ACTIVE_EMBED_MODEL) as any).cnt;
     } catch {}
 
     const coveragePct = projectNotes > 0 ? Math.round((embeddedCount / projectNotes) * 100) : 0;
@@ -819,7 +830,12 @@ server.tool(
     lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
 
     if (sidecarStatus === "ready") {
-      lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)`);
+      lines.push(
+        `- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)` +
+          (staleModelCount > 0
+            ? ` - WARNING: ${staleModelCount} note(s) still carry vectors from a previous model and are INVISIBLE to semantic search until re-embedded (backfillChunks)`
+            : ``),
+      );
     } else if (sidecarStatus === "starting") {
       lines.push("- **Embeddings**: starting up...");
     } else {

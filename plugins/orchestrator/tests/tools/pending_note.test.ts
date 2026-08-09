@@ -9,7 +9,7 @@ import {
   findConcurrentCaptures,
   PENDING_NOTE_TTL_MS,
 } from "../../mcp/tools/pending_note";
-import type { EmbeddingClient } from "../../mcp/engine/embeddings";
+import { EmbeddingClient, ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 import { now } from "../../mcp/utils";
 
 // ===========================================================================
@@ -143,7 +143,7 @@ describe("gate -> pending_id -> commit (end to end)", () => {
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, Buffer.from(vector.buffer), "bge-m3", new Date().toISOString()]
+      [noteId, Buffer.from(vector.buffer), ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
   }
 

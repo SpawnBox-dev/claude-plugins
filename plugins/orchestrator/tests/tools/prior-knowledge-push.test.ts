@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { handleRemember } from "../../mcp/tools/remember";
-import type { EmbeddingClient } from "../../mcp/engine/embeddings";
+import { EmbeddingClient, ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 import { now } from "../../mcp/utils";
 import { resolveNoteId } from "../../mcp/tools/id_resolver";
 
@@ -60,13 +60,17 @@ describe("0.32.0: prior-knowledge push at write time", () => {
     return new Float32Array([x, y]);
   }
   function client(vector: Float32Array): EmbeddingClient {
-    return { embed: async (_t: string[]) => [vector] } as unknown as EmbeddingClient;
+    // Real client with embed() overridden - a bare cast silently lacks
+    // embedIfAvailable, which production now calls (anti_pattern 798f741b).
+    const c = new EmbeddingClient("http://127.0.0.1:1");
+    (c as any).embed = async (texts: string[]) => texts.map(() => vector);
+    return c;
   }
   function seed(db: Database, noteId: string, vector: Float32Array) {
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, Buffer.from(vector.buffer), "bge-m3", new Date().toISOString()]
+      [noteId, Buffer.from(vector.buffer), ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
   }
   function prior(db: Database, opts: { id: string; type: string; content: string }) {

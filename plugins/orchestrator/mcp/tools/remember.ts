@@ -361,18 +361,28 @@ async function insertNote(
   const linkStats = createAutoLinksWithStats(db, noteId, keywords);
   const links = linkStats.links;
 
-  // Embed the new note (still needed for future similarity queries).
-  if (embeddingClient) {
+  // Embed the new note. 0.47.2: route through embedIfAvailable instead of
+  // writing the embeddings row by hand.
+  //
+  // This was a SECOND, INDEPENDENT writer of the same table, and it drifted
+  // from the first the moment either changed. By 0.47.1 it had two defects
+  // that compounded: it never wrote note_chunks (so a newly created note was
+  // absent from passage retrieval), and it hardcoded the model literal
+  // "bge-m3" - which 0.47.0's `WHERE model = ACTIVE_EMBED_MODEL` filter then
+  // excluded. Net effect: every note created after the model switch was
+  // INVISIBLE to vector search, findable only by keyword, with no error
+  // anywhere.
+  //
+  // One writer, one code path. embedIfAvailable owns chunking, the model tag
+  // and the note-level row together, so they cannot disagree again.
+  // Shape-check before calling: callers pass duck-typed `{ embed }` partials in
+  // several places, and this is the THIRD time today that assumption has bitten
+  // (see anti_pattern 798f741b). A best-effort embed must never break the note
+  // write that triggered it, and `typeof` is cheaper than discovering it in
+  // production.
+  if (embeddingClient && typeof embeddingClient.embedIfAvailable === "function") {
     try {
-      const vecs = await embeddingClient.embed([input.content]);
-      if (vecs && vecs.length > 0) {
-        const blob = Buffer.from(vecs[0].buffer);
-        db.run(
-          `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
-           VALUES (?, ?, ?, ?)`,
-          [noteId, blob, "bge-m3", new Date().toISOString()]
-        );
-      }
+      await embeddingClient.embedIfAvailable(db, noteId, input.content);
     } catch (err) {
       console.error(`[embed] Failed to embed note ${noteId}:`, err);
     }

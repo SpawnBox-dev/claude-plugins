@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { blobToVector } from "../engine/embeddings";
+import { blobToVector, ACTIVE_EMBED_MODEL } from "../engine/embeddings";
 import { cosineSimilarity } from "../engine/hybrid_search";
 import type { NoteType } from "../types";
 
@@ -40,13 +40,22 @@ export function handleCheckSimilar(
 
   const rows = db
     .query(
+      // 0.47.2: restrict to the ACTIVE model. Vectors written by a previous
+      // model share no coordinate system with the query and are not even the
+      // same length. Without this the near-duplicate gate compares a 384-dim
+      // query against 1024-dim rows; cosineSimilarity's dimension guard makes
+      // that score 0 rather than garbage, so the failure is silent - the gate
+      // simply stops noticing duplicates and every write sails through.
+      // Filtering makes the degradation explicit and self-healing: notes
+      // rejoin the comparison as they are re-embedded.
       `SELECT n.id, n.type, n.content, e.vector
        FROM notes n
        JOIN embeddings e ON n.id = e.note_id
        WHERE n.type IN (${placeholders})
-         AND n.resolved = 0`
+         AND n.resolved = 0
+         AND e.model = ?`
     )
-    .all(...types) as Array<{
+    .all(...types, ACTIVE_EMBED_MODEL) as Array<{
     id: string;
     type: string;
     content: string;

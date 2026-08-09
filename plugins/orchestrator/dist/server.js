@@ -21151,7 +21151,8 @@ function handleCheckSimilar(db, queryVector, input) {
        FROM notes n
        JOIN embeddings e ON n.id = e.note_id
        WHERE n.type IN (${placeholders})
-         AND n.resolved = 0`).all(...types2);
+         AND n.resolved = 0
+         AND e.model = ?`).all(...types2, ACTIVE_EMBED_MODEL);
   const scored = [];
   for (const row of rows) {
     const noteVector = blobToVector(row.vector);
@@ -21469,14 +21470,9 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   ]);
   const linkStats = createAutoLinksWithStats(db, noteId, keywords);
   const links = linkStats.links;
-  if (embeddingClient) {
+  if (embeddingClient && typeof embeddingClient.embedIfAvailable === "function") {
     try {
-      const vecs = await embeddingClient.embed([input.content]);
-      if (vecs && vecs.length > 0) {
-        const blob = Buffer.from(vecs[0].buffer);
-        db.run(`INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
-           VALUES (?, ?, ?, ?)`, [noteId, blob, "bge-m3", new Date().toISOString()]);
-      }
+      await embeddingClient.embedIfAvailable(db, noteId, input.content);
     } catch (err) {
       console.error(`[embed] Failed to embed note ${noteId}:`, err);
     }
@@ -27384,8 +27380,10 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   const projectNotes = projectDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
   const globalNotes = globalDb2.query("SELECT COUNT(*) as cnt FROM notes").get().cnt;
   let embeddedCount = 0;
+  let staleModelCount = 0;
   try {
-    embeddedCount = projectDb2.query("SELECT COUNT(*) as cnt FROM embeddings").get().cnt;
+    embeddedCount = projectDb2.query("SELECT COUNT(*) as cnt FROM embeddings WHERE model = ?").get(ACTIVE_EMBED_MODEL).cnt;
+    staleModelCount = projectDb2.query("SELECT COUNT(*) as cnt FROM embeddings WHERE model <> ?").get(ACTIVE_EMBED_MODEL).cnt;
   } catch {}
   const coveragePct = projectNotes > 0 ? Math.round(embeddedCount / projectNotes * 100) : 0;
   let activeSessions = 0;
@@ -27425,7 +27423,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   }
   lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
   if (sidecarStatus === "ready") {
-    lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)`);
+    lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)` + (staleModelCount > 0 ? ` - WARNING: ${staleModelCount} note(s) still carry vectors from a previous model and are INVISIBLE to semantic search until re-embedded (backfillChunks)` : ``));
   } else if (sidecarStatus === "starting") {
     lines.push("- **Embeddings**: starting up...");
   } else {

@@ -6,8 +6,9 @@ import {
   bucketLabel,
   similarityAlertThreshold,
 } from "../../mcp/tools/remember";
-import type { EmbeddingClient } from "../../mcp/engine/embeddings";
+import { EmbeddingClient } from "../../mcp/engine/embeddings";
 import { generateId, now } from "../../mcp/utils";
+import { ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 
 function makeDb(type: "project" | "global"): Database {
   const db = new Database(":memory:");
@@ -252,9 +253,14 @@ describe("R4: forced-resolution gate", () => {
   });
 
   function makeMockClient(vector: Float32Array): EmbeddingClient {
-    return {
-      embed: async (_texts: string[]) => [vector],
-    } as unknown as EmbeddingClient;
+    // A REAL client with embed() overridden, not a bare object cast to the
+    // type. The cast version silently lacked embedIfAvailable, so production
+    // code calling it threw at runtime while typecheck stayed green - the
+    // fixture was lying about what it implemented (anti_pattern 798f741b).
+    // Returns one vector PER INPUT TEXT, as the sidecar does.
+    const c = new EmbeddingClient("http://127.0.0.1:1");
+    (c as any).embed = async (texts: string[]) => texts.map(() => vector);
+    return c;
   }
 
   function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
@@ -262,7 +268,7 @@ describe("R4: forced-resolution gate", () => {
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, blob, "bge-m3", new Date().toISOString()]
+      [noteId, blob, ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
   }
 
@@ -698,9 +704,14 @@ describe("R4.1: candidate rank buckets in gate message", () => {
   }
 
   function makeMockClient(vector: Float32Array): EmbeddingClient {
-    return {
-      embed: async (_texts: string[]) => [vector],
-    } as unknown as EmbeddingClient;
+    // A REAL client with embed() overridden, not a bare object cast to the
+    // type. The cast version silently lacked embedIfAvailable, so production
+    // code calling it threw at runtime while typecheck stayed green - the
+    // fixture was lying about what it implemented (anti_pattern 798f741b).
+    // Returns one vector PER INPUT TEXT, as the sidecar does.
+    const c = new EmbeddingClient("http://127.0.0.1:1");
+    (c as any).embed = async (texts: string[]) => texts.map(() => vector);
+    return c;
   }
 
   function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
@@ -708,7 +719,7 @@ describe("R4.1: candidate rank buckets in gate message", () => {
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, blob, "bge-m3", new Date().toISOString()]
+      [noteId, blob, ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
   }
 
@@ -972,16 +983,21 @@ describe("fc7fcb0d: type-aware similarity gate threshold", () => {
     return new Float32Array([x, y]);
   }
   function makeMockClient(vector: Float32Array): EmbeddingClient {
-    return {
-      embed: async (_texts: string[]) => [vector],
-    } as unknown as EmbeddingClient;
+    // A REAL client with embed() overridden, not a bare object cast to the
+    // type. The cast version silently lacked embedIfAvailable, so production
+    // code calling it threw at runtime while typecheck stayed green - the
+    // fixture was lying about what it implemented (anti_pattern 798f741b).
+    // Returns one vector PER INPUT TEXT, as the sidecar does.
+    const c = new EmbeddingClient("http://127.0.0.1:1");
+    (c as any).embed = async (texts: string[]) => texts.map(() => vector);
+    return c;
   }
   function seedEmbedding(db: Database, noteId: string, vector: Float32Array) {
     const blob = Buffer.from(vector.buffer);
     db.run(
       `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at)
        VALUES (?, ?, ?, ?)`,
-      [noteId, blob, "bge-m3", new Date().toISOString()]
+      [noteId, blob, ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
   }
   function insertPriorNote(
@@ -1194,7 +1210,7 @@ describe("fc7fcb0d: type-aware similarity gate threshold", () => {
       );
       db.run(
         `INSERT OR REPLACE INTO embeddings (note_id, vector, model, embedded_at) VALUES (?, ?, ?, ?)`,
-        [id, Buffer.from(v.buffer), "bge-m3", new Date().toISOString()]
+        [id, Buffer.from(v.buffer), ACTIVE_EMBED_MODEL, new Date().toISOString()]
       );
     }
     // Blocking neighbor @0.87 (>=0.85) AND advisory neighbor @0.78 (in

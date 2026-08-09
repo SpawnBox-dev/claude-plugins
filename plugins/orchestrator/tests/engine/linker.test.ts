@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import { findRelatedNotes, findRelatedNotesHybrid, createAutoLinks, inferRelationship } from "../../mcp/engine/linker";
 import { generateId, now } from "../../mcp/utils";
+import { ACTIVE_EMBED_MODEL } from "../../mcp/engine/embeddings";
 
 function insertNote(
   db: Database,
@@ -177,7 +178,7 @@ describe("linker", () => {
     const blob = Buffer.from(mockVec.buffer);
     db.run(
       `INSERT INTO embeddings (note_id, vector, model, embedded_at) VALUES (?, ?, ?, ?)`,
-      [id, blob, "bge-m3", new Date().toISOString()]
+      [id, blob, ACTIVE_EMBED_MODEL, new Date().toISOString()]
     );
 
     const queryVec = new Float32Array(768).fill(0.5);
