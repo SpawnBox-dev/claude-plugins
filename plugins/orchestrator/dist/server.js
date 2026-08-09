@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join8 } from "path";
-import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync7, mkdirSync as mkdirSync4 } from "fs";
+import { resolve, join as join9 } from "path";
+import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync8, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -6543,6 +6543,68 @@ function emitLifecycleLine(writeStderr, writeFile, line) {
   try {
     writeStderr(line);
   } catch {}
+}
+
+// mcp/engine/state_gc.ts
+import { readdirSync, statSync as statSync2, unlinkSync } from "fs";
+import { join } from "path";
+var EPHEMERAL_PREFIXES = [
+  "active-session-",
+  "preuse-warn-",
+  "turn-",
+  "stop-",
+  "subagent-stop-",
+  "struggle-",
+  "bridge-",
+  "orch-active-"
+];
+var MARKER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+var WL_BACKUP_KEEP = 20;
+var WL_BACKUP_PREFIX = ".wl-backup-";
+var sweptDirs = new Set;
+function sweepStateDir(stateDir) {
+  const result = { scanned: 0, removed: 0, rotated: 0, skipped: false };
+  if (sweptDirs.has(stateDir)) {
+    result.skipped = true;
+    return result;
+  }
+  sweptDirs.add(stateDir);
+  let entries;
+  try {
+    entries = readdirSync(stateDir);
+  } catch {
+    return result;
+  }
+  result.scanned = entries.length;
+  const now = Date.now();
+  const backups = [];
+  for (const name of entries) {
+    const full = join(stateDir, name);
+    if (name.startsWith(WL_BACKUP_PREFIX)) {
+      try {
+        backups.push({ name, mtime: statSync2(full).mtimeMs });
+      } catch {}
+      continue;
+    }
+    if (!EPHEMERAL_PREFIXES.some((p) => name.startsWith(p)))
+      continue;
+    try {
+      if (now - statSync2(full).mtimeMs < MARKER_MAX_AGE_MS)
+        continue;
+      unlinkSync(full);
+      result.removed++;
+    } catch {}
+  }
+  if (backups.length > WL_BACKUP_KEEP) {
+    backups.sort((a, b) => b.mtime - a.mtime);
+    for (const b of backups.slice(WL_BACKUP_KEEP)) {
+      try {
+        unlinkSync(join(stateDir, b.name));
+        result.rotated++;
+      } catch {}
+    }
+  }
+  return result;
 }
 
 // mcp/server.ts
@@ -19561,7 +19623,7 @@ var GLOBAL_TYPES = ["user_pattern", "tool_capability"];
 // mcp/db/connection.ts
 import { Database } from "bun:sqlite";
 import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "fs";
-import { dirname as dirname2, join } from "path";
+import { dirname as dirname2, join as join2 } from "path";
 import { homedir } from "os";
 
 // mcp/db/schema.ts
@@ -19993,8 +20055,8 @@ function applyMigrations(db, dbType = "project") {
 var globalDb = null;
 var projectDb = null;
 function getGlobalDbPath() {
-  const newPath = join(homedir(), ".claude", "orchestrator", "global.db");
-  const legacyPath = join(homedir(), ".orchestrator", "global.db");
+  const newPath = join2(homedir(), ".claude", "orchestrator", "global.db");
+  const legacyPath = join2(homedir(), ".orchestrator", "global.db");
   if (!existsSync2(newPath) && existsSync2(legacyPath)) {
     const newDir = dirname2(newPath);
     if (!existsSync2(newDir)) {
@@ -20016,7 +20078,7 @@ function getProjectDbPath() {
   if (root.includes(".claude/plugins/cache") || root.includes(".claude\\plugins\\cache")) {
     console.error(`[orchestrator] WARNING: Project DB path resolves to plugin cache (${root}). ` + `DB will be lost on plugin update! Set ORCHESTRATOR_PROJECT_ROOT or ensure CLAUDE_PROJECT_DIR is available.`);
   }
-  return join(root, ".orchestrator", "project.db");
+  return join2(root, ".orchestrator", "project.db");
 }
 function initDb(path, dbType) {
   const dir = dirname2(path);
@@ -21819,8 +21881,8 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
 }
 
 // mcp/tools/supersede.ts
-import { existsSync as existsSync3, readdirSync, readFileSync } from "fs";
-import { join as join2 } from "path";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync } from "fs";
+import { join as join3 } from "path";
 import { homedir as homedir2 } from "os";
 
 // mcp/tools/id_resolver.ts
@@ -21844,19 +21906,19 @@ function resolveNoteId(db, idOrPrefix) {
 function findMemoryFilesCarryingClaim(content, projectDir, max = 4) {
   try {
     const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-    const memDir = join2(homedir2(), ".claude", "projects", projectHash, "memory");
+    const memDir = join3(homedir2(), ".claude", "projects", projectHash, "memory");
     if (!existsSync3(memDir))
       return [];
     const terms = new Set(extractKeywords(content).map((t) => t.toLowerCase()));
     if (terms.size === 0)
       return [];
     const scored = [];
-    for (const file of readdirSync(memDir)) {
+    for (const file of readdirSync2(memDir)) {
       if (!file.endsWith(".md"))
         continue;
       let text;
       try {
-        text = readFileSync(join2(memDir, file), "utf-8").toLowerCase();
+        text = readFileSync(join3(memDir, file), "utf-8").toLowerCase();
       } catch {
         continue;
       }
@@ -23383,18 +23445,18 @@ This was already blocked last checkpoint and is blocked again in the same words.
 
 // mcp/engine/live_sessions.ts
 import { existsSync as existsSync6 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 
 // mcp/engine/agent_channel_state.ts
 import {
   readFileSync as readFileSync2,
   existsSync as existsSync5,
   mkdirSync as mkdirSync3,
-  unlinkSync,
-  readdirSync as readdirSync2,
-  statSync as statSync2
+  unlinkSync as unlinkSync2,
+  readdirSync as readdirSync3,
+  statSync as statSync3
 } from "fs";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 import { Database as Database2 } from "bun:sqlite";
 var SESSIONS_FILE = "sessions.json";
 var STATE_FILE = "state.json";
@@ -23411,7 +23473,7 @@ function sweepStaleTmpArtifacts(stateDir) {
   tmpSweptDirs.add(stateDir);
   let entries;
   try {
-    entries = readdirSync2(stateDir);
+    entries = readdirSync3(stateDir);
   } catch {
     return;
   }
@@ -23419,11 +23481,11 @@ function sweepStaleTmpArtifacts(stateDir) {
   for (const name of entries) {
     if (!name.includes(".tmp."))
       continue;
-    const full = join3(stateDir, name);
+    const full = join4(stateDir, name);
     try {
-      if (now3 - statSync2(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
+      if (now3 - statSync3(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
         continue;
-      unlinkSync(full);
+      unlinkSync2(full);
     } catch {}
   }
 }
@@ -23450,7 +23512,7 @@ function getDb(stateDir) {
   sweepStaleTmpArtifacts(stateDir);
   const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
   if (useInMemory && false) {}
-  const dbPath = useInMemory ? ":memory:" : join3(stateDir, AGENT_CHANNEL_DB_FILE);
+  const dbPath = useInMemory ? ":memory:" : join4(stateDir, AGENT_CHANNEL_DB_FILE);
   const db = new Database2(dbPath);
   if (!useInMemory) {
     db.exec("PRAGMA journal_mode = WAL;");
@@ -23559,7 +23621,7 @@ function rowToEntry(r) {
   return entry;
 }
 function migrateSessionsLegacy(stateDir, db) {
-  const legacyPath = join3(stateDir, SESSIONS_FILE);
+  const legacyPath = join4(stateDir, SESSIONS_FILE);
   if (!existsSync5(legacyPath))
     return;
   let legacy = [];
@@ -23568,7 +23630,7 @@ function migrateSessionsLegacy(stateDir, db) {
     legacy = Array.isArray(data) ? data : data?.sessions ?? [];
   } catch {
     try {
-      unlinkSync(legacyPath);
+      unlinkSync2(legacyPath);
     } catch {}
     return;
   }
@@ -23596,7 +23658,7 @@ function migrateSessionsLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync(legacyPath);
+    unlinkSync2(legacyPath);
   } catch {}
 }
 function readSessions(stateDir) {
@@ -23641,7 +23703,7 @@ function removeSession(stateDir, session_id) {
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
 }
 function migrateOverrideStateLegacy(stateDir, db) {
-  const legacyPath = join3(stateDir, STATE_FILE);
+  const legacyPath = join4(stateDir, STATE_FILE);
   if (!existsSync5(legacyPath))
     return;
   let legacy = null;
@@ -23649,7 +23711,7 @@ function migrateOverrideStateLegacy(stateDir, db) {
     legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
   } catch {
     try {
-      unlinkSync(legacyPath);
+      unlinkSync2(legacyPath);
     } catch {}
     return;
   }
@@ -23675,7 +23737,7 @@ function migrateOverrideStateLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync(legacyPath);
+    unlinkSync2(legacyPath);
   } catch {}
 }
 function readOverrideState(stateDir) {
@@ -23696,7 +23758,7 @@ function readOverrideState(stateDir) {
   };
 }
 function migrateOffsetsLegacy(stateDir, db, receiverId8) {
-  const legacyPath = join3(stateDir, `offsets-${receiverId8}.json`);
+  const legacyPath = join4(stateDir, `offsets-${receiverId8}.json`);
   if (!existsSync5(legacyPath))
     return;
   let legacy = null;
@@ -23704,7 +23766,7 @@ function migrateOffsetsLegacy(stateDir, db, receiverId8) {
     legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
   } catch {
     try {
-      unlinkSync(legacyPath);
+      unlinkSync2(legacyPath);
     } catch {}
     return;
   }
@@ -23722,7 +23784,7 @@ function migrateOffsetsLegacy(stateDir, db, receiverId8) {
     })();
   }
   try {
-    unlinkSync(legacyPath);
+    unlinkSync2(legacyPath);
   } catch {}
 }
 function readOffsets(stateDir, receiverId8) {
@@ -23764,7 +23826,7 @@ function rowToSystemEvent(r) {
   };
 }
 function migrateSystemEventsLegacy(stateDir, db) {
-  const legacyPath = join3(stateDir, "system_events.jsonl");
+  const legacyPath = join4(stateDir, "system_events.jsonl");
   if (!existsSync5(legacyPath))
     return;
   let lines = [];
@@ -23773,7 +23835,7 @@ function migrateSystemEventsLegacy(stateDir, db) {
 `).filter((l) => l.trim());
   } catch {
     try {
-      unlinkSync(legacyPath);
+      unlinkSync2(legacyPath);
     } catch {}
     return;
   }
@@ -23797,7 +23859,7 @@ function migrateSystemEventsLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync(legacyPath);
+    unlinkSync2(legacyPath);
   } catch {}
 }
 function appendSystemEvent(stateDir, event) {
@@ -23856,11 +23918,11 @@ function alertEmissionStats(stateDir, alertKind) {
 // mcp/engine/live_sessions.ts
 function getAgentChannelStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join4(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join5(projectDir, ".orchestrator-state", "agent-channel");
   if (!existsSync6(stateDir))
     return null;
-  const dbExists = existsSync6(join4(stateDir, "agent_channel.db"));
-  const legacyExists = existsSync6(join4(stateDir, "sessions.json"));
+  const dbExists = existsSync6(join5(stateDir, "agent_channel.db"));
+  const legacyExists = existsSync6(join5(stateDir, "sessions.json"));
   if (!dbExists && !legacyExists)
     return null;
   return stateDir;
@@ -24137,8 +24199,8 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { statSync as statSync3, readFileSync as readFileSync3 } from "fs";
-import { join as join5 } from "path";
+import { statSync as statSync4, readFileSync as readFileSync3 } from "fs";
+import { join as join6 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -25255,12 +25317,12 @@ function wardenLedgerPath() {
   const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   if (!root)
     return null;
-  return join5(root, ".orchestrator-state", "warden-ledger.md");
+  return join6(root, ".orchestrator-state", "warden-ledger.md");
 }
 function wardenLedgerLiveness(ledgerPath) {
   let st;
   try {
-    st = statSync3(ledgerPath);
+    st = statSync4(ledgerPath);
   } catch {
     return { status: "absent" };
   }
@@ -25776,8 +25838,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync6, readdirSync as readdirSync3 } from "fs";
-import { join as join7 } from "path";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync7, readdirSync as readdirSync4 } from "fs";
+import { join as join8 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -25839,7 +25901,7 @@ function parseAddressing(content, sender, sessions) {
 }
 
 // mcp/engine/session_rename.ts
-import { statSync as statSync4, readFileSync as readFileSync4 } from "fs";
+import { statSync as statSync5, readFileSync as readFileSync4 } from "fs";
 var RENAME_RE = /The user named this session "([^"]*)"\. This may indicate the session's focus or intent\./g;
 function isInsideChannelEnvelope(content, index) {
   const before = content.slice(0, index);
@@ -25876,7 +25938,7 @@ function parseLatestRename(transcriptText) {
 }
 function readLatestRename(transcriptPath, knownSize) {
   try {
-    const size = statSync4(transcriptPath).size;
+    const size = statSync5(transcriptPath).size;
     if (knownSize !== undefined && size === knownSize) {
       return { name: null, size };
     }
@@ -25887,12 +25949,12 @@ function readLatestRename(transcriptPath, knownSize) {
 }
 
 // mcp/engine/restart_witness.ts
-import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync5 } from "fs";
-import { join as join6 } from "path";
+import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync6 } from "fs";
+import { join as join7 } from "path";
 import { homedir as homedir3 } from "os";
 var RESTART_WINDOW_MS = 4 * 60 * 1000;
 function lifecycleLogPath() {
-  return join6(process.env.CLAUDE_CONFIG_DIR || join6(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+  return join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 }
 function lastCleanShutdownMs(logTail, sessionId) {
   let latest = null;
@@ -25925,7 +25987,7 @@ function readLifecycleTail(bytes = 64 * 1024, path2 = lifecycleLogPath()) {
   try {
     if (!existsSync7(path2))
       return "";
-    const size = statSync5(path2).size;
+    const size = statSync6(path2).size;
     const start = Math.max(0, size - bytes);
     const len = size - start;
     if (len <= 0)
@@ -26220,7 +26282,7 @@ class AgentChannel {
   }
   syncRenameIntoName() {
     try {
-      const path2 = join7(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const path2 = join8(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
       const { name, size } = readLatestRename(path2, this.lastRenameScanSize);
       this.lastRenameScanSize = size;
       if (name && name !== this.selfSession.name) {
@@ -26363,7 +26425,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -26371,8 +26433,8 @@ class AgentChannel {
   readTranscriptTail(sid) {
     let fd;
     try {
-      const path2 = join7(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync6(path2).size;
+      const path2 = join8(this.projectsHashDir, `${sid}.jsonl`);
+      const size = statSync7(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
@@ -26394,7 +26456,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -26408,7 +26470,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync6(join7(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -26475,7 +26537,7 @@ class AgentChannel {
   listJsonlFiles() {
     if (!existsSync8(this.projectsHashDir))
       return [];
-    return readdirSync3(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join7(this.projectsHashDir, f));
+    return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join8(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -26609,7 +26671,7 @@ class AgentChannel {
   processFile(file, sessions, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync6(file);
+      stat = statSync7(file);
     } catch {
       return false;
     }
@@ -26958,7 +27020,7 @@ async function handleRespondToPermission(input, ctx) {
 import { homedir as homedir4 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join8(import.meta.dir, "..", "package.json");
+    const pkgPath = join9(import.meta.dir, "..", "package.json");
     return JSON.parse(readFileSync5(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
@@ -27021,10 +27083,10 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join8(projectDir, ".orchestrator-state");
+  const stateDir = join9(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join8(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join9(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync9(perPidFile)) {
         const raw = readFileSync5(perPidFile, "utf8").trim();
@@ -27037,14 +27099,14 @@ function getFallbackSessionId() {
       }
     } catch {}
   }
-  const file = join8(stateDir, "active-session");
+  const file = join9(stateDir, "active-session");
   try {
     if (existsSync9(file)) {
       const raw = readFileSync5(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join8(stateDir, `active-session-${claudePid}`);
+          const perPidFile = join9(stateDir, `active-session-${claudePid}`);
           if (!existsSync9(perPidFile)) {
             try {
               writeFileSync2(perPidFile, raw, "utf8");
@@ -27124,7 +27186,7 @@ async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const sidecarStateDir = join8(homedir4(), ".claude", "orchestrator");
+  const sidecarStateDir = join9(homedir4(), ".claude", "orchestrator");
   try {
     if (!existsSync9(sidecarStateDir))
       mkdirSync4(sidecarStateDir, { recursive: true });
@@ -27162,11 +27224,11 @@ async function startSidecar() {
       closeSync3(openSync3(lockFile, "wx"));
       holdsLock = true;
     } catch {
-      const age = Date.now() - (statSync7(lockFile).mtimeMs || 0);
+      const age = Date.now() - (statSync8(lockFile).mtimeMs || 0);
       if (age > LOCK_STALE_MS) {
         try {
-          const { unlinkSync: unlinkSync2 } = await import("fs");
-          unlinkSync2(lockFile);
+          const { unlinkSync: unlinkSync3 } = await import("fs");
+          unlinkSync3(lockFile);
         } catch {}
         try {
           closeSync3(openSync3(lockFile, "wx"));
@@ -27194,22 +27256,22 @@ async function startSidecar() {
     console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
   }
   try {
-    const { unlinkSync: unlinkSync2 } = await import("fs");
-    unlinkSync2(portFile);
+    const { unlinkSync: unlinkSync3 } = await import("fs");
+    unlinkSync3(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile, "--model", ACTIVE_EMBED_MODEL_REPO];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync2 } = await import("fs");
-      unlinkSync2(portFile);
+      const { unlinkSync: unlinkSync3 } = await import("fs");
+      unlinkSync3(portFile);
     } catch {}
     result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
   }
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync2 } = await import("fs");
-      unlinkSync2(portFile);
+      const { unlinkSync: unlinkSync3 } = await import("fs");
+      unlinkSync3(portFile);
     } catch {}
     result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
   }
@@ -27398,7 +27460,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   try {
     const self = process.argv[1];
     if (self) {
-      bundleStamp = ` - bundle ${statSync7(self).mtime.toISOString()}`;
+      bundleStamp = ` - bundle ${statSync8(self).mtime.toISOString()}`;
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
@@ -27410,7 +27472,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join8(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackFile = join9(resolvedProjectDir, ".orchestrator-state", "active-session");
     const fallbackExists = existsSync9(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
@@ -27443,7 +27505,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
   try {
-    const channelStateDir = join8(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const channelStateDir = join9(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
     const alertStats = alertEmissionStats(channelStateDir);
     if (alertStats.length > 0) {
       lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
@@ -28706,7 +28768,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join8(homedir4(), ".claude", "projects", projectHash);
+  const projectsHashDir = join9(homedir4(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -28722,7 +28784,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join8(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join9(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -28868,7 +28930,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join9(process.env.CLAUDE_CONFIG_DIR || join9(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
@@ -29057,6 +29119,14 @@ if (initialParentClaudePid) {
 async function main() {
   emitLifecycle(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
+  try {
+    const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const swept = sweepStateDir(join9(projectRoot, ".orchestrator-state"));
+    if (swept.removed > 0 || swept.rotated > 0) {
+      emitLifecycle(`[orchestrator] state-dir GC: removed ${swept.removed} stale marker(s), rotated ${swept.rotated} ledger backup(s), of ${swept.scanned} file(s)
+`);
+    }
+  } catch {}
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
   const transport = new StdioServerTransport;

@@ -1,6 +1,7 @@
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
+import { sweepStateDir } from "./engine/state_gc";
 import { execSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -3352,6 +3353,32 @@ async function main() {
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
       `role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}\n`,
   );
+
+  // 0.48.0 (backlog item M + N): GC the state directory once per process.
+  //
+  // Nothing had ever deleted a marker. Measured three times on one machine:
+  // 448 files -> 535 -> 730 (76 MB), debris back to 2026-04-21, dominated by
+  // 445 `active-session-<pid>` anchors that are read once at boot and inert
+  // forever after. The directory sits inside a OneDrive-synced project folder,
+  // so all of it is replicated to the cloud indefinitely.
+  //
+  // Startup is the right moment (bounded, once, off the hot loop) and the
+  // sweep is allowlist-based, age-floored and best-effort - see state_gc.ts.
+  // Deliberately NOT awaited into a blocking gate: a slow filesystem must not
+  // delay MCP availability.
+  try {
+    const projectRoot =
+      process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const swept = sweepStateDir(join(projectRoot, ".orchestrator-state"));
+    if (swept.removed > 0 || swept.rotated > 0) {
+      emitLifecycle(
+        `[orchestrator] state-dir GC: removed ${swept.removed} stale marker(s), ` +
+          `rotated ${swept.rotated} ledger backup(s), of ${swept.scanned} file(s)\n`,
+      );
+    }
+  } catch {
+    // Never block startup on housekeeping.
+  }
 
   // Initialize session tracker and clean up stale sessions
   sessionTracker = new SessionTracker(getProjectDb());
