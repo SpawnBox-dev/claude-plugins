@@ -62,6 +62,10 @@ export interface RememberResult {
 
 const SIMILARITY_ALERT_TYPES: NoteType[] = ["decision", "convention", "anti_pattern"];
 
+/** Types where keyword dedup does not apply, because identity is not phrasing.
+ *  See the findDuplicates call site for the measured data-loss case. */
+const DEDUP_EXEMPT_TYPES: NoteType[] = ["reference"];
+
 // fc7fcb0d: type-aware BLOCK threshold. A flat 0.75 over-blocked anti_pattern
 // notes, which by design enumerate close-but-distinct failure modes that share
 // vocabulary (dogfood: bot 4x/5h, dev 3x, +1 live 2026-05-17 - a design
@@ -488,7 +492,21 @@ export async function handleRemember(
   // Runs FIRST. If it short-circuits to "Near-duplicate found - promoted
   // existing", return early as today. The R4 gate does NOT fire on this
   // path; keyword-based near-dupes are already handled by auto-promotion.
-  const duplicates = findDuplicates(db, input.type, input.content);
+  // `reference` is EXEMPT. Jaccard dedup asks "is this the same claim, said
+  // again?" - correct for a decision or a pattern, wrong for a POINTER, which
+  // is identified by what it points AT, not by how it is worded. Pointers are
+  // formulaic ("the X dashboard lives at Y"), so two references to genuinely
+  // different resources share nearly all their keywords.
+  //
+  // Measured while adding the type: "Billing dashboard for the PAYMENT
+  // provider..." and "Billing dashboard for the EMAIL provider..." collapsed
+  // into ONE note - the second write was silently discarded and the first
+  // note's confidence PROMOTED, so the loss looked like a success. Shipping
+  // the type without this exemption would have shipped a type whose primary
+  // use case destroys data.
+  const duplicates = DEDUP_EXEMPT_TYPES.includes(input.type)
+    ? []
+    : findDuplicates(db, input.type, input.content);
   if (duplicates.length > 0) {
     const bestMatch = duplicates[0];
     const newConfidence = promoteConfidence(db, bestMatch.id);

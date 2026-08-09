@@ -14,6 +14,18 @@ export const NOTE_TYPES = [
   "quality_gate",
   "tool_capability",
   "user_pattern",
+  // Backlog item H, requested twice in real use (a version->date lookup table,
+  // and a `gotcha`) and rejected both times because the enum had nowhere to put
+  // them. Every other type here is a CLAIM ABOUT THE WORLD - a decision, a
+  // pattern, a risk. `reference` is the one thing that is not: a POINTER to
+  // where something lives (a URL, a dashboard, a ticket, a lookup table).
+  // Forcing pointers into `insight` or `architecture` mislabels them and makes
+  // type-filtered retrieval worse for both.
+  //
+  // Deliberately NOT added to SIMILARITY_ALERT_TYPES: two pointers to different
+  // resources are often near-identical in wording, so duplicate-gating them
+  // would block legitimate writes - which is the corrosion item A described.
+  "reference",
   "checkpoint",
   "work_item",
 ] as const;
@@ -95,6 +107,11 @@ export const MAYBE_GLOBAL_TYPES: NoteType[] = [
   "autonomy_recipe",
   "quality_gate",
   "convention",
+  // A pointer to an external resource is often cross-project (a vendor
+  // dashboard, an API doc, an account console), but just as often names a
+  // project-specific artifact - so it belongs in MAYBE_GLOBAL, judged per
+  // note, rather than in the always-global set.
+  "reference",
 ];
 
 // ── Interfaces ───────────────────────────────────────────────────────

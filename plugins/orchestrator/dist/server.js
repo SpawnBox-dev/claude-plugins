@@ -19581,6 +19581,7 @@ var NOTE_TYPES = [
   "quality_gate",
   "tool_capability",
   "user_pattern",
+  "reference",
   "checkpoint",
   "work_item"
 ];
@@ -21475,6 +21476,7 @@ function takePendingNote(db, token, ttlMs = PENDING_NOTE_TTL_MS) {
 
 // mcp/tools/remember.ts
 var SIMILARITY_ALERT_TYPES = ["decision", "convention", "anti_pattern"];
+var DEDUP_EXEMPT_TYPES = ["reference"];
 var SIMILARITY_ALERT_THRESHOLDS = {
   decision: 0.75,
   convention: 0.75,
@@ -21648,7 +21650,7 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
   }
   const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
   const db = useGlobal ? globalDb2 : projectDb2;
-  const duplicates = findDuplicates(db, input.type, input.content);
+  const duplicates = DEDUP_EXEMPT_TYPES.includes(input.type) ? [] : findDuplicates(db, input.type, input.content);
   if (duplicates.length > 0) {
     const bestMatch = duplicates[0];
     const newConfidence = promoteConfidence(db, bestMatch.id);
