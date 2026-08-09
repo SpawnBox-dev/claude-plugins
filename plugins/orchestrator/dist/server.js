@@ -25209,7 +25209,7 @@ function handleStop(ctx, args) {
   const inFlight = listInFlightWorkItemsForSession(ctx.db, args.session_id);
   const freshNoteList = fresh >= 3 ? listFreshSurfacedNotes(ctx.db, args.session_id, 3) : [];
   const parts = [];
-  parts.push("Before ending: complete orchestrator housekeeping. Maintenance is equal-priority to capture.");
+  parts.push("Handing control back - complete orchestrator housekeeping now. Maintenance is equal-priority to capture, and anything below that you skip is lost if this turn is your last.");
   let n = 1;
   if (inFlight.length > 0) {
     const list = inFlight.slice(0, 3).map((w) => `  - **${w.id.slice(0, 8)}** [${w.status}] ${w.content.slice(0, 70)}`).join(`

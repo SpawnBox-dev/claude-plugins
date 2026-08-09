@@ -2211,8 +2211,18 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   const freshNoteList = fresh >= 3 ? listFreshSurfacedNotes(ctx.db, args.session_id, 3) : [];
 
   const parts: string[] = [];
+  // Backlog item I. This said "Before ending:" - but the Stop hook fires at
+  // EVERY hand-back, and the overwhelmingly common case is pausing for the
+  // user's next message, not ending. A reader who is plainly not ending
+  // classifies the nudge as inapplicable, and an inapplicable nudge becomes
+  // chrome (anti_pattern 60f2fdc2) - which is how the firing that DOES matter
+  // gets skipped.
+  //
+  // The fix is accuracy, not volume: name the moment that is actually
+  // happening. "Handing control back" is true whether the session pauses or
+  // ends, so the reader never has grounds to dismiss it as not-my-situation.
   parts.push(
-    "Before ending: complete orchestrator housekeeping. Maintenance is equal-priority to capture."
+    "Handing control back - complete orchestrator housekeeping now. Maintenance is equal-priority to capture, and anything below that you skip is lost if this turn is your last."
   );
 
   let n = 1;

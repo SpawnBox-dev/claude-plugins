@@ -24,6 +24,14 @@ import { cosineSimilarity } from "../mcp/engine/hybrid_search";
 
 const setName = process.argv[2] ?? "para";
 const LIMIT = Number(process.argv[3] ?? 6);
+/**
+ * MMR lambda: 1.0 = pure relevance, lower = more diversity pressure.
+ * `recall` passes 0.7 today. Exposed here because widening the candidate pool
+ * made results WORSE (42.1% -> 15.8%), which points at diversification rather
+ * than pool size - more candidates means more for MMR to diversify AWAY from
+ * the target.
+ */
+const LAMBDA = Number(process.argv[4] ?? 0.7);
 const probes: Probe[] = JSON.parse(await Bun.file(join(import.meta.dir, `probes-${setName}.json`)).text());
 
 const db = new Database(DB_PATH, { readonly: true });
@@ -57,7 +65,7 @@ for (const p of probes) {
   scored.sort((a, b) => b[1] - a[1]);
   const vecRank = scored.findIndex(([id]) => id === p.target) + 1;
 
-  const results = await findRelatedNotesHybrid(db, p.query, LIMIT, qv, 0.7, false);
+  const results = await findRelatedNotesHybrid(db, p.query, LIMIT, qv, LAMBDA, false);
   const hit = results.some((r) => r.id === p.target);
 
   if (hit) e2eHit++;
