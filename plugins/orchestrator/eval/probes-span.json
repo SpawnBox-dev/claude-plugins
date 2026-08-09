@@ -1,0 +1,962 @@
+[
+ {
+  "target": "01312f85-e26a-4185-bbf0-e16d3e870ada",
+  "query": "holds backbone DONE, DNS demote + dashboard gate IN-FLIGHT-UNCOMMITTED, mark-offline wiring + cron processor + countdown UX REMAINING. RELAUNCH SEQUENCE: Jarid closes this window then runs pa-start.ps1 -Resume ec560bbd-135f-4a1d-853f-abe462f48d57 (RAW",
+  "kind": "span"
+ },
+ {
+  "target": "01c3bcbb-ff9f-46fc-b72e-f25c114d03b0",
+  "query": "0063 additive last_notified_at, manual per-file apply pending). 952bf3bd at a clean pause, ready to build Slice-10 (c) hypothesis→timeline hop the moment Lane C exposes the MasterTimeline focus-window param. ddb796b4 finalizing",
+  "kind": "span"
+ },
+ {
+  "target": "03134cbf-fa19-4011-80f8-051005d1a3a1",
+  "query": "(wpr.exe elevation) 3. **Packet capture** (when deep enabled): - `pktmon start --comp nics --capture` for 60 seconds - Simultaneous with ETW - `pktmon stop` then `pktmon format` - Include .etl",
+  "kind": "span"
+ },
+ {
+  "target": "03c9465e-e651-483e-8134-04b26a94be5a",
+  "query": "Output target: docs/superpowers/specs/2026-04-29-channel-system-spec.md, then new plan superseding 2026-04-20-channel-system-phase-1-and-1.5.md, then ~7-15h execution. ## Open Questions - [\"A1: What does 'enterprise-grade' concretely mean - Jarid to define\", \"A2: Single source of truth",
+  "kind": "span"
+ },
+ {
+  "target": "04359482-8590-4593-8087-59a47d8432a8",
+  "query": "four instances above are all cases where the PREDICATE was wrong (wrong pattern, wrong quantity, unsatisfiable regex, tautological condition). Here the predicate was CORRECT and never got the chance to",
+  "kind": "span"
+ },
+ {
+  "target": "049db1f5-507a-4abb-834e-cfdb7205f032",
+  "query": "= logic over probe data, runtime decisions - **Service layer** = orchestrates everything else Capability probe fits the SERVICE layer (not probe, not domain). Its current location in `core/networking/` alongside",
+  "kind": "span"
+ },
+ {
+  "target": "04c74171-12c8-4180-a871-ef82bcfa92b6",
+  "query": "actually responds. Confirmed-reachable, confirmed-unreachable, and unknown states surfaced in the UI. **Tier 4: Router observability UX** - IN-PROGRESS. UI to show which port-mapping attempts succeeded, which protocol was used, what",
+  "kind": "span"
+ },
+ {
+  "target": "082f0f92-c6e5-4333-b1a8-ddfbed8af1cb",
+  "query": "this note is the PA seam glue.) --- 2026-06-12T16:11:20.705Z --- CORRECTION 2026-06-12 (9d37791b Axis 4, read the actual component props): this note above said the FE reflects the DNS hold",
+  "kind": "span"
+ },
+ {
+  "target": "08415039-aa7f-4ba3-a880-5976492861f2",
+  "query": "hardening in progress; engine legs gated on punch-13 check; NO rebuild until PA clears stack). (6) Genericity: today's batch verified clean; drift WI 2fdfb97b filed (Jarid-only vocab, SPAWNBOX_* env, discord-bot",
+  "kind": "span"
+ },
+ {
+  "target": "0a3921b8-bffc-40b1-971e-fc26250d2962",
+  "query": "scheduling that relaunches discord-start.bat per run = a fresh lean session each tick (already floated in /discord-bootstrap Step 4 as the durable-cron long-term fix; this is now a SECOND independent",
+  "kind": "span"
+ },
+ {
+  "target": "0f336583-e671-4f93-9887-c28acddeadb1",
+  "query": "Flight 7d89c214: final Option-A dropdown consolidation (LoginButton single 'Account' portal link + delete→portal; FE, ships in the GATED Option-A cutover, NOT independently - must ship with/after the portal worker-deploy). All",
+  "kind": "span"
+ },
+ {
+  "target": "105de343-1b66-4c00-810a-3aa5dd3d78ea",
+  "query": "complete for the happy path. Next probe queued but NOT started: double-click/second-trigger collision behavior on backup (does it queue per sec 6, refuse with copy, or mystery-refuse?). Ops tray panel",
+  "kind": "span"
+ },
+ {
+  "target": "1261d028-dde0-4872-945a-1765bd3c5e9d",
+  "query": "to answer) or waiting out the hung call - flag Jarid to look at the window; (4) same-session rejoin keeps context: earlier channel briefings are still in it, resume not",
+  "kind": "span"
+ },
+ {
+  "target": "15175e9b-efcb-4139-9408-5e24c8137992",
+  "query": "= `${op_id}@${state.terminal.at}` (terminal_at is frozen per instance, no further deltas - 54036cb0's design guarantees stability; dismissal only applies to terminal rows so terminal.at always exists). New run => new terminal_at",
+  "kind": "span"
+ },
+ {
+  "target": "159a8f1a-9c06-449a-b067-57afcc6e8f1c",
+  "query": "oreo's credit is for the IMPORT/OPERATIONS SAFETY report, NOT the backup autosave fix (risk a236bd08). Public miscredit is the exact thing prevented this afternoon. 4. Any other 🚀-in-beta soak items",
+  "kind": "span"
+ },
+ {
+  "target": "15a4e6bf-1390-47fa-8d41-dcc39aa88d7d",
+  "query": "service tick path. On the 2026-05-04 fresh install test (alpha.1, anon `de90af8b...`), this probe timed out at the 10s ceiling **SIX consecutive times** (10:48:27, 10:49:46, 10:51:04, 10:52:22, 10:53:40, 10:54:57). Each",
+  "kind": "span"
+ },
+ {
+  "target": "16cc23b3-7b66-41f1-9396-e6ba0804fe70",
+  "query": "#staff-chat download card (all 4 channels). Each build: bump 3 files (package.json L4 / src-tauri/tauri.conf.json L4 / src-tauri/Cargo.toml L6) -> touch lib.rs -> SPAWNBOX_SIGN=1 npx tauri build -> Authenticode-sign setup.exe",
+  "kind": "span"
+ },
+ {
+  "target": "17f9b9bd-61af-4fc1-9eac-3ef5361732dd",
+  "query": "- `src/utils/minecraft-data/types.ts` - added `chartSummaryAggregation` to FieldDisplayConfig - `src/utils/minecraft-data/field-display.ts` - set aggregation on `player_count` ('arrivals') and `peak_concurrent` ('max') - `src/components/features/activity/insights/ActivitySummaryCard.tsx` - added `maxMetric`, `arrivalsMetric`, `aggregateMetric` functions; updated useMemo to use",
+  "kind": "span"
+ },
+ {
+  "target": "1895191e-4b6e-463e-abe4-c8b8c75f9d68",
+  "query": "suggestions on server/world switch - could apply fixes to wrong server 8. Known-plugin suggestions not dismissable 9. Port math magic numbers duplicated (now uses allocator constants) 10. find_port_conflict early return",
+  "kind": "span"
+ },
+ {
+  "target": "18df4587-ad86-45df-a28c-83de457534ec",
+  "query": "return the second is the deductible number. ALSO ESTABLISHED THIS SESSION: Google Workspace GST is CA$0.23 TOTAL (non-resident suppliers under the simplified GST/HST regime stop charging once your registration number",
+  "kind": "span"
+ },
+ {
+  "target": "18f3aefc-489b-459e-b1b1-0f5dd88a8fc5",
+  "query": "commit fea6d61b added `pre_bootstrap` timestamp + `effective_since = since_timestamp.or(Some(pre_bootstrap))` so first-boot event stream replays events from the bootstrap→stream-connect gap - Pre-fix symptom: events fired in the ~6s gap between bootstrap",
+  "kind": "span"
+ },
+ {
+  "target": "1b2c248d-4f34-431b-b2f2-27743d70767d",
+  "query": "friendly name in `service-info.ts`. Daemon-side service registration should pick canonical and deprecate the alias to remove the double-handling everywhere. C. **Pre-existing unused vars** in DaemonStatusIndicator (`networkDiscoveryEnabled` line 1665, `ipAssignmentSummary` line",
+  "kind": "span"
+ },
+ {
+  "target": "1c605b69-6984-45b5-9e20-3a39f97e4a0b",
+  "query": "classifier (PA channel messages treated as external); Jarid's direct in-chat go unblocked it. ## Next Steps - Route combined Discord stub through PA to discord-bot SA (#tips-and-tricks) - drafted, PA-gated.",
+  "kind": "span"
+ },
+ {
+  "target": "1d7200ff-766f-4d93-90f2-a32257be4a23",
+  "query": "new route directly, full worker suite green - nothing exercises the OLD route's consumers against the NEW registration order. WHY MISSED: plan/brief asserted the route was new; reviewers checked what",
+  "kind": "span"
+ },
+ {
+  "target": "2098b5f2-af4e-443d-8c3d-1afeda90379d",
+  "query": "ff7981b7 has the full deploy-chain record. Standing authorization captured: Jarid (direct in-terminal 2026-06-11) retired the per-op 'go' carve-out for worker deploy + --remote D1 writes (note 129b4aed; memory feedback_pa_full_endorsement updated).",
+  "kind": "span"
+ },
+ {
+  "target": "21ae9c57-c9ab-40d4-8bf0-15539f180fb1",
+  "query": "by tags). If high-volume usage warrants, consider adding `type=engagement` to the orchestrator's type enum. Currently NOT a blocker; tag-filtering works fine. ### Validation plan 1. Run `/discord-bootstrap` manually in next",
+  "kind": "span"
+ },
+ {
+  "target": "22650bd0-e4cd-4f0f-b563-9237c1c041d1",
+  "query": "with no connection **Fix options:** **Option A (recommended): Enable tracing log feature** Change `Cargo.toml:44` to: `tracing = { version = \"0.1\", features = [\"log\"] }` This bridges tracing events to",
+  "kind": "span"
+ },
+ {
+  "target": "23a7dd8b-ed58-4332-80ab-43fb6455060b",
+  "query": "failure, emitting one router_port_mapping_cascade event per cascade invocation. ## Open Questions - [\"None blocking. Integration path is clear from the task description in docs/superpowers/plans/2026-04-17-connectivity-fallback-chain-and-fleet-telemetry.md Phase 3.\"] ## Next Steps -",
+  "kind": "span"
+ },
+ {
+  "target": "23fc5163-8b80-4a9c-b495-e975e4d8fade",
+  "query": "out of read_cache_file() (DRY, preserves read_cache_file's None-on-logout contract for try_load); added cache_file_has_logout_sentinel(); reload_from_cache_file()->bool became reload_or_clear_from_cache_file()->CacheHydrateOutcome{Loaded|LoggedOut|Unchanged} - invalidates in-memory auth (existing invalidate_access_token) ONLY on LoggedOut, Unchanged stays the defensive no-op for",
+  "kind": "span"
+ },
+ {
+  "target": "241e55e4-1d4d-4f54-b92f-fbdb263ef01d",
+  "query": "note tagged `ga-blocker,from-diag-package,diag-bd387054-61d`. ## Open Questions - [\"Confirm whether Tauri-command restore path has the same compare-script vulnerability (not checked this session) - if yes, both paths silently no-op.\",\"Does the compare",
+  "kind": "span"
+ },
+ {
+  "target": "25607ec0-6558-44e1-ae26-8f0a007d2a42",
+  "query": "overrides?) 3. Some other registry tree we haven't probed (perhaps `HKLM\\SYSTEM\\CurrentControlSet\\Control\\FeatureManagement\\Overrides\\*` which has hundreds of numeric-ID entries we can't decode without Microsoft's internal catalog) **Action for next session:** - Re-do",
+  "kind": "span"
+ },
+ {
+  "target": "26dd3e28-d077-45f6-880d-dd212540ff68",
+  "query": "to CHECK which config the daemon is actually using.** Do not infer it from the file, and do not infer it from log silence (the interval is only logged when",
+  "kind": "span"
+ },
+ {
+  "target": "28af33b3-732b-4e03-86d1-f39f8cdcaf72",
+  "query": "useful for \"why isn't my server auto-restarting?\" diagnoses) - SpawnboxDaemon scheduled task state (registered? enabled? last_run_time? exit_code?) - Pending-reboot status (would explain why some operations are deferring) - Docker container",
+  "kind": "span"
+ },
+ {
+  "target": "29cbb152-36bf-4711-b363-a74f7267f45d",
+  "query": "on the branch regardless of where HEAD currently sits. (3) Ask whether a lane/PA is mid release-build (broadcast check). CORRECT RESPONSE in this state: do NOT `git checkout`/`reset`/`restore`/`add`/`commit` on the",
+  "kind": "span"
+ },
+ {
+  "target": "2af8aa62-5524-42f2-a176-b39bbc51ce02",
+  "query": "fix for the build-all spurious-drift red herring [[c9c30e9d]], two eol-only layers (no functional/content change): 1. datapacks/build-all.py normalizes CRLF->LF on read before zipping -> zips are byte-reproducible regardless of autocrlf /",
+  "kind": "span"
+ },
+ {
+  "target": "2bc55010-2ba1-4073-b8af-0620cdc732cc",
+  "query": "access-control files staged; did NOT --sync or touch the reference (pre-existing unrelated Discord access drift, channel 1508518418649841707). DILIGENCE (hook ran neither): tsc --noEmit = my added lines 0 errors; the",
+  "kind": "span"
+ },
+ {
+  "target": "2c28eb85-3b9b-460d-bb8e-a04fb7eac6e5",
+  "query": "the thing you are timing. Profile before choosing. 2. UNCHANGED: open_thread a8cb63d8 - my concurrent-capture warning is advisory-only, and decision ea5bee61 (the gate's founding principle) says informational alerts do not",
+  "kind": "span"
+ },
+ {
+  "target": "2e63a3bf-266a-4aa1-b2c0-1990d0ece745",
+  "query": "JARID OUT of the real app (un-mocked auth/OAuth/logout suites hit the live auth backend + cleared the keyring refresh token) AND wrote bogus operation_history rows 6-9 into the real app.db",
+  "kind": "span"
+ },
+ {
+  "target": "2e6d452f-c5dd-4c08-890f-f11b5d5d0e8f",
+  "query": "Tabs, Periodic Unlock. Provided recommended combination per feature. ## Open Questions - [\"Does the user want to implement soft gating now or plan it for later?\", \"Should map.live_view be changed",
+  "kind": "span"
+ },
+ {
+  "target": "2ea429b4-503d-4c53-a9d3-525137ac008e",
+  "query": "options with a known address get promoted to `unverified` (visible gray) so they don't disappear; hostname is demoted below LAN. **Tier gating exclusion:** `dnsStatus === 'tier-gated'` is EXCLUDED from `buildAddressOptions`",
+  "kind": "span"
+ },
+ {
+  "target": "317a6b16-8374-4f68-81bd-f36c2049f534",
+  "query": "had been fighting a NeoForge Version Check hang on an ATM (AllTheMons) modpack import (msg 1494869845819265184 onward). Dev team had been speculating the modpack bundles a specific NeoForge subversion (21.1.224)",
+  "kind": "span"
+ },
+ {
+  "target": "31a0f678-3c7c-49cf-a3d6-1cae893f9b4d",
+  "query": "- e.g. an address that became foreign-owned after an identity switch stays conflict=false because the check never re-ran). CONSEQUENCE: any FE consumer that treats `synced && !conflict` as \"this is",
+  "kind": "span"
+ },
+ {
+  "target": "32d371cf-a112-43d0-bb30-792ac6143e4f",
+  "query": "user's beta.6 build PREDATES the fix and lacks the bypass path. The fix is shipped to main but not yet published to the beta channel that this user is on.",
+  "kind": "span"
+ },
+ {
+  "target": "3556968e-2247-4cc5-8150-611419c17d67",
+  "query": "PA's primary mechanism above is \"parent-death race\": the NSIS installer process exits while the helper child is still inside its 3s HTTPS POST, Windows tears the child down before the",
+  "kind": "span"
+ },
+ {
+  "target": "37c59084-137a-469d-b608-357dc179cc66",
+  "query": "404. For create: inspect by name; if exists, return its id. 4. Skipped restart (only single SOS caller; \"running with new started_at\" is harder to verify without capturing pre-call state).",
+  "kind": "span"
+ },
+ {
+  "target": "398ea510-88aa-4543-9526-8f799a9736d2",
+  "query": "which returns a parsed view. Worth a dedicated investigation - risky to rush. **Scope for future work**: 1. Eval `Get-AppPackageRegistrySettings` output format on WSL AppX (Store + preview builds). 2.",
+  "kind": "span"
+ },
+ {
+  "target": "3a1cb5e7-b2b2-4f7b-8527-45e169524c18",
+  "query": "(Task 4) done (main repo 4ca1aa46). ## In Flight Task 3 done + reported to PA (listed-vs-draft map + spot-check offer). Now free until a3bb12a4 banks the INSTALLED-SERVER VM checkpoint,",
+  "kind": "span"
+ },
+ {
+  "target": "3ed80b31-1560-4e0f-9988-3dc0aed68880",
+  "query": "awaiting Fable cross-look + dashboard cut). ## In Flight #22 awaiting Fable (7085e408) cross-look then PA's dashboard cut. Nothing else active. ## Open Questions - Jarid's Java built-in-default posture: Option",
+  "kind": "span"
+ },
+ {
+  "target": "3f20d83a-9c7a-414c-9832-bedaadd34929",
+  "query": "content was visible inside the sticky column - looked like a visual glitch where columns were merging. Fix was removing the /50 modifier. Why: alpha modifier produces color-mix at 50%",
+  "kind": "span"
+ },
+ {
+  "target": "40ff0f13-6181-4727-8aab-dc9d520589ca",
+  "query": "mid-flight = report context to PA, then decide whether to abort or coast (depends on whether you've already captured what you need). Decision rule for non-urgent FE verifications (e.g. visual-only",
+  "kind": "span"
+ },
+ {
+  "target": "4142b9e9-1506-4ec6-bfeb-992efb6c09ef",
+  "query": "**What future diags will capture** (was missing pre-2026-04-17): - server + world .appdata config files (server.env, world.env, docker-config.toml, MCA config.yml) - server.properties, eula.txt, ops.json, whitelist.json, banned-*.json - plugins/mods/datapacks/resourcepacks directory listings",
+  "kind": "span"
+ },
+ {
+  "target": "414ee385-9718-4a05-a892-06f25ec3d0cf",
+  "query": "a Buy Season Pass CTA + a useCheckout season-pass method. GATED ON JARID (go-live, NOT blocking testing): ls_variant_id_annual=1347396 D1 write + worker deploy + LS store activation. E2E: WS-J running",
+  "kind": "span"
+ },
+ {
+  "target": "427dc2dd-db82-4365-b9b7-b07046992048",
+  "query": "- [Upgrade]\" or \"Sign in to access beta.\" **Why the split:** silent behavior is acceptable for agents (automated poll loops) where there's no human in the moment. For human-explicit requests,",
+  "kind": "span"
+ },
+ {
+  "target": "42fff3d7-c924-4ae2-a549-1c812f97fb34",
+  "query": "start Phase 2 commit work, defer to follow-up session, or reshape scope? - RecoveryState enum shape: PA approved generic Idle/Recovering/Retrying lean states - confirm initial variant set with Jarid before",
+  "kind": "span"
+ },
+ {
+  "target": "4370b5d3-01b8-4812-90e1-c262eb793a22",
+  "query": "G2/G3/G4 instrumentation ALL already-live (ddb796b4 verify-before-assuming x3) - fetchSubscriptionMetrics (Slice 1), trial_started_at/converted_at + write path, billing_events table + appendBillingEvent in 7 sites. So the LIFECYCLE FUNNEL (GA-overhaul centerpiece 9d65f7d9) is",
+  "kind": "span"
+ },
+ {
+  "target": "44dcbf06-8320-4630-87d6-1d9be8a123fa",
+  "query": "telemetry self-heal across loader switches [78186791/84b6fed5]. breakingChanges: [] (no user-facing breaks). draft: true (always). description 148/160 chars. Schema validates (the 55 astro check errors are pre-existing TS issues in HeroPreview/PainPoints/etc,",
+  "kind": "span"
+ },
+ {
+  "target": "44e1bbee-d642-4c62-8e29-0c1ec28f651f",
+  "query": "exist (1.19 only went to 1.19.4). Compat module defines legacy era as all of 1.19 through 1.20.4. ## Next Steps - [\"User to decide: (a) single zip with lowest pack_format",
+  "kind": "span"
+ },
+ {
+  "target": "46935d05-4aac-4ec4-a010-6f3a02b56f1f",
+  "query": "call `wsl.exe` periodically and accidentally wake WSL, worst case is: - Probe wakes WSL (cold start ~10s) - Probe runs (~1-2s), exits - Next keepalive tick (~30s later) sees no",
+  "kind": "span"
+ },
+ {
+  "target": "482a1bb2-9ee6-4d9c-b4e3-e8745cc41cc0",
+  "query": "L370 `{a.victim_name || 'coordinated attack'}` -> shows \"7 kills in 540s\" instead of \"coordinated attack\" (the synthetic non-empty string DEFEATS the existing empty-fallback); (3) PlayerDossier.tsx L607 \"Targeted {victim_name}\" + L617",
+  "kind": "span"
+ },
+ {
+  "target": "4910ef2a-a331-4efa-b127-0c0fc35133fb",
+  "query": "usefulness self-organise. **Relationship to what shipped (do not treat as substitutes):** the IDF weighting added in 0.30.73 ranks by **term rarity** - static, content-derived, computed at write time. This decision",
+  "kind": "span"
+ },
+ {
+  "target": "491a0307-cafd-40b8-b312-b92c4a9b57e9",
+  "query": "false. This is infrastructure: it doesn't gate any single user-facing feature, but it silently degrades every future debugging session that touches FE state. **Reproduce:** On a SpawnBox dev box, check",
+  "kind": "span"
+ },
+ {
+  "target": "4b0aad3a-7a81-4aa8-b70a-0ad17d31cb6b",
+  "query": "that retires the manual workaround pattern. yakuzer is implicitly a beneficiary; their reporter status remains on the umbrella `04c74171`. ## Supersedes / updates This note supersedes the prior engagement-state-awaiting-user note",
+  "kind": "span"
+ },
+ {
+  "target": "4bc430ee-cecc-4025-a9d7-d45b6769b170",
+  "query": "SHA-256 hex) - chose inline duplication over cross-file refactor of landing.ts since the helper is only 6 lines. - `worker/src/__tests__/download-tracking.test.ts` - 8 vitest tests covering round-trip, salt mismatch, signature tampering,",
+  "kind": "span"
+ },
+ {
+  "target": "4e5438a8-8e74-43d3-b989-28472fe94882",
+  "query": "routing tables, capability maps) over a duplicated or externally-maintained enum, NEVER add a `_ =>` catch-all. The wildcard is what converts \"someone added a verb\" from a compile error into",
+  "kind": "span"
+ },
+ {
+  "target": "4f129365-28f1-4dce-b0c9-db7dfef8e9db",
+  "query": "upgradeConfirmPage (account.ts:905) hard-blocks the buy-picker for ANY account.tier==='pro' (anti-double-charge guard), and accountContextFrom (account.ts:102) maps every pro cohort -> 'pro'. So a season-pass holder CANNOT proactively renew/extend the pass or buy",
+  "kind": "span"
+ },
+ {
+  "target": "506e7575-cb5e-476e-ad90-5da7c6bae7fe",
+  "query": "OUR CODE and says nothing about the REMOTE ACCOUNT. **49 redemptions remain.** ## FOR PER-RECIPIENT COMPS (creator programme and similar) Shape proposed by 5a433456 and unaffected by any of the",
+  "kind": "span"
+ },
+ {
+  "target": "5071fba0-28e8-4a4f-afb5-92141e03260b",
+  "query": "for the friction is to launch SAs WITH bypass (per-launch `sa-start.bat -BypassPermissions`, or make it default in sa-start.ps1 / relaunch-fleet.ps1), NOT to fix the (intentionally-removed) relay. Verified caveats: even under",
+  "kind": "span"
+ },
+ {
+  "target": "52ece115-b57b-4456-80f3-a4ebba685677",
+  "query": "containers expose a port to LAN/internet? Until MS documents networking + volumes + image-compat, unknown whether this is a small adapter change or a portproxy/firewall/heal rewrite. Posture: track the preview;",
+  "kind": "span"
+ },
+ {
+  "target": "597a28e7-d5ed-4e7c-8d24-30a2ff00776d",
+  "query": "returns false (no JAR on disk) - `get_plugin_config_for_server()` returns None (no config.yml) - `get_server_capability()` cache returns `(is_paper=true, plugin_available=false)` - Connected Players falls back to RCON → shows only ~5 basic",
+  "kind": "span"
+ },
+ {
+  "target": "5a3bd529-f7dd-4f78-b805-f2f222ac1fc5",
+  "query": "normal idle-out. Run B (wizard-absent converge - the money leg): same bring-up, after reboot do NOT Rearm for 8-10 min, verify pin holds (services Running, first_run_incomplete=true in keepalive raw_data, no",
+  "kind": "span"
+ },
+ {
+  "target": "5a3d9410-729a-4029-bf04-97b59d079f33",
+  "query": "Paid tier active (work-item 2dccb220) for the Platform Quota monitor. ## Next Steps - Deliver Slice-6 PASS verdict to Lane C turn-final with 3 soft follow-ups (band-dashing keyed on m.kind",
+  "kind": "span"
+ },
+ {
+  "target": "5bd6379a-0900-4e4c-8386-7d37701ad7eb",
+  "query": "2026-07-02T02:56:54.301Z --- --- GATE CONFIRMED-CLOSED 2026-07-02 (SA-2e5dc600, read-only live verification; PA-directed after ALERT_PAGE_WEBHOOK_URL found set = pager LIVE, not inert). No D1 writes / no synthetic incidents (a synthetic would",
+  "kind": "span"
+ },
+ {
+  "target": "5bf9c68a-b524-4b2e-ab14-a3a0b2eb01b2",
+  "query": "screenshot in #setup-help 21:57 UTC) tracked as a work item? Jarid said he'd track it but no work item confirmed.\", \"Should the public 'Rebuild Images button non-functional on Purpur server'",
+  "kind": "span"
+ },
+ {
+  "target": "5c226169-91cf-42af-acc2-b6c8ff684d81",
+  "query": "Copy preserved verbatim throughout. CRITICAL embed-purchase E2E GREEN: a real Polar Season Pass purchase completed on the live redesigned page AND the overlay scroll-locked under the RETAINED style-src 'unsafe-inline' (the",
+  "kind": "span"
+ },
+ {
+  "target": "5d6392a9-2070-447b-aac7-cdb6c60b7113",
+  "query": "shared helper `getEffectiveTierLevel(db, kindeId)` exported from `worker/src/middleware/auth.ts`. It mirrors authMiddleware's trial-elevation logic exactly. Returns `null` if no user row exists (caller should default to 0 = free-equivalent). **Rule for future",
+  "kind": "span"
+ },
+ {
+  "target": "5e3d0247-8fc7-49f8-b53b-978d1dde81bc",
+  "query": "wrong. DIAGNOSTIC BUILD = the recommended FIRST target/template: cancel is unambiguously SAFE (build_package packager.rs:194 writes ONLY to scratch staging dir, remove_dir_all at :226, reads-but-never-mutates server data -> cancel = stop",
+  "kind": "span"
+ },
+ {
+  "target": "5edd73b4-a0a6-4c5d-905c-c069cb264a3c",
+  "query": "**Privacy bar**: - Opt-in only. Never collect silently. - A diag package links telemetry + potentially PII-bearing logs to a real Discord identity. That's a different privacy posture than current",
+  "kind": "span"
+ },
+ {
+  "target": "5f727692-dd15-4ec8-8943-36f940e167bf",
+  "query": "by rule). SpawnBox is not hosting, so a creator pointing here isn't making a referral that competes with their platform's rent - neither platform can counter that pitch. LANDING DRAFT,",
+  "kind": "span"
+ },
+ {
+  "target": "60e7fd90-2d5d-4f11-8710-3d8082be3495",
+  "query": "his row should read BOTH (runs peak-smp Fabric+datapack AND pvp-plugin-test Paper+plugin); locating his row via hashed install_id among the 7 BOTH. DISCORD (622e7298): two defects from diag-f63c2952-c75 (first-run, wsl-feature 3x",
+  "kind": "span"
+ },
+ {
+  "target": "61c02eae-212c-4de9-8fa8-cc00f74f8b88",
+  "query": "(H4 bridge mis-attribution + H6 remove-before-rename data-loss window). Commits 09cb4efa, 36de2744, 798b6e79 (all pushed). HARD HOLD still honored: no builds/dev-stack during 1.2.1 release cycle. ## Open Questions - Live-drive matrix",
+  "kind": "span"
+ },
+ {
+  "target": "632b8ac4-fb08-4d1d-98a9-2710c906b1f7",
+  "query": "audit = flagged to Jarid for prioritization, filler pool 7298d762+0f784cbc+003eb727, 674779f8 diag-gated, d276eb7a deploy-tail rides release ladder. Earlier: u19 LIVE-VERIFIED (MEMORY.md updated), 83241cfa closed, SA bootstrap-freeze incident captured (insight 1261d028).",
+  "kind": "span"
+ },
+ {
+  "target": "632e1e7b-1b09-4ac7-bb91-9bf200fc434f",
+  "query": "per d4c9805a retention rework). DEFERRED POLISH (PA, non-blocking): RetentionForkModal periodEndsAt line -> adaptive-date convention 8a18b455 ('for N more days (until <date>)' when <=14d, bare date when far); find the util",
+  "kind": "span"
+ },
+ {
+  "target": "643edc75-d5f7-4f15-8f63-839c3d743575",
+  "query": "info: Failed to read port file: os error 2 [23:33:52] [http-api] Backend not available for /api/setup/attestation <-- the save click [23:34:18] [http-api] Backend not available for /api/setup/attestation <-- retry [23:34:19]",
+  "kind": "span"
+ },
+ {
+  "target": "64bb1e22-d524-44d8-8e27-6f4ca9e85551",
+  "query": "prominent-offer). (2) #7 cooldown POLICY - the N in 'N trials per device per 30 days' (default built strict N=1; flipping is a one-constant change MAX_TRIALS_PER_DEVICE). (3) account.spawnbox.app gateway orphaned",
+  "kind": "span"
+ },
+ {
+  "target": "65e786dc-8e80-40dd-bad1-9b0bf505e30a",
+  "query": "doc IMPLEMENTED). All FE-only, app stays in DEV (no publish - that's a separate gated op). Also persisted push-after-each-commit convention to auto-memory. ## In Flight Nothing in flight. Task done.",
+  "kind": "span"
+ },
+ {
+  "target": "6830805c-229d-4290-b8f2-c36d9660f771",
+  "query": "waiting for direction on scope (fix #1 only vs bundle all three). ## Open Questions - [\"For same-family switches with only a RenameDatapackZip action, should we still create a pre-migration",
+  "kind": "span"
+ },
+ {
+  "target": "68d9399e-b8a9-40bf-a04b-6c88b199243f",
+  "query": "58f61a47 with my eighth sighting (pre-registered checks inherit authority, which suppressed re-verifying 372023af across four sessions). Leg-2 pointers sent to warden (2fd9e063 + eb53466c correction blocks + note_revisions) with fail-condition",
+  "kind": "span"
+ },
+ {
+  "target": "6a1f74d6-116a-4c4d-92cb-950ab9be0d14",
+  "query": "## Open Questions - [\"Should wsl_exec_timeout be changed to error-on-nonzero globally, or should callers be updated individually? Worth auditing all wsl_exec call sites across the repair module for the same",
+  "kind": "span"
+ },
+ {
+  "target": "6aa530fc-0e56-413e-b90c-203718cbe923",
+  "query": "+ PUBLIC stable shoutout (risk a236bd08). (2) c241356d ambiguity - status 'done' but content/dri say proposed; needs human call. (3) staff-chat download card 'not discord' scope (HELD). (4) stable 1.3.0",
+  "kind": "span"
+ },
+ {
+  "target": "6bbe501c-377f-4ca7-bea2-3d960a54a1d1",
+  "query": "5. STRIPE-BACKED - \"Acquired by Stripe (2026)\" = infra stability + scale to 35+ countries. 6. SUBSCRIPTION LIFECYCLE AUTOMATION - dunning (failed-payment retries), cancellation grace periods, refunds, reactivation - without",
+  "kind": "span"
+ },
+ {
+  "target": "6c5b504b-d79d-412d-9114-cc4e072564e4",
+  "query": "a `current_gate: Option<GateSummary>` in lockstep with the status (the wsl_feature.rs:214/777 pattern), (c) override `gate_summary()` + `apply_gate_ack()` (the wsl_feature.rs:1865/1897 pattern), (d) wire the FE CredentialsRequired gate component. NOTE the auth wrinkle:",
+  "kind": "span"
+ },
+ {
+  "target": "6caa4100-5043-446a-ba58-2acb1747f0fe",
+  "query": "Plugin JAR not deployed to `.appdata/plugins/` 2. Plugin config.yml not written to `.appdata/plugins/MCA/config.yml` 3. docker-config.toml MCA `[[ports]]` block not written These three are the real defect. Everything else works. **Datapack",
+  "kind": "span"
+ },
+ {
+  "target": "6d507753-e3bd-4760-be3b-0a90be97e917",
+  "query": "presence-incapable because `list uuids` is blocked (names-only, no UUIDs -> UUID-keyed bridge :751 skips them -> unusable roster), confirm with a3bb12a4 there's no UUID-bearing fallback roster source. --- 2026-07-13T23:52:53.424Z ---",
+  "kind": "span"
+ },
+ {
+  "target": "6ee90de2-e525-4fd0-886e-6c797db3ebc2",
+  "query": "of this run:** Write a `checkpoint` note tagged `triage_community_run,hwm_format_v1` containing the HWM_BEGIN_v1...HWM_END_v1 block with three maps: channels (snowflake), forums (ISO archive_timestamp), threads (snowflake). This is load-bearing - without it every",
+  "kind": "span"
+ },
+ {
+  "target": "6f3a285c-bbc1-4398-a8bb-da60764c5eaf",
+  "query": "that way - it's PER-EVENT, self-limited by cleanupExpiredGracePeriods (same hourly cron, lifecycle.ts) zeroing the match fields (hibernation_storage_used_bytes=0, grace_period_ends_at=NULL). A lifetime guard there would WRONGLY suppress a returning user's SECOND grace-expiry",
+  "kind": "span"
+ },
+ {
+  "target": "6f95d3f6-c720-451a-8538-8b7dc5275660",
+  "query": "thundering, game_mode, difficulty - world_settings.env: ENABLE_COMMAND_BLOCK, LEVEL_TYPE, etc. - access_control: per-world ops with levels, whitelist, banned - Per-player: playtime_hours, deaths, mobs_killed, pvp_kills, advancement_count STILL TODO: - Expanded view enrichment: ops",
+  "kind": "span"
+ },
+ {
+  "target": "7100f850-d4bb-44df-999d-c9a46d418cb6",
+  "query": "done: `docker stop` on all containers, `POST /api/servers/stop` via API, mineflayer bot processes killed. What was NOT done: delete the server directories on disk, remove from SpawnBox server registry, DELETE",
+  "kind": "span"
+ },
+ {
+  "target": "71b8577c-1db0-4426-820d-cbc51e19c075",
+  "query": "the injected <style> => no body-scroll-lock (page scrolls behind the modal) + a static loader spinner = a janky overlay on the revenue path. So 432176ab is NOT achievable merely",
+  "kind": "span"
+ },
+ {
+  "target": "727b3f12-04f8-43ca-8773-0f14428c7e4c",
+  "query": "path. 2. **4xx is terminal**: on any client error the file is deleted. Retrying with the same bytes will never succeed (malformed body, bad auth, payload too large). 5xx still",
+  "kind": "span"
+ },
+ {
+  "target": "77a6aeb8-0b0e-4cb7-b0c7-2363c78abc4e",
+  "query": "- 0 running servers -> silent `graceful_quit()` (no prompt) - N servers + no frontend connected (`ws::frontend_connection_count() == 0`) -> Windows toast + immediate `graceful_quit()` (can't prompt without UI) ##",
+  "kind": "span"
+ },
+ {
+  "target": "77d5c57e-e679-4d8b-b287-4d43082e00c5",
+  "query": "a gated service's effective_interval becomes Duration::from_secs(u64::MAX) - periodic tick fully suspended (watchdog still sees heartbeat); TickNow dropped while gated; ONLY ServiceCommand::AckGate with matching epoch exits. AckGate handling: not-gated->ignore; epoch-mismatch->ignore (stale",
+  "kind": "span"
+ },
+ {
+  "target": "78d31aa7-5601-4e44-8c06-11937355cf31",
+  "query": "death. - The wizard's \"Configuring your router\" waits on the main-loop-driven external-verify -> hangs indefinitely. User's only recourse = restart (reboot). **Watchdog DETECTS but does NOT auto-recover the stalled main",
+  "kind": "span"
+ },
+ {
+  "target": "790dcf41-4ac0-40f5-bc2f-b0de65121454",
+  "query": "`[link](url)`, `~~strike~~`. No headings, lists, paragraphs, code blocks - one bullet, one inline string. **When adding new array fields to a content collection schema** (e.g. for guides or blog posts)",
+  "kind": "span"
+ },
+ {
+  "target": "79680724-d053-4b98-9e83-0253980d8762",
+  "query": "**Phase 1 harvest:** text channels unchanged from prior ticks (#general=ab1az 06-10 quiet; #troubleshooting=Jarid 06-25 ab1az Win-VM-on-Linux awaiting-diag; #setup-help=schmevn 06-23). Forums: 10 active threads, but the 1 newly-active vs the 06-26",
+  "kind": "span"
+ },
+ {
+  "target": "79e06f20-67d5-4f28-abad-4d1f3091bcb9",
+  "query": "name - confirmed live this session), c58d74b6 (encounter model half-2, future) + publish logistics. Awaiting next-focus assignment from PA. ## Next Steps - Await next focus from PA (no active",
+  "kind": "span"
+ },
+ {
+  "target": "7bc15075-771c-431c-a181-a0ca50a0bd9e",
+  "query": "harness tool deferral. `XJy` in the same binary builds this hint: \"This tool's schema was not sent to the API - it was not in the discovered-tool set derived from",
+  "kind": "span"
+ },
+ {
+  "target": "7bdeb0cc-2b6f-4915-aba4-320f4464acd3",
+  "query": "Off 9223 (shared connection left up). Notes: 092e2d52 (mirror-parity discipline), 826d3e7d (live-verify stale-WS broadcast-drop gotcha). PA retracted its 'missing-from-WS-forward-list' root cause (my evidence disproved it) - captured as PA anti-pattern",
+  "kind": "span"
+ },
+ {
+  "target": "7de9b9b1-be5f-4f89-9e6a-68b482a97528",
+  "query": "WI `4c261355` (distinct cold-boot crash — DONE+VERIFIED; its fix unmasked this clear-side defect's reachability) - Note `2cfa4266` (canonical verify-first gate decision + PA adjudication) - Note `4361e19a` (beta.9 gate evidence:",
+  "kind": "span"
+ },
+ {
+  "target": "7e21a032-eebb-41ce-89ba-178883a2ee8a",
+  "query": "\"sleep 60\"` (or equivalent) through the wrapper with a 1s outer timeout and confirms the child PID is dead within 2s of the timeout. **Bundling consideration:** This fix is necessary",
+  "kind": "span"
+ },
+ {
+  "target": "7e6df861-5e95-4605-a33d-cc261a053e78",
+  "query": "(data already collected)\". v1 ships as-is (NEEDS_INSTRUMENTATION still honest). --- 2026-07-01T18:58:53.087Z --- --- **FAST-FOLLOW DONE (commit 1930b12d).** notSignedIn.reason reframed per dd0f1fd4: \"needs a pre-auth beacon\" -> \"needs a sign-in-state +",
+  "kind": "span"
+ },
+ {
+  "target": "7f1e3846-686a-4318-8ec8-aab3b68676c5",
+  "query": "refresh cycle, that's the signal Fix D missed something - but the predicate logic is airtight and the only unobserved sliver is the trivial 4-line if->emit glue. No live-verification automation",
+  "kind": "span"
+ },
+ {
+  "target": "7fb3c81a-a49f-4f40-bd59-4a9e8e69dd14",
+  "query": "NOT BEND THE PRIVACY DECISION: 974905f1 forbids joining the ANONYMOUS INSTALL BEACON to accounts (install_beacons must never carry kinde_id). The code path is categorically different - the USER VOLUNTEERS the",
+  "kind": "span"
+ },
+ {
+  "target": "8146dceb-c8b7-428f-8fc1-6a52ba723b9b",
+  "query": "\"If it can run Minecraft, it can host Minecraft\" is a memorable hook - beats the generic feature list 5. Leads with capability and ownership, not feature bullets **Why Version",
+  "kind": "span"
+ },
+ {
+  "target": "833dab19-c287-4095-8353-4fdf37f9f550",
+  "query": "FIX = void the sub at the PROVIDER (account-workflow §7 step 1), not D1. WORKAROUND that avoids the provider rabbit-hole for a timed run: the reaper branches C/D/E reap by",
+  "kind": "span"
+ },
+ {
+  "target": "83dbab0a-b139-4e1f-9a41-904f1dce024b",
+  "query": "as a Defer case (the fail-safe is correct; the ordering is the operational gate). Observed LIVE 2026-06-12: fresh daemon (build 13:40) on the OLD prod worker shows peak-smp deferring every",
+  "kind": "span"
+ },
+ {
+  "target": "84091b1e-8baa-4782-abb4-9b48dac75f68",
+  "query": "Phase C (account home page). Worker deploy remains HELD. ## Open Questions - Worker deploy of /auth routes is HELD until A1 (account.spawnbox.app route + KINDE_WEB_CLIENT_ID/SECRET + SESSION_HMAC_KEY secrets) and",
+  "kind": "span"
+ },
+ {
+  "target": "843aabde-2349-4e6c-8422-59576c12d768",
+  "query": "beta.25 | posted 1494637891 | yes | ### Private channel ping (asianrizz) Posted in support-asianrizz (channel `1493763194395562135`, msg `1494637131803525161`) requesting a fresh diagnostic package on beta.26 for the two open",
+  "kind": "span"
+ },
+ {
+  "target": "85f08dc3-37cf-40de-b2e3-971a54818ee2",
+  "query": "kept with WHY; spec gets light divergence-note). 021e090c gates. (3) TRAY FIX BUILDING: a3bb12a4 confirmed the circular-trap discriminator (tick crash-recovery gated on last_launch.is_some() app_launcher.rs:358, distinct from initial launch) - marker",
+  "kind": "span"
+ },
+ {
+  "target": "8683b0a3-1f12-4916-8010-359c3fa33af0",
+  "query": "needing the reference updated), NOT an accidental/unauthorized addition to scrutinize. Then the 3 verified fixes commit normally (protocol: `git commit -- <files>` explicit pathspec, not git-add+bare-commit, due to the shared",
+  "kind": "span"
+ },
+ {
+  "target": "874619dc-1943-4ced-b916-0ea3f6c5ee45",
+  "query": "`client-overrides/servers.dat` (modpack.rs:561-566, 1002). PA d4c8dda8 hypothesised the \"pkg file\" might be a separate servers.dat artifact alongside a pack reference; it is not. Single bundle carrying both mods and the pre-populated",
+  "kind": "span"
+ },
+ {
+  "target": "877df20e-8f2c-4a07-afff-cc951bfcecfb",
+  "query": "rests on them:** - Whether these installs emit `daemon_fleet_heartbeat` at all (the direct \"is the daemon alive and polling\" signal). - Whether they are reaching the update manifest endpoint, and",
+  "kind": "span"
+ },
+ {
+  "target": "88dbfe19-8afa-428c-9cc6-00aac33593a1",
+  "query": "the current soak delta, e.g. 3727d8f8..HEAD for 1.3.0, and NOT in any stable release <= current stable 1.2.1): reply \"now available to try in the PRE-RELEASE / preview channels\" -",
+  "kind": "span"
+ },
+ {
+  "target": "89c8ca92-1e54-4530-b4f0-832c1c62a185",
+  "query": "Plugins/Mods | Datapacks - Educational SmartTooltips on every stat - Orange ring on restore-from dots - skipped_files persistence + backup-attempts.jsonl tracking - Code review fixes applied - CRITICAL BUG FIXED:",
+  "kind": "span"
+ },
+ {
+  "target": "8a6a7261-601a-4605-b5cc-8210d9e0f29e",
+  "query": "BUN busy independent of the model's turns, so the MCP never idle-disconnects; a MODEL-side keep-awake loop adds nothing to bun's liveness and can't revive/prevent a dead bun process (different process).",
+  "kind": "span"
+ },
+ {
+  "target": "8a76e81a-2550-46d7-9031-15113b10f280",
+  "query": "fb97c59a (hosted/branded account+subscription mgmt pages w/ account-deletion). PA self-correction this session: relayed 'go ahead' on a prod D1 --remote reset - harness correctly DENIED (prod writes need Jarid's DIRECT word,",
+  "kind": "span"
+ },
+ {
+  "target": "8ca23906-5018-4f88-a7ac-6177b47fa095",
+  "query": "rules active: error-rate-1h (>5/hr), infra-failure-1h (>3/hr), error-burst (>3/batch) - Test embed sent successfully to ops channel DOCUMENTATION: - docs/architecture/2026-03-24-telemetry-system-architecture.md (420 lines, 22 source files) - docs/index.md updated with all 22",
+  "kind": "span"
+ },
+ {
+  "target": "8f22d641-65a9-47c3-ad3b-34ac8d66ce81",
+  "query": "from tool ordering); SURVIVING confirmed findings F2 (no determinate progress bar, closes FR 02ddf9a1) + F3 (split tray read 400-1000ms lag) + F4 (stale terminal phase) all fold to Phase",
+  "kind": "span"
+ },
+ {
+  "target": "904acdcc-cdf9-40cc-98b0-d3e890e2aa96",
+  "query": "pvp_first_attacker -> datapack already establishes Participants(2) via damage-edges. So datapack = no-regression + both-types confirmed; the kill-fold is idempotent there. PLUGIN tick-pairing CODE-confirmed: EventListeners.onPlayerDeath emits player_death + pvp_kill at the",
+  "kind": "span"
+ },
+ {
+  "target": "915cf14d-b634-4d8b-bd13-46510a438586",
+  "query": "the pattern-library asymmetry, handed to SA-f154f8c5 who BE-fixed it (main.rs empty PatternLibrary); FE pixel-confirmed (Done line text-green-400). Store-guard left unlanded (PA decision - BE fix resolves it). (8) Console-formatting coverage",
+  "kind": "span"
+ },
+ {
+  "target": "9362c2c1-eb23-477a-84c6-7e3eaedc3837",
+  "query": "on StatusCache + wire into PushMessage::StatusUpdate (router_mappings precedent). 54036cb0's 2 load-bearing catches accepted: CAP load-bearing on daemon (status cache broadcast to every subscriber on every change) + absolute-rfc3339 terminal_at (whole-cache",
+  "kind": "span"
+ },
+ {
+  "target": "93995873-dd25-42d6-a410-94dfa151bffb",
+  "query": "test did, and what a power user doing `curl POST /api/servers ... --data '{\"plugin_api_port\": 27840}'` would trigger). 3. Any future code path that calls `wizard_deploy_mca` with a port that doesn't",
+  "kind": "span"
+ },
+ {
+  "target": "9673d9f6-b7b4-4b5a-afc8-0a02e0e93e15",
+  "query": "so no behavior change). 5. Update `.claude/commands/spawnbox-release-notes-publish.md` to remove the \"highlights are plain text only\" anti-pattern note (or invert it - \"highlights now support inline markdown like bold/italic/links/code\"). **Why deferred**:",
+  "kind": "span"
+ },
+ {
+  "target": "96a2e2b0-f952-4054-8d1b-b813202ca7c2",
+  "query": "restored so daemon DNS-upkeep resumes. ## In Flight Campaign fully wrapped from SA-ac2f95a5's side. PA (030fb7fa) to verify peak-smp's DNS-upkeep/dashboard resumed, close campaign WI b568ed9e, and give Jarid the full-wrap",
+  "kind": "span"
+ },
+ {
+  "target": "973f015c-d9b2-4cd0-8c71-3446bdff7ed9",
+  "query": "retype to canonical SubscriptionSnapshot. - `reconcileOneSubscription` (:2188) + `reconcileSubscriptions` (:2275) — only the ENUMERATION is provider-specific: `GET /v1/subscriptions?filter[store_id]=...&page[size]=100` + pagination (:2282) + LsSubscriptionResource shape + resolveKindeIdFrom (email fallback). Everything downstream",
+  "kind": "span"
+ },
+ {
+  "target": "99128011-1851-4018-8d7a-2edbd4e521f0",
+  "query": "-> MissingModsWindow.open -> JFrame.<init> -> Frame.<init> -> Window.<init> -> GraphicsEnvironment.checkHeadless`. This is a MOD BUG (the author assumed client context). SpawnBox-side mitigations to consider: 1. Detect by jar name during",
+  "kind": "span"
+ },
+ {
+  "target": "99a1844e-6946-4ed1-9d6d-b0c318bbe851",
+  "query": "If \"don't push a peer's commit\" is adopted as the rule, their work never reaches origin and the lane silently strands. On 2026-08-06 PA pushed six commits for the discord-bot",
+  "kind": "span"
+ },
+ {
+  "target": "9b8c1309-c6f4-45f8-8ebc-73fee9894f66",
+  "query": "graph, concierge synthesis. Building a parallel \"engagement-state MCP\" would duplicate it. The orchestrator just doesn't have the engagement-note CONVENTION yet. The convention is a pure-data layer; no new MCP server",
+  "kind": "span"
+ },
+ {
+  "target": "a109a50d-e1d5-43e3-98c6-cad85e58581e",
+  "query": "first month via Bisect. **So a Modrinth-EXCLUSIVE author currently has WORSE hosting economics than a CurseForge one, and Modrinth has no incentive to fix it because they are the host.**",
+  "kind": "span"
+ },
+ {
+  "target": "a2149ff3-fa5a-4ca2-b4d4-334f72744282",
+  "query": "to test-user-max (peak-smp visible, upkeep resumed). CDP-chrome relaunch lesson: it dies when Jarid closes the window - re-launch via `cmd start chrome --remote-debugging-port=9222 --user-data-dir=C:\\Users\\Jarid\\.spawnbox-cdp-profile`. Full session also delivered earlier: DNS/Polar",
+  "kind": "span"
+ },
+ {
+  "target": "a26bbdb3-2007-40d7-89cc-bede1277e1cb",
+  "query": "spawnbox.app): i.e. prod spawnbox.app, OR a *.spawnbox.app dev subdomain. On *.pages.dev it is CROSS-site (pages.dev is its own public-suffix registrable domain) -> Lax cookie NOT sent on the subresource fetch",
+  "kind": "span"
+ },
+ {
+  "target": "a332f035-8a42-417c-bf21-0ccf65eeebb3",
+  "query": "through node_modules/.git before rejecting each file - so slow it auto-backgrounds and effectively hangs. Must PRUNE: `find ROOT \\( -name node_modules -o -name .git -o -name target -o -name dist",
+  "kind": "span"
+ },
+ {
+  "target": "a503ed2e-3bc6-45c3-ae0e-144ae94cf8f3",
+  "query": "Actiontec model?' / 'BGW620 vs BGW320' breakdowns.\", \"Does the 89% Actiontec UPnP success hold when re-sliced by model? The BGW620 may be a small slice of Actiontec - need model",
+  "kind": "span"
+ },
+ {
+  "target": "a5628eb5-c1e5-4237-9339-73cc0f4c8bb0",
+  "query": "non-conversion boundary, never one lying continuous funnel). ## Open Questions - None blocking. Two tracked, non-orphaned follow-ups: WI be34ff03 (FunnelDisplay still FE-computes drop-offs for the Revenue-BI surface - pre-existing worker-owns-math",
+  "kind": "span"
+ },
+ {
+  "target": "a70b3b23-6c9d-4a22-a871-16fd6a3669ab",
+  "query": "verified REAL (MS Store, session-capped free tier) - closest competitor; intel 27e4d3d0; content-play WI 093ab8df filed (comparisons+organic+GEO). IN FLIGHT: SA-0c230dcf building warden canonization 9c01fb36 (brief written, PA-payload warden line GREEN,",
+  "kind": "span"
+ },
+ {
+  "target": "a8280654-5ca2-4a5d-840f-de2b7e3f218a",
+  "query": "modern); (4) A/B decision framing for Jarid (keep-world->A proxy / fresh->B); (5) public-IP privacy backstop (kept 69.x IP/ISP/Calix router out of Discord). VERSION/COMPAT PRODUCT-SIGNAL CLUSTER (carry to Jarid's product-direction brief):",
+  "kind": "span"
+ },
+ {
+  "target": "a8abf4a6-f256-4fed-95ef-ae0955d35453",
+  "query": "helper; his case showed helper running and still unreachable across 8 restarts, which re-checking cannot fix; that part **still open, tracked under his report**; fresh diagnostic requested (April one expired).",
+  "kind": "span"
+ },
+ {
+  "target": "a9656442-8a3c-4f58-bfd4-dea3230bc18d",
+  "query": "the staged installer - locale-independent, closes the TOCTOU even where hardening fails; sound because the minisign pubkey is a compile-time const (signature.rs:22), so staging-dir tampering cannot forge a pass; (b)",
+  "kind": "span"
+ },
+ {
+  "target": "a97ea3f8-e2c7-4a91-b9e7-def56f9c57aa",
+  "query": "the next check, a clearance removes the reason to look; name the instrument of clearance and check it is not the instrument under indictment); warden protocols (carry-list audited on quiet",
+  "kind": "span"
+ },
+ {
+  "target": "a99b7168-accb-4be4-a699-a10623629904",
+  "query": "by storing the full `properties_json` in D1 for every event_type whose schema declares `d1` persistence. The fix is not \"add each field to a blob\" - it's \"stop relying on",
+  "kind": "span"
+ },
+ {
+  "target": "a9e7985d-412d-4e21-957f-83ed5a141128",
+  "query": "and the prod license_tiers dump (Free+Pro [1325913/1347396] + Season Pass [1347399]; no Junior/Plus) are baked into the LS store-activation appeal, now complete with compliance live on spawnbox.app.</summary> <in_flight\">None. Lane complete.",
+  "kind": "span"
+ },
+ {
+  "target": "aa099bff-a716-4301-b777-0b1381bf1409",
+  "query": "applies to all future gate copy; fail-closed pin contract on redacted investigation routes), c9619781 `7e0a1bbb` (community arc + RESUME-STATE block; next-tick priority = flip `aae8f59e` beta→fixed after git-confirming stable), 86555d1e",
+  "kind": "span"
+ },
+ {
+  "target": "aa6b3bbf-0171-417b-8d11-76d61f9e87e7",
+  "query": "present + current!=acked + hook live) is the TOAST FIRING - detect via getNotificationCount() + DOM [data-testid=spawnbox-notifications]. Force-tick (03's lane): backend PUT /api/daemon/servers/{name}/settings (GET->PUT-unchanged) -> notify_config_changed -> reload_config -> TickNow.",
+  "kind": "span"
+ },
+ {
+  "target": "aae62d89-8c46-4890-88b1-5f485e53bda0",
+  "query": "icon drift), .claude/docs/sql drift; INCLUDE the ~28 P2 files + provision.rs new + the DRAFT spec 2-line marker. 116 P2 FE tests pass. SEQUENCE: 2cb01a7b fixes HIGH + audit ->",
+  "kind": "span"
+ },
+ {
+  "target": "ab36f077-aca3-40cd-950d-a235017a5377",
+  "query": "/telemetry/lifecycle downloadsTotal (unique ESTIMATE) + rawDownloads (disclosed) | business.downloads (raw, channel!=dev) relabel/retire; funnel download_redirects (raw) label. | | Version distribution (app) | /telemetry/business versions.distribution (update_checks, DISTINCT install, -7d) | fleet",
+  "kind": "span"
+ },
+ {
+  "target": "aba4358c-227d-4d86-8bed-5db2acf451d7",
+  "query": "Season Pass purchase on the live redesigned /account/upgrade COMPLETED end-to-end AND the overlay scroll-locked under the RETAINED style-src 'unsafe-inline' CSP. Live eval after click: bodyClass=\"polar-no-scroll\", computed overflowY=\"hidden\", the Polar-injected <style>",
+  "kind": "span"
+ },
+ {
+  "target": "ad7c5f52-bcc5-407a-8705-fbc455739b7b",
+  "query": "resets to defaults)? - Is 14s cold-start acceptable or should we add a loading progress indicator? ## Next Steps - Validate mining panel loads in UI within IPC timeout (should",
+  "kind": "span"
+ },
+ {
+  "target": "ad810f55-7c89-4e9a-985b-758cabd39915",
+  "query": "fine (`COUNT()`, `GROUP BY` without selecting identifying columns). - Diagnostic_packages.contact_email is already disclosed in diag bundles, so referencing an email that came IN with the diag is not a fresh",
+  "kind": "span"
+ },
+ {
+  "target": "ae16148b-96ae-404e-9f99-a5ad7cec24d1",
+  "query": "Rule B (public disclosure) still applies to observable attachment content: don't paste faces / IPs / API keys / other users' usernames into a public forum post. **Tested failure mode",
+  "kind": "span"
+ },
+ {
+  "target": "ae4a9f4b-4ca9-4f02-b61c-87066998af6f",
+  "query": "to apply:** - For lib tests: `cargo test -p spawnbox <test_path> --lib` from any directory, OR `cargo test <test_path> --lib` from `src-tauri/`. - For binary tests: add `--bin backend` etc.",
+  "kind": "span"
+ },
+ {
+  "target": "ae69aeca-e19f-4905-987a-002f8932447c",
+  "query": "under a different tag.\", \"Should the Channels migration for /discord-help and the persistent-observation design (open thread 89897e87) be bundled into one unified real-time-Discord initiative, or kept as separate work streams",
+  "kind": "span"
+ },
+ {
+  "target": "aedbb7a3-4b25-4ab2-b44f-624bcaba7088",
+  "query": "-> verify -> review) and ship as dev.25 when verified end-to-end on the test VM.</in_flight> <open_questions>[\"User has not explicitly greenlit starting code work yet — last reply gave them the",
+  "kind": "span"
+ },
+ {
+  "target": "b139a15e-5978-42bd-b843-e67291184c51",
+  "query": "backstop); scope-disposition table covering PA's named boundary zones (commands/, common-types/, shell binary [FLAG: no lane owns it], bindings.ts, migrations/, worker/ OUT, datapack/plugin producer-only); claim-by-ledger-write protocol; BE traps incl. broker bypass,",
+  "kind": "span"
+ },
+ {
+  "target": "b1423386-f778-4124-a99b-687b83f5f95a",
+  "query": "status snapshot, and daemonStore is bootstrapped on reconnect (bootstrap.ts:102-146) - a gate raised while the FE was away is visible the instant the FE re-syncs. Likewise the daemon's authoritative auth",
+  "kind": "span"
+ },
+ {
+  "target": "b27d0ff2-465d-4687-b847-c2b3795df468",
+  "query": "in-app subscription-lifecycle (4 commits); daemon-UAC incident owned+closed (2e63a3bf). ## In Flight Slice 10 (c) hypothesis->timeline hop = BLOCKED on Lane C (1bb0bd08) exposing the MasterTimeline focus-window param. My side ready",
+  "kind": "span"
+ },
+ {
+  "target": "b343f712-5cae-44b4-a85b-1cfd50285b4a",
+  "query": "saved at scratchpad/e5769432-bundle/e5769432.diff (395 lines). **c32be28f (3 GA-live runtime crashes): code-side DONE + GREEN, commit HELD.** All 3 files edited (TrialClaimModal+AssetBrowserTab missing `commands` imports; ServerInfoCard undefined `stale` -> `!neverChecked &&",
+  "kind": "span"
+ },
+ {
+  "target": "b388860b-858f-4012-a144-e02950c6b0e5",
+  "query": "TO COMPILE when out of sync (self-correcting, fail-loud). THIS one COMPILES + passes all tests while silently producing an incomplete FE binding (fail-silent). An agent who knows 3d2938e4 will still",
+  "kind": "span"
+ },
+ {
+  "target": "b450fc94-c8bf-4eef-98d5-27907df27fde",
+  "query": "contain failure context - uploaded_at timestamp correlates with AE event timestamps 3. **Funnel metrics**: - Ratio of setup_step_abandoned : setup_step_completed reveals drop-off points per step - Ratio of first_install :",
+  "kind": "span"
+ },
+ {
+  "target": "b4f91512-7f28-4d64-b797-1310a1212d69",
+  "query": "TpsUpdate even when empty' claim (L237 + L316) to the new behavior + the deliberate asymmetry (rider 2). VERIFY WHEN CARGO FREES (riders 1+4, use telemetry-pipeline-audit skill battery-3): cargo check/clippy/test",
+  "kind": "span"
+ },
+ {
+  "target": "b592162b-6c83-43de-ae93-f52a5b64a1dc",
+  "query": "backup of the same server mints the IDENTICAL id, so a previously-completed backup already occupies that id as `terminal`. If `pickWinner` (or any don't-resurrect-a-terminal-op guard) resolves the collision toward the",
+  "kind": "span"
+ },
+ {
+  "target": "b5fc5f0c-5cd9-4bb6-a1f6-7f88eedc9751",
+  "query": "metric \"no more plaintext RCON_PASSWORD\" would falsely suggest the leak is closed when it isn't. The fix MUST handle both surfaces in the same PR. **Why this matters for Paper",
+  "kind": "span"
+ },
+ {
+  "target": "b6518410-6886-4fed-97f0-15a7b24cc302",
+  "query": "commit-trace rigor):** - modpack-.mrpack-import (thread 1498696199660634222): `mrpack` exists in useCreateServerOrchestrator.ts + modpack-wizard work shipped, BUT unclear if the FR's specific \"local .mrpack file → server\" ask is met vs Modrinth-browse-only.",
+  "kind": "span"
+ },
+ {
+  "target": "b71e1f84-1e0d-4f27-9960-faaa1d96da91",
+  "query": "incl. churned/one-off). **CORRECTION for the appeal draft (§4/§6):** the draft says \"~100 active users on the free preview today.\" That is FALSE as an *active* claim — real 7d-active is",
+  "kind": "span"
+ },
+ {
+  "target": "b782650e-459f-4658-b712-4fbf6e7fd812",
+  "query": "fallback hazard. daemon log confirms code matches behavior (peak-smp dns=Some(true) happy-case; backup-restore-test dns=None because dns.enabled=false). PHASE C BEARING: Jarid's box HAS publicly-resolvable IPv6 in DNS for _mc.peak-smp (2001:56a:76b7:b200:52ca:1e5b:f0:c1aa). PA's \"Jarid",
+  "kind": "span"
+ },
+ {
+  "target": "ba0463b5-bf4c-4ce7-acf6-bd303428016c",
+  "query": "a mid-flow reboot) gets stuck in \"please reboot\" UI even after they reboot. The daemon needs to re-check the current pending-reboot state each tick, not cache the post-DISM verdict. **Likely",
+  "kind": "span"
+ },
+ {
+  "target": "bad390fc-ec57-4577-8598-b7fcf7e54e4f",
+  "query": "Same anti-pattern as the `insight_engine` site: naive Windows file-copy of a live plugin SQLite over the `\\\\wsl.localhost\\` UNC path → torn copy. Git-verified `telemetry_migration.rs` is UNCHANGED since 0.2.0-beta.0 (still current",
+  "kind": "span"
+ },
+ {
+  "target": "bad40583-0b66-471f-b2d2-8779794e69d5",
+  "query": "in the wild has no account-site routing). Do NOT mistake this flip for the real go-live. (2) A REAL go-live requires re-pointing the prod worker to the PROD Polar org:",
+  "kind": "span"
+ },
+ {
+  "target": "bbc79d3a-5bb9-42ff-9900-09890bab870d",
+  "query": "-> marker written -> next backup stamps field -> marker consumed - VISUAL EDGE CASE: same-day restore+backup puts both in same DayCard, so no fork visible. Branch visualization works across",
+  "kind": "span"
+ },
+ {
+  "target": "bbcd4b2e-20d4-480c-8bd1-d84049f89331",
+  "query": "(27%, \"Diagnostic build cancelled - discarding staging\"), AFTER Tier A (9-42s) + Tier B (~25-28s, dominated by dxdiag stabilization ~15-17s) + Tier C + WSL-networking-forensics (~15s) each ran to completion.",
+  "kind": "span"
+ },
+ {
+  "target": "bdd1a529-e6a0-4c4e-9289-ca89b4aad6b4",
+  "query": "1.21.1)**: different failure shape. SVC was \"we fetched the wrong ecosystem's versions\"; Bells & Whistles is \"we fetched the right ecosystem's versions but the author's declared required dep truly doesn't",
+  "kind": "span"
+ },
+ {
+  "target": "c21874bc-e091-40d1-88e6-f093f6772bf4",
+  "query": "botched refactor = every logged-in user breaks. Warrants careful test coverage before touching. - Right time to do this is when someone is already changing trial logic and can validate",
+  "kind": "span"
+ },
+ {
+  "target": "c2a14198-9379-4f01-84e2-928591b8e44c",
+  "query": "before use) 2. Surface to user with explicit \"this has your server data, recover or start fresh?\" choice **Anti-pattern (from seeding agent 22629bad, 2026-05-09):** asserting \"orphan VHDX has no user-data",
+  "kind": "span"
+ },
+ {
+  "target": "c2cc081a-f8bf-4e89-bd36-3ed3c5261e40",
+  "query": "HIGH (degraded functionality) ### 4. NBT field names not dual-format - File: `core/player/nbt_adapter.rs:102-105` - `playerGameType` and `foodLevel` have NO snake_case alias (unlike `ActiveEffects`/`active_effects` which does) - If 26.1 continues the",
+  "kind": "span"
+ },
+ {
+  "target": "c33e36bb-d348-49ec-a71b-b94b6805614d",
+  "query": "want a new focused ServerControlsCard toast-behavior vitest (none existed; component has a large store/hook dependency surface so a harness would be non-trivial). Item-5 currently satisfied by 'checked, none existed, generic",
+  "kind": "span"
+ },
+ {
+  "target": "c4165b45-93b1-4ecc-b31e-6c3eaeda7d47",
+  "query": "messaging-envelope-default block ~L163). NOT corrected (scope discipline + prior-session subject): the file-tree comment block (~L27-31 still 'atomic-write helpers for sessions.json/state.json'), the agent_channel.ts bullet (~L261 '30s heartbeat in sessions.json'), live_sessions section",
+  "kind": "span"
+ },
+ {
+  "target": "c78884f8-a06d-4b55-b2f0-5d623f5e937e",
+  "query": "2026-04-26T00:38:59.741Z --- ## Merged 2026-04-25 (NOT yet shipped - correction 2026-04-25) Verified via git 2026-04-25 (this session, anti-pattern #21 audit). Fix commits: - `de049170` 2026-04-25 09:57:29 fix(daemon/upnp): emit Ipv6Mapped independently",
+  "kind": "span"
+ },
+ {
+  "target": "c939ca90-9e61-42b8-8166-f59ae68e409b",
+  "query": "next under this SA, hand off to another SA, or hold? - RecoveryState::Recovering variant: implement now as Phase 2c (needs more granular recovery-flow signals like ghost-distro unregister phase), or defer",
+  "kind": "span"
+ },
+ {
+  "target": "ca8afce1-0276-455c-8ac1-84f19aca9ec6",
+  "query": "in session-names.tsv after 5+ min. A headless probe (`claude -p \"reply OK\" --model claude-fable-5`) booted fine, so the model flag is NOT the cause; the wt.exe -w new tab-launch path",
+  "kind": "span"
+ },
+ {
+  "target": "cbdaab1e-aa2b-4b62-b0a7-8fe89f9c964a",
+  "query": "\"apply_retention_v2 for\" + \"Retention: deleted N\"); wrapped `{\"policy\":{\"keep_recent\":...}}` -> 422. So the route LOGIC (my #8 server-side derivation) is correct; the CONTRACT was broken. LESSON: \"accept-and-ignore a client body\" must",
+  "kind": "span"
+ },
+ {
+  "target": "cc8cae61-e38c-4a26-b26f-a75a26966033",
+  "query": "- If a replacement upsell flow is built later, do it as a positive \"enhanced telemetry available\" opportunity (not a deficit-framed \"limited functionality\" alert) AND fix the placeholder URL `github.com/yourusername/mca-plugin/releases`",
+  "kind": "span"
+ },
+ {
+  "target": "ccb12bb6-ec5c-4431-ad30-357704996657",
+  "query": "outgoing auditor directed that it still be driven for rich-progress / collision-queued / reattach-on-reopen criteria. If the entitlement genuinely gates the flow on the dev box, that live drive may",
+  "kind": "span"
+ },
+ {
+  "target": "ce16289a-2ba1-407e-b179-e17d4376d5cf",
+  "query": "THIS ALONE breaks the data-corruption chain. - L1b FLAP TRIGGER (rcon_guard.rs negative-cache TTL) - PARTIALLY MITIGATED (shorter negative TTL self-heals faster). Defense-in-depth, NOT launch-required once L1a lands (L1a makes the",
+  "kind": "span"
+ },
+ {
+  "target": "ce7fa2e9-5ae4-4d0a-88e8-fe5132393887",
+  "query": "ruling + brief while the root-cause MECHANISM was still being refined (worker-pool -> 22209938 -> channel-backpressure, all within one hour). Downstream conclusions (severity/observability) that DEPEND on an unsettled mechanism are",
+  "kind": "span"
+ }
+]

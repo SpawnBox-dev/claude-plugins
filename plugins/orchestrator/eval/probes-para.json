@@ -1,0 +1,21 @@
+[
+ {"target":"049db1f5-507a-4abb-834e-cfdb7205f032","kind":"paraphrase","query":"we agreed to leave the router feature detection code in its current folder instead of moving it with the others"},
+ {"target":"1261d028-dde0-4872-945a-1765bd3c5e9d","kind":"paraphrase","query":"a newly launched worker goes quiet right after joining and looks gone, but it is only wedged during start up"},
+ {"target":"26dd3e28-d077-45f6-880d-dd212540ff68","kind":"paraphrase","query":"hand editing the settings file changes nothing because the background service only reads it once when it launches"},
+ {"target":"3556968e-2247-4cc5-8150-611419c17d67","kind":"paraphrase","query":"the installer kicks off a reporting call then exits before it completes, so the report never arrives"},
+ {"target":"5bd6379a-0900-4e4c-8386-7d37701ad7eb","kind":"paraphrase","query":"before letting warnings reach the owner's real chat, confirm nothing is permanently showing red by design"},
+ {"target":"6c5b504b-d79d-412d-9114-cc4e072564e4","kind":"paraphrase","query":"the data shapes already exist; the remaining effort is connecting them to the screen and emitting them"},
+ {"target":"71b8577c-1db0-4426-820d-cbc51e19c075","kind":"paraphrase","query":"do not tighten the page security rule because the payment widget writes its styling inline"},
+ {"target":"75e5d780-4cb2-41e4-ba8e-4cdb08a2b3d6","kind":"paraphrase","query":"the usage figures on the dashboard come from a query the browser itself runs, not from a server endpoint"},
+ {"target":"99a1844e-6946-4ed1-9d6d-b0c318bbe851","kind":"paraphrase","query":"sending a colleague's finished work upstream is fine, but sweeping their unfinished files into your own snapshot is not"},
+ {"target":"a26bbdb3-2007-40d7-89cc-bede1277e1cb","kind":"paraphrase","query":"the staging copy of the marketing website lives on a preview deployment of the hosting provider"},
+ {"target":"a99b7168-accb-4be4-a699-a10623629904","kind":"paraphrase","query":"the catch all branch quietly discards measurements for many record kinds without telling anyone"},
+ {"target":"ad810f55-7c89-4e9a-985b-758cabd39915","kind":"paraphrase","query":"the safety filter refuses to combine customer contact details with other tables even after being granted permission"},
+ {"target":"44d445bb-c25f-4530-a551-0591582bb926","kind":"paraphrase","query":"text added onto an existing record cannot be found by describing it, only by quoting its exact words"},
+ {"target":"798f741b-2d81-407a-ad3a-13ee9fac5a50","kind":"paraphrase","query":"an optional extra step took down the thing it was attached to because only one flavour of failure was guarded"},
+ {"target":"4716af0f-fd98-4f60-bf8f-a2ad69859e09","kind":"paraphrase","query":"relayed material arrives looking exactly like something we wrote ourselves, so checks based on format cannot tell origin"},
+ {"target":"1ad2c09d-1c13-4f99-b0b6-2e9dc9f8f26d","kind":"paraphrase","query":"one branch of a four way choice skipped the shared step every sibling branch performed"},
+ {"target":"dfeea6b8-fda6-40e8-ba9a-6a2a28b42f96","kind":"paraphrase","query":"on a weaker laptop the evidence gathering gives up partway and we lose the details we needed most"},
+ {"target":"f11b181f-dbf2-48c1-8b6d-fca1c47f76fb","kind":"paraphrase","query":"the newer networking mode behaves differently from what our older analysis assumed"},
+ {"target":"cc1d3816-97ce-4acd-8c39-06839c0ccaf9","kind":"paraphrase","query":"discussion of a subject was mistaken for the subject itself and poisoned the recorded value"}
+]
