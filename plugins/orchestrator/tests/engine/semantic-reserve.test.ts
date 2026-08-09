@@ -36,6 +36,15 @@ function unit(dim: number, i: number): Float32Array {
   return v;
 }
 
+/** Unit vector whose cosine with `unit(dim, i)` is exactly `w`. Lets a test
+ *  place two notes at DISTINCT, known vector ranks. */
+function blend(dim: number, i: number, j: number, w: number): Float32Array {
+  const v = new Float32Array(dim);
+  v[i] = w;
+  v[j] = Math.sqrt(1 - w * w);
+  return v;
+}
+
 function addNote(db: Database, content: string, vec: Float32Array, signal = 0) {
   const id = generateId();
   const ts = now();
@@ -92,6 +101,43 @@ describe("0.49.0: semantic reserve", () => {
     expect(results[0].id).toBe(agreed);
   });
 
+  test("0.55.0: BOTH reserved candidates survive - the reserve must not eat its own", async () => {
+    // THE BUG THIS FILE MISSED FOR TWO RELEASES. The injection did
+    // `if (finalIds.length >= limit) finalIds.pop()` before each push - but
+    // after the first injection the TAIL IS THE FIRST INJECTION, so candidate
+    // #2 popped candidate #1 straight back out. The reserve was therefore
+    // effectively size ONE, and because vecScores is sorted descending, the
+    // note it always discarded was the STRONGEST semantic match in the corpus.
+    //
+    // Every existing test here passed throughout: they assert that ONE
+    // semantic match surfaces, and that the reserved count is `<= 2` - an
+    // UPPER bound. Nothing asserted that two reserved candidates coexist,
+    // which is the only shape that exposes it.
+    //
+    // Measured on the live corpus (192-probe span set): 47 targets the
+    // embedding had ranked in the top 6 were dropped by the pipeline, and 35
+    // of those were vector rank #1 - the signature of the top slot being
+    // evicted every time.
+    const db = makeDb();
+    const DIM = 8;
+    // Two semantic-only notes at DIFFERENT similarities, so they occupy
+    // vecScores[0] (cos 1.0) and vecScores[1] (cos 0.9) deterministically.
+    const best = addNote(db, "zzz alien wording one", unit(DIM, 0));
+    const second = addNote(db, "zzz alien wording two", blend(DIM, 0, 1, 0.9));
+    // Lexical decoys with high signal - the population that crowds them out.
+    for (let i = 0; i < 30; i++) {
+      addNote(db, `alpha beta gamma delta filler ${i}`, unit(DIM, 3), 80);
+    }
+
+    const results = await findRelatedNotesHybrid(
+      db, "alpha beta gamma delta", 6, unit(DIM, 0), 0.7, false,
+    );
+    const ids = results.map((r) => r.id);
+    // Before the fix, `second` came back and `best` did not.
+    expect(ids).toContain(second);
+    expect(ids).toContain(best);
+  });
+
   test("keyword still owns the majority of the result set", async () => {
     const db = makeDb();
     const DIM = 8;
@@ -136,7 +182,12 @@ describe("0.49.0: WIRING", () => {
   });
 
   test("it displaces from the tail, not the head", () => {
-    expect(/finalIds\.pop\(\)/.test(LINKER)).toBe(true);
+    // 0.55.0: this used to assert the literal `finalIds.pop()`, which is how a
+    // grep-test can encode a BUG as the spec - the bare pop was exactly the
+    // defect (see the both-survive test above). Assert the PROPERTY instead:
+    // the eviction is index-based and skips already-injected reserved slots.
+    expect(/finalIds\.splice\(victim, 1\)/.test(LINKER)).toBe(true);
+    expect(/const victim = finalIds\.length - 1 - injected/.test(LINKER)).toBe(true);
   });
 });
 

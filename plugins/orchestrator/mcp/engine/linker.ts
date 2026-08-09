@@ -445,6 +445,7 @@ export async function findRelatedNotesHybrid(
   // pass the same superseded / code_ref filters as any other result. Keyword
   // still owns the majority of every result set.
   const SEMANTIC_RESERVED = Math.min(2, Math.max(0, limit - 1));
+  let injected = 0; // reserved slots already filled - never displace these
   if (SEMANTIC_RESERVED > 0 && vecScores.length > 0) {
     for (const cand of vecScores.slice(0, SEMANTIC_RESERVED)) {
       if (finalIds.includes(cand.id)) continue;
@@ -476,8 +477,26 @@ export async function findRelatedNotesHybrid(
       }
       // Displace from the TAIL, never the head: the top hybrid result is the
       // one both signals agree on and must not be evicted by this.
-      if (finalIds.length >= limit) finalIds.pop();
+      //
+      // 0.55.0 - AND NEVER FROM THE RESERVE ITSELF. A bare pop() took the tail
+      // unconditionally, but after the first injection the tail IS the first
+      // injection, so the second reserved candidate evicted the first. The
+      // reserve was therefore effectively size ONE, and - because vecScores is
+      // sorted descending - the note it always threw away was the STRONGEST
+      // semantic match in the corpus, keeping only the runner-up.
+      //
+      // Measured on the 192-probe span set before the fix: 47 targets that the
+      // embedding ranked in the top 6 were dropped by the pipeline, and 35 of
+      // those were vector rank #1. Diagnosed on 03c9465e - vector rank 1, never
+      // returned, while rank 2 (44fc2445) came back in the final slot.
+      // eval/diag-one.ts reproduces it on any lost id8.
+      if (finalIds.length >= limit) {
+        const victim = finalIds.length - 1 - injected;
+        if (victim >= 0) finalIds.splice(victim, 1);
+        else finalIds.pop(); // limit smaller than the reserve; degrade sanely
+      }
       finalIds.push(cand.id);
+      injected++;
     }
   }
 
