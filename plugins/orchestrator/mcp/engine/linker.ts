@@ -107,6 +107,45 @@ export function findRelatedNotes(
   const codeRefLikeParam = escapedForLike !== null ? `%"${escapedForLike}"%` : null;
 
   try {
+    // 0.56.0 - TWO-STAGE RANKING. WI eb678a70.
+    //
+    // This query used to score EVERY matched row with bm25() and sort them.
+    // Because the terms are OR-joined, "how does the agent channel detect a
+    // dead session" matches 6,838 of 7,210 notes - "the" alone matches 6,544 -
+    // so bm25() ran over 95% of the knowledge base to return 20 rows. Measured:
+    //
+    //   join + bm25() ORDER BY, all matches   11,083 ms
+    //   identical query without bm25 ordering       8.7 ms
+    //
+    // That was ~99% of a 16-SECOND lookup, paid by every agent on every search.
+    //
+    // Stage 1 uses FTS5's own top-K fast path (`ORDER BY rank LIMIT`) against
+    // the index ALONE - the join was defeating that optimisation. Stage 2 then
+    // applies the real weighted bm25 to only those survivors. Same ranking
+    // function, a fraction of the rows: 11,083 ms -> 100 ms, 110x, with a
+    // top-5 IDENTICAL to the old query.
+    //
+    // TWO MEASURED DEAD ENDS, recorded so nobody re-derives them:
+    //  - FTS5's built-in `ORDER BY rank` instead of the custom weights: 2x
+    //    SLOWER (21,465 ms), not faster.
+    //  - dropping stopwords: only 2.7x (3,749 ms), still seconds, AND it
+    //    changes which notes come back.
+    //  - stage-1 WITHOUT re-scoring (take FTS5's default-weight order as final)
+    //    is ~1000x but returns DIFFERENT notes - fast and wrong. The custom
+    //    weights (keywords 2.0) are load-bearing; stage 2 is not optional.
+    //
+    // OVERSAMPLE exists because stage 1 ranks with DEFAULT weights while
+    // stage 2 re-ranks with ours, so the two can disagree near the cut. Pulling
+    // a wide stage-1 window makes it vanishingly unlikely that a note our
+    // weights would promote is excluded before we ever score it. Validated
+    // end-to-end by the 192-probe span eval, not by argument.
+    const stage1K = Math.max(200, limit * 20);
+    const prelim = db
+      .query(`SELECT rowid FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank LIMIT ?`)
+      .all(ftsQuery, stage1K) as Array<{ rowid: number }>;
+    if (prelim.length === 0) return [];
+    const rowidMarks = prelim.map(() => "?").join(",");
+
     // R3.2: fetch 2x limit so the post-SQL signal/confidence re-rank has
     // headroom to promote high-signal items that BM25 alone would have
     // dropped just below the cut line.
@@ -116,14 +155,16 @@ export function findRelatedNotes(
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
+           AND n.rowid IN (${rowidMarks})
            ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
            ${codeRefClause}
          ORDER BY rank ASC
          LIMIT ?`;
+    const rowids = prelim.map((r) => r.rowid);
     const params: any[] =
       codeRefLikeParam !== null
-        ? [ftsQuery, codeRefLikeParam, limit * 2]
-        : [ftsQuery, limit * 2];
+        ? [ftsQuery, ...rowids, codeRefLikeParam, limit * 2]
+        : [ftsQuery, ...rowids, limit * 2];
     const rows = db.query(sql).all(...params) as Array<{
       id: string;
       type: string;

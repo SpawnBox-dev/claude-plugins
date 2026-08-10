@@ -20908,17 +20908,24 @@ function findRelatedNotes(db, query, limit = 10, includeSuperseded = false, code
   const escapedForLike = codeRefFilter ? JSON.stringify(codeRefFilter).slice(1, -1) : null;
   const codeRefLikeParam = escapedForLike !== null ? `%"${escapedForLike}"%` : null;
   try {
+    const stage1K = Math.max(200, limit * 20);
+    const prelim = db.query(`SELECT rowid FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank LIMIT ?`).all(ftsQuery, stage1K);
+    if (prelim.length === 0)
+      return [];
+    const rowidMarks = prelim.map(() => "?").join(",");
     const sql = `SELECT n.id, n.type, n.content, n.confidence, n.created_at, n.updated_at, n.source_session, n.superseded_by, n.keywords, n.tags, n.code_refs,
                 COALESCE(n.signal, 0) AS note_signal,
                 bm25(notes_fts, 1.0, 0.5, 2.0) AS rank
          FROM notes_fts
          JOIN notes n ON notes_fts.rowid = n.rowid
          WHERE notes_fts MATCH ?
+           AND n.rowid IN (${rowidMarks})
            ${includeSuperseded ? "" : "AND n.superseded_by IS NULL"}
            ${codeRefClause}
          ORDER BY rank ASC
          LIMIT ?`;
-    const params = codeRefLikeParam !== null ? [ftsQuery, codeRefLikeParam, limit * 2] : [ftsQuery, limit * 2];
+    const rowids = prelim.map((r) => r.rowid);
+    const params = codeRefLikeParam !== null ? [ftsQuery, ...rowids, codeRefLikeParam, limit * 2] : [ftsQuery, ...rowids, limit * 2];
     const rows = db.query(sql).all(...params);
     const rescored = rows.map((r) => ({
       row: r,
