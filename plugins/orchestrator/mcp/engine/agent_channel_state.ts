@@ -579,7 +579,18 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
        name = excluded.name,
        started_at = excluded.started_at,
        last_heartbeat_at = excluded.last_heartbeat_at,
-       current_task = excluded.current_task,
+       -- 0.57.0: COALESCE, not a plain overwrite. current_task belongs with the
+       -- self-declared columns above, but was left in the clobber set while
+       -- NOTHING ever populates it on the heartbeat path (server.ts builds
+       -- selfSession with current_task: null and never assigns it). So every
+       -- 30s beat wrote NULL over it, and the column was empty for all 8 live
+       -- sessions. That is not cosmetic: getLiveSessions() reads THIS table,
+       -- and it feeds both the post-compact roster PA rebuilds from and the
+       -- from_task on every channel message - so PA saw "(no task set)" for
+       -- every peer while session_registry held a current task for each one.
+       -- COALESCE lets a session that genuinely holds a task in memory refresh
+       -- it, while an empty heartbeat can no longer erase one set out-of-band.
+       current_task = COALESCE(excluded.current_task, sessions.current_task),
        kind = excluded.kind,
        instance = excluded.instance`,
   ).run(
@@ -611,6 +622,28 @@ export function setWarmContext(stateDir: string, session_id: string, tags: strin
 
 /** Set a session's self-declared hot-path status
  *  (`driving` | `holding-for-<X>` | `idle-available` | `parked`). */
+/**
+ * Mirror a session's broadcast task into the agent-channel registry (0.57.0).
+ *
+ * `update_session_task` writes session_registry (project.db), which is what the
+ * post-compact hook rehydrates PA's own task from. But getLiveSessions() reads
+ * THIS table, and it is the source for the peer roster PA rebuilds after a
+ * compaction and for the from_task on every channel notification. Nothing was
+ * ever writing this copy, so both surfaces rendered "(no task set)" for every
+ * peer while the real task sat in the other database.
+ *
+ * A dedicated setter rather than routing it through writeSession, matching the
+ * other self-declared columns: the heartbeat carries no task, so anything the
+ * heartbeat writes here can only be an erasure.
+ */
+export function setCurrentTask(stateDir: string, session_id: string, task: string): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET current_task = ? WHERE session_id = ?`).run(
+    task,
+    session_id,
+  );
+}
+
 export function setHotPathStatus(stateDir: string, session_id: string, status: string): void {
   const db = getDb(stateDir);
   prep(db, `UPDATE sessions SET hot_path_status = ? WHERE session_id = ?`).run(

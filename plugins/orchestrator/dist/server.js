@@ -23765,13 +23765,28 @@ function writeSession(stateDir, entry) {
        name = excluded.name,
        started_at = excluded.started_at,
        last_heartbeat_at = excluded.last_heartbeat_at,
-       current_task = excluded.current_task,
+       -- 0.57.0: COALESCE, not a plain overwrite. current_task belongs with the
+       -- self-declared columns above, but was left in the clobber set while
+       -- NOTHING ever populates it on the heartbeat path (server.ts builds
+       -- selfSession with current_task: null and never assigns it). So every
+       -- 30s beat wrote NULL over it, and the column was empty for all 8 live
+       -- sessions. That is not cosmetic: getLiveSessions() reads THIS table,
+       -- and it feeds both the post-compact roster PA rebuilds from and the
+       -- from_task on every channel message - so PA saw "(no task set)" for
+       -- every peer while session_registry held a current task for each one.
+       -- COALESCE lets a session that genuinely holds a task in memory refresh
+       -- it, while an empty heartbeat can no longer erase one set out-of-band.
+       current_task = COALESCE(excluded.current_task, sessions.current_task),
        kind = excluded.kind,
        instance = excluded.instance`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null, entry.instance ?? null);
 }
 function setWarmContext(stateDir, session_id, tags) {
   const db = getDb(stateDir);
   prep(db, `UPDATE sessions SET warm_context = ? WHERE session_id = ?`).run(JSON.stringify(tags), session_id);
+}
+function setCurrentTask(stateDir, session_id, task) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET current_task = ? WHERE session_id = ?`).run(task, session_id);
 }
 function setHotPathStatus(stateDir, session_id, status) {
   const db = getDb(stateDir);
@@ -26383,6 +26398,10 @@ class AgentChannel {
   }
   declareSelf(fields) {
     const sid = this.selfSession.session_id;
+    if (fields.current_task !== undefined) {
+      setCurrentTask(this.projectStateDir, sid, fields.current_task);
+      this.selfSession = { ...this.selfSession, current_task: fields.current_task };
+    }
     if (fields.warm_context !== undefined) {
       setWarmContext(this.projectStateDir, sid, fields.warm_context);
     }
@@ -28858,8 +28877,9 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
     };
   }
   const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
-  if (agentChannel && (args.warm_context !== undefined || args.hot_path_status !== undefined || args.keep_clean !== undefined)) {
+  if (agentChannel) {
     agentChannel.declareSelf({
+      current_task: args.task,
       warm_context: args.warm_context,
       hot_path_status: args.hot_path_status,
       keep_clean: args.keep_clean

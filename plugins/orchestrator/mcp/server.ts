@@ -2426,13 +2426,18 @@ server.tool(
     // per-column setters) so the repurposing query can read them. Only present
     // fields are written; the auto-derived warm_context floor (Phase 5) is left
     // intact when warm_context is omitted.
-    if (
-      agentChannel &&
-      (args.warm_context !== undefined ||
-        args.hot_path_status !== undefined ||
-        args.keep_clean !== undefined)
-    ) {
+    //
+    // 0.57.0: the TASK itself is mirrored unconditionally, not only when an
+    // optional coherence field is present. handleUpdateSessionTask above writes
+    // session_registry (project.db); getLiveSessions() reads the agent-channel
+    // table, and THAT is what builds the post-compact peer roster and the
+    // from_task on every channel notification. Nothing wrote that copy, so both
+    // surfaces showed "(no task set)" for every peer while session_registry
+    // held a current task for each - which is why PA kept rebuilding a blank
+    // fleet picture after compaction.
+    if (agentChannel) {
       agentChannel.declareSelf({
+        current_task: args.task,
         warm_context: args.warm_context,
         hot_path_status: args.hot_path_status,
         keep_clean: args.keep_clean,

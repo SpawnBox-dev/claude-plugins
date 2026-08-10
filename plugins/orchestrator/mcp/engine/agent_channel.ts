@@ -33,6 +33,7 @@ import {
   writeAllOffsets,
   readNewSystemEvents,
   setWarmContext,
+  setCurrentTask,
   setHotPathStatus,
   setKeepClean,
   setClientUnreachableSince,
@@ -797,8 +798,24 @@ export class AgentChannel {
     warm_context?: string[];
     hot_path_status?: string;
     keep_clean?: boolean;
+    current_task?: string;
   }): void {
     const sid = this.selfSession.session_id;
+    if (fields.current_task !== undefined) {
+      // 0.57.0: mirror the broadcast task into the agent-channel row.
+      // update_session_task writes session_registry (project.db), but
+      // getLiveSessions() reads the agent-channel table - and that is what
+      // feeds the post-compact peer roster and every channel from_task. With
+      // nothing writing this copy, both rendered "(no task set)" for every
+      // peer while the real task sat in the other database.
+      //
+      // selfSession is updated too, so the in-memory value the heartbeat
+      // carries matches: writeSession now COALESCEs, so a null heartbeat can
+      // no longer erase this, but a session that HAS a task should still
+      // refresh rather than rely on the setter alone.
+      setCurrentTask(this.projectStateDir, sid, fields.current_task);
+      this.selfSession = { ...this.selfSession, current_task: fields.current_task };
+    }
     if (fields.warm_context !== undefined) {
       setWarmContext(this.projectStateDir, sid, fields.warm_context);
     }
