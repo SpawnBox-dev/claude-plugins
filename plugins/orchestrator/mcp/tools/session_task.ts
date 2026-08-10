@@ -11,12 +11,15 @@ import type { SessionTracker } from "../engine/session_tracker";
 export interface UpdateSessionTaskArgs {
   session_id: string;
   task: string;
+  /** Cited work-item / note ids. Persisted durably (WI fe4d4acf) so they can be
+   *  restored after a plugin reload wipes the agent-channel copy. */
+  refs?: string[];
 }
 
 export function handleUpdateSessionTask(
   tracker: SessionTracker,
   args: UpdateSessionTaskArgs,
 ): string {
-  tracker.updateCurrentTask(args.session_id, args.task);
+  tracker.updateCurrentTask(args.session_id, args.task, args.refs);
   return "Current task updated.";
 }

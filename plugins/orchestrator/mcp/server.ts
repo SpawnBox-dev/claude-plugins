@@ -2457,7 +2457,11 @@ server.tool(
         ],
       };
     }
-    const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+    const text = handleUpdateSessionTask(sessionTracker, {
+      session_id: sid,
+      task: args.task,
+      refs: args.refs,
+    });
     // PA-coherence self-declare (Phase 3): persist the optional coherence fields
     // to this session's agent-channel roster row (via declareSelf -> the
     // per-column setters) so the repurposing query can read them. Only present

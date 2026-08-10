@@ -245,12 +245,32 @@ export class SessionTracker {
    * The staleness nudge in handleStop reads this column; without it the only
    * option is nagging every turn, which does not work.
    */
-  updateCurrentTask(sessionId: string, task: string): void {
+  updateCurrentTask(sessionId: string, task: string, refs?: string[]): void {
     const ts = now();
     this.db.run(
       `UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`,
       [task, ts, ts, sessionId]
     );
+    // WI fe4d4acf: keep a DURABLE copy of the cited ids. The agent-channel row
+    // that normally holds them is deleted and recreated by a plugin reload, so
+    // without this a declared pointer set vanishes on every reload and only
+    // comes back if the session happens to re-declare. Guarded because the
+    // column arrives in migration 24 and partial-DB fixtures may lack it.
+    //
+    // `undefined` means "not part of this declaration" and must NOT clear a
+    // previously-declared set; an explicit empty array is a real value ("I cite
+    // nothing now") and does clear it.
+    if (refs !== undefined) {
+      try {
+        this.db.run(`UPDATE session_registry SET refs = ? WHERE session_id = ?`, [
+          JSON.stringify(refs),
+          sessionId,
+        ]);
+      } catch {
+        /* pre-migration-24 DB - the roster copy still works, it just cannot be
+           restored after a reload, which is the status quo this fixes */
+      }
+    }
     // Re-declaring resets the turn counter that drives the staleness nudge, so
     // the next one is a full interval away. Without this the counter would keep
     // climbing and the nudge would fire every turn once tripped - which is the

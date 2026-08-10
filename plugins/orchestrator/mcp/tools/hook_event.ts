@@ -6,6 +6,7 @@ import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_session
 import {
   appendSystemEvent,
   setCurrentTask,
+  setRefs,
   readSessions,
   type SystemEvent,
 } from "../engine/agent_channel_state";
@@ -1530,7 +1531,7 @@ const TASK_ACTS_KEY_PREFIX = "task_acts_";
  * runs once per session because after the first declaration `declareSelf`
  * keeps the copy current.
  */
-function backfillRosterTask(_ctx: HookCtx, sid: string, task: string): void {
+function backfillRosterTask(ctx: HookCtx, sid: string, task: string): void {
   try {
     const stateDir = getAgentChannelStateDir();
     if (!stateDir) return;
@@ -1538,10 +1539,33 @@ function backfillRosterTask(_ctx: HookCtx, sid: string, task: string): void {
     // No row yet (the channel has not registered this session) - nothing to
     // repair, and creating one here would race the registration path.
     if (!mine) return;
+
     // Already correct. This IS the guard: cheap, derived from the actual state,
     // and it cannot go stale.
     if (mine.current_task && mine.current_task.trim()) return;
+
     setCurrentTask(stateDir, sid, task);
+
+    // WI fe4d4acf: restore the CITED IDS in the same repair. The reload wiped
+    // both, and repairing only the task would leave a declaration whose pointers
+    // silently vanished - visibly fine, quietly less informative than what the
+    // session actually declared. Only ever restores from the durable copy; if
+    // there is none (declared before migration 24, or genuinely no refs) the
+    // roster keeps its empty set rather than inventing one.
+    try {
+      const reg = ctx.db
+        .query(`SELECT refs FROM session_registry WHERE session_id = ?`)
+        .get(sid) as { refs: string | null } | undefined;
+      if (reg?.refs) {
+        const parsed = JSON.parse(reg.refs);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setRefs(stateDir, sid, parsed as string[]);
+        }
+      }
+    } catch {
+      /* pre-migration-24 DB, or corrupt JSON -> task is still repaired, which
+         is the more important half */
+    }
   } catch {
     /* agent-channel absent or unreadable - the roster keeps its existing
        value, which is the status quo, and the next tick tries again */

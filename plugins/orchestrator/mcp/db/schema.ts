@@ -438,6 +438,33 @@ CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
       }
     },
   },
+  {
+    version: 24,
+    name: "add_session_refs",
+    sql: `SELECT 1;`,
+    // WI fe4d4acf. `refs` (the work-item/note ids a declaration cites) lived
+    // ONLY in the agent-channel store, and a plugin reload DELETES AND
+    // RECREATES that row - measured on the live fleet 2026-08-10 22:02Z, where
+    // every session's started_at was rewritten to the reload minute and every
+    // coherence column came back NULL.
+    //
+    // current_task survived only because it has this durable copy and could be
+    // repaired from it. refs had no such copy, so a declared pointer set simply
+    // vanished on every reload - and the sessions least likely to notice and
+    // re-declare are the parked ones, which is the same population every other
+    // gap in this area has landed on.
+    //
+    // Additive + guarded, matching migration 23.
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(session_registry)").all() as Array<{
+        name: string;
+      }>;
+      if (cols.length === 0) return;
+      if (!cols.some((c) => c.name === "refs")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN refs TEXT");
+      }
+    },
+  },
 ];
 
 /**

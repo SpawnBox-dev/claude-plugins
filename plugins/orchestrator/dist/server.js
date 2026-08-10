@@ -19991,6 +19991,19 @@ CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
         db.exec("ALTER TABLE session_registry ADD COLUMN current_task_at TEXT");
       }
     }
+  },
+  {
+    version: 24,
+    name: "add_session_refs",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(session_registry)").all();
+      if (cols.length === 0)
+        return;
+      if (!cols.some((c) => c.name === "refs")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN refs TEXT");
+      }
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -24196,9 +24209,17 @@ class SessionTracker {
       activation_score
     };
   }
-  updateCurrentTask(sessionId, task) {
+  updateCurrentTask(sessionId, task, refs) {
     const ts = now();
     this.db.run(`UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`, [task, ts, ts, sessionId]);
+    if (refs !== undefined) {
+      try {
+        this.db.run(`UPDATE session_registry SET refs = ? WHERE session_id = ?`, [
+          JSON.stringify(refs),
+          sessionId
+        ]);
+      } catch {}
+    }
     try {
       for (const key of [`task_turns_${sessionId}`, `task_acts_${sessionId}`]) {
         this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [key, ts]);
@@ -24338,7 +24359,7 @@ class SessionTracker {
 
 // mcp/tools/session_task.ts
 function handleUpdateSessionTask(tracker, args) {
-  tracker.updateCurrentTask(args.session_id, args.task);
+  tracker.updateCurrentTask(args.session_id, args.task, args.refs);
   return "Current task updated.";
 }
 
@@ -24970,7 +24991,7 @@ var STALE_TASK_TURNS = 30;
 var STALE_TASK_ACTIONS = 60;
 var TASK_TURNS_KEY_PREFIX = "task_turns_";
 var TASK_ACTS_KEY_PREFIX = "task_acts_";
-function backfillRosterTask(_ctx, sid, task) {
+function backfillRosterTask(ctx, sid, task) {
   try {
     const stateDir = getAgentChannelStateDir();
     if (!stateDir)
@@ -24981,6 +25002,15 @@ function backfillRosterTask(_ctx, sid, task) {
     if (mine.current_task && mine.current_task.trim())
       return;
     setCurrentTask(stateDir, sid, task);
+    try {
+      const reg = ctx.db.query(`SELECT refs FROM session_registry WHERE session_id = ?`).get(sid);
+      if (reg?.refs) {
+        const parsed = JSON.parse(reg.refs);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setRefs(stateDir, sid, parsed);
+        }
+      }
+    } catch {}
   } catch {}
 }
 function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {
@@ -29135,7 +29165,11 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
       ]
     };
   }
-  const text = handleUpdateSessionTask(sessionTracker, { session_id: sid, task: args.task });
+  const text = handleUpdateSessionTask(sessionTracker, {
+    session_id: sid,
+    task: args.task,
+    refs: args.refs
+  });
   if (agentChannel) {
     agentChannel.declareSelf({
       current_task: args.task,
