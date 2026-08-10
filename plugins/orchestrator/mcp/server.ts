@@ -2429,6 +2429,22 @@ server.tool(
       ),
     session_id: z.string().optional(),
     warm_context: z.array(z.string()).max(50).optional(),
+    // WI dcc756ec. CITE, don't restate. The roster resolves these to each
+    // record's CURRENT title and status when it renders, so a work item that
+    // closes after you declare shows as closed without you touching anything -
+    // which a pasted summary can never do, and which is why this exists rather
+    // than a bigger `task` cap.
+    refs: z
+      .array(z.string())
+      .max(20)
+      .optional()
+      .describe(
+        "Work-item / note ids your declaration refers to (8-char prefix or full id). " +
+          "Cite them here INSTEAD of restating what they say in `task`: the roster renders " +
+          "each one's live title and status, so the pointer stays true as the record changes " +
+          "while a copied summary silently goes stale. Also frees the `task` budget for what " +
+          "only you can say - what you hold, what is blocked on whom, and your standing holds."
+      ),
     hot_path_status: z.string().max(80).optional(),
     keep_clean: z.boolean().optional(),
   },
@@ -2460,6 +2476,7 @@ server.tool(
       agentChannel.declareSelf({
         current_task: args.task,
         warm_context: args.warm_context,
+        refs: args.refs,
         hot_path_status: args.hot_path_status,
         keep_clean: args.keep_clean,
       });

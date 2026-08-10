@@ -23612,6 +23612,7 @@ function getDb(stateDir) {
       current_task TEXT,
       kind TEXT,
       warm_context TEXT,
+      refs TEXT,
       liveness_state TEXT,
       liveness_ts TEXT,
       liveness_expires_at TEXT,
@@ -23655,6 +23656,7 @@ function getDb(stateDir) {
   `);
   ensureColumns(db, "sessions", {
     warm_context: "TEXT",
+    refs: "TEXT",
     liveness_state: "TEXT",
     liveness_ts: "TEXT",
     liveness_expires_at: "TEXT",
@@ -23692,6 +23694,13 @@ function rowToEntry(r) {
       const parsed = JSON.parse(r.warm_context);
       if (Array.isArray(parsed))
         entry.warm_context = parsed;
+    } catch {}
+  }
+  if (r.refs !== null) {
+    try {
+      const parsed = JSON.parse(r.refs);
+      if (Array.isArray(parsed))
+        entry.refs = parsed;
     } catch {}
   }
   if (r.liveness_state !== null)
@@ -23759,7 +23768,7 @@ function readSessions(stateDir) {
   const db = getDb(stateDir);
   migrateSessionsLegacy(stateDir, db);
   const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
-            current_task, kind, warm_context, liveness_state, liveness_ts,
+            current_task, kind, warm_context, refs, liveness_state, liveness_ts,
             liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
             instance
      FROM sessions`).all();
@@ -23796,6 +23805,10 @@ function writeSession(stateDir, entry) {
 function setWarmContext(stateDir, session_id, tags) {
   const db = getDb(stateDir);
   prep(db, `UPDATE sessions SET warm_context = ? WHERE session_id = ?`).run(JSON.stringify(tags), session_id);
+}
+function setRefs(stateDir, session_id, refs) {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET refs = ? WHERE session_id = ?`).run(JSON.stringify(refs), session_id);
 }
 function setCurrentTask(stateDir, session_id, task) {
   const db = getDb(stateDir);
@@ -25154,6 +25167,35 @@ function handlePreCompact(ctx, args) {
 }
 var SESSIONSTART_CHECKPOINT_CAP = 4000;
 var SESSIONSTART_TOTAL_CAP = 7000;
+var COMPACT_ROSTER_MAX_REFS = 4;
+var COMPACT_ROSTER_REF_LABEL_CAP = 48;
+function resolveRefs(db, ids) {
+  const out = [];
+  for (const raw of ids.slice(0, COMPACT_ROSTER_MAX_REFS)) {
+    const id = String(raw || "").trim();
+    if (!id)
+      continue;
+    const short = id.slice(0, 8);
+    try {
+      const row = db.query(`SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`).get(id, `${short}%`);
+      if (!row) {
+        out.push({ id8: short, label: "(not found)", missing: true });
+        continue;
+      }
+      const firstLine = (row.content || "").split(`
+`).map((l) => l.replace(/[*_`#>]/g, "").trim()).find((l) => l.length > 0) ?? "";
+      const label = firstLine.length > COMPACT_ROSTER_REF_LABEL_CAP ? firstLine.slice(0, COMPACT_ROSTER_REF_LABEL_CAP) + "..." : firstLine || "(empty)";
+      out.push({
+        id8: short,
+        label,
+        status: row.type === "work_item" ? row.status : null
+      });
+    } catch {
+      out.push({ id8: short, label: "(unresolved)", missing: true });
+    }
+  }
+  return out;
+}
 var COMPACT_ROSTER_MAX_PEERS = 8;
 var COMPACT_ROSTER_TASK_CAP = 70;
 function renderCompactRoster(peers) {
@@ -25163,7 +25205,13 @@ function renderCompactRoster(peers) {
   const lines = shown.map((p) => {
     const task = p.current_task && p.current_task.trim() ? `: ${p.current_task.slice(0, COMPACT_ROSTER_TASK_CAP)}` : ": (no task set)";
     const live = p.liveness_state && p.liveness_state !== "healthy" ? ` [${p.liveness_state}]` : "";
-    return `  - SA-${p.id8}${live}${task}`;
+    const refs = p.refs && p.refs.length > 0 ? `
+` + p.refs.map((r) => {
+      const st = r.status ? ` [${r.status}]` : "";
+      return `      -> ${r.id8}${st}: ${r.label}`;
+    }).join(`
+`) : "";
+    return `  - SA-${p.id8}${live}${task}${refs}`;
   });
   const more = peers.length > shown.length ? `
   ...and ${peers.length - shown.length} more.` : "";
@@ -25281,7 +25329,8 @@ function handleSessionStartCompact(ctx, args) {
       peers = otherSubs.map((e) => ({
         id8: e.id8,
         current_task: e.current_task ?? null,
-        liveness_state: e.liveness_state ?? null
+        liveness_state: e.liveness_state ?? null,
+        refs: e.refs && e.refs.length > 0 ? resolveRefs(ctx.db, e.refs) : null
       }));
       activeSAs = otherSubs.map((e) => ({
         session_id: e.session_id,
@@ -26496,6 +26545,9 @@ class AgentChannel {
     }
     if (fields.warm_context !== undefined) {
       setWarmContext(this.projectStateDir, sid, fields.warm_context);
+    }
+    if (fields.refs !== undefined) {
+      setRefs(this.projectStateDir, sid, fields.refs);
     }
     if (fields.hot_path_status !== undefined) {
       setHotPathStatus(this.projectStateDir, sid, fields.hot_path_status);
@@ -28971,6 +29023,7 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
   task: exports_external.string().min(1).max(2000, "Task declaration is over the 2000-character limit. This is a broadcast line, not a checkpoint - it rides on every channel notification and every sibling's briefing. To fit: keep what a PEER needs in order to avoid colliding with you (what you hold, what is blocked on whom, standing 'do NOT do X' holds), and cite work items and notes by id instead of restating them - a reader can look those up, and a cited id stays true after the record changes while a copied summary rots. Put the long-form history in save_progress or a note, not here."),
   session_id: exports_external.string().optional(),
   warm_context: exports_external.array(exports_external.string()).max(50).optional(),
+  refs: exports_external.array(exports_external.string()).max(20).optional().describe("Work-item / note ids your declaration refers to (8-char prefix or full id). Cite them here INSTEAD of restating what they say in `task`: the roster renders each one's live title and status, so the pointer stays true as the record changes while a copied summary silently goes stale. Also frees the `task` budget for what only you can say - what you hold, what is blocked on whom, and your standing holds."),
   hot_path_status: exports_external.string().max(80).optional(),
   keep_clean: exports_external.boolean().optional()
 }, async (args) => {
@@ -28987,6 +29040,7 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
     agentChannel.declareSelf({
       current_task: args.task,
       warm_context: args.warm_context,
+      refs: args.refs,
       hot_path_status: args.hot_path_status,
       keep_clean: args.keep_clean
     });

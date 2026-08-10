@@ -33,6 +33,7 @@ import {
   writeAllOffsets,
   readNewSystemEvents,
   setWarmContext,
+  setRefs,
   setCurrentTask,
   setHotPathStatus,
   setKeepClean,
@@ -800,6 +801,7 @@ export class AgentChannel {
     hot_path_status?: string;
     keep_clean?: boolean;
     current_task?: string;
+    refs?: string[];
   }): void {
     const sid = this.selfSession.session_id;
     if (fields.current_task !== undefined) {
@@ -819,6 +821,9 @@ export class AgentChannel {
     }
     if (fields.warm_context !== undefined) {
       setWarmContext(this.projectStateDir, sid, fields.warm_context);
+    }
+    if (fields.refs !== undefined) {
+      setRefs(this.projectStateDir, sid, fields.refs);
     }
     if (fields.hot_path_status !== undefined) {
       setHotPathStatus(this.projectStateDir, sid, fields.hot_path_status);

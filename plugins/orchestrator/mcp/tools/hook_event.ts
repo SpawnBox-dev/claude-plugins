@@ -1977,6 +1977,86 @@ export interface CompactPeer {
    *  repurposing candidate "must be reachable, not just idle-looking".
    *  Null = healthy/unknown and renders nothing. */
   liveness_state?: string | null;
+  /**
+   * WI dcc756ec: records this peer's declaration POINTS AT, already resolved
+   * against the live note/work-item table. Resolution happens in the impure
+   * shell so this renderer stays pure and deterministically testable.
+   */
+  refs?: ResolvedRef[] | null;
+}
+
+/** A work-item/note id resolved to what it says RIGHT NOW. */
+export interface ResolvedRef {
+  id8: string;
+  label: string;
+  /** Present for work items; notes have no status and render without one. */
+  status?: string | null;
+  /** True when the id matched nothing - rendered explicitly, never dropped. */
+  missing?: boolean;
+}
+
+// How many resolved refs to render per peer, and how much label each gets.
+// The roster is a scan-and-decide surface, not a report; a peer citing 16
+// records (observed) must not push the other seven lanes off the digest.
+const COMPACT_ROSTER_MAX_REFS = 4;
+const COMPACT_ROSTER_REF_LABEL_CAP = 48;
+
+/**
+ * Resolve declaration pointers to their CURRENT title and status.
+ *
+ * This is the half of WI dcc756ec that makes pointers better than the copied
+ * summaries they replace: the text rendered here is read from the record at
+ * render time, so a work item that closed after the declaration was written
+ * renders as closed, with nobody editing anything. A summary pasted into the
+ * declaration could only ever describe the moment it was pasted.
+ *
+ * Notes carry no separate title column - `title` is an alias that folds into
+ * `content` at creation - so the label is derived from the first meaningful
+ * line of the body, with markdown emphasis stripped so the roster does not
+ * render half a bold marker.
+ *
+ * An id that resolves to nothing is reported as missing rather than dropped:
+ * silently omitting it would make a dangling pointer look like a peer that
+ * simply cited less, which is the failure this whole change exists to avoid.
+ */
+export function resolveRefs(db: Database, ids: string[]): ResolvedRef[] {
+  const out: ResolvedRef[] = [];
+  for (const raw of ids.slice(0, COMPACT_ROSTER_MAX_REFS)) {
+    const id = String(raw || "").trim();
+    if (!id) continue;
+    const short = id.slice(0, 8);
+    try {
+      const row = db
+        .query(
+          `SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`
+        )
+        .get(id, `${short}%`) as
+        | { id: string; type: string; status: string | null; content: string }
+        | undefined;
+      if (!row) {
+        out.push({ id8: short, label: "(not found)", missing: true });
+        continue;
+      }
+      const firstLine =
+        (row.content || "")
+          .split("\n")
+          .map((l) => l.replace(/[*_`#>]/g, "").trim())
+          .find((l) => l.length > 0) ?? "";
+      const label =
+        firstLine.length > COMPACT_ROSTER_REF_LABEL_CAP
+          ? firstLine.slice(0, COMPACT_ROSTER_REF_LABEL_CAP) + "..."
+          : firstLine || "(empty)";
+      out.push({
+        id8: short,
+        label,
+        status: row.type === "work_item" ? row.status : null,
+      });
+    } catch {
+      // A resolution failure must not cost the reader the pointer itself.
+      out.push({ id8: short, label: "(unresolved)", missing: true });
+    }
+  }
+  return out;
 }
 
 // WI 2ad3240e roster caps. The whole systemMessage is still bounded by
@@ -2008,7 +2088,20 @@ export function renderCompactRoster(peers: CompactPeer[]): string {
       p.liveness_state && p.liveness_state !== "healthy"
         ? ` [${p.liveness_state}]`
         : "";
-    return `  - SA-${p.id8}${live}${task}`;
+    // WI dcc756ec: cited records render with what they say NOW, on their own
+    // indented line so the task prose stays scannable. Nothing here is stored
+    // on the declaration - it is read from the record at render time.
+    const refs =
+      p.refs && p.refs.length > 0
+        ? "\n" +
+          p.refs
+            .map((r) => {
+              const st = r.status ? ` [${r.status}]` : "";
+              return `      -> ${r.id8}${st}: ${r.label}`;
+            })
+            .join("\n")
+        : "";
+    return `  - SA-${p.id8}${live}${task}${refs}`;
   });
   const more =
     peers.length > shown.length
@@ -2351,10 +2444,21 @@ function handleSessionStartCompact(
       const otherSubs = live.filter(
         (e) => e.role === "subordinate" && e.session_id !== sid
       );
+      // WI dcc756ec: resolve each peer's cited records HERE, in the impure
+      // shell. Two reasons this is the right seam. (1) It keeps
+      // renderCompactRoster pure and deterministically testable, matching how
+      // every other branch in this composer is structured. (2) The declaration
+      // rides on every channel notification as from_task, where its whole value
+      // is being already-there at zero cost - so the reader must never have to
+      // make a lookup call to understand a pointer. Resolution is a local read
+      // against the same project.db this handler already holds, so it costs one
+      // query per cited id at compaction time and nothing at read time.
       peers = otherSubs.map((e) => ({
         id8: e.id8,
         current_task: e.current_task ?? null,
         liveness_state: e.liveness_state ?? null,
+        refs:
+          e.refs && e.refs.length > 0 ? resolveRefs(ctx.db, e.refs) : null,
       }));
       activeSAs = otherSubs.map((e) => ({
         session_id: e.session_id,

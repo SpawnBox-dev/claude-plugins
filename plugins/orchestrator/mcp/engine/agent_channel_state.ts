@@ -105,6 +105,18 @@ export interface SessionEntry {
   /** Subsystems/files/WIs this session is warm on (auto-derived floor +
    *  self-declared override). Stored as a JSON array; absent = unknown. */
   warm_context?: string[] | null;
+  /**
+   * Work-item / note ids this session's declaration POINTS AT, rather than
+   * restates (WI dcc756ec). Stored as a JSON array of ids; absent = none.
+   *
+   * The roster resolves these to live titles and statuses at RENDER time, so
+   * nothing here duplicates the record. Measured motivation: 56 distinct ids
+   * were cited across 7 declarations on 2026-08-10, each one accompanied by a
+   * hand-written summary of the record it cited - which cost the space that
+   * collision-avoidance detail needed, and went false the moment the record
+   * changed. A cited id stays true; a copied summary rots.
+   */
+  refs?: string[] | null;
   liveness_state?: LivenessState | null;
   /** ISO-8601 of the freshest observation that set liveness_state (freshest wins). */
   liveness_ts?: string | null;
@@ -325,6 +337,7 @@ function getDb(stateDir: string): Database {
       current_task TEXT,
       kind TEXT,
       warm_context TEXT,
+      refs TEXT,
       liveness_state TEXT,
       liveness_ts TEXT,
       liveness_expires_at TEXT,
@@ -370,6 +383,7 @@ function getDb(stateDir: string): Database {
   // above only adds them to fresh DBs). Idempotent - a no-op once present.
   ensureColumns(db, "sessions", {
     warm_context: "TEXT",
+    refs: "TEXT",
     liveness_state: "TEXT",
     liveness_ts: "TEXT",
     liveness_expires_at: "TEXT",
@@ -422,6 +436,7 @@ interface SessionRow {
   current_task: string | null;
   kind: string | null;
   warm_context: string | null;
+  refs: string | null;
   liveness_state: string | null;
   liveness_ts: string | null;
   liveness_expires_at: string | null;
@@ -453,6 +468,15 @@ function rowToEntry(r: SessionRow): SessionEntry {
       if (Array.isArray(parsed)) entry.warm_context = parsed as string[];
     } catch {
       // Corrupt JSON -> treat as unknown, don't surface a bad value.
+    }
+  }
+  if (r.refs !== null) {
+    try {
+      const parsed = JSON.parse(r.refs);
+      if (Array.isArray(parsed)) entry.refs = parsed as string[];
+    } catch {
+      // Corrupt JSON -> treat as absent. A malformed pointer list must never
+      // surface as a bad value; the declaration's prose still renders.
     }
   }
   if (r.liveness_state !== null) entry.liveness_state = r.liveness_state as LivenessState;
@@ -557,7 +581,7 @@ export function readSessions(stateDir: string): SessionEntry[] {
   const rows = prep(
     db,
     `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
-            current_task, kind, warm_context, liveness_state, liveness_ts,
+            current_task, kind, warm_context, refs, liveness_state, liveness_ts,
             liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
             instance
      FROM sessions`,
@@ -624,6 +648,21 @@ export function setWarmContext(stateDir: string, session_id: string, tags: strin
   const db = getDb(stateDir);
   prep(db, `UPDATE sessions SET warm_context = ? WHERE session_id = ?`).run(
     JSON.stringify(tags),
+    session_id,
+  );
+}
+
+/**
+ * Set/replace a session's `refs` - the work-item/note ids its declaration
+ * points at (WI dcc756ec). Stored as a JSON array of ids and NOTHING else:
+ * no titles, no statuses, no summaries. Everything displayable is resolved
+ * from the record at render time, which is the whole point - a title copied
+ * to here would be stale the next time anyone edited the work item.
+ */
+export function setRefs(stateDir: string, session_id: string, refs: string[]): void {
+  const db = getDb(stateDir);
+  prep(db, `UPDATE sessions SET refs = ? WHERE session_id = ?`).run(
+    JSON.stringify(refs),
     session_id,
   );
 }
