@@ -1,0 +1,517 @@
+[
+ {
+  "target": "62f64b7c-5f3d-41df-8998-67a00abd6ccd",
+  "query": "0c7b8bc5 console noise toggle LogCategory RCON filter Console.tsx hide background noise",
+  "kind": "real"
+ },
+ {
+  "target": "b3f2fb7f-f49a-4aed-b644-e236d50e60ab",
+  "query": "consumer graph enumeration hydration rehydrate transport class registry input inventory",
+  "kind": "real"
+ },
+ {
+  "target": "a1f8d5d6-57dc-4c13-bfd7-592299be8058",
+  "query": "BE consumer graph enumeration UniversalDataBroker rich_events PlayerPresenceSnapshot analytics insight digest transport class per-consumer",
+  "kind": "real"
+ },
+ {
+  "target": "0d11b7e5-715c-4cac-ac50-95b0a40d49dc",
+  "query": "import killed mid-flight partial server folder cleanup orphan",
+  "kind": "real"
+ },
+ {
+  "target": "f3d195ac-51cd-40a7-9f9c-b2d25f816de5",
+  "query": "enumeration latch live-verify malformed Lxss BasePath fixture elevation harness",
+  "kind": "real"
+ },
+ {
+  "target": "bbd9d375-0aa3-4e43-8411-ea276170e24a",
+  "query": "daemon debug binary VM overlay fails to start forklift copy scheduled task",
+  "kind": "real"
+ },
+ {
+  "target": "5932b492-4656-4f8b-aba3-515f9928bbbd",
+  "query": "peak-smp world_composition DATAPACK_ONLY confirmed flags has_mca_datapack panel flip",
+  "kind": "real"
+ },
+ {
+  "target": "19d10cc9-532c-46c5-b100-da04cff578a9",
+  "query": "append_content does not refresh embeddings semantically invisible appended note negative void",
+  "kind": "real"
+ },
+ {
+  "target": "cd215a28-ade4-40f7-a7bb-b0838a7b7abb",
+  "query": "duration once discount card checkout Polar demands payment method",
+  "kind": "real"
+ },
+ {
+  "target": "ccb12bb6-ec5c-4431-ad30-357704996657",
+  "query": "ops-lifecycle UX fidelity audit 001e3321 untouched surfaces import modal hibernation",
+  "kind": "real"
+ },
+ {
+  "target": "36f0e1a5-ee2d-4cf6-a94a-61fae24a54de",
+  "query": "updateStore apply update install restart daemon",
+  "kind": "real"
+ },
+ {
+  "target": "a7333edc-a3fa-4ab0-8af4-3c30b6f8a484",
+  "query": "progress bar modal operation cancel resume in-flight backup restore import",
+  "kind": "real"
+ },
+ {
+  "target": "e439ce72-59b8-401f-b9ce-b559b341cc59",
+  "query": "webview_execute_js dynamic import Vite module store getState pattern Tauri MCP",
+  "kind": "real"
+ },
+ {
+  "target": "4f581d2f-7693-4606-9dd9-faf31d5bb716",
+  "query": "restore wizard SnapshotProgress lifecycle cancel dismiss reattach snapshotStore restore_v2",
+  "kind": "real"
+ },
+ {
+  "target": "3f3b1bfe-c6e8-45d7-985e-7368de0982ad",
+  "query": "on a weaker laptop the evidence gathering gives up partway and we lose the very details we needed",
+  "kind": "real"
+ },
+ {
+  "target": "88dbfe19-8afa-428c-9cc6-00aac33593a1",
+  "query": "oreo kroniienjoyer backup cancel autosave save-off safe operations report",
+  "kind": "real"
+ },
+ {
+  "target": "85b046d7-0d89-41c4-8c78-5dcf8655d7ab",
+  "query": "playerlist tab information feature request community what does playerlist show",
+  "kind": "real"
+ },
+ {
+  "target": "a90a5b81-2fa5-4e84-baf0-a13eccaaeecd",
+  "query": "reconcile_coherent_main_sha DRI watermark discord triage HWM",
+  "kind": "real"
+ },
+ {
+  "target": "ba94cc23-d1db-4894-91a5-2c95c64a33c6",
+  "query": "Evan release notes 404 in-app link non-release builds discord_sourced",
+  "kind": "real"
+ },
+ {
+  "target": "cd851351-834a-4870-a89c-fbf8819a7477",
+  "query": "telemetry raw error string redaction PII paths hostname shared redactor",
+  "kind": "real"
+ },
+ {
+  "target": "4cbc023b-2576-4a55-83f4-47635f4a5a3c",
+  "query": "orchestrator plugin improvement backlog warden channel routing gap",
+  "kind": "real"
+ },
+ {
+  "target": "ea5bee61-7263-4160-b67e-f3bbb274af3b",
+  "query": "briefing startup slow timeout performance orient",
+  "kind": "real"
+ },
+ {
+  "target": "8f9a3f18-b161-4909-977a-b30c57f61f46",
+  "query": "auto-link links graph keyword overlap noise neighborhood",
+  "kind": "real"
+ },
+ {
+  "target": "ed316fcd-87db-428a-9426-28d681c69ac7",
+  "query": "8522c487 flap departed reap hysteresis session registry",
+  "kind": "real"
+ },
+ {
+  "target": "7b9ccdba-e329-4722-95ae-87b4298b5be6",
+  "query": "confidence label propagates to peer session overstated lead correlation hypothesis routing another agent's work",
+  "kind": "real"
+ },
+ {
+  "target": "2335f3fd-7370-4eea-ae4d-f2e8fce439e1",
+  "query": "Gated Service primitive ProceedAnywayDecision durable gate user resolves proceed-anyway 965ac069",
+  "kind": "real"
+ },
+ {
+  "target": "f3e6a488-f224-4919-a430-83e4c0280aa4",
+  "query": "backup service daemon tick state gotcha per_server_status backup_in_flight quiesce",
+  "kind": "real"
+ },
+ {
+  "target": "ae170796-a8c5-4f63-8047-e4d9bc357ac2",
+  "query": "daemon-status-update push not reaching frontend daemonStore ingest backend monitor",
+  "kind": "real"
+ },
+ {
+  "target": "38ce2eb6-7df6-4abe-bf11-8977c12083f8",
+  "query": "notification surfacing standard spec altitude table sinks coalescing",
+  "kind": "real"
+ },
+ {
+  "target": "60f842aa-e809-4d98-9f86-6eb7ac554835",
+  "query": "resizable movable dashboard panels layout customize rearrange resize cards",
+  "kind": "real"
+ },
+ {
+  "target": "db57bda8-2017-4d18-862b-5f1056563ef5",
+  "query": "TAB overlay default plugin server show RAM memory usage per-player ping resource yakuzer feature request",
+  "kind": "real"
+ },
+ {
+  "target": "5cccae88-3bb6-40de-b87c-e2e4483d5766",
+  "query": "creator influencer youtuber outreach marketing program partnership",
+  "kind": "real"
+ },
+ {
+  "target": "62582532-3f29-476e-8784-0dd08d66adfe",
+  "query": "referral code affiliate program attribution utm download_redirect",
+  "kind": "real"
+ },
+ {
+  "target": "e9adfdb5-2ec1-4c91-bf3f-dc693797524a",
+  "query": "growth strategy goal awareness vs revenue priority post-GA marketing what matters now",
+  "kind": "real"
+ },
+ {
+  "target": "d4551896-3550-4e8c-9824-c5c0b6edd2e5",
+  "query": "creator program modrinth curseforge hosting authors data entitlements codes",
+  "kind": "real"
+ },
+ {
+  "target": "5cccae88-3bb6-40de-b87c-e2e4483d5766",
+  "query": "creator influencer outreach youtube channels target list marketing",
+  "kind": "real"
+ },
+ {
+  "target": "42759ab3-d304-4945-bb83-af3017eb3313",
+  "query": "bot reply behavior quiet by default engagement responds to every message feature request",
+  "kind": "real"
+ },
+ {
+  "target": "42759ab3-d304-4945-bb83-af3017eb3313",
+  "query": "Docker Desktop close install wizard coexistence container conflict first-run",
+  "kind": "real"
+ },
+ {
+  "target": "9110483d-b755-43b6-9676-0cc6ede7482d",
+  "query": "icacls protected_dirs localization Administrators SID hardening update directory",
+  "kind": "real"
+ },
+ {
+  "target": "6a01af9d-e605-4f77-9f24-80d78f8de63e",
+  "query": "WSL reboot on upgrade servicing version update daemon shutdown save world reboot batching",
+  "kind": "real"
+ },
+ {
+  "target": "1bc0a65b-9a7b-4ae6-ae55-34701be6650a",
+  "query": "ops-lifecycle standard P3 phase 3 scope daemon terminal retention tray Recent section backup hibernation conformance spawn_op wrapper OpHandle convergence phantom-drop op-model result field reboot generic-ack",
+  "kind": "real"
+ },
+ {
+  "target": "19430cdf-a250-43d1-afea-b7defb1eaa6e",
+  "query": "history.emptySuccessLatch player-v2 vitest test failing pre-existing known-broken scoreboard history.ts empty-success latch b95f035f",
+  "kind": "real"
+ },
+ {
+  "target": "84ed7702-9b9e-4240-8e49-b174ee3549c8",
+  "query": "OneDrive .git sync exclude hazard clobber",
+  "kind": "real"
+ },
+ {
+  "target": "45f23324-f9c3-4597-88d1-b90844acccb5",
+  "query": "2737286 ALBERTA INC incorporation address registered office",
+  "kind": "real"
+ },
+ {
+  "target": "07d21d3a-8831-489e-8c7d-04206b4bc770",
+  "query": "ownr incorporation RBC certificate articles",
+  "kind": "real"
+ },
+ {
+  "target": "6a01af9d-e605-4f77-9f24-80d78f8de63e",
+  "query": "fable audit punch list epic prioritized findings daemon backend frontend",
+  "kind": "real"
+ },
+ {
+  "target": "6d273149-466e-4709-8b99-ad8edc7455b5",
+  "query": "fire-and-forget long-running operations survive modal close reattach progress backup import",
+  "kind": "real"
+ },
+ {
+  "target": "2f2dc67f-6d6f-4f52-9bca-bf156d3151a8",
+  "query": "orphaned in-flight operation modal closes wizard import resume detection already running duplicate attempt UX epic",
+  "kind": "real"
+ },
+ {
+  "target": "d578e904-867a-4d5f-89cf-649052376e10",
+  "query": "lifeboat run script backup export standalone sos.exe emergency terminal repair",
+  "kind": "real"
+ },
+ {
+  "target": "8b2eb119-74d4-4cdc-b7e9-c23ccccd5968",
+  "query": "test bot player join connected players session telemetry starts flowing",
+  "kind": "real"
+ },
+ {
+  "target": "29374a58-b32a-455b-8f84-3383bd8c56d2",
+  "query": "google ads campaign keywords CPC bids",
+  "kind": "real"
+ },
+ {
+  "target": "a2fbfdbc-d480-4d73-b24a-595404a442eb",
+  "query": "d1b35a7b diagnostic response verification tested pilot",
+  "kind": "real"
+ },
+ {
+  "target": "c6d34be8-b1bf-43c4-ac7b-af99e6ec21df",
+  "query": "unified poller telemetry mode fallback capability downgrade demote sticky",
+  "kind": "real"
+ },
+ {
+  "target": "21d753e5-8183-4cdb-9698-d6dfd53198ae",
+  "query": "datapack 1.19 1.20.3 variant backport zip build functions directory bundled",
+  "kind": "real"
+ },
+ {
+  "target": "baee6beb-afb5-45ec-820c-387071845191",
+  "query": "punchlist punch 13 lane B status suspended",
+  "kind": "real"
+ },
+ {
+  "target": "cf71d67b-4454-4674-b9ca-8e96c9d09a94",
+  "query": "seq collision datapack gametime seed a1f8d5d6",
+  "kind": "real"
+ },
+ {
+  "target": "af692fb1-6b3a-4f5d-b660-32f9d09406f0",
+  "query": "datapack tellraw say function output console line no leading timestamp bracket parser classify species-1 species-2 quieted noise event class checklist MCA",
+  "kind": "real"
+ },
+ {
+  "target": "62f64b7c-5f3d-41df-8998-67a00abd6ccd",
+  "query": "hydration arc M1 M2 M3 registry auto-hydrate history mode-change",
+  "kind": "real"
+ },
+ {
+  "target": "5bfb7c67-81b6-4e08-93ea-f2b662c55cf2",
+  "query": "RCON paper bug payload truncate multipage fragment rate limit throttle",
+  "kind": "real"
+ },
+ {
+  "target": "13fb9d62-0720-4cea-a7fd-5df1bfb2e190",
+  "query": "validation matrix RUN 1",
+  "kind": "real"
+ },
+ {
+  "target": "093ab8df-ab1f-43a7-ba8e-1d800da42887",
+  "query": "fallback rig pre-1.19 F2 F3 F5 deferred cells purpose-built",
+  "kind": "real"
+ },
+ {
+  "target": "af692fb1-6b3a-4f5d-b660-32f9d09406f0",
+  "query": "1.2.0 semver family diagnosis-response ship version next release naming",
+  "kind": "real"
+ },
+ {
+  "target": "1ca12f70-0faa-4490-bf42-fd278ccdb7a8",
+  "query": "console formatting rich events chat advancements unformatted console noise plugin events leak",
+  "kind": "real"
+ },
+ {
+  "target": "670075e2-e3f5-45db-8fef-5ee47262839d",
+  "query": "video creation webapp agent-driven workflow service record demo videos programmatic",
+  "kind": "real"
+ },
+ {
+  "target": "c8759e72-3518-4eaf-ac7d-d6924994dc81",
+  "query": "DiagnosticPackageDialog diagnostics dialog prefill reattach",
+  "kind": "real"
+ },
+ {
+  "target": "ed767e75-e143-45bd-8729-577712ad929a",
+  "query": "uiPreferencesStore persist partialize preferences convention",
+  "kind": "real"
+ },
+ {
+  "target": "e3e7b391-e6de-494f-a6dc-4396f29ab924",
+  "query": "Google Ads campaign copy headlines policy free desktop software",
+  "kind": "real"
+ },
+ {
+  "target": "95c3ea4f-5dd7-4d9a-9add-4f7ca173b04f",
+  "query": "google ads budget spend daily cap kill criteria stop campaign cost per click evaluation",
+  "kind": "real"
+ },
+ {
+  "target": "6b72682f-79ad-4fd0-8cf6-c502a795d0cb",
+  "query": "never navigate existing tab open new tab Jarid working state",
+  "kind": "real"
+ },
+ {
+  "target": "d351ddf2-ea79-4795-b458-df0c01338d28",
+  "query": "google ads conversion tracking offline conversion import gclid attribution plan",
+  "kind": "real"
+ },
+ {
+  "target": "a99219a2-fb37-4e57-9e3e-5912a70b81fb",
+  "query": "Claude-Session trailer commit body attribute which session authored a commit shared author name",
+  "kind": "real"
+ },
+ {
+  "target": "0616d6d5-6ffb-4b41-9216-cd1985a44b74",
+  "query": "diagnostic package upload retention window user-facing copy how long we keep data privacy statement",
+  "kind": "real"
+ },
+ {
+  "target": "acb0171e-bcc0-4d91-bfee-16948b0e24e8",
+  "query": "punch 13 telemetry investigate tab Lane B status",
+  "kind": "real"
+ },
+ {
+  "target": "8ff08b4e-832b-421d-bf30-a5d41e7b81b7",
+  "query": "bindings.ts regeneration mechanism tauri specta debug runtime",
+  "kind": "real"
+ },
+ {
+  "target": "13fb9d62-0720-4cea-a7fd-5df1bfb2e190",
+  "query": "session departed egress suspect false alarm heartbeat reload-plugins mcp re-init transcript still growing",
+  "kind": "real"
+ },
+ {
+  "target": "cf71d67b-4454-4674-b9ca-8e96c9d09a94",
+  "query": "panel-intercept ad group Crafty Pterodactyl AMP CubeCoders self-host panel facts positioning",
+  "kind": "real"
+ },
+ {
+  "target": "62f64b7c-5f3d-41df-8998-67a00abd6ccd",
+  "query": "hydration M2 mode-change work item M2-C",
+  "kind": "real"
+ },
+ {
+  "target": "8fa2aa46-0eac-47af-a686-1495611687fc",
+  "query": "SessionTimeline hydration \u00a78 consumer matrix session-close events dropped while hidden catchup backfill",
+  "kind": "real"
+ },
+ {
+  "target": "fb6e4311-faa4-4d93-93da-c2c526ea8db6",
+  "query": "M3 parked polish per-row basic badge all-dashes zero-telemetry cells join-during-names-only scoreboard c71a6a90",
+  "kind": "real"
+ },
+ {
+  "target": "411736e0-4116-483b-bd81-67505e6366e1",
+  "query": "GST HST sales tax VAT merchant of record Polar remittance",
+  "kind": "real"
+ },
+ {
+  "target": "13cc28bf-29d3-4c38-a130-354b5053cc51",
+  "query": "ownr minute book incorporation registry RBC bank account company expenses subscriptions",
+  "kind": "real"
+ },
+ {
+  "target": "a7b1bf67-a3f5-44a2-9a2a-6b83d97584cf",
+  "query": "bundled_assets manual assets telemetry MCA detection prior art",
+  "kind": "real"
+ },
+ {
+  "target": "c5b25355-6a4a-4757-afdd-fe9a0f575a17",
+  "query": "ops-test-skill-contribution",
+  "kind": "real"
+ },
+ {
+  "target": "83132b62-84e4-412e-8dc8-c05348a6cc26",
+  "query": "desired-state POST backend-home op OpHandle::desired set_desired_state registry cancel signal",
+  "kind": "real"
+ },
+ {
+  "target": "4861e6bb-5e06-4e74-baa6-2687b16af729",
+  "query": "wsl keepalive policy redesign anti-wake gate cold-start wake-cascade shutdown-when-idle history 2026-04-28",
+  "kind": "real"
+ },
+ {
+  "target": "d287de8f-1c45-4c3c-925b-158f65eafc0f",
+  "query": "evan release notes preview channel non-release channel what's new link reported discord",
+  "kind": "real"
+ },
+ {
+  "target": "f5048dd6-80a9-43c8-bedc-037714bbd353",
+  "query": "RAM slider bound half memory wizard host memory cap",
+  "kind": "real"
+ },
+ {
+  "target": "677d7a46-8246-4222-90e3-4373f7a6ac03",
+  "query": "modpack slug mrpack client instance file player connection package",
+  "kind": "real"
+ },
+ {
+  "target": "1bbf6905-ae6d-43f5-987a-1f58d8fde3fc",
+  "query": "task killed status background bash harness stopped root cause",
+  "kind": "real"
+ },
+ {
+  "target": "721def70-2d44-4e84-857c-32af2bd44a4c",
+  "query": "revert or build telemetry identity",
+  "kind": "real"
+ },
+ {
+  "target": "42811501-b809-4d6c-9303-a9fd3a04113c",
+  "query": "security code fallback Fable Opus heuristics",
+  "kind": "real"
+ },
+ {
+  "target": "29374a58-b32a-455b-8f84-3383bd8c56d2",
+  "query": "Google Ads campaign strategy conversion tracking bidding keywords search-test-1 webhost intercept",
+  "kind": "real"
+ },
+ {
+  "target": "bbd9d375-0aa3-4e43-8411-ea276170e24a",
+  "query": "background build killed stopped tauri build long running task terminated cargo",
+  "kind": "real"
+ },
+ {
+  "target": "b024688e-b4a1-4e97-a859-33c699dbf53f",
+  "query": "tag drift reconcile forum bug reports feature requests shipped status Discord backlog",
+  "kind": "real"
+ },
+ {
+  "target": "f8a55926-463e-4eb0-9ce5-7779da9f565e",
+  "query": "OpsTray ruling 12.1 suppressed automatic successes Show-all history keeps icon visible",
+  "kind": "real"
+ },
+ {
+  "target": "5cccae88-3bb6-40de-b87c-e2e4483d5766",
+  "query": "Modrinth mod author creator marketing partnership affiliate referral community outreach",
+  "kind": "real"
+ },
+ {
+  "target": "d0a267a1-e124-422a-90a8-c954c5246831",
+  "query": "3bb30aab wsl_should_be_alive seven readers keepalive publishes infra_setup_pending pins",
+  "kind": "real"
+ },
+ {
+  "target": "04c74171-12c8-4180-a871-ef82bcfa92b6",
+  "query": "Starlink CGNAT port forward tunnel connectivity server reachable",
+  "kind": "real"
+ },
+ {
+  "target": "4910ef2a-a331-4efa-b127-0c0fc35133fb",
+  "query": "knowledge captured but never found discoverability capture is not the constraint agents do not read the KB",
+  "kind": "real"
+ },
+ {
+  "target": "8f393462-e984-4fc5-b006-b118461fa4f9",
+  "query": "check measures wrong property vantage point verification measured one thing concluded another",
+  "kind": "real"
+ },
+ {
+  "target": "ce4b8d34-2c34-4797-a7dc-2302bcb50f38",
+  "query": "implemented but not perceived shipped feature never reaches the screen",
+  "kind": "real"
+ },
+ {
+  "target": "f8a55926-463e-4eb0-9ce5-7779da9f565e",
+  "query": "af692fb1 Paper Purpur realtime data dead zone plugin probe retry LegacyFallback",
+  "kind": "real"
+ },
+ {
+  "target": "7dca13f7-6ffb-4ffa-a47e-bac9d3e7ab68",
+  "query": "discord-bot-bootstrap checkpoint catch-up sweep asianrizz",
+  "kind": "real"
+ }
+]

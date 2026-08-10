@@ -485,7 +485,16 @@ export async function findRelatedNotesHybrid(
   // Deliberately SMALL: reserve at most 2 of `limit`, and only for notes that
   // pass the same superseded / code_ref filters as any other result. Keyword
   // still owns the majority of every result set.
-  const SEMANTIC_RESERVED = Math.min(2, Math.max(0, limit - 1));
+  // ORCHESTRATOR_SEMANTIC_RESERVE exists so the reserve size can be SWEPT by
+  // the eval harness without editing this file between arms. Unset in normal
+  // operation, where the default of 2 applies. Measured 2026-08-10: the vector
+  // leg alone beats the full pipeline on BOTH probe sets (span 80.2 vs 78.1,
+  // para-v2 77.6 vs 67.2), so how much semantic result survives fusion is an
+  // open tuning question rather than a settled constant.
+  const reserveOverride = Number(process.env.ORCHESTRATOR_SEMANTIC_RESERVE);
+  const reserveTarget =
+    Number.isFinite(reserveOverride) && reserveOverride > 0 ? reserveOverride : 2;
+  const SEMANTIC_RESERVED = Math.min(reserveTarget, Math.max(0, limit - 1));
   let injected = 0; // reserved slots already filled - never displace these
   if (SEMANTIC_RESERVED > 0 && vecScores.length > 0) {
     for (const cand of vecScores.slice(0, SEMANTIC_RESERVED)) {
