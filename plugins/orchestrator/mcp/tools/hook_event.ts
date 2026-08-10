@@ -1079,6 +1079,60 @@ export function shouldRenderRoster(opts: {
   return elapsed >= (opts.refreshTurns ?? ROSTER_REFRESH_TURNS);
 }
 
+/**
+ * Mark WHICH entries changed since this reader last saw the roster.
+ *
+ * Block-level suppression (below) already answers "did anything change?" - the
+ * block simply does not render when nothing did, which is a stronger signal
+ * than a flag because it costs zero tokens. What it could not answer is WHICH
+ * line changed, and that is the half with documented consequences: note
+ * 60f2fdc2 records PA reading an advisory ~30 times and concluding "by turn ten
+ * I stopped reading it. If it had ever changed to name a DIFFERENT item, I'd
+ * probably have missed it." A re-rendered 8-line roster has exactly that shape -
+ * the reader knows something moved but must diff 8 lines by eye to find it.
+ *
+ * A peer's line is hashed together with its resolved ref sub-lines, so a cited
+ * work item changing status marks the PEER whose declaration cites it. That is
+ * the behaviour worth having: the reader cares that this lane's picture moved,
+ * not which internal field produced the difference.
+ *
+ * Entries with no prior hash are NOT marked. A newly-joined session, or the
+ * first render after a compaction, would otherwise light up every line as
+ * "changed" and mean nothing - the marker has to be scarce to be worth reading.
+ */
+export function markChangedRosterLines(
+  current: string,
+  prior: Record<string, string>
+): { text: string; hashes: Record<string, string>; changed: number } {
+  const lines = current.split("\n");
+  const hashes: Record<string, string> = {};
+  // Group each peer line with the ref sub-lines that belong to it.
+  const groups: Array<{ start: number; id: string; body: string[] }> = [];
+  lines.forEach((ln, i) => {
+    // Key on the session id ONLY - stop at whitespace or the colon. A greedy
+    // \S+ swallows the trailing ":" when the line has no "(kind)" suffix and no
+    // overlap marker, so the same peer would key differently depending on
+    // whether its kind was known that turn, and a kind appearing or vanishing
+    // would read as a brand-new entry (silently unmarked) rather than a change.
+    const m = ln.match(/^ {2}- ([^\s:]+)/);
+    if (m) groups.push({ start: i, id: m[1], body: [ln] });
+    else if (groups.length > 0 && /^ {6}-> /.test(ln)) groups[groups.length - 1].body.push(ln);
+  });
+  let changed = 0;
+  for (const g of groups) {
+    const h = rosterFingerprint(g.body.join("\n"));
+    hashes[g.id] = h;
+    const before = prior[g.id];
+    if (before !== undefined && before !== h) {
+      changed++;
+      // Replace the leading "  - " with "  * " so the changed lane is findable
+      // at a glance without re-reading the block.
+      lines[g.start] = lines[g.start].replace(/^ {2}- /, "  * ");
+    }
+  }
+  return { text: lines.join("\n"), hashes, changed };
+}
+
 /** Impure shell: read/write the last-shown marker. */
 function dedupeSiblingRoster(
   ctx: HookCtx,
@@ -1094,22 +1148,52 @@ function dedupeSiblingRoster(
 
   let lastFingerprint: string | null = null;
   let lastTurn: number | null = null;
+  let priorLines: Record<string, string> = {};
   if (row?.value) {
-    const [t, fp] = row.value.split("|");
+    const [t, fp, lines] = row.value.split("|");
     const parsed = Number(t);
     lastTurn = Number.isFinite(parsed) ? parsed : null;
     lastFingerprint = fp ?? null;
+    // Third segment added in 0.62.0; a value written by an older version has
+    // only two, and simply yields no marks on the first render after upgrade.
+    if (lines) {
+      try {
+        const p = JSON.parse(lines);
+        if (p && typeof p === "object") priorLines = p as Record<string, string>;
+      } catch {
+        /* corrupt -> no marks, never a crash */
+      }
+    }
   }
 
+  // DECIDE on the UNMARKED text, and store the UNMARKED fingerprint. If the
+  // change markers fed back into the fingerprint, adding or clearing a marker
+  // would itself count as a change and re-render the block - a feedback loop
+  // that matters here because this renders 5-15 times per turn for the prime
+  // (UserPromptSubmit fires per inbound channel delivery, per note 60f2fdc2).
   if (!shouldRenderRoster({ current, lastFingerprint, lastTurn, turn })) {
     return "";
   }
 
+  const marked = markChangedRosterLines(current, priorLines);
+
+  // Persist ONLY on the path that actually returns the block. Updating the
+  // hashes on a suppressed render would consume the change silently: the
+  // reader never saw the line, but the next render would compare against the
+  // unseen version and show no marker. The change would be lost precisely
+  // because nobody read it.
   ctx.db.run(
     `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
-    [key, `${turn}|${rosterFingerprint(current)}`, now()]
+    [
+      key,
+      `${turn}|${rosterFingerprint(current)}|${JSON.stringify(marked.hashes)}`,
+      now(),
+    ]
   );
-  return current;
+
+  return marked.changed > 0
+    ? `${marked.text}\n  (* = changed since you last saw this roster)`
+    : marked.text;
 }
 
 function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {

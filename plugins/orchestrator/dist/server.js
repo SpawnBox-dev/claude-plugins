@@ -24787,6 +24787,32 @@ function shouldRenderRoster(opts) {
     return true;
   return elapsed >= (opts.refreshTurns ?? ROSTER_REFRESH_TURNS);
 }
+function markChangedRosterLines(current, prior) {
+  const lines = current.split(`
+`);
+  const hashes = {};
+  const groups = [];
+  lines.forEach((ln, i) => {
+    const m = ln.match(/^ {2}- ([^\s:]+)/);
+    if (m)
+      groups.push({ start: i, id: m[1], body: [ln] });
+    else if (groups.length > 0 && /^ {6}-> /.test(ln))
+      groups[groups.length - 1].body.push(ln);
+  });
+  let changed = 0;
+  for (const g of groups) {
+    const h = rosterFingerprint(g.body.join(`
+`));
+    hashes[g.id] = h;
+    const before = prior[g.id];
+    if (before !== undefined && before !== h) {
+      changed++;
+      lines[g.start] = lines[g.start].replace(/^ {2}- /, "  * ");
+    }
+  }
+  return { text: lines.join(`
+`), hashes, changed };
+}
 function dedupeSiblingRoster(ctx, sessionId, turn, current) {
   if (!current)
     return "";
@@ -24794,17 +24820,31 @@ function dedupeSiblingRoster(ctx, sessionId, turn, current) {
   const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
   let lastFingerprint = null;
   let lastTurn = null;
+  let priorLines = {};
   if (row?.value) {
-    const [t, fp] = row.value.split("|");
+    const [t, fp, lines] = row.value.split("|");
     const parsed = Number(t);
     lastTurn = Number.isFinite(parsed) ? parsed : null;
     lastFingerprint = fp ?? null;
+    if (lines) {
+      try {
+        const p = JSON.parse(lines);
+        if (p && typeof p === "object")
+          priorLines = p;
+      } catch {}
+    }
   }
   if (!shouldRenderRoster({ current, lastFingerprint, lastTurn, turn })) {
     return "";
   }
-  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, `${turn}|${rosterFingerprint(current)}`, now()]);
-  return current;
+  const marked = markChangedRosterLines(current, priorLines);
+  ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [
+    key,
+    `${turn}|${rosterFingerprint(current)}|${JSON.stringify(marked.hashes)}`,
+    now()
+  ]);
+  return marked.changed > 0 ? `${marked.text}
+  (* = changed since you last saw this roster)` : marked.text;
 }
 function handlePreToolUse(ctx, args) {
   const filePath = args.payload?.file_path ?? null;
