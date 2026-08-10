@@ -235,11 +235,21 @@ export class SessionTracker {
     };
   }
 
-  /** Update the current_task for a session. */
+  /**
+   * Update the current_task for a session.
+   *
+   * WI 7844a909: `current_task_at` is stamped separately from `last_active_at`.
+   * They were previously written together, which made "how old is this
+   * DECLARATION" unanswerable - ordinary activity kept bumping the only
+   * timestamp, so a two-day-stale task looked as fresh as one set a minute ago.
+   * The staleness nudge in handleStop reads this column; without it the only
+   * option is nagging every turn, which does not work.
+   */
   updateCurrentTask(sessionId: string, task: string): void {
+    const ts = now();
     this.db.run(
-      `UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`,
-      [task, now(), sessionId]
+      `UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`,
+      [task, ts, ts, sessionId]
     );
   }
 

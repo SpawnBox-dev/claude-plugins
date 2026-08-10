@@ -19978,6 +19978,19 @@ CREATE TABLE IF NOT EXISTS note_chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
 `
+  },
+  {
+    version: 23,
+    name: "add_current_task_at",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(session_registry)").all();
+      if (cols.length === 0)
+        return;
+      if (!cols.some((c) => c.name === "current_task_at")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN current_task_at TEXT");
+      }
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -24171,7 +24184,8 @@ class SessionTracker {
     };
   }
   updateCurrentTask(sessionId, task) {
-    this.db.run(`UPDATE session_registry SET current_task = ?, last_active_at = ? WHERE session_id = ?`, [task, now(), sessionId]);
+    const ts = now();
+    this.db.run(`UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`, [task, ts, ts, sessionId]);
   }
   getActiveSiblings(sessionId) {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -24899,6 +24913,32 @@ function findNotesDescribingEditedFiles(db, editedFiles, max = 4) {
   }
   return out;
 }
+var STALE_TASK_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+function describeStaleTaskDeclaration(ctx, sessionId) {
+  const sid = sanitizeSessionId(sessionId);
+  if (!sid)
+    return "";
+  try {
+    const row = ctx.db.query(`SELECT current_task, current_task_at, last_active_at
+           FROM session_registry WHERE session_id = ?`).get(sid);
+    if (!row?.current_task || !row.current_task.trim())
+      return "";
+    if (!row.current_task_at)
+      return "";
+    const declaredMs = Date.parse(row.current_task_at);
+    if (!Number.isFinite(declaredMs))
+      return "";
+    const ageMs = Date.now() - declaredMs;
+    if (ageMs < STALE_TASK_THRESHOLD_MS)
+      return "";
+    const hours = Math.floor(ageMs / (60 * 60 * 1000));
+    const age = hours >= 24 ? `${Math.floor(hours / 24)}d` : `${hours}h`;
+    const snippet = row.current_task.trim().slice(0, 60);
+    return `**Your declared task is ${age} old** - \`update_session_task\`. ` + `It currently reads: "${snippet}${row.current_task.trim().length > 60 ? "..." : ""}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture.`;
+  } catch {
+    return "";
+  }
+}
 function composeEditedFileCuration(ctx, sessionId) {
   const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
   const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
@@ -25082,7 +25122,8 @@ function renderCompactRoster(peers) {
   const shown = peers.slice(0, COMPACT_ROSTER_MAX_PEERS);
   const lines = shown.map((p) => {
     const task = p.current_task && p.current_task.trim() ? `: ${p.current_task.slice(0, COMPACT_ROSTER_TASK_CAP)}` : ": (no task set)";
-    return `  - SA-${p.id8}${task}`;
+    const live = p.liveness_state && p.liveness_state !== "healthy" ? ` [${p.liveness_state}]` : "";
+    return `  - SA-${p.id8}${live}${task}`;
   });
   const more = peers.length > shown.length ? `
   ...and ${peers.length - shown.length} more.` : "";
@@ -25199,7 +25240,8 @@ function handleSessionStartCompact(ctx, args) {
       const otherSubs = live.filter((e) => e.role === "subordinate" && e.session_id !== sid);
       peers = otherSubs.map((e) => ({
         id8: e.id8,
-        current_task: e.current_task ?? null
+        current_task: e.current_task ?? null,
+        liveness_state: e.liveness_state ?? null
       }));
       activeSAs = otherSubs.map((e) => ({
         session_id: e.session_id,
@@ -25278,6 +25320,11 @@ function handleStop(ctx, args) {
     parts.push(`**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:
 ${list}${more}
   -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`);
+    n++;
+  }
+  const staleTask = describeStaleTaskDeclaration(ctx, args.session_id);
+  if (staleTask) {
+    parts.push(`**${n}. ${staleTask}`);
     n++;
   }
   const editedCuration = composeEditedFileCuration(ctx, args.session_id);

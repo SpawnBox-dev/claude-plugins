@@ -1355,6 +1355,63 @@ export function findNotesDescribingEditedFiles(
 }
 
 /** Impure shell: read this session's edited-file list and pair it up. */
+/**
+ * How old a session's DECLARED task may get before the Stop housekeeping asks
+ * about it (WI 7844a909).
+ *
+ * Deliberately hours, not minutes. This nudge only earns its place by being
+ * RARE: a session that re-declares when it switches lanes will never see it,
+ * so when it does appear the reader has no grounds to dismiss it as
+ * not-my-situation - the failure mode that turns an always-on nudge into
+ * chrome (anti_pattern 60f2fdc2). Four hours is roughly a working block; the
+ * drift that actually hurt was measured in DAYS.
+ */
+const STALE_TASK_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * Returns a nudge when this session's declared task is materially older than
+ * its activity, or "" when it is fresh / unknown / never set.
+ *
+ * Silent when there is no declaration at all: "you have never set a task" is a
+ * different ask, already covered by the briefing, and firing both would double
+ * up on a brand-new session that has not done anything yet.
+ */
+export function describeStaleTaskDeclaration(ctx: HookCtx, sessionId: string): string {
+  const sid = sanitizeSessionId(sessionId);
+  if (!sid) return "";
+  try {
+    const row = ctx.db
+      .query(
+        `SELECT current_task, current_task_at, last_active_at
+           FROM session_registry WHERE session_id = ?`
+      )
+      .get(sid) as
+      | { current_task: string | null; current_task_at: string | null; last_active_at: string | null }
+      | null;
+    if (!row?.current_task || !row.current_task.trim()) return "";
+    // Never declared under the new schema (migration 102 backfills nothing on
+    // purpose - a NULL here means "set before we tracked this", which we cannot
+    // date and must not guess at).
+    if (!row.current_task_at) return "";
+    const declaredMs = Date.parse(row.current_task_at);
+    if (!Number.isFinite(declaredMs)) return "";
+    const ageMs = Date.now() - declaredMs;
+    if (ageMs < STALE_TASK_THRESHOLD_MS) return "";
+    const hours = Math.floor(ageMs / (60 * 60 * 1000));
+    const age = hours >= 24 ? `${Math.floor(hours / 24)}d` : `${hours}h`;
+    const snippet = row.current_task.trim().slice(0, 60);
+    return (
+      `**Your declared task is ${age} old** - \`update_session_task\`. ` +
+      `It currently reads: "${snippet}${row.current_task.trim().length > 60 ? "..." : ""}". ` +
+      `This is not bookkeeping: it is what peers see in their roster, what rides on every ` +
+      `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` +
+      `sends the whole fleet, and your own future self, the wrong picture.`
+    );
+  } catch {
+    return "";
+  }
+}
+
 function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
   const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
   const row = ctx.db
@@ -1736,6 +1793,10 @@ const SESSIONSTART_TOTAL_CAP = 7000;
 export interface CompactPeer {
   id8: string;
   current_task: string | null;
+  /** WI e3a58e10: reachability, so PA can honour its own rule that a
+   *  repurposing candidate "must be reachable, not just idle-looking".
+   *  Null = healthy/unknown and renders nothing. */
+  liveness_state?: string | null;
 }
 
 // WI 2ad3240e roster caps. The whole systemMessage is still bounded by
@@ -1751,7 +1812,7 @@ const COMPACT_ROSTER_TASK_CAP = 70;
  * explicit "(no task set)" - never the literal "null"/"undefined" (the
  * post-compact composer's no-checkpoint test guards against those leaking).
  */
-function renderCompactRoster(peers: CompactPeer[]): string {
+export function renderCompactRoster(peers: CompactPeer[]): string {
   if (!peers || peers.length === 0) return "";
   const shown = peers.slice(0, COMPACT_ROSTER_MAX_PEERS);
   const lines = shown.map((p) => {
@@ -1759,7 +1820,15 @@ function renderCompactRoster(peers: CompactPeer[]): string {
       p.current_task && p.current_task.trim()
         ? `: ${p.current_task.slice(0, COMPACT_ROSTER_TASK_CAP)}`
         : ": (no task set)";
-    return `  - SA-${p.id8}${task}`;
+    // WI e3a58e10: only SUSPECT states are rendered. "healthy" is the
+    // overwhelming majority and printing it on every line would be noise that
+    // trains the reader to skip the column - which is precisely when the one
+    // line that matters gets missed. Absence means reachable.
+    const live =
+      p.liveness_state && p.liveness_state !== "healthy"
+        ? ` [${p.liveness_state}]`
+        : "";
+    return `  - SA-${p.id8}${live}${task}`;
   });
   const more =
     peers.length > shown.length
@@ -2105,6 +2174,7 @@ function handleSessionStartCompact(
       peers = otherSubs.map((e) => ({
         id8: e.id8,
         current_task: e.current_task ?? null,
+        liveness_state: e.liveness_state ?? null,
       }));
       activeSAs = otherSubs.map((e) => ({
         session_id: e.session_id,
@@ -2236,6 +2306,27 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     parts.push(
       `**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:\n${list}${more}\n  -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`
     );
+    n++;
+  }
+
+  // WI 7844a909: STALE-DECLARATION nudge, and it is deliberately the only item
+  // here that is CONDITIONAL ON MEASURED STATE rather than always present.
+  //
+  // The problem it fixes: current_task is a voluntary write competing with the
+  // work, and the cost of skipping it lands on someone ELSE later - a peer
+  // reading the roster, or this session's own post-compaction self. PA's task
+  // went TWO DAYS stale (describing 0.44.x while the fleet ran 0.56.0) under a
+  // regime that already nudges every single turn. So volume is not the lever.
+  //
+  // Firing only when the declaration is actually old is what keeps it from
+  // becoming chrome (anti_pattern 60f2fdc2): a reader who sees this knows it is
+  // true of them right now, which is exactly the property the always-on nudges
+  // lack. Reads current_task_at (migration 102), which is stamped ONLY by
+  // update_session_task - last_active_at cannot serve, because ordinary
+  // activity bumps it and a two-day-old declaration looks fresh through it.
+  const staleTask = describeStaleTaskDeclaration(ctx, args.session_id);
+  if (staleTask) {
+    parts.push(`**${n}. ${staleTask}`);
     n++;
   }
 

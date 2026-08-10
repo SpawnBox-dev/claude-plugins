@@ -410,6 +410,34 @@ CREATE TABLE IF NOT EXISTS note_chunks (
 CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
 `,
   },
+  {
+    version: 23,
+    name: "add_current_task_at",
+    sql: `SELECT 1;`,
+    // WI 7844a909. `last_active_at` is bumped by ordinary activity, so it
+    // cannot answer "how old is this session's DECLARED TASK" - the two were
+    // written together and became indistinguishable. Without that, a
+    // staleness-triggered nudge is impossible and the only alternative is
+    // nagging every turn, which measurably does not work (the plugin already
+    // nudges each turn and PA's own task still went TWO DAYS stale describing
+    // 0.44.x work while the fleet ran 0.56.0).
+    //
+    // Additive + guarded, matching the last_briefing_at precedent above.
+    customApply: (db) => {
+      // Tolerate the table being absent. Partial-DB fixtures (migration-14 /
+      // migration-15 tests) apply an early subset and then run the full chain,
+      // so an ALTER that assumes session_registry exists fails the whole
+      // migration run. PRAGMA table_info returns [] for a missing table rather
+      // than throwing, so this doubles as the existence check.
+      const cols = db.query("PRAGMA table_info(session_registry)").all() as Array<{
+        name: string;
+      }>;
+      if (cols.length === 0) return; // table not created in this DB - nothing to alter
+      if (!cols.some((c) => c.name === "current_task_at")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN current_task_at TEXT");
+      }
+    },
+  },
 ];
 
 /**
