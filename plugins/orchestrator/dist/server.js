@@ -24977,7 +24977,44 @@ function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {
     }
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
-    return `**Your declared task is ${count} ${unit} old** - \`update_session_task\` if it has drifted. ` + `It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.`;
+    return `**Records checkpoint - your declared task is ${count} ${unit} old.** ` + `Take the moment to true up everything you have been leaving behind, not just the one field.
+` + `- \`update_session_task\` if it has drifted. It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.` + composeOpenItemsNudge(ctx, sid);
+  } catch {
+    return "";
+  }
+}
+var OPEN_ITEMS_FP_KEY_PREFIX = "records_ckpt_fp_";
+var OPEN_ITEMS_MAX = 3;
+function composeOpenItemsNudge(ctx, sid) {
+  try {
+    const rows = ctx.db.query(`SELECT n.id, n.status, n.content
+           FROM notes n
+          WHERE n.type = 'work_item'
+            AND COALESCE(n.status, '') IN ('proposed', 'planned')
+            AND (
+              n.source_session = ?
+              OR EXISTS (
+                SELECT 1 FROM plugin_state ps
+                 WHERE ps.key = 'wi_touched_' || ? || '_' || n.id
+              )
+            )
+          ORDER BY n.updated_at DESC
+          LIMIT ?`).all(sid, sid, OPEN_ITEMS_MAX);
+    if (rows.length === 0)
+      return "";
+    const fp = rows.map((r) => `${r.id}:${r.status ?? ""}`).join("|");
+    const key = `${OPEN_ITEMS_FP_KEY_PREFIX}${sid}`;
+    const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+    if (prev?.value === fp)
+      return "";
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, fp, now()]);
+    const lines = rows.map((r) => `  - **${r.id.slice(0, 8)}** [${r.status}]: ${truncate(r.content, 90)}`).join(`
+`);
+    return `
+- **You touched these work items and they still read as not-yet-started:**
+${lines}
+` + `  -> Did you SHIP one without moving it? An item that goes straight from 'planned' to ` + `finished never passes through the in-flight check, so nothing else will ever ask about ` + `it - this is the only place it surfaces. \`update_work_item\` to close it, or leave it ` + `if it is genuinely still queued.
+` + `- **Anything else you learned since your last capture?** A note now beats reconstructing ` + `it after a compaction, which is where it will otherwise be lost.`;
   } catch {
     return "";
   }

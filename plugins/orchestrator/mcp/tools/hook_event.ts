@@ -1547,12 +1547,105 @@ function tickStaleTask(
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
     return (
-      `**Your declared task is ${count} ${unit} old** - \`update_session_task\` if it has drifted. ` +
-      `It currently reads: "${snippet}". ` +
+      `**Records checkpoint - your declared task is ${count} ${unit} old.** ` +
+      `Take the moment to true up everything you have been leaving behind, not just the one field.\n` +
+      `- \`update_session_task\` if it has drifted. It currently reads: "${snippet}". ` +
       `This is not bookkeeping: it is what peers see in their roster, what rides on every ` +
       `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` +
       `sends the whole fleet, and your own future self, the wrong picture. ` +
-      `If it is still accurate, re-declaring it costs one call and resets this.`
+      `If it is still accurate, re-declaring it costs one call and resets this.` +
+      composeOpenItemsNudge(ctx, sid)
+    );
+  } catch {
+    return "";
+  }
+}
+
+const OPEN_ITEMS_FP_KEY_PREFIX = "records_ckpt_fp_";
+const OPEN_ITEMS_MAX = 3;
+
+/**
+ * The SHIPPED-BUT-STILL-QUEUED blind spot (Jarid: "our nudge should be a
+ * generalized 'take this time to update all the crap you should have been
+ * keeping updated'").
+ *
+ * Most of that routine already exists - composeLoopCloseNudge covers in-flight
+ * work items, composeEditedFileCuration covers notes invalidated by your own
+ * edits, and the checkpoint-cadence nudge covers save_progress. Adding a
+ * generic "update everything" line would have been the WRONG generalisation:
+ * VARIANTS already carries four such lines on every turn ("did you note
+ * decisions, capture patterns, update work items, or close threads?") and the
+ * arc that produced this file exists because that regime demonstrably failed.
+ * Volume is not the lever; note 60f2fdc2 has the fleet-scale evidence.
+ *
+ * THE ACTUAL GAP is narrow and structural. listInFlightWorkItemsForSession
+ * excludes 'proposed' and 'planned' on purpose (R7.7): queued and deferred
+ * items over-fired the loop-close nudge every turn with work that had never
+ * started. Correct - but it means an item you AUTHORED, then SHIPPED, without
+ * ever moving off its birth status is invisible to every existing check. It
+ * never entered in-flight, so nothing was ever watching it.
+ *
+ * Found by dogfooding: at the moment this was written the authoring session had
+ * NINE non-terminal work items, two of which (e3a58e10, 40d09574) were fully
+ * shipped and still read 'proposed'/'planned' - in the session building the
+ * staleness fix, under every existing nudge, on the same day.
+ *
+ * SPECIFICITY AND STATE-GATING, because breadth is what failed before: only
+ * items this session actually TOUCHED are named, never the project backlog;
+ * they are named with id and status; and an unchanged set is suppressed via a
+ * fingerprint, so a genuinely-deferred item cannot become the every-interval
+ * wallpaper that trained PA to stop reading loop-close by turn ten.
+ */
+function composeOpenItemsNudge(ctx: HookCtx, sid: string): string {
+  try {
+    const rows = ctx.db
+      .query(
+        `SELECT n.id, n.status, n.content
+           FROM notes n
+          WHERE n.type = 'work_item'
+            AND COALESCE(n.status, '') IN ('proposed', 'planned')
+            AND (
+              n.source_session = ?
+              OR EXISTS (
+                SELECT 1 FROM plugin_state ps
+                 WHERE ps.key = 'wi_touched_' || ? || '_' || n.id
+              )
+            )
+          ORDER BY n.updated_at DESC
+          LIMIT ?`
+      )
+      .all(sid, sid, OPEN_ITEMS_MAX) as Array<{
+      id: string;
+      status: string | null;
+      content: string;
+    }>;
+    if (rows.length === 0) return "";
+
+    // Suppress an unchanged set. A new item, a closed one, or an edited one
+    // changes the fingerprint and renders immediately - which is exactly when
+    // it is worth reading.
+    const fp = rows.map((r) => `${r.id}:${r.status ?? ""}`).join("|");
+    const key = `${OPEN_ITEMS_FP_KEY_PREFIX}${sid}`;
+    const prev = ctx.db
+      .query(`SELECT value FROM plugin_state WHERE key = ?`)
+      .get(key) as { value: string } | undefined;
+    if (prev?.value === fp) return "";
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [key, fp, now()]
+    );
+
+    const lines = rows
+      .map((r) => `  - **${r.id.slice(0, 8)}** [${r.status}]: ${truncate(r.content, 90)}`)
+      .join("\n");
+    return (
+      `\n- **You touched these work items and they still read as not-yet-started:**\n${lines}\n` +
+      `  -> Did you SHIP one without moving it? An item that goes straight from 'planned' to ` +
+      `finished never passes through the in-flight check, so nothing else will ever ask about ` +
+      `it - this is the only place it surfaces. \`update_work_item\` to close it, or leave it ` +
+      `if it is genuinely still queued.\n` +
+      `- **Anything else you learned since your last capture?** A note now beats reconstructing ` +
+      `it after a compaction, which is where it will otherwise be lost.`
     );
   } catch {
     return "";

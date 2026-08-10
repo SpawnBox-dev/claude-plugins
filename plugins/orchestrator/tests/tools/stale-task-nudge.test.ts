@@ -177,6 +177,91 @@ describe("turn-based staleness nudge: up to date, but intermittent", () => {
   });
 });
 
+describe("records checkpoint: the shipped-but-still-queued blind spot", () => {
+  let db: Database;
+  let ctx: any;
+  beforeEach(() => {
+    db = new Database(":memory:");
+    applyMigrations(db, "project");
+    ctx = { db, tracker: null };
+    seed(db, "ORCH-IMP: building the records checkpoint", new Date().toISOString());
+  });
+
+  function seedItem(id: string, status: string, content: string, session = SID) {
+    db.run(
+      `INSERT OR REPLACE INTO notes (id, type, content, status, source_session, created_at, updated_at)
+       VALUES (?, 'work_item', ?, ?, ?, ?, ?)`,
+      [id, content, status, session, new Date().toISOString(), new Date().toISOString()]
+    );
+  }
+
+  test("names an item left at 'planned' - the case nothing else can see", () => {
+    // The whole reason this exists: listInFlightWorkItemsForSession EXCLUDES
+    // proposed/planned, so an item shipped straight from its birth status never
+    // passes through the in-flight check and no other nudge will ever mention
+    // it. Lived: two of the authoring session's own items were exactly this.
+    seedItem("40d09574-aaaa-bbbb-cccc-dddddddddddd", "planned", "Staleness nudge cold start");
+    const out = takeTurns(ctx, TURNS);
+    expect(out).toContain("40d09574");
+    expect(out).toContain("[planned]");
+    expect(out).toContain("still read as not-yet-started");
+  });
+
+  test("does NOT duplicate loop-close: an in-flight item is not named here", () => {
+    // Two nudges naming the same item is how a rare signal becomes noise.
+    seedItem("11111111-aaaa-bbbb-cccc-dddddddddddd", "in_progress", "actively being worked");
+    expect(takeTurns(ctx, TURNS)).not.toContain("11111111");
+  });
+
+  test("ignores the project backlog - only what THIS session touched", () => {
+    // Naming items an agent merely read about in a briefing was the documented
+    // over-fire that R7.6 removed; do not reintroduce it here.
+    seedItem("22222222-aaaa-bbbb-cccc-dddddddddddd", "planned", "someone else's item", "other-session");
+    expect(takeTurns(ctx, TURNS)).not.toContain("22222222");
+  });
+
+  test("an UNCHANGED set is suppressed at the next firing", () => {
+    // The failure this prevents is documented in note 60f2fdc2: a nudge that
+    // named one long-lived item ~30 times taught PA to stop reading it by turn
+    // ten. A genuinely-deferred item must not become wallpaper.
+    seedItem("33333333-aaaa-bbbb-cccc-dddddddddddd", "planned", "deferred on purpose");
+    expect(takeTurns(ctx, TURNS)).toContain("33333333");
+    expect(takeTurns(ctx, TURNS)).not.toContain("33333333"); // second interval
+  });
+
+  test("a CHANGED set renders again immediately", () => {
+    // Suppression must not swallow new information - that would trade one
+    // failure for a worse one.
+    seedItem("44444444-aaaa-bbbb-cccc-dddddddddddd", "planned", "first item");
+    expect(takeTurns(ctx, TURNS)).toContain("44444444");
+    seedItem("55555555-aaaa-bbbb-cccc-dddddddddddd", "planned", "a NEW item appeared");
+    expect(takeTurns(ctx, TURNS)).toContain("55555555");
+  });
+
+  test("closing the item silences it", () => {
+    seedItem("66666666-aaaa-bbbb-cccc-dddddddddddd", "planned", "will be closed");
+    expect(takeTurns(ctx, TURNS)).toContain("66666666");
+    db.run(`UPDATE notes SET status = 'done' WHERE id LIKE '66666666%'`);
+    expect(takeTurns(ctx, TURNS)).not.toContain("66666666");
+  });
+
+  test("BOUNDED at 3 - the checkpoint stays readable", () => {
+    for (let i = 0; i < 6; i++) {
+      seedItem(`7777777${i}-aaaa-bbbb-cccc-dddddddddddd`, "planned", `queued item ${i}`);
+    }
+    const out = takeTurns(ctx, TURNS);
+    const named = (out.match(/\*\*7777777\d\*\*/g) ?? []).length;
+    expect(named).toBeLessThanOrEqual(3);
+  });
+
+  test("with no touched items the checkpoint is just the task line", () => {
+    // No work items seeded - the nudge must not render an empty section header.
+    const out = takeTurns(ctx, TURNS);
+    expect(out).toContain("update_session_task");
+    expect(out).not.toContain("still read as not-yet-started");
+  });
+});
+
 describe("WI e3a58e10: liveness reaches the roster PA rebuilds from", () => {
   test("a SUSPECT peer is flagged", () => {
     const peers: CompactPeer[] = [
