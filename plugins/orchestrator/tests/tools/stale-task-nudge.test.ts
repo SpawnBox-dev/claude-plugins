@@ -133,31 +133,24 @@ describe("turn-based staleness nudge: up to date, but intermittent", () => {
     expect(at >= before).toBe(true);
   });
 
-  test("a NULL-timestamp row is mirrored to the roster, not left blank", () => {
-    // The other half of the same cold start: the task existed in the registry
-    // the whole time and simply never reached the copy the roster reads.
-    seed(db, "task that never reached the roster", null);
-    tickStaleTaskDeclaration(ctx, SID);
-    const guard = db
-      .query(`SELECT value FROM plugin_state WHERE key = ?`)
-      .get(`task_mirrored_${SID}`) as { value: string } | undefined;
-    expect(guard?.value).toBe("1");
-  });
-
-  test("the roster backfill runs ONCE, not on every turn", () => {
-    // It writes to a different database than the counters; doing it per-tick
-    // would add a cross-DB write to every hand-back and every tool call for a
-    // repair that is only ever needed once.
+  test("REGRESSION PIN: the roster repair writes NO once-per-session flag", () => {
+    // 0.58.0 gated this repair on a `task_mirrored_<sid>` plugin_state flag, so
+    // it could run only once per session id. A session id SURVIVES A PLUGIN
+    // RELOAD, and a reload DELETES AND RECREATES the agent-channel row - so
+    // after the wipe the flag was already set and the repair could never fire
+    // again. Measured on the live fleet at 22:02Z: 7 of 8 sessions had a NULL
+    // roster task, all 8 still had the task in session_registry, and every one
+    // had `task_mirrored_` stamped at the PREVIOUS reload. The repair was
+    // structurally unable to run in exactly the situation it was written for.
+    //
+    // The guard is now DERIVED FROM STATE ("is the mirror empty?"), which
+    // cannot go stale. If a flag guard ever comes back, this test fails.
     seed(db, "a task", new Date().toISOString());
-    tickStaleTaskDeclaration(ctx, SID);
-    const first = db
-      .query(`SELECT updated_at FROM plugin_state WHERE key = ?`)
-      .get(`task_mirrored_${SID}`) as { updated_at: string };
-    takeTurns(ctx, 5);
-    const after = db
-      .query(`SELECT updated_at FROM plugin_state WHERE key = ?`)
-      .get(`task_mirrored_${SID}`) as { updated_at: string };
-    expect(after.updated_at).toBe(first.updated_at); // never rewritten
+    takeTurns(ctx, TURNS + 5);
+    const flags = db
+      .query(`SELECT COUNT(*) AS n FROM plugin_state WHERE key LIKE 'task_mirrored_%'`)
+      .get() as { n: number };
+    expect(flags.n).toBe(0);
   });
 
   test("an unknown session is silent, not an error", () => {

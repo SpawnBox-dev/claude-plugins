@@ -24970,17 +24970,17 @@ var STALE_TASK_TURNS = 30;
 var STALE_TASK_ACTIONS = 60;
 var TASK_TURNS_KEY_PREFIX = "task_turns_";
 var TASK_ACTS_KEY_PREFIX = "task_acts_";
-var TASK_MIRRORED_KEY_PREFIX = "task_mirrored_";
-function backfillRosterTask(ctx, sid, task) {
-  const key = `${TASK_MIRRORED_KEY_PREFIX}${sid}`;
+function backfillRosterTask(_ctx, sid, task) {
   try {
-    const done = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
-    if (done)
-      return;
     const stateDir = getAgentChannelStateDir();
-    if (stateDir)
-      setCurrentTask(stateDir, sid, task);
-    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
+    if (!stateDir)
+      return;
+    const mine = readSessions(stateDir).find((r) => r.session_id === sid);
+    if (!mine)
+      return;
+    if (mine.current_task && mine.current_task.trim())
+      return;
+    setCurrentTask(stateDir, sid, task);
   } catch {}
 }
 function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {

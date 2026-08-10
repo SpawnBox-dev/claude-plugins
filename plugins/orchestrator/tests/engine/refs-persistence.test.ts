@@ -9,6 +9,7 @@ import {
   readSessions,
   writeSession,
   setRefs,
+  removeSession,
   closeAgentChannelDb,
   type SessionEntry,
 } from "../../mcp/engine/agent_channel_state";
@@ -88,6 +89,29 @@ describe("refs storage round-trip", () => {
     setRefs(stateDir, SID, ["cccccccc"]);
     const row = readSessions(stateDir).find((s) => s.session_id === SID)!;
     expect(row.refs).toEqual(["cccccccc"]);
+  });
+
+  test("A RELOAD WIPES THE COHERENCE COLUMNS - this is why the repair must repeat", () => {
+    // The measured cause of the 22:02Z fleet-wide blank roster. A plugin reload
+    // removes the session row and the new process re-inserts it, so every
+    // column that lives ONLY in the agent-channel store is lost: current_task,
+    // warm_context, hot_path_status, and refs. Only current_task has a durable
+    // copy (session_registry) and can therefore be repaired.
+    //
+    // This test documents the lifecycle rather than asserting it is desirable.
+    // If a future change makes these columns survive a re-registration, this
+    // fails and the repair logic can be simplified - that is a good failure.
+    seedSession(SID);
+    setRefs(stateDir, SID, ["40d09574"]);
+    expect(readSessions(stateDir).find((s) => s.session_id === SID)!.refs).toEqual(["40d09574"]);
+
+    // Simulate what a reload does: drop the row, re-register fresh.
+    removeSession(stateDir, SID);
+    seedSession(SID);
+
+    const after = readSessions(stateDir).find((s) => s.session_id === SID)!;
+    expect(after.refs).toBeUndefined(); // gone, as on the live fleet
+    expect(after.current_task).toBeUndefined();
   });
 
   test("an empty list is storable - 'I cite nothing now' must be expressible", () => {

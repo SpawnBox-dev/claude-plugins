@@ -3,7 +3,12 @@ import { statSync, readFileSync } from "fs";
 import { join } from "path";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
-import { appendSystemEvent, setCurrentTask, type SystemEvent } from "../engine/agent_channel_state";
+import {
+  appendSystemEvent,
+  setCurrentTask,
+  readSessions,
+  type SystemEvent,
+} from "../engine/agent_channel_state";
 import { now, normalizeCodeRef, truncate, extractKeywords } from "../utils";
 import { getGlobalDb } from "../db/connection";
 
@@ -1503,7 +1508,6 @@ const TASK_ACTS_KEY_PREFIX = "task_acts_";
  * intermittent rather than arriving twice for the same drift.
  */
 // Once-per-session guard for the roster backfill below.
-const TASK_MIRRORED_KEY_PREFIX = "task_mirrored_";
 
 /**
  * Self-heal THIS session's roster row from its own registry declaration.
@@ -1526,22 +1530,21 @@ const TASK_MIRRORED_KEY_PREFIX = "task_mirrored_";
  * runs once per session because after the first declaration `declareSelf`
  * keeps the copy current.
  */
-function backfillRosterTask(ctx: HookCtx, sid: string, task: string): void {
-  const key = `${TASK_MIRRORED_KEY_PREFIX}${sid}`;
+function backfillRosterTask(_ctx: HookCtx, sid: string, task: string): void {
   try {
-    const done = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key) as
-      | { value: string }
-      | undefined;
-    if (done) return;
     const stateDir = getAgentChannelStateDir();
-    if (stateDir) setCurrentTask(stateDir, sid, task);
-    ctx.db.run(
-      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
-      [key, now()]
-    );
+    if (!stateDir) return;
+    const mine = readSessions(stateDir).find((r) => r.session_id === sid);
+    // No row yet (the channel has not registered this session) - nothing to
+    // repair, and creating one here would race the registration path.
+    if (!mine) return;
+    // Already correct. This IS the guard: cheap, derived from the actual state,
+    // and it cannot go stale.
+    if (mine.current_task && mine.current_task.trim()) return;
+    setCurrentTask(stateDir, sid, task);
   } catch {
-    /* agent-channel absent, or plugin_state missing in a partial fixture -
-       the roster simply keeps its pre-existing value, which is the status quo */
+    /* agent-channel absent or unreadable - the roster keeps its existing
+       value, which is the status quo, and the next tick tries again */
   }
 }
 
@@ -1660,6 +1663,14 @@ function tickStaleTask(
   }
 }
 
+// NOTE: the former `task_mirrored_<sid>` plugin_state guard is GONE (0.63.0).
+// It gated the roster repair to once per session id, and a session id survives a
+// plugin reload - so after the reload WIPED the roster row, the guard was
+// already set and the repair could never run again. Measured on the live fleet:
+// 7 of 8 sessions had a NULL roster task, every one of them still had the task
+// in session_registry, and every one had `task_mirrored_` set at the PREVIOUS
+// reload. The repair was structurally unable to fire in exactly the situation
+// it was written for. State-derived guards do not rot; flag guards do.
 const OPEN_ITEMS_FP_KEY_PREFIX = "records_ckpt_fp_";
 const OPEN_ITEMS_MAX = 3;
 
