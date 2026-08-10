@@ -5,6 +5,7 @@ import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
 import { appendSystemEvent, setCurrentTask, type SystemEvent } from "../engine/agent_channel_state";
 import { now, normalizeCodeRef, truncate, extractKeywords } from "../utils";
+import { getGlobalDb } from "../db/connection";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
 // Cross-session communication is now via agent-channel notifications -
@@ -2213,20 +2214,63 @@ const COMPACT_ROSTER_REF_LABEL_CAP = 48;
  * silently omitting it would make a dangling pointer look like a peer that
  * simply cited less, which is the failure this whole change exists to avoid.
  */
-export function resolveRefs(db: Database, ids: string[]): ResolvedRef[] {
+export function resolveRefs(
+  db: Database,
+  ids: string[],
+  /** Test seam: inject the global store instead of opening the real one. */
+  globalOverride?: Database
+): ResolvedRef[] {
   const out: ResolvedRef[] = [];
+  // Knowledge lives in TWO stores - the project db and a GLOBAL db of
+  // cross-project knowledge (~564 notes vs ~7290 at the time of writing).
+  // Resolving only the project db made every cited global note render as
+  // "(not found)", which is worse than unresolved: it asserts the record does
+  // not exist when it does, and the notes most worth citing across lanes -
+  // durable anti-patterns, conventions - are exactly the ones kept global.
+  //
+  // Caught by running this resolver against the live databases rather than
+  // fixtures: the third id in the first real declaration was a global note
+  // (60f2fdc2) and came back MISSING while the two project-scoped ids resolved
+  // perfectly. No unit test would have found it - the fixtures only ever had
+  // one store.
+  let globalDb: Database | null = globalOverride ?? null;
+  const readGlobal = () => {
+    if (globalDb === null) {
+      try {
+        globalDb = getGlobalDb();
+      } catch {
+        return null;
+      }
+    }
+    return globalDb;
+  };
+
   for (const raw of ids.slice(0, COMPACT_ROSTER_MAX_REFS)) {
     const id = String(raw || "").trim();
     if (!id) continue;
     const short = id.slice(0, 8);
     try {
-      const row = db
-        .query(
-          `SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`
-        )
-        .get(id, `${short}%`) as
-        | { id: string; type: string; status: string | null; content: string }
-        | undefined;
+      const SQL = `SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`;
+      type NoteRow = {
+        id: string;
+        type: string;
+        status: string | null;
+        content: string;
+      };
+      let row = db.query(SQL).get(id, `${short}%`) as NoteRow | undefined;
+      if (!row) {
+        // Project db first (the common case and the cheaper read), global only
+        // as a fallback, so the extra connection is never opened for a session
+        // whose refs are all local.
+        const g = readGlobal();
+        if (g) {
+          try {
+            row = g.query(SQL).get(id, `${short}%`) as NoteRow | undefined;
+          } catch {
+            /* global unreadable -> fall through to missing */
+          }
+        }
+      }
       if (!row) {
         out.push({ id8: short, label: "(not found)", missing: true });
         continue;

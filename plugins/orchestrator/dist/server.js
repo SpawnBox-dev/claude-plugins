@@ -25242,15 +25242,35 @@ var SESSIONSTART_TOTAL_CAP = 7000;
 var COMPACT_ROSTER_MAX_REFS = 4;
 var PER_TURN_MAX_REFS = 2;
 var COMPACT_ROSTER_REF_LABEL_CAP = 48;
-function resolveRefs(db, ids) {
+function resolveRefs(db, ids, globalOverride) {
   const out = [];
+  let globalDb2 = globalOverride ?? null;
+  const readGlobal = () => {
+    if (globalDb2 === null) {
+      try {
+        globalDb2 = getGlobalDb();
+      } catch {
+        return null;
+      }
+    }
+    return globalDb2;
+  };
   for (const raw of ids.slice(0, COMPACT_ROSTER_MAX_REFS)) {
     const id = String(raw || "").trim();
     if (!id)
       continue;
     const short = id.slice(0, 8);
     try {
-      const row = db.query(`SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`).get(id, `${short}%`);
+      const SQL = `SELECT id, type, status, content FROM notes WHERE id = ? OR id LIKE ? LIMIT 1`;
+      let row = db.query(SQL).get(id, `${short}%`);
+      if (!row) {
+        const g = readGlobal();
+        if (g) {
+          try {
+            row = g.query(SQL).get(id, `${short}%`);
+          } catch {}
+        }
+      }
       if (!row) {
         out.push({ id8: short, label: "(not found)", missing: true });
         continue;

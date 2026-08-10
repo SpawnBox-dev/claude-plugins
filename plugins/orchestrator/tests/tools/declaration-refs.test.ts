@@ -97,6 +97,46 @@ describe("resolveRefs: a pointer reads the record, it does not carry a copy", ()
   test("empty and whitespace ids are ignored, not resolved as missing", () => {
     expect(resolveRefs(db, ["", "   "])).toEqual([]);
   });
+
+  test("GLOBAL FALLBACK: a cross-project note resolves instead of reading as missing", () => {
+    // Knowledge lives in TWO stores. Resolving only the project db made every
+    // cited global note render "(not found)" - worse than unresolved, because
+    // it ASSERTS the record does not exist. And the notes most worth citing
+    // across lanes (durable anti-patterns, conventions) are exactly the ones
+    // kept global.
+    //
+    // Found against the LIVE databases, not fixtures: the first real
+    // declaration cited three ids, two project-scoped ones resolved perfectly
+    // and the third (60f2fdc2, a global anti-pattern note) came back MISSING.
+    // Single-store fixtures could not have surfaced it.
+    const globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "project");
+    seedNote(globalDb, "60f2fdc2-cdc8-453a-8010-10761d1e32a6", "anti_pattern", null,
+      "System-reminder habituation defeats static reminders");
+
+    const [r] = resolveRefs(db, ["60f2fdc2"], globalDb);
+    expect(r.missing).toBeUndefined();
+    expect(r.label).toContain("habituation");
+  });
+
+  test("the PROJECT store wins when an id exists in both", () => {
+    // Project knowledge is the more specific of the two; a local record that
+    // shadows a global id should not be overridden by the fallback.
+    seedNote(db, WI, "work_item", "in_progress", "the project copy");
+    const globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "project");
+    seedNote(globalDb, WI, "work_item", "done", "the global copy");
+
+    const [r] = resolveRefs(db, [WI], globalDb);
+    expect(r.label).toContain("project");
+    expect(r.status).toBe("in_progress");
+  });
+
+  test("still reports missing when the id is in NEITHER store", () => {
+    const globalDb = new Database(":memory:");
+    applyMigrations(globalDb, "project");
+    expect(resolveRefs(db, ["deadbeef"], globalDb)[0].missing).toBe(true);
+  });
 });
 
 describe("renderCompactRoster with resolved refs", () => {
