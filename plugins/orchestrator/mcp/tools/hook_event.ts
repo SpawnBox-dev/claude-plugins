@@ -141,22 +141,17 @@ export function buildHookEnvelope(
 // phrasing implies "lookup = enough context" or "skip the source read,"
 // rewrite it before adding.
 const VARIANTS = [
-  "[orch] REFLECT on last turn: did you note decisions, capture patterns, update work items, or close threads? THEN for this turn: lookup adds historical context to layer onto your own code reading - it doesn't replace it.",
   "[orch] What prior decisions or anti-patterns apply here? lookup surfaces team-level context you'd otherwise miss; pair it with reading the actual code you're about to touch. Capture new knowledge the moment it appears.",
-  "[orch] Discipline check: knowledge captured this session so far? When you're about to touch unfamiliar code, check_similar gives you adjacent prior thinking - additive to (not a substitute for) reading the current source.",
   "[orch] Mid-session nudge: user preferences, anti-patterns, and decisions are easiest to lose. If any surfaced last turn, note() them NOW before context shifts.",
   "[orch] Lookups as you go alongside your normal investigation. The KB tells you what was learned/decided in the past; the current code is still ground truth. Capture new findings the moment they appear - 'I will capture it later' is the top cause of knowledge loss.",
   "[orch] Toolkit scan: briefing, lookup, note, check_similar, plan, save_progress, close_thread, update_note, supersede_note, update_session_task. These ADD context-engineering primitives on top of your normal workflow - they don't replace the careful reading/web-checking you'd do anyway. code_refs: [paths] on note/update_note when the knowledge is about specific files.",
   "[orch] Struggle detector: if you are editing code you just edited, or hitting the same error twice, STOP and lookup for prior anti-patterns/gotchas - then re-read the actual source with that context in hand. If a PA is active, address `PA, ...` in your terminal output - PA's tailing will surface the address. Do not hammer.",
   "[orch] Past-self continuity: what you learn this turn only helps future sessions if you note() it. Context windows are temporary, the knowledge base is permanent.",
-  "[orch] Work-item hygiene: did a tracked item just change status? update_work_item. New work identified? create_work_item. Do not rely on memory across turns.",
   "[orch] Completeness check: if this turn is a list, inventory, or audit, list_work_items gives a complete filtered view (FTS5 keyword search may miss vocabulary variants).",
   "[orch] Capturing knowledge about specific code? Add code_refs: [paths] so future agents find this note via lookup({code_ref: 'path'}) when they touch the same file.",
   "[orch] Editing a non-trivial file? While reading it, also try lookup({code_ref: 'path/to/file'}) to pull notes breadcrumb-tagged with that exact path - past decisions/gotchas/conventions about this specific code, additive to what you'll learn from reading it now.",
   "[orch] Cross-session check: see sibling sessions in your hook context? Set update_session_task at the start of major work so they see your scope in their agent-channel notifications. To address a sibling, type `@SA-<id8>` in your terminal output.",
   "[orch] Agent-channel: cross-session events arrive as <channel source=\"plugin:orchestrator:core\" ...>content</channel> tags inline at every turn. Empty agent-channel = zero token cost. If you see one, act on it before continuing your own work - someone left it for a reason.",
-  "[orch] Loop-closure check: any in-flight work_items in your scope? If you completed one, mark done. If unsure whether the user considers it done, ASK in your reply - closing loops is part of the job, not 'bothering the user'.",
-  "[orch] Update as you go, not at the end. When a work_item's scope shifts mid-task, update_work_item({id, content}) keeps siblings looking at current state. Stale work_item descriptions actively mislead other agents.",
   "[orch] Coordination etiquette: starting work that overlaps a sibling's current_task? Address `@SA-<id8>` in your terminal output FIRST to align - 'I'm about to touch X, anything I should know?' beats 'we both edited the same file in different directions and now have to merge'.",
   "[orch] Check siblings when it matters. You don't need to scan their state every turn - but at a task boundary, when starting something that might overlap, take 5s to check the sibling activity in your hook context.",
   "[orch] Orchestrator notes are starting hypotheses, not final answers. After a couple of lookups, you may feel you have the picture - in practice the KB knows what WAS, current code/docs/web are what IS. Use both.",
@@ -1547,14 +1542,33 @@ function tickStaleTask(
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
     return (
-      `**Records checkpoint - your declared task is ${count} ${unit} old.** ` +
-      `Take the moment to true up everything you have been leaving behind, not just the one field.\n` +
+      `**RECORDS CHECKPOINT** - your declared task is ${count} ${unit} old, so this is the ` +
+      `moment to bring everything you maintain back up to date, not just the one field.\n` +
       `- \`update_session_task\` if it has drifted. It currently reads: "${snippet}". ` +
       `This is not bookkeeping: it is what peers see in their roster, what rides on every ` +
       `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` +
       `sends the whole fleet, and your own future self, the wrong picture. ` +
       `If it is still accurate, re-declaring it costs one call and resets this.` +
-      composeOpenItemsNudge(ctx, sid)
+      composeOpenItemsNudge(ctx, sid) +
+      // THE ASK IS DELIBERATELY OPEN (Jarid, 2026-08-10): "i don't want to limit its scope
+      // by telling it what specifically to update, the agent should reason over the things
+      // it knows it should be maintaining and bloody maintain them in whatever
+      // weird/whacky/unique way they deserve/require."
+      //
+      // This is the synthesis of two findings that only LOOK contradictory. Note 60f2fdc2
+      // says specificity is what gets a nudge honoured and generic exhortation is what gets
+      // filtered - but that is about the TRIGGER, not the INSTRUCTION. The evidence above
+      // (your actual stale declaration, your actual queued items) is what establishes that
+      // drift is real and earns the interruption. Once attention is here, an enumerated
+      // checklist CAPS the work at whatever the list happens to name - and the list can only
+      // name what the plugin can see, which is a fraction of what any given lane maintains.
+      // So: specific trigger, open ask.
+      `\n- **Then do your own pass.** The checks above are only what this plugin can SEE - ` +
+      `they are not the list. You know what you have actually been keeping up this session: ` +
+      `notes, docs, a spec, a tracker, a scratch file, a README, a peer you owe an update. ` +
+      `Bring all of it current now, in whatever form each one actually needs. The test is ` +
+      `simple - if a compaction landed right now, what would you have to reconstruct from ` +
+      `memory? Write that down instead.`
     );
   } catch {
     return "";
@@ -1642,10 +1656,7 @@ function composeOpenItemsNudge(ctx: HookCtx, sid: string): string {
       `\n- **You touched these work items and they still read as not-yet-started:**\n${lines}\n` +
       `  -> Did you SHIP one without moving it? An item that goes straight from 'planned' to ` +
       `finished never passes through the in-flight check, so nothing else will ever ask about ` +
-      `it - this is the only place it surfaces. \`update_work_item\` to close it, or leave it ` +
-      `if it is genuinely still queued.\n` +
-      `- **Anything else you learned since your last capture?** A note now beats reconstructing ` +
-      `it after a compaction, which is where it will otherwise be lost.`
+      `it - this is the only place it surfaces.`
     );
   } catch {
     return "";
@@ -2092,6 +2103,12 @@ export interface ResolvedRef {
 // The roster is a scan-and-decide surface, not a report; a peer citing 16
 // records (observed) must not push the other seven lanes off the digest.
 const COMPACT_ROSTER_MAX_REFS = 4;
+/**
+ * Tighter than the compact-roster cap, purely because of frequency: the sibling
+ * block renders every turn for every session, while the compact roster renders
+ * once per compaction. Same principle, different budget.
+ */
+const PER_TURN_MAX_REFS = 2;
 const COMPACT_ROSTER_REF_LABEL_CAP = 48;
 
 /**
@@ -3247,9 +3264,11 @@ function renderSiblingActivity(
   // channel). Single sessions.json read; map by session_id for O(1) lookup.
   const liveEntries = getLiveSessions();
   const kindBySession = new Map<string, string>();
+  const refsBySession = new Map<string, string[]>();
   if (liveEntries) {
     for (const e of liveEntries) {
       if (e.kind) kindBySession.set(e.session_id, e.kind);
+      if (e.refs && e.refs.length > 0) refsBySession.set(e.session_id, e.refs);
     }
   }
 
@@ -3266,7 +3285,35 @@ function renderSiblingActivity(
     const task = s.current_task
       ? `: ${s.current_task.slice(0, 80)}`
       : ": (no task set)";
-    return `  - ${s.session_id}${kindSuffix}${marker}${task}`;
+    // WI dcc756ec, corrected: HYDRATE POINTERS AT READ TIME, HERE TOO.
+    //
+    // The first cut resolved refs only in the post-compact roster - the RAREST
+    // read - and missed this block, which every session renders on every turn
+    // and is by far the most-read view of what peers are doing. Jarid caught
+    // it by reasoning about the architecture: "doesn't the roster get read by
+    // other agents for awareness of what other agents are working on... if it
+    // got queried by other agents, whatever is there that has pointers to
+    // other stuff should be dynamically constructed/hydrated at read time in
+    // case what is stored on the other end of those pointers has changed."
+    //
+    // That is exactly right, and it matters MORE here than at compaction: the
+    // task text is truncated to 80 chars in this view, so ids cited late in a
+    // declaration are cut off entirely - the pointer would be invisible, not
+    // merely unresolved.
+    //
+    // Bounded harder than the compact roster (2 refs, short labels) purely
+    // because of frequency: this renders every turn for every session, and an
+    // unbounded per-turn block is how a coordination signal becomes the noise
+    // everything else in this change is trying to remove.
+    const refIds = refsBySession.get(s.session_id);
+    const refs =
+      refIds && refIds.length > 0
+        ? "\n" +
+          resolveRefs(ctx.db, refIds.slice(0, PER_TURN_MAX_REFS))
+            .map((r) => `      -> ${r.id8}${r.status ? ` [${r.status}]` : ""}: ${r.label}`)
+            .join("\n")
+        : "";
+    return `  - ${s.session_id}${kindSuffix}${marker}${task}${refs}`;
   });
 
   let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:\n${lines.join("\n")}`;

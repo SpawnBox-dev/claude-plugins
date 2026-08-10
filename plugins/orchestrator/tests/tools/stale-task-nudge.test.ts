@@ -254,6 +254,27 @@ describe("records checkpoint: the shipped-but-still-queued blind spot", () => {
     expect(named).toBeLessThanOrEqual(3);
   });
 
+  test("the ask is OPEN, not a checklist - it must not cap the work at what we can see", () => {
+    // Jarid: "i don't want to limit its scope by telling it what specifically
+    // to update, the agent should reason over the things it knows it should be
+    // maintaining." The named items are EVIDENCE that drift is real (which is
+    // what earns the interruption, per 60f2fdc2); the instruction that follows
+    // must stay open, because the plugin can only see a fraction of what any
+    // given lane actually maintains.
+    seedItem("88888888-aaaa-bbbb-cccc-dddddddddddd", "planned", "an item");
+    const out = takeTurns(ctx, TURNS);
+    expect(out).toContain("do your own pass");
+    expect(out).toContain("not the list");
+  });
+
+  test("the open ask is present even with nothing else to report", () => {
+    // If it only appeared alongside findings, the checkpoint would silently
+    // degrade to a single-field reminder in exactly the sessions whose records
+    // the plugin cannot see - the ones that need the open pass most.
+    const out = takeTurns(ctx, TURNS);
+    expect(out).toContain("do your own pass");
+  });
+
   test("with no touched items the checkpoint is just the task line", () => {
     // No work items seeded - the nudge must not render an empty section header.
     const out = takeTurns(ctx, TURNS);
