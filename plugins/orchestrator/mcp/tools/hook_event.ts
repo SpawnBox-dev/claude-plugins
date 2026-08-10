@@ -1377,21 +1377,58 @@ export function findNotesDescribingEditedFiles(
  */
 const STALE_TASK_TURNS = 30;
 
+/**
+ * Substantive ACTIONS since the declaration that also trip the nudge.
+ *
+ * TURNS ALONE ARE NOT ENOUGH, and the gap is the opposite of what it looks
+ * like (Jarid, 2026-08-10). Claude Code runs long autonomous stretches without
+ * handing back - which is desirable, and means the Stop hook can be quiet for
+ * hours while an enormous amount of work happens. So a turn counter
+ * UNDER-SERVES exactly the sessions that do the most and drift the most: an SA
+ * grinding through a multi-hour task might take five turns total, and 30
+ * hand-backs could be days away.
+ *
+ * Substantive actions (edits/writes/notes/work-items - isSubstantiveActivity)
+ * are counted on the PostToolUse path, which fires continuously mid-run. So the
+ * two triggers cover the two populations: turns catch a conversational session
+ * that is being redirected repeatedly, actions catch a heads-down session that
+ * never hands back. Whichever trips first wins; both reset together.
+ *
+ * Sized so focused work on ONE declared thing is not interrupted - a single
+ * feature can easily be 40 edits - while a run that has clearly moved on is
+ * caught.
+ */
+const STALE_TASK_ACTIONS = 60;
+
 /** plugin_state key holding turns taken since the last declaration. */
 const TASK_TURNS_KEY_PREFIX = "task_turns_";
+/** plugin_state key holding substantive actions taken since the last declaration. */
+const TASK_ACTS_KEY_PREFIX = "task_acts_";
 
 /**
- * Count this turn and, when enough have passed since the session last declared
- * its task, return the nudge (and reset the counter). Returns "" otherwise.
+ * Shared core: bump one counter, and return the nudge when it trips.
  *
- * Called on EVERY Stop, deliberately OUTSIDE the once-per-session housekeeping
- * block. That block is gated by `stop_<sid>` and fires exactly once per session
- * - so a staleness check placed inside it could only ever run at the FIRST
- * hand-back, when the declaration is newest, and would never fire in practice.
- * (It was placed there in the first draft of this feature and would have been
- * inert - the same never-invoked-guard shape this codebase keeps finding.)
+ * TWO TRIGGERS, ONE MESSAGE. `tickStaleTaskTurn` counts hand-backs (Stop) and
+ * `tickStaleTaskAction` counts substantive actions (PostToolUse). They exist
+ * because the two populations fail differently:
+ *
+ *   - a CONVERSATIONAL session hands back constantly and is redirected each
+ *     time, so turns catch its drift;
+ *   - a LONG AUTONOMOUS run may not hand back for hours - which is desirable
+ *     and is exactly when the most work happens - so turns are nearly silent
+ *     there and actions are what catch it.
+ *
+ * Counting only turns under-serves precisely the sessions that drift most.
+ * Whichever counter trips first fires; BOTH reset, so the nudge stays
+ * intermittent rather than arriving twice for the same drift.
  */
-export function tickStaleTaskDeclaration(ctx: HookCtx, sessionId: string): string {
+function tickStaleTask(
+  ctx: HookCtx,
+  sessionId: string,
+  keyPrefix: string,
+  threshold: number,
+  unit: "turns" | "actions"
+): string {
   const sid = sanitizeSessionId(sessionId);
   if (!sid) return "";
   try {
@@ -1407,30 +1444,34 @@ export function tickStaleTaskDeclaration(ctx: HookCtx, sessionId: string): strin
     // migration 23, whose age is unknowable and must not be guessed at.
     if (!row?.current_task?.trim() || !row.current_task_at) return "";
 
-    const key = `${TASK_TURNS_KEY_PREFIX}${sid}`;
+    const key = `${keyPrefix}${sid}`;
     const prev = ctx.db
       .query(`SELECT value FROM plugin_state WHERE key = ?`)
       .get(key) as { value: string } | undefined;
-    const turns = (Number(prev?.value) || 0) + 1;
+    const count = (Number(prev?.value) || 0) + 1;
 
-    if (turns < STALE_TASK_TURNS) {
+    if (count < threshold) {
       ctx.db.run(
         `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
-        [key, String(turns), now()]
+        [key, String(count), now()]
       );
       return "";
     }
 
-    // Fire, and reset - so the next nudge is another full interval away rather
-    // than every turn from here on.
-    ctx.db.run(
-      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`,
-      [key, now()]
-    );
+    // Fire, and reset BOTH counters - otherwise the other trigger fires again
+    // moments later for the same drift, which is the double-notification that
+    // turns a rare nudge back into noise.
+    const ts = now();
+    for (const p of [TASK_TURNS_KEY_PREFIX, TASK_ACTS_KEY_PREFIX]) {
+      ctx.db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`,
+        [`${p}${sid}`, ts]
+      );
+    }
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
     return (
-      `**Your declared task is ${turns} turns old** - \`update_session_task\` if it has drifted. ` +
+      `**Your declared task is ${count} ${unit} old** - \`update_session_task\` if it has drifted. ` +
       `It currently reads: "${snippet}". ` +
       `This is not bookkeeping: it is what peers see in their roster, what rides on every ` +
       `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` +
@@ -1440,6 +1481,28 @@ export function tickStaleTaskDeclaration(ctx: HookCtx, sessionId: string): strin
   } catch {
     return "";
   }
+}
+
+/**
+ * Count a HAND-BACK. Called on every Stop, deliberately OUTSIDE the
+ * once-per-session housekeeping block: that block is gated by `stop_<sid>` and
+ * fires exactly once per session, so a staleness check placed inside it could
+ * only ever run at the FIRST hand-back, when the declaration is newest, and
+ * would never fire in practice. (The first draft did exactly that and was
+ * inert - the never-invoked-guard shape this codebase keeps finding.)
+ */
+export function tickStaleTaskDeclaration(ctx: HookCtx, sessionId: string): string {
+  return tickStaleTask(ctx, sessionId, TASK_TURNS_KEY_PREFIX, STALE_TASK_TURNS, "turns");
+}
+
+/**
+ * Count a SUBSTANTIVE ACTION. Called from PostToolUse on the same branch that
+ * feeds bumpActivitySinceSave, so it sees edits/writes/notes/work-items and not
+ * mere reads. This is the trigger that reaches a long autonomous run, where the
+ * Stop hook may not fire for hours.
+ */
+export function tickStaleTaskAction(ctx: HookCtx, sessionId: string): string {
+  return tickStaleTask(ctx, sessionId, TASK_ACTS_KEY_PREFIX, STALE_TASK_ACTIONS, "actions");
 }
 
 function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
@@ -1475,6 +1538,7 @@ function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
 
 function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   // Mark orch activity for the turn so PreToolUse Option B doesn't nag.
+  let staleTaskFromAction = "";
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
@@ -1500,6 +1564,11 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
     );
   } else if (isSubstantiveActivity(args.tool_name)) {
     bumpActivitySinceSave(ctx.db, args.session_id);
+    // WI 7844a909: the same branch feeds the stale-declaration counter. This is
+    // the trigger that reaches a LONG AUTONOMOUS RUN - Claude Code can work for
+    // hours without handing back (desirable), so the Stop-based turn counter is
+    // nearly silent exactly when the most work, and the most drift, happens.
+    staleTaskFromAction = tickStaleTaskAction(ctx, args.session_id);
   }
   // Reset struggle counter on any successful tool call.
   resetStruggleCounter(ctx.db, args.session_id);
@@ -1526,6 +1595,11 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   const parts: string[] = [];
   if (areaEntry) parts.push(areaEntry);
   if (driftNudge) parts.push(driftNudge);
+  // WI 7844a909: only set when the action counter actually tripped, which is
+  // once per STALE_TASK_ACTIONS substantive actions and never during ordinary
+  // work. PostToolUse is in HSO_EVENTS, so additionalContext is a valid channel
+  // here (unlike Stop, where it fails schema validation).
+  if (staleTaskFromAction) parts.push(`[orch] ${staleTaskFromAction}`);
 
   if (parts.length === 0) return {};
   return { additionalContext: parts.join("\n\n") };

@@ -255,13 +255,20 @@ export class SessionTracker {
     // the next one is a full interval away. Without this the counter would keep
     // climbing and the nudge would fire every turn once tripped - which is the
     // difference between an intermittent prompt and noise.
+    // BOTH counters: turns (hand-backs) and actions (substantive tool calls).
+    // They are two triggers for one nudge - a conversational session trips the
+    // first, a long autonomous run that never hands back trips the second - so
+    // re-declaring has to silence both or the other fires moments later for
+    // drift the agent has already corrected.
     try {
-      this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [
-        `task_turns_${sessionId}`,
-        ts,
-      ]);
+      for (const key of [`task_turns_${sessionId}`, `task_acts_${sessionId}`]) {
+        this.db.run(
+          `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`,
+          [key, ts]
+        );
+      }
     } catch {
-      /* plugin_state absent in partial fixtures - the counter simply restarts */
+      /* plugin_state absent in partial fixtures - the counters simply restart */
     }
   }
 

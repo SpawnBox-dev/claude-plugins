@@ -4,6 +4,7 @@ import { applyMigrations } from "../../mcp/db/schema";
 import {
   renderCompactRoster,
   tickStaleTaskDeclaration,
+  tickStaleTaskAction,
   type CompactPeer,
 } from "../../mcp/tools/hook_event";
 
@@ -150,5 +151,45 @@ describe("WI e3a58e10: liveness reaches the roster PA rebuilds from", () => {
     const out = renderCompactRoster(peers);
     expect(out).toContain("[client_transport_suspect]");
     expect(out).toContain("(no task set)");
+  });
+});
+
+describe("ACTION trigger: reaches a long autonomous run that never hands back", () => {
+  let db: Database;
+  let ctx: any;
+  beforeEach(() => {
+    db = new Database(":memory:");
+    applyMigrations(db, "project");
+    ctx = { db, tracker: null };
+  });
+
+  const ACTIONS = 60; // must track STALE_TASK_ACTIONS
+
+  test("FIRES on the Nth substantive action, with ZERO hand-backs", () => {
+    // The gap this closes: Claude Code runs long stretches without a Stop, so
+    // the turn counter can sit at 0 for hours while a lot of work happens.
+    seed(db, "ORCH-IMP: one long autonomous task", new Date().toISOString());
+    let out = "";
+    for (let i = 0; i < ACTIONS; i++) out = tickStaleTaskAction(ctx, SID);
+    expect(out).toContain("update_session_task");
+    expect(out).toContain("60 actions old");
+  });
+
+  test("SILENT well into focused work - one feature is not an interruption", () => {
+    seed(db, "a focused task", new Date().toISOString());
+    let out = "";
+    for (let i = 0; i < 40; i++) out = tickStaleTaskAction(ctx, SID);
+    expect(out).toBe("");
+  });
+
+  test("firing resets the TURN counter too - one nudge, not two", () => {
+    // Both triggers describe the same drift. If only its own counter reset, the
+    // other would fire moments later for something already corrected.
+    seed(db, "task", new Date().toISOString());
+    for (let i = 0; i < 29; i++) tickStaleTaskDeclaration(ctx, SID); // turns primed at 29
+    let out = "";
+    for (let i = 0; i < ACTIONS; i++) out = tickStaleTaskAction(ctx, SID);
+    expect(out).not.toBe(""); // action trigger fired
+    expect(tickStaleTaskDeclaration(ctx, SID)).toBe(""); // turn counter was reset, not at 30
   });
 });

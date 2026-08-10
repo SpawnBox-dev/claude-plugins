@@ -24187,10 +24187,9 @@ class SessionTracker {
     const ts = now();
     this.db.run(`UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`, [task, ts, ts, sessionId]);
     try {
-      this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [
-        `task_turns_${sessionId}`,
-        ts
-      ]);
+      for (const key of [`task_turns_${sessionId}`, `task_acts_${sessionId}`]) {
+        this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [key, ts]);
+      }
     } catch {}
   }
   getActiveSiblings(sessionId) {
@@ -24920,8 +24919,10 @@ function findNotesDescribingEditedFiles(db, editedFiles, max = 4) {
   return out;
 }
 var STALE_TASK_TURNS = 30;
+var STALE_TASK_ACTIONS = 60;
 var TASK_TURNS_KEY_PREFIX = "task_turns_";
-function tickStaleTaskDeclaration(ctx, sessionId) {
+var TASK_ACTS_KEY_PREFIX = "task_acts_";
+function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {
   const sid = sanitizeSessionId(sessionId);
   if (!sid)
     return "";
@@ -24929,20 +24930,29 @@ function tickStaleTaskDeclaration(ctx, sessionId) {
     const row = ctx.db.query(`SELECT current_task, current_task_at FROM session_registry WHERE session_id = ?`).get(sid);
     if (!row?.current_task?.trim() || !row.current_task_at)
       return "";
-    const key = `${TASK_TURNS_KEY_PREFIX}${sid}`;
+    const key = `${keyPrefix}${sid}`;
     const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
-    const turns = (Number(prev?.value) || 0) + 1;
-    if (turns < STALE_TASK_TURNS) {
-      ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turns), now()]);
+    const count = (Number(prev?.value) || 0) + 1;
+    if (count < threshold) {
+      ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(count), now()]);
       return "";
     }
-    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [key, now()]);
+    const ts = now();
+    for (const p of [TASK_TURNS_KEY_PREFIX, TASK_ACTS_KEY_PREFIX]) {
+      ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [`${p}${sid}`, ts]);
+    }
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
-    return `**Your declared task is ${turns} turns old** - \`update_session_task\` if it has drifted. ` + `It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.`;
+    return `**Your declared task is ${count} ${unit} old** - \`update_session_task\` if it has drifted. ` + `It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.`;
   } catch {
     return "";
   }
+}
+function tickStaleTaskDeclaration(ctx, sessionId) {
+  return tickStaleTask(ctx, sessionId, TASK_TURNS_KEY_PREFIX, STALE_TASK_TURNS, "turns");
+}
+function tickStaleTaskAction(ctx, sessionId) {
+  return tickStaleTask(ctx, sessionId, TASK_ACTS_KEY_PREFIX, STALE_TASK_ACTIONS, "actions");
 }
 function composeEditedFileCuration(ctx, sessionId) {
   const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
@@ -24962,6 +24972,7 @@ ${lines}
 ` + `  NOTE THE LIMIT: this catches CODE staleness only. A note can equally be invalidated by a live ` + `value moving (a price, a quota, a D1 row), a deployment, or a decision reversed in conversation - ` + `none of those are file edits and none will appear here. If something like that happened this ` + `session, the note it invalidated is still yours to find.`;
 }
 function handlePostToolUse(ctx, args) {
+  let staleTaskFromAction = "";
   if (args.tool_name && args.tool_name.startsWith("mcp__plugin_orchestrator_core__")) {
     markOrchActivityThisTurn(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
     appendBridgeAction(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id), args.tool_name);
@@ -24975,6 +24986,7 @@ function handlePostToolUse(ctx, args) {
     recordCheckpointSaved(ctx.db, args.session_id, ctx.tracker.getCurrentTurn(args.session_id));
   } else if (isSubstantiveActivity(args.tool_name)) {
     bumpActivitySinceSave(ctx.db, args.session_id);
+    staleTaskFromAction = tickStaleTaskAction(ctx, args.session_id);
   }
   resetStruggleCounter(ctx.db, args.session_id);
   const driftNudge = composeWorkItemDriftNudge(ctx.db, args.session_id, args);
@@ -24988,6 +25000,8 @@ function handlePostToolUse(ctx, args) {
     parts.push(areaEntry);
   if (driftNudge)
     parts.push(driftNudge);
+  if (staleTaskFromAction)
+    parts.push(`[orch] ${staleTaskFromAction}`);
   if (parts.length === 0)
     return {};
   return { additionalContext: parts.join(`
