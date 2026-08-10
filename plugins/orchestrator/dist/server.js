@@ -24922,14 +24922,35 @@ var STALE_TASK_TURNS = 30;
 var STALE_TASK_ACTIONS = 60;
 var TASK_TURNS_KEY_PREFIX = "task_turns_";
 var TASK_ACTS_KEY_PREFIX = "task_acts_";
+var TASK_MIRRORED_KEY_PREFIX = "task_mirrored_";
+function backfillRosterTask(ctx, sid, task) {
+  const key = `${TASK_MIRRORED_KEY_PREFIX}${sid}`;
+  try {
+    const done = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+    if (done)
+      return;
+    const stateDir = getAgentChannelStateDir();
+    if (stateDir)
+      setCurrentTask(stateDir, sid, task);
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
+  } catch {}
+}
 function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {
   const sid = sanitizeSessionId(sessionId);
   if (!sid)
     return "";
   try {
     const row = ctx.db.query(`SELECT current_task, current_task_at FROM session_registry WHERE session_id = ?`).get(sid);
-    if (!row?.current_task?.trim() || !row.current_task_at)
+    if (!row?.current_task?.trim())
       return "";
+    backfillRosterTask(ctx, sid, row.current_task.trim());
+    if (!row.current_task_at) {
+      ctx.db.run(`UPDATE session_registry SET current_task_at = ? WHERE session_id = ?`, [
+        now(),
+        sid
+      ]);
+      return "";
+    }
     const key = `${keyPrefix}${sid}`;
     const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
     const count = (Number(prev?.value) || 0) + 1;
@@ -28946,8 +28967,8 @@ server.tool("list_open_threads", "List ALL open threads (unresolved questions, i
   return { content: [{ type: "text", text: lines.join(`
 `) }] };
 });
-server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.", {
-  task: exports_external.string().min(1).max(2000),
+server.tool("update_session_task", "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. LENGTH: task is capped at 2000 characters and is REJECTED (not truncated) above it - write it as a broadcast line, not a checkpoint. Prioritise what a peer needs to avoid colliding with you, and CITE work items and notes by id rather than restating them: a cited id stays true after the record changes, while a copied summary rots and costs you the space that collision detail needed. Long-form history belongs in save_progress or a note. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.", {
+  task: exports_external.string().min(1).max(2000, "Task declaration is over the 2000-character limit. This is a broadcast line, not a checkpoint - it rides on every channel notification and every sibling's briefing. To fit: keep what a PEER needs in order to avoid colliding with you (what you hold, what is blocked on whom, standing 'do NOT do X' holds), and cite work items and notes by id instead of restating them - a reader can look those up, and a cited id stays true after the record changes while a copied summary rots. Put the long-form history in save_progress or a note, not here."),
   session_id: exports_external.string().optional(),
   warm_context: exports_external.array(exports_external.string()).max(50).optional(),
   hot_path_status: exports_external.string().max(80).optional(),

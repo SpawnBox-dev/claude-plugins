@@ -3,7 +3,7 @@ import { statSync, readFileSync } from "fs";
 import { join } from "path";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
-import { appendSystemEvent, type SystemEvent } from "../engine/agent_channel_state";
+import { appendSystemEvent, setCurrentTask, type SystemEvent } from "../engine/agent_channel_state";
 import { now, normalizeCodeRef, truncate, extractKeywords } from "../utils";
 
 // R6/R7 cross-session messaging (peekInbox/drainInbox) removed in 0.29.0.
@@ -1422,6 +1422,49 @@ const TASK_ACTS_KEY_PREFIX = "task_acts_";
  * Whichever counter trips first fires; BOTH reset, so the nudge stays
  * intermittent rather than arriving twice for the same drift.
  */
+// Once-per-session guard for the roster backfill below.
+const TASK_MIRRORED_KEY_PREFIX = "task_mirrored_";
+
+/**
+ * Self-heal THIS session's roster row from its own registry declaration.
+ *
+ * The two copies exist for a good reason and one bad consequence. The
+ * agent-channel DB (0.30.35, WI 8f3730ca) was split out to fix write-stomping
+ * between concurrent MCPs; it carries high-frequency ephemeral state -
+ * heartbeats every 30s, read-offsets every 1.5s. `project.db` carries durable
+ * knowledge. Different write rates and different lifetimes genuinely warrant
+ * different stores.
+ *
+ * What does NOT follow is copying `current_task` into both while its timestamp
+ * `current_task_at` lives in only one. The value and its own clock ended up in
+ * different databases, which is why the roster could show a task with no way to
+ * tell its age, and why 0.57.0's forward-only mirror left six of eight sessions
+ * rendering "(no task set)" while the registry held a real task for each.
+ *
+ * This writes only OUR OWN row - the same ownership rule as removeOwnSession -
+ * so a session never repairs a peer's state from data it cannot vouch for, and
+ * runs once per session because after the first declaration `declareSelf`
+ * keeps the copy current.
+ */
+function backfillRosterTask(ctx: HookCtx, sid: string, task: string): void {
+  const key = `${TASK_MIRRORED_KEY_PREFIX}${sid}`;
+  try {
+    const done = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key) as
+      | { value: string }
+      | undefined;
+    if (done) return;
+    const stateDir = getAgentChannelStateDir();
+    if (stateDir) setCurrentTask(stateDir, sid, task);
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
+      [key, now()]
+    );
+  } catch {
+    /* agent-channel absent, or plugin_state missing in a partial fixture -
+       the roster simply keeps its pre-existing value, which is the status quo */
+  }
+}
+
 function tickStaleTask(
   ctx: HookCtx,
   sessionId: string,
@@ -1440,9 +1483,42 @@ function tickStaleTask(
 
     // No declaration to be stale about. "You never set a task" is a different
     // ask, already covered by the briefing; firing both would double up on a
-    // session that has not started work yet. Also covers rows written before
-    // migration 23, whose age is unknowable and must not be guessed at.
-    if (!row?.current_task?.trim() || !row.current_task_at) return "";
+    // session that has not started work yet.
+    if (!row?.current_task?.trim()) return "";
+
+    // Mirror our own declaration into the roster copy if it never got there.
+    // Deliberately BEFORE the arming return below: a pre-0.57.0 session needs
+    // both repairs, and gating the mirror behind the timestamp would leave the
+    // roster blank for one extra tick for no reason.
+    backfillRosterTask(ctx, sid, row.current_task.trim());
+
+    // COLD START (WI 40d09574). A row that predates migration 23 has a task but
+    // no timestamp, and the original guard returned "" for it - correctly, since
+    // an unknowable age must never be guessed at. But that made the nudge
+    // DORMANT for every session that declared before the upgrade: 16 of 18 rows
+    // when this was measured, and the fleet only armed because Jarid asked
+    // everyone to re-declare by hand.
+    //
+    // It cannot self-heal for the sessions that need it most. A session arms the
+    // nudge by declaring, and the nudge exists to make sessions declare - so an
+    // ACTIVE lane escapes via normal work, while a PARKED one never does: parked
+    // means accumulating no turns and no actions, which is precisely the state in
+    // which no counter ever trips and nothing ever prompts it.
+    //
+    // The fix stamps NOW, as an OBSERVATION time rather than a declaration time.
+    // That arms the counter with a fresh clock, so the first nudge lands up to a
+    // full interval LATE and never early - the conservative direction, and it
+    // preserves the original guard's intent (never invent an age) while closing
+    // the hole. Do NOT backdate to started_at or any inferred time: that is the
+    // guessing the guard exists to prevent, and it would fire a nudge burst
+    // across the whole fleet on the next tick.
+    if (!row.current_task_at) {
+      ctx.db.run(`UPDATE session_registry SET current_task_at = ? WHERE session_id = ?`, [
+        now(),
+        sid,
+      ]);
+      return "";
+    }
 
     const key = `${keyPrefix}${sid}`;
     const prev = ctx.db

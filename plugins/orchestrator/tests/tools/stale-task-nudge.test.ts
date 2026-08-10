@@ -96,11 +96,68 @@ describe("turn-based staleness nudge: up to date, but intermittent", () => {
     expect(takeTurns(ctx, TURNS + 5)).toBe("");
   });
 
-  test("SILENT when the declaration predates migration 23", () => {
-    // A NULL timestamp means "set before we tracked this" - unknowable age,
-    // and it must not be guessed at.
+  test("ARMS a declaration that predates migration 23, instead of ignoring it forever", () => {
+    // CHANGED in 0.58.0 (WI 40d09574). This test previously asserted permanent
+    // silence for a NULL timestamp, and that assertion was the bug: measured on
+    // the live fleet, 16 of 18 rows had a task and no timestamp, so the nudge
+    // was DORMANT for every session that declared before the upgrade. Nothing
+    // errored - it simply never fired, which is why it went unnoticed.
+    //
+    // The original reasoning still holds and is preserved: an unknowable age
+    // must not be guessed at. So the first tick stamps NOW as an OBSERVATION
+    // time and stays silent; the clock starts fresh from there. The nudge lands
+    // up to a full interval late and never early.
     seed(db, "a task from before the column existed", null);
-    expect(takeTurns(ctx, TURNS + 5)).toBe("");
+
+    expect(tickStaleTaskDeclaration(ctx, SID)).toBe(""); // arms, does not fire
+    const stamped = db
+      .query(`SELECT current_task_at FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { current_task_at: string | null };
+    expect(stamped.current_task_at).not.toBeNull();
+
+    // ...and from a fresh clock it now behaves like any armed session.
+    expect(takeTurns(ctx, TURNS - 1)).toBe("");
+    expect(tickStaleTaskDeclaration(ctx, SID)).not.toBe("");
+  });
+
+  test("arming NEVER back-dates - a fleet-wide nudge burst is the failure to avoid", () => {
+    // Stamping started_at (or any inferred earlier time) would make every
+    // pre-upgrade session instantly overdue and fire at once on the next tick.
+    // The stamp must be no earlier than the moment we first saw the row.
+    const before = new Date().toISOString();
+    seed(db, "old declaration", null);
+    tickStaleTaskDeclaration(ctx, SID);
+    const { current_task_at: at } = db
+      .query(`SELECT current_task_at FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { current_task_at: string };
+    expect(at >= before).toBe(true);
+  });
+
+  test("a NULL-timestamp row is mirrored to the roster, not left blank", () => {
+    // The other half of the same cold start: the task existed in the registry
+    // the whole time and simply never reached the copy the roster reads.
+    seed(db, "task that never reached the roster", null);
+    tickStaleTaskDeclaration(ctx, SID);
+    const guard = db
+      .query(`SELECT value FROM plugin_state WHERE key = ?`)
+      .get(`task_mirrored_${SID}`) as { value: string } | undefined;
+    expect(guard?.value).toBe("1");
+  });
+
+  test("the roster backfill runs ONCE, not on every turn", () => {
+    // It writes to a different database than the counters; doing it per-tick
+    // would add a cross-DB write to every hand-back and every tool call for a
+    // repair that is only ever needed once.
+    seed(db, "a task", new Date().toISOString());
+    tickStaleTaskDeclaration(ctx, SID);
+    const first = db
+      .query(`SELECT updated_at FROM plugin_state WHERE key = ?`)
+      .get(`task_mirrored_${SID}`) as { updated_at: string };
+    takeTurns(ctx, 5);
+    const after = db
+      .query(`SELECT updated_at FROM plugin_state WHERE key = ?`)
+      .get(`task_mirrored_${SID}`) as { updated_at: string };
+    expect(after.updated_at).toBe(first.updated_at); // never rewritten
   });
 
   test("an unknown session is silent, not an error", () => {

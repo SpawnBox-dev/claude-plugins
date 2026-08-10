@@ -2396,7 +2396,7 @@ server.tool(
 
 server.tool(
   "update_session_task",
-  "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.",
+  "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. LENGTH: task is capped at 2000 characters and is REJECTED (not truncated) above it - write it as a broadcast line, not a checkpoint. Prioritise what a peer needs to avoid colliding with you, and CITE work items and notes by id rather than restating them: a cited id stays true after the record changes, while a copied summary rots and costs you the space that collision detail needed. Long-form history belongs in save_progress or a note. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.",
   {
     // 0.30.72+: raised 500 -> 2000. The 500 cap was cutting the part of a lane
     // declaration that peers most need: the standing "do NOT do X" holds.
@@ -2405,7 +2405,28 @@ server.tool(
     // sibling's briefing and rides on every channel notification, so truncating
     // it degrades exactly the cross-session awareness the field exists for.
     // 2000 is still a hard bound - it is a broadcast line, not a checkpoint.
-    task: z.string().min(1).max(2000),
+    // 0.58.0 (WI 40d09574): the limit is now STATED - in the tool description
+    // above and in this rejection message. It was neither, and the first signal
+    // a caller got was a bare `too_big` after composing a full declaration.
+    // Measured on 2026-08-10: two sessions hit it independently within minutes
+    // (one three times) and BOTH resolved it by deleting collision-avoidance
+    // detail - the single most expensive content to lose, since its absence
+    // shows up later as duplicated work or a merge conflict rather than as an
+    // error. Naming the bound and the way out turns a blind trim into a
+    // principled one.
+    task: z
+      .string()
+      .min(1)
+      .max(
+        2000,
+        "Task declaration is over the 2000-character limit. This is a broadcast line, " +
+          "not a checkpoint - it rides on every channel notification and every sibling's " +
+          "briefing. To fit: keep what a PEER needs in order to avoid colliding with you " +
+          "(what you hold, what is blocked on whom, standing 'do NOT do X' holds), and cite " +
+          "work items and notes by id instead of restating them - a reader can look those up, " +
+          "and a cited id stays true after the record changes while a copied summary rots. " +
+          "Put the long-form history in save_progress or a note, not here."
+      ),
     session_id: z.string().optional(),
     warm_context: z.array(z.string()).max(50).optional(),
     hot_path_status: z.string().max(80).optional(),
