@@ -23796,6 +23796,14 @@ function setKeepClean(stateDir, session_id, keep) {
   const db = getDb(stateDir);
   prep(db, `UPDATE sessions SET keep_clean = ? WHERE session_id = ?`).run(keep ? 1 : 0, session_id);
 }
+function setSessionLiveness(stateDir, session_id, opts) {
+  const db = getDb(stateDir);
+  const expiresAt = opts.state !== "healthy" && opts.ttlSeconds ? new Date(new Date(opts.observedAt).getTime() + opts.ttlSeconds * 1000).toISOString() : null;
+  prep(db, `UPDATE sessions
+       SET liveness_state = ?, liveness_ts = ?, liveness_expires_at = ?
+     WHERE session_id = ?
+       AND (liveness_ts IS NULL OR liveness_ts <= ?)`).run(opts.state, opts.observedAt, expiresAt, session_id, opts.observedAt);
+}
 function removeSession(stateDir, session_id) {
   const db = getDb(stateDir);
   prep(db, `DELETE FROM sessions WHERE session_id = ?`).run(session_id);
@@ -26443,6 +26451,11 @@ class AgentChannel {
     this.publishedUnreachableSince = since;
     try {
       setClientUnreachableSince(this.projectStateDir, this.selfSession.session_id, since);
+      setSessionLiveness(this.projectStateDir, this.selfSession.session_id, {
+        state: since ? "client_transport_suspect" : "healthy",
+        observedAt: new Date().toISOString(),
+        ...since ? { ttlSeconds: 900 } : {}
+      });
     } catch {}
   }
   heartbeat() {
@@ -26664,6 +26677,15 @@ class AgentChannel {
         thresholdMs: INGRESS_STALE_THRESHOLD_MS,
         transcriptMtimeMs
       });
+      if (verdict !== "pending") {
+        try {
+          setSessionLiveness(this.projectStateDir, sid, {
+            state: verdict === "ingress_suspect" ? "ingress_suspect" : "healthy",
+            observedAt: new Date(now3).toISOString(),
+            ...verdict === "ingress_suspect" ? { ttlSeconds: 600 } : {}
+          });
+        } catch {}
+      }
       if (verdict === "ingress_suspect") {
         let lastEmit;
         try {

@@ -37,6 +37,7 @@ import {
   setHotPathStatus,
   setKeepClean,
   setClientUnreachableSince,
+  setSessionLiveness,
   type SessionEntry,
   getAlertLastEmit,
   setAlertLastEmit,
@@ -922,6 +923,20 @@ export class AgentChannel {
         this.selfSession.session_id,
         since,
       );
+      // 0.57.0 (WI e3a58e10): also record it as LIVENESS, so there is ONE
+      // field a reader can consult for "is this session reachable" instead of
+      // needing to know about three separate columns. PA's agent definition
+      // tells it a repurposing candidate "must be reachable (not
+      // egress/ingress-suspect)" - liveness_state is where that question is
+      // supposed to be answered, and nothing was writing it.
+      //
+      // Self-written rather than observer-written, unlike the ingress/egress
+      // verdicts: only this process can see that its own emits are not landing.
+      setSessionLiveness(this.projectStateDir, this.selfSession.session_id, {
+        state: since ? "client_transport_suspect" : "healthy",
+        observedAt: new Date().toISOString(),
+        ...(since ? { ttlSeconds: 900 } : {}),
+      });
     } catch {
       /* best-effort: never break the heartbeat over telemetry */
     }
@@ -1377,6 +1392,29 @@ export class AgentChannel {
         thresholdMs: INGRESS_STALE_THRESHOLD_MS,
         transcriptMtimeMs,
       });
+      // 0.57.0 (WI e3a58e10): PERSIST the verdict, every tick, whether or not
+      // an alert fires. Until now this judgement lived only in the emitted
+      // alert - so the one consumer that needs it, PA deciding whether a
+      // repurposing candidate is REACHABLE ("not egress/ingress-suspect", per
+      // its own agent definition), could only know it if the alert happened to
+      // still be in PA's context. A compaction erases exactly that.
+      //
+      // Deliberately NOT coupled to the emit: the alert is throttled by a
+      // refractory floor and an episode dedup, so alert-coupled persistence
+      // would leave the state stale for the whole refractory window. `pending`
+      // is skipped rather than written - it means "not enough evidence yet",
+      // which must not overwrite a known state.
+      if (verdict !== "pending") {
+        try {
+          setSessionLiveness(this.projectStateDir, sid, {
+            state: verdict === "ingress_suspect" ? "ingress_suspect" : "healthy",
+            observedAt: new Date(now).toISOString(),
+            ...(verdict === "ingress_suspect" ? { ttlSeconds: 600 } : {}),
+          });
+        } catch {
+          /* best-effort: never let a telemetry write break the tick */
+        }
+      }
       if (verdict === "ingress_suspect") {
         // Refractory floor sits OUTSIDE the episode dedup on purpose: the
         // episode flag is cleared whenever the verdict goes healthy, which is

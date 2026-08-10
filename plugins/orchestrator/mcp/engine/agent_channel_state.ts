@@ -79,7 +79,15 @@ export type SessionKind = "prime" | "subordinate" | "discord-bot";
 /** PA-coherence primitive (WI 19294811-family): a session's fleet-liveness as
  *  the repurposing query gates on it. `healthy` = reachable; the two `_suspect`
  *  states mean alive-but-not-reachable and are carried with a TTL. */
-export type LivenessState = "healthy" | "egress_suspect" | "ingress_suspect";
+export type LivenessState =
+  | "healthy"
+  | "egress_suspect"
+  | "ingress_suspect"
+  // 0.57.0 (WI d4873dfc): server alive, CLIENT unreachable. Distinct from the
+  // other two on purpose - egress/ingress describe a session whose own loop or
+  // transport is impaired, whereas this one is fully healthy and simply cannot
+  // be reached, which is a different repurposing answer (it will come back).
+  | "client_transport_suspect";
 
 export interface SessionEntry {
   session_id: string;
