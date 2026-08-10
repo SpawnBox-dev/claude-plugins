@@ -1356,56 +1356,86 @@ export function findNotesDescribingEditedFiles(
 
 /** Impure shell: read this session's edited-file list and pair it up. */
 /**
- * How old a session's DECLARED task may get before the Stop housekeeping asks
- * about it (WI 7844a909).
+ * How many TURNS a session may take before it is asked whether its declared
+ * task still describes what it is doing (WI 7844a909).
  *
- * Deliberately hours, not minutes. This nudge only earns its place by being
- * RARE: a session that re-declares when it switches lanes will never see it,
- * so when it does appear the reader has no grounds to dismiss it as
- * not-my-situation - the failure mode that turns an always-on nudge into
- * chrome (anti_pattern 60f2fdc2). Four hours is roughly a working block; the
- * drift that actually hurt was measured in DAYS.
+ * TURNS, NOT WALL-CLOCK, and the distinction is the whole design (Jarid,
+ * 2026-08-10). Drift happens when what a session is DOING diverges from what it
+ * SAID; doing is measured in turns. Time is only a proxy for turns, and a poor
+ * one in both directions - six idle hours change nothing, while forty turns in
+ * one hour can change everything.
+ *
+ * Turn-counting also removes a false positive for free: a parked session takes
+ * no turns, so it never accumulates and is never asked to restate a
+ * declaration that is still true. No separate idle-detection is needed.
+ *
+ * Sized so a session doing focused work on ONE declared thing is not
+ * interrupted, while a session that has clearly moved on is caught. The counter
+ * RESETS on every firing and on every update_session_task, so this is
+ * intermittent by construction rather than a per-turn reminder - the property
+ * that stops it being classified as noise (anti_pattern 60f2fdc2).
  */
-const STALE_TASK_THRESHOLD_MS = 4 * 60 * 60 * 1000;
+const STALE_TASK_TURNS = 30;
+
+/** plugin_state key holding turns taken since the last declaration. */
+const TASK_TURNS_KEY_PREFIX = "task_turns_";
 
 /**
- * Returns a nudge when this session's declared task is materially older than
- * its activity, or "" when it is fresh / unknown / never set.
+ * Count this turn and, when enough have passed since the session last declared
+ * its task, return the nudge (and reset the counter). Returns "" otherwise.
  *
- * Silent when there is no declaration at all: "you have never set a task" is a
- * different ask, already covered by the briefing, and firing both would double
- * up on a brand-new session that has not done anything yet.
+ * Called on EVERY Stop, deliberately OUTSIDE the once-per-session housekeeping
+ * block. That block is gated by `stop_<sid>` and fires exactly once per session
+ * - so a staleness check placed inside it could only ever run at the FIRST
+ * hand-back, when the declaration is newest, and would never fire in practice.
+ * (It was placed there in the first draft of this feature and would have been
+ * inert - the same never-invoked-guard shape this codebase keeps finding.)
  */
-export function describeStaleTaskDeclaration(ctx: HookCtx, sessionId: string): string {
+export function tickStaleTaskDeclaration(ctx: HookCtx, sessionId: string): string {
   const sid = sanitizeSessionId(sessionId);
   if (!sid) return "";
   try {
     const row = ctx.db
       .query(
-        `SELECT current_task, current_task_at, last_active_at
-           FROM session_registry WHERE session_id = ?`
+        `SELECT current_task, current_task_at FROM session_registry WHERE session_id = ?`
       )
-      .get(sid) as
-      | { current_task: string | null; current_task_at: string | null; last_active_at: string | null }
-      | null;
-    if (!row?.current_task || !row.current_task.trim()) return "";
-    // Never declared under the new schema (migration 102 backfills nothing on
-    // purpose - a NULL here means "set before we tracked this", which we cannot
-    // date and must not guess at).
-    if (!row.current_task_at) return "";
-    const declaredMs = Date.parse(row.current_task_at);
-    if (!Number.isFinite(declaredMs)) return "";
-    const ageMs = Date.now() - declaredMs;
-    if (ageMs < STALE_TASK_THRESHOLD_MS) return "";
-    const hours = Math.floor(ageMs / (60 * 60 * 1000));
-    const age = hours >= 24 ? `${Math.floor(hours / 24)}d` : `${hours}h`;
-    const snippet = row.current_task.trim().slice(0, 60);
+      .get(sid) as { current_task: string | null; current_task_at: string | null } | null;
+
+    // No declaration to be stale about. "You never set a task" is a different
+    // ask, already covered by the briefing; firing both would double up on a
+    // session that has not started work yet. Also covers rows written before
+    // migration 23, whose age is unknowable and must not be guessed at.
+    if (!row?.current_task?.trim() || !row.current_task_at) return "";
+
+    const key = `${TASK_TURNS_KEY_PREFIX}${sid}`;
+    const prev = ctx.db
+      .query(`SELECT value FROM plugin_state WHERE key = ?`)
+      .get(key) as { value: string } | undefined;
+    const turns = (Number(prev?.value) || 0) + 1;
+
+    if (turns < STALE_TASK_TURNS) {
+      ctx.db.run(
+        `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+        [key, String(turns), now()]
+      );
+      return "";
+    }
+
+    // Fire, and reset - so the next nudge is another full interval away rather
+    // than every turn from here on.
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`,
+      [key, now()]
+    );
+    const task = row.current_task.trim();
+    const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
     return (
-      `**Your declared task is ${age} old** - \`update_session_task\`. ` +
-      `It currently reads: "${snippet}${row.current_task.trim().length > 60 ? "..." : ""}". ` +
+      `**Your declared task is ${turns} turns old** - \`update_session_task\` if it has drifted. ` +
+      `It currently reads: "${snippet}". ` +
       `This is not bookkeeping: it is what peers see in their roster, what rides on every ` +
       `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` +
-      `sends the whole fleet, and your own future self, the wrong picture.`
+      `sends the whole fleet, and your own future self, the wrong picture. ` +
+      `If it is still accurate, re-declaring it costs one call and resets this.`
     );
   } catch {
     return "";
@@ -2261,13 +2291,34 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     }
   }
 
+  // WI 7844a909: tick the turn counter and, if the declaration has gone stale,
+  // carry the nudge. DELIBERATELY BEFORE the once-per-session gate below.
+  //
+  // The gate makes the big housekeeping block fire exactly ONCE per session, at
+  // the first hand-back. A staleness check placed inside it could therefore
+  // only ever run when the declaration is NEWEST, and would never fire in
+  // practice - which is what the first draft of this feature did. Anything that
+  // needs to observe a session OVER TIME has to sit on this side of the gate.
+  const staleTask = tickStaleTaskDeclaration(ctx, args.session_id);
+
   // Block once per session id, then pass through. Reuse plugin_state with a
   // marker key.
   const key = `stop_${args.session_id}`;
   const exists = ctx.db
     .query(`SELECT 1 FROM plugin_state WHERE key = ?`)
     .get(key);
-  if (exists) return {};
+  // Housekeeping already delivered - but the staleness nudge is per-turn state
+  // and must still reach the agent, so it is returned on its own rather than
+  // swallowed by the early return.
+  if (exists) {
+    // Same delivery channel the housekeeping block below uses. `Stop` is NOT in
+    // HSO_EVENTS, so a hookSpecificOutput envelope would fail schema validation
+    // here; and systemMessage surfaces to the USER rather than feeding the
+    // agent. decision:"block" + reason is what actually reaches the model on
+    // this event - it declines the stop and hands the text back, which is
+    // exactly what a nudge needs to be acted on rather than merely displayed.
+    return staleTask ? { decision: "block", reason: `[orch] ${staleTask}` } : {};
+  }
   ctx.db.run(
     `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
     [key, now()]
@@ -2306,27 +2357,6 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     parts.push(
       `**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:\n${list}${more}\n  -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`
     );
-    n++;
-  }
-
-  // WI 7844a909: STALE-DECLARATION nudge, and it is deliberately the only item
-  // here that is CONDITIONAL ON MEASURED STATE rather than always present.
-  //
-  // The problem it fixes: current_task is a voluntary write competing with the
-  // work, and the cost of skipping it lands on someone ELSE later - a peer
-  // reading the roster, or this session's own post-compaction self. PA's task
-  // went TWO DAYS stale (describing 0.44.x while the fleet ran 0.56.0) under a
-  // regime that already nudges every single turn. So volume is not the lever.
-  //
-  // Firing only when the declaration is actually old is what keeps it from
-  // becoming chrome (anti_pattern 60f2fdc2): a reader who sees this knows it is
-  // true of them right now, which is exactly the property the always-on nudges
-  // lack. Reads current_task_at (migration 102), which is stamped ONLY by
-  // update_session_task - last_active_at cannot serve, because ordinary
-  // activity bumps it and a two-day-old declaration looks fresh through it.
-  const staleTask = describeStaleTaskDeclaration(ctx, args.session_id);
-  if (staleTask) {
-    parts.push(`**${n}. ${staleTask}`);
     n++;
   }
 

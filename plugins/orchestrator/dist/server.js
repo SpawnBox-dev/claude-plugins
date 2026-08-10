@@ -24186,6 +24186,12 @@ class SessionTracker {
   updateCurrentTask(sessionId, task) {
     const ts = now();
     this.db.run(`UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`, [task, ts, ts, sessionId]);
+    try {
+      this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [
+        `task_turns_${sessionId}`,
+        ts
+      ]);
+    } catch {}
   }
   getActiveSiblings(sessionId) {
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -24913,28 +24919,27 @@ function findNotesDescribingEditedFiles(db, editedFiles, max = 4) {
   }
   return out;
 }
-var STALE_TASK_THRESHOLD_MS = 4 * 60 * 60 * 1000;
-function describeStaleTaskDeclaration(ctx, sessionId) {
+var STALE_TASK_TURNS = 30;
+var TASK_TURNS_KEY_PREFIX = "task_turns_";
+function tickStaleTaskDeclaration(ctx, sessionId) {
   const sid = sanitizeSessionId(sessionId);
   if (!sid)
     return "";
   try {
-    const row = ctx.db.query(`SELECT current_task, current_task_at, last_active_at
-           FROM session_registry WHERE session_id = ?`).get(sid);
-    if (!row?.current_task || !row.current_task.trim())
+    const row = ctx.db.query(`SELECT current_task, current_task_at FROM session_registry WHERE session_id = ?`).get(sid);
+    if (!row?.current_task?.trim() || !row.current_task_at)
       return "";
-    if (!row.current_task_at)
+    const key = `${TASK_TURNS_KEY_PREFIX}${sid}`;
+    const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+    const turns = (Number(prev?.value) || 0) + 1;
+    if (turns < STALE_TASK_TURNS) {
+      ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, String(turns), now()]);
       return "";
-    const declaredMs = Date.parse(row.current_task_at);
-    if (!Number.isFinite(declaredMs))
-      return "";
-    const ageMs = Date.now() - declaredMs;
-    if (ageMs < STALE_TASK_THRESHOLD_MS)
-      return "";
-    const hours = Math.floor(ageMs / (60 * 60 * 1000));
-    const age = hours >= 24 ? `${Math.floor(hours / 24)}d` : `${hours}h`;
-    const snippet = row.current_task.trim().slice(0, 60);
-    return `**Your declared task is ${age} old** - \`update_session_task\`. ` + `It currently reads: "${snippet}${row.current_task.trim().length > 60 ? "..." : ""}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture.`;
+    }
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [key, now()]);
+    const task = row.current_task.trim();
+    const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
+    return `**Your declared task is ${turns} turns old** - \`update_session_task\` if it has drifted. ` + `It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.`;
   } catch {
     return "";
   }
@@ -25301,10 +25306,12 @@ function handleStop(ctx, args) {
       }
     }
   }
+  const staleTask = tickStaleTaskDeclaration(ctx, args.session_id);
   const key = `stop_${args.session_id}`;
   const exists = ctx.db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(key);
-  if (exists)
-    return {};
+  if (exists) {
+    return staleTask ? { decision: "block", reason: `[orch] ${staleTask}` } : {};
+  }
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
   const fresh = countFreshSurfaced(ctx.db, args.session_id);
   const inFlight = listInFlightWorkItemsForSession(ctx.db, args.session_id);
@@ -25320,11 +25327,6 @@ function handleStop(ctx, args) {
     parts.push(`**${n}. Loop-closure.** ${inFlight.length} in-flight work_item${inFlight.length === 1 ? "" : "s"}:
 ${list}${more}
   -> For each: did it complete? \`update_work_item({id, status:"done"})\`. If unsure, ASK.`);
-    n++;
-  }
-  const staleTask = describeStaleTaskDeclaration(ctx, args.session_id);
-  if (staleTask) {
-    parts.push(`**${n}. ${staleTask}`);
     n++;
   }
   const editedCuration = composeEditedFileCuration(ctx, args.session_id);

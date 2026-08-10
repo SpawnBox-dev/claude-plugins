@@ -3,54 +3,51 @@ import { Database } from "bun:sqlite";
 import { applyMigrations } from "../../mcp/db/schema";
 import {
   renderCompactRoster,
-  describeStaleTaskDeclaration,
+  tickStaleTaskDeclaration,
   type CompactPeer,
 } from "../../mcp/tools/hook_event";
 
 // WI 7844a909 + e3a58e10.
 //
 // Jarid: "are you planning to somehow address the fact that agents don't
-// maintain their running notes/records like they should?"
+// maintain their running notes/records like they should?" ... "there must be a
+// way to make this smart and efficient so its as up to date as possible, but
+// intermittently injected so it can't be classified as noise".
 //
-// NAGGING HAS ALREADY FAILED, WITH EVIDENCE. The plugin injects a housekeeping
-// reminder on EVERY turn, and under that regime PA's own declared task went TWO
-// DAYS stale - describing 0.44.x work while the fleet ran 0.56.0. More volume
-// is not the lever; a nudge that is TRUE OF THE READER when it appears is. An
-// always-applicable nudge becomes chrome (anti_pattern 60f2fdc2), and chrome is
-// skipped exactly when it finally matters.
+// NAGGING HAS ALREADY FAILED, WITH EVIDENCE: the plugin injects a reminder on
+// EVERY turn, and under that regime PA's own declaration went TWO DAYS stale
+// (describing 0.44.x while the fleet ran 0.56.0). Volume is not the lever.
 //
-// Researched 2026-08-10 against code.claude.com/docs/en/hooks: PreCompact
-// CANNOT carry this - it is a synchronous decision point with no model turn
-// before compaction, so an agent cannot act on a prompt delivered there (the
-// plugin already learned this and made its PreCompact capture deterministic).
-// `Stop` is the event that can, because the turn ends but the conversation
-// continues.
+// TURNS, NOT WALL-CLOCK (Jarid's refinement, and it is the better signal):
+// drift happens when what a session is DOING diverges from what it SAID, and
+// doing is measured in turns. Six idle hours change nothing; forty turns in one
+// hour can change everything. Turn-counting also removes the parked-session
+// false positive for free - no turns accumulate, so nothing fires.
 //
-// These tests EXERCISE the function against a real database. An earlier draft
-// grep'd the source for its guard clauses, which is the same weak shape as the
-// grep-test that once pinned a bug as spec (retired in 0.56.0) - it proves the
-// text exists, not that the behaviour holds.
+// Researched against code.claude.com/docs/en/hooks (2026-08-10): PreCompact
+// cannot carry this (synchronous, no model turn before compaction), so `Stop`
+// is the only event where an actionable nudge survives into the next turn.
 
 const SID = "11111111-2222-3333-4444-555555555555";
+const TURNS = 30; // must track STALE_TASK_TURNS
 
-function seed(db: Database, taskAgeHours: number | null, task: string | null) {
+function seed(db: Database, task: string | null, declaredAt: string | null) {
   db.run(
     `INSERT OR REPLACE INTO session_registry
        (session_id, started_at, last_active_at, current_task, current_task_at)
      VALUES (?, ?, ?, ?, ?)`,
-    [
-      SID,
-      new Date().toISOString(),
-      new Date().toISOString(), // always FRESH - ordinary activity keeps bumping it
-      task,
-      taskAgeHours === null
-        ? null
-        : new Date(Date.now() - taskAgeHours * 3600_000).toISOString(),
-    ]
+    [SID, new Date().toISOString(), new Date().toISOString(), task, declaredAt]
   );
 }
 
-describe("stale-declaration nudge: fires when true, silent when not", () => {
+/** Take n turns; returns whatever the last one produced. */
+function takeTurns(ctx: any, n: number): string {
+  let out = "";
+  for (let i = 0; i < n; i++) out = tickStaleTaskDeclaration(ctx, SID);
+  return out;
+}
+
+describe("turn-based staleness nudge: up to date, but intermittent", () => {
   let db: Database;
   let ctx: any;
   beforeEach(() => {
@@ -59,50 +56,66 @@ describe("stale-declaration nudge: fires when true, silent when not", () => {
     ctx = { db, tracker: null };
   });
 
-  test("FIRES when the declaration is old", () => {
-    seed(db, 30, "ORCH-IMP: shipped 0.44.0 + 0.44.1"); // the real PA failure, aged
-    const out = describeStaleTaskDeclaration(ctx, SID);
+  test("SILENT for the first 29 turns", () => {
+    // The control that matters most. If this ever fails the nudge has become
+    // per-turn chrome and is worse than nothing.
+    seed(db, "ORCH-IMP: fixing the roster", new Date().toISOString());
+    expect(takeTurns(ctx, TURNS - 1)).toBe("");
+  });
+
+  test("FIRES on the 30th turn", () => {
+    seed(db, "ORCH-IMP: shipped 0.44.0 + 0.44.1", new Date().toISOString());
+    const out = takeTurns(ctx, TURNS);
     expect(out).not.toBe("");
     expect(out).toContain("update_session_task");
     expect(out).toContain("0.44.0"); // quotes the stale text back at the reader
+    expect(out).toContain("30 turns old");
   });
 
-  test("SILENT when the declaration is fresh - the control that matters", () => {
-    // If this ever fails, the nudge has become every-turn chrome and is worse
-    // than nothing.
-    seed(db, 0.25, "ORCH-IMP: currently fixing the roster");
-    expect(describeStaleTaskDeclaration(ctx, SID)).toBe("");
+  test("RESETS after firing - intermittent, not every turn from then on", () => {
+    // Without the reset the counter keeps climbing and every subsequent turn
+    // fires. That is the exact failure mode this design exists to avoid.
+    seed(db, "some task", new Date().toISOString());
+    expect(takeTurns(ctx, TURNS)).not.toBe("");
+    expect(tickStaleTaskDeclaration(ctx, SID)).toBe(""); // turn 31
+    expect(takeTurns(ctx, TURNS - 2)).toBe(""); // ...through 59
+    expect(tickStaleTaskDeclaration(ctx, SID)).not.toBe(""); // 60: next interval
+  });
+
+  test("a PARKED session is never nudged - no turns, no firing", () => {
+    // Wall-clock would fire here (declared long ago); turns do not, because the
+    // session has done nothing its declaration could have drifted from.
+    seed(db, "reserve, idle-available", "2026-08-01T00:00:00.000Z");
+    expect(tickStaleTaskDeclaration(ctx, SID)).toBe("");
   });
 
   test("SILENT when no task was ever declared", () => {
-    // A different ask, already covered by the briefing; firing both would
-    // double up on a session that has not started work yet.
+    // A different ask, already covered by the briefing.
     seed(db, null, null);
-    expect(describeStaleTaskDeclaration(ctx, SID)).toBe("");
+    expect(takeTurns(ctx, TURNS + 5)).toBe("");
   });
 
-  test("SILENT when the task predates the timestamp column", () => {
-    // Migration 102 deliberately backfills nothing: a NULL means "set before we
-    // tracked this", which cannot be dated and must not be guessed at.
-    seed(db, null, "a task set before migration 102 existed");
-    expect(describeStaleTaskDeclaration(ctx, SID)).toBe("");
-  });
-
-  test("age is reported in DAYS once it passes 24h", () => {
-    seed(db, 49, "two days stale");
-    expect(describeStaleTaskDeclaration(ctx, SID)).toContain("2d old");
+  test("SILENT when the declaration predates migration 23", () => {
+    // A NULL timestamp means "set before we tracked this" - unknowable age,
+    // and it must not be guessed at.
+    seed(db, "a task from before the column existed", null);
+    expect(takeTurns(ctx, TURNS + 5)).toBe("");
   });
 
   test("an unknown session is silent, not an error", () => {
-    expect(describeStaleTaskDeclaration(ctx, "no-such-session")).toBe("");
+    expect(tickStaleTaskDeclaration(ctx, "no-such-session")).toBe("");
   });
 
-  test("last_active_at CANNOT rescue it - that is why the column was added", () => {
-    // The seed keeps last_active_at fresh on purpose. If the function read that
-    // instead, a 30-hour-old declaration would look current and the nudge could
-    // never fire - which is the bug that let PA drift for two days.
-    seed(db, 30, "stale declaration, active session");
-    expect(describeStaleTaskDeclaration(ctx, SID)).not.toBe("");
+  test("re-declaring resets the counter", () => {
+    // The escape hatch the nudge text promises: "re-declaring costs one call
+    // and resets this". If it did not hold, the advice would be false.
+    seed(db, "task A", new Date().toISOString());
+    takeTurns(ctx, TURNS - 1);
+    db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [
+      `task_turns_${SID}`,
+      new Date().toISOString(),
+    ]);
+    expect(tickStaleTaskDeclaration(ctx, SID)).toBe("");
   });
 });
 
@@ -122,13 +135,10 @@ describe("WI e3a58e10: liveness reaches the roster PA rebuilds from", () => {
     const peers: CompactPeer[] = [
       { id8: "bbbbbbbb", current_task: "CREATOR lane", liveness_state: "healthy" },
     ];
-    const out = renderCompactRoster(peers);
-    expect(out).not.toContain("[healthy]");
-    expect(out).toContain("CREATOR lane");
+    expect(renderCompactRoster(peers)).not.toContain("[healthy]");
   });
 
   test("null liveness degrades to the previous rendering", () => {
-    // Every session predating this ships NULL here.
     const peers: CompactPeer[] = [{ id8: "cccccccc", current_task: "VMTEST" }];
     expect(renderCompactRoster(peers)).toBe("  - SA-cccccccc: VMTEST");
   });

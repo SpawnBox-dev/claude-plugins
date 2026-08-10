@@ -251,6 +251,18 @@ export class SessionTracker {
       `UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`,
       [task, ts, ts, sessionId]
     );
+    // Re-declaring resets the turn counter that drives the staleness nudge, so
+    // the next one is a full interval away. Without this the counter would keep
+    // climbing and the nudge would fire every turn once tripped - which is the
+    // difference between an intermittent prompt and noise.
+    try {
+      this.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '0', ?)`, [
+        `task_turns_${sessionId}`,
+        ts,
+      ]);
+    } catch {
+      /* plugin_state absent in partial fixtures - the counter simply restarts */
+    }
   }
 
   /**
