@@ -351,12 +351,32 @@ export class SessionTracker {
     const twentyFourHoursAgo = new Date(
       Date.now() - 24 * 60 * 60 * 1000
     ).toISOString();
+    // LIMIT ORDER FIXED (0.68.0). This used `ORDER BY last_active_at DESC
+    // LIMIT 5` and THEN intersected with the live set, which is the wrong
+    // order and silently dropped live peers.
+    //
+    // Two failures, both measured on the live fleet 2026-08-11 17:47Z with
+    // 7 live siblings:
+    //   1. TRUNCATION WAS INVISIBLE. Five were shown and the header announced
+    //      "5 sibling sessions active" - the truncated count presented as the
+    //      total. A reader had no way to know two peers existed, and one of
+    //      the omitted ones was the PRIME, mid-publish-finalization.
+    //   2. WHICH peers vanished was UNSTABLE. `last_active_at` churns every
+    //      minute, so the five survivors reshuffle constantly - different
+    //      readers lose different peers at different moments. That makes the
+    //      collision-avoidance surface unreliable in a way nobody can observe
+    //      from inside it.
+    //
+    // Now: take a generous window from the 24h set, filter to LIVE first, and
+    // let the caller truncate for display while knowing the true total. The
+    // cap on what is RENDERED still exists (additionalContext stays tight);
+    // what is gone is the pretence that the rendered count is the real one.
     const rows = this.db
       .query(
         `SELECT session_id, current_task, last_active_at FROM session_registry
          WHERE session_id != ? AND last_active_at > ?
          ORDER BY last_active_at DESC
-         LIMIT 5`
+         LIMIT 40`
       )
       .all(sessionId, twentyFourHoursAgo) as Array<{
         session_id: string;

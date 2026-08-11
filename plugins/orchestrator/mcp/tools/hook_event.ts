@@ -3540,7 +3540,24 @@ function renderSiblingActivity(
     return `  - ${s.session_id}${kindSuffix}${marker}${task}${refs}`;
   });
 
-  let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:\n${lines.join("\n")}`;
+  // 0.68.0: CAP THE RENDER HERE, and never present the capped number as the
+  // total. The bound used to live in the SQL (`LIMIT 5`) which meant the caller
+  // could not tell truncation from a small fleet - it printed "5 sibling
+  // sessions active" while 7 were live, and one of the two it silently dropped
+  // was the PRIME, mid-publish-finalization. Which peers vanished also churned
+  // minute to minute, because the SQL ordered by a timestamp that keeps moving.
+  //
+  // The payload still has to stay bounded - an unbounded hook payload broke
+  // session entry once (05f072d3) - so the cap is kept, just moved to where the
+  // true count is still in hand and can be stated.
+  const SIBLING_RENDER_MAX = 8;
+  const shownLines = lines.slice(0, SIBLING_RENDER_MAX);
+  const omitted = sibs.length - shownLines.length;
+  const countLabel =
+    omitted > 0
+      ? `${shownLines.length} of ${sibs.length} sibling sessions (${omitted} not shown)`
+      : `${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active`;
+  let block = `[orch] ${countLabel}:\n${shownLines.join("\n")}`;
   if (overlapping.length > 0) {
     const ids = overlapping.map((o) => o.session_id).join(", ");
     block += `\n  -> Coordinate with ${ids} via @SA-<id8> in your terminal output BEFORE starting work in their area. Shared scope is the most common cause of merge conflicts and contradictory decisions across sessions.`;

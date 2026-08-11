@@ -79,6 +79,43 @@ describe("durable refs on session_registry", () => {
     expect(row.current_task_at).not.toBeNull();
   });
 
+  test("getActiveSiblings does not let a SQL cap drop LIVE peers", () => {
+    // Measured on the live fleet 2026-08-11 17:47Z: 7 live siblings, 5 shown.
+    // The query was `ORDER BY last_active_at DESC LIMIT 5` and the live filter
+    // ran AFTER, so peers were cut by a churning timestamp before liveness was
+    // ever considered - and one of the two dropped was the PRIME, mid-publish.
+    //
+    // The filter must be able to see every live peer; bounding what gets
+    // RENDERED is the caller's job, where the true total is still known.
+    const now = new Date().toISOString();
+    const ids = Array.from({ length: 9 }, (_, i) => `sib${i}-0000-0000-0000-00000000000${i}`);
+    for (const id of ids) {
+      db.run(
+        `INSERT OR REPLACE INTO session_registry (session_id, started_at, last_active_at, current_task)
+         VALUES (?, ?, ?, ?)`,
+        [id, now, now, "a lane"]
+      );
+    }
+    // All nine are live. A LIMIT-5-then-filter would return at most 5.
+    const t = new SessionTracker(db, () => ids);
+    expect(t.getActiveSiblings("someone-else").length).toBe(9);
+  });
+
+  test("a DEAD peer is still excluded - the live filter must keep working", () => {
+    const now = new Date().toISOString();
+    const ids = ["aaa-1", "bbb-2", "ccc-3"];
+    for (const id of ids) {
+      db.run(
+        `INSERT OR REPLACE INTO session_registry (session_id, started_at, last_active_at, current_task)
+         VALUES (?, ?, ?, ?)`,
+        [id, now, now, "a lane"]
+      );
+    }
+    const t = new SessionTracker(db, () => ["aaa-1", "ccc-3"]); // bbb-2 is dead
+    const got = t.getActiveSiblings("someone-else").map((r) => r.session_id);
+    expect(got.sort()).toEqual(["aaa-1", "ccc-3"]);
+  });
+
   test("migration 25 adds the coherence columns", () => {
     const cols = db.query("PRAGMA table_info(session_registry)").all() as Array<{ name: string }>;
     expect(cols.some((c) => c.name === "warm_context")).toBe(true);

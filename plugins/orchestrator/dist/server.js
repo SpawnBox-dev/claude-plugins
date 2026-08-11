@@ -24263,7 +24263,7 @@ class SessionTracker {
     const rows = this.db.query(`SELECT session_id, current_task, last_active_at FROM session_registry
          WHERE session_id != ? AND last_active_at > ?
          ORDER BY last_active_at DESC
-         LIMIT 5`).all(sessionId, twentyFourHoursAgo);
+         LIMIT 40`).all(sessionId, twentyFourHoursAgo);
     const liveOthers = this.liveOthersResolver(sessionId);
     if (liveOthers === null)
       return rows;
@@ -25866,8 +25866,12 @@ function renderSiblingActivity(ctx, sessionId, userPrompt) {
 `) : "";
     return `  - ${s.session_id}${kindSuffix}${marker}${task}${refs}`;
   });
-  let block = `[orch] ${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active:
-${lines.join(`
+  const SIBLING_RENDER_MAX = 8;
+  const shownLines = lines.slice(0, SIBLING_RENDER_MAX);
+  const omitted = sibs.length - shownLines.length;
+  const countLabel = omitted > 0 ? `${shownLines.length} of ${sibs.length} sibling sessions (${omitted} not shown)` : `${sibs.length} sibling session${sibs.length > 1 ? "s" : ""} active`;
+  let block = `[orch] ${countLabel}:
+${shownLines.join(`
 `)}`;
   if (overlapping.length > 0) {
     const ids = overlapping.map((o) => o.session_id).join(", ");
