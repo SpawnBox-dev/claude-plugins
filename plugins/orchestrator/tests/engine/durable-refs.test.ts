@@ -79,6 +79,70 @@ describe("durable refs on session_registry", () => {
     expect(row.current_task_at).not.toBeNull();
   });
 
+  test("migration 25 adds the coherence columns", () => {
+    const cols = db.query("PRAGMA table_info(session_registry)").all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === "warm_context")).toBe(true);
+    expect(cols.some((c) => c.name === "hot_path_status")).toBe(true);
+  });
+
+  test("hot_path_status persists durably - the field PA's repurposing query reads", () => {
+    // The operational one. Without a durable copy, every reload leaves PA
+    // reading the whole fleet as unknown, and an unknown lane is
+    // indistinguishable from a busy one.
+    tracker.persistCoherence(SID, { hot_path_status: "idle-available" });
+    const row = db
+      .query(`SELECT hot_path_status FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { hot_path_status: string };
+    expect(row.hot_path_status).toBe("idle-available");
+  });
+
+  test("warm_context persists durably as an array", () => {
+    tracker.persistCoherence(SID, { warm_context: ["a/path.ts", "b/path.ts"] });
+    const row = db
+      .query(`SELECT warm_context FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { warm_context: string };
+    expect(JSON.parse(row.warm_context)).toEqual(["a/path.ts", "b/path.ts"]);
+  });
+
+  test("UNDEFINED coherence fields must NOT clear prior values", () => {
+    // Same trap as refs, and the same reason: most declarations omit these, so
+    // treating absent as "clear" would wipe the durable copy on the next
+    // ordinary re-declaration - the identical loss, arriving more slowly.
+    tracker.persistCoherence(SID, {
+      warm_context: ["kept.ts"],
+      hot_path_status: "driving",
+    });
+    tracker.persistCoherence(SID, {}); // a declaration carrying neither field
+    const row = db
+      .query(`SELECT warm_context, hot_path_status FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { warm_context: string; hot_path_status: string };
+    expect(JSON.parse(row.warm_context)).toEqual(["kept.ts"]);
+    expect(row.hot_path_status).toBe("driving");
+  });
+
+  test("the two fields are independent - setting one leaves the other alone", () => {
+    tracker.persistCoherence(SID, { hot_path_status: "parked", warm_context: ["x.ts"] });
+    tracker.persistCoherence(SID, { hot_path_status: "driving" });
+    const row = db
+      .query(`SELECT warm_context, hot_path_status FROM session_registry WHERE session_id = ?`)
+      .get(SID) as { warm_context: string; hot_path_status: string };
+    expect(row.hot_path_status).toBe("driving");
+    expect(JSON.parse(row.warm_context)).toEqual(["x.ts"]);
+  });
+
+  test("a pre-migration-25 database does not break the declaration", () => {
+    const old = new Database(":memory:");
+    applyMigrations(old, "project");
+    old.run(`ALTER TABLE session_registry RENAME COLUMN hot_path_status TO hps_removed`);
+    const t2 = new SessionTracker(old, () => null);
+    old.run(
+      `INSERT OR REPLACE INTO session_registry (session_id, started_at, last_active_at)
+       VALUES (?, ?, ?)`,
+      [SID, new Date().toISOString(), new Date().toISOString()]
+    );
+    expect(() => t2.persistCoherence(SID, { hot_path_status: "driving" })).not.toThrow();
+  });
+
   test("a pre-migration-24 database does not break the declaration", () => {
     // The refs write is guarded because partial-DB fixtures exist and older
     // databases upgrade lazily. Losing the durable copy is acceptable; losing

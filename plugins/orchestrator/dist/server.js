@@ -20004,6 +20004,22 @@ CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
         db.exec("ALTER TABLE session_registry ADD COLUMN refs TEXT");
       }
     }
+  },
+  {
+    version: 25,
+    name: "add_session_coherence_durable",
+    sql: `SELECT 1;`,
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(session_registry)").all();
+      if (cols.length === 0)
+        return;
+      if (!cols.some((c) => c.name === "warm_context")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN warm_context TEXT");
+      }
+      if (!cols.some((c) => c.name === "hot_path_status")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN hot_path_status TEXT");
+      }
+    }
   }
 ];
 var GLOBAL_MIGRATIONS = [
@@ -24209,6 +24225,22 @@ class SessionTracker {
       activation_score
     };
   }
+  persistCoherence(sessionId, fields) {
+    try {
+      if (fields.warm_context !== undefined) {
+        this.db.run(`UPDATE session_registry SET warm_context = ? WHERE session_id = ?`, [
+          JSON.stringify(fields.warm_context),
+          sessionId
+        ]);
+      }
+      if (fields.hot_path_status !== undefined) {
+        this.db.run(`UPDATE session_registry SET hot_path_status = ? WHERE session_id = ?`, [
+          fields.hot_path_status,
+          sessionId
+        ]);
+      }
+    } catch {}
+  }
   updateCurrentTask(sessionId, task, refs) {
     const ts = now();
     this.db.run(`UPDATE session_registry SET current_task = ?, current_task_at = ?, last_active_at = ? WHERE session_id = ?`, [task, ts, ts, sessionId]);
@@ -24999,16 +25031,31 @@ function backfillRosterTask(ctx, sid, task) {
     const mine = readSessions(stateDir).find((r) => r.session_id === sid);
     if (!mine)
       return;
-    if (mine.current_task && mine.current_task.trim())
+    const needTask = !(mine.current_task && mine.current_task.trim());
+    const needRefs = !(mine.refs && mine.refs.length > 0);
+    const needWarm = !(mine.warm_context && mine.warm_context.length > 0);
+    const needHot = !mine.hot_path_status;
+    if (!needTask && !needRefs && !needWarm && !needHot)
       return;
-    setCurrentTask(stateDir, sid, task);
+    if (needTask)
+      setCurrentTask(stateDir, sid, task);
     try {
-      const reg = ctx.db.query(`SELECT refs FROM session_registry WHERE session_id = ?`).get(sid);
-      if (reg?.refs) {
+      const reg = ctx.db.query(`SELECT refs, warm_context, hot_path_status
+             FROM session_registry WHERE session_id = ?`).get(sid);
+      if (needRefs && reg?.refs) {
         const parsed = JSON.parse(reg.refs);
         if (Array.isArray(parsed) && parsed.length > 0) {
           setRefs(stateDir, sid, parsed);
         }
+      }
+      if (needWarm && reg?.warm_context) {
+        const parsed = JSON.parse(reg.warm_context);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setWarmContext(stateDir, sid, parsed);
+        }
+      }
+      if (needHot && reg?.hot_path_status) {
+        setHotPathStatus(stateDir, sid, reg.hot_path_status);
       }
     } catch {}
   } catch {}
@@ -29169,6 +29216,10 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
     session_id: sid,
     task: args.task,
     refs: args.refs
+  });
+  sessionTracker.persistCoherence(sid, {
+    warm_context: args.warm_context,
+    hot_path_status: args.hot_path_status
   });
   if (agentChannel) {
     agentChannel.declareSelf({

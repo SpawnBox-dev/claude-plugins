@@ -2462,6 +2462,12 @@ server.tool(
       task: args.task,
       refs: args.refs,
     });
+    // WI fe4d4acf: durable copy of the coherence fields, so a reload or a
+    // reaper sweep cannot silently erase what the session declared.
+    sessionTracker.persistCoherence(sid, {
+      warm_context: args.warm_context,
+      hot_path_status: args.hot_path_status,
+    });
     // PA-coherence self-declare (Phase 3): persist the optional coherence fields
     // to this session's agent-channel roster row (via declareSelf -> the
     // per-column setters) so the repurposing query can read them. Only present

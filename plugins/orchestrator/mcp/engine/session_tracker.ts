@@ -245,6 +245,45 @@ export class SessionTracker {
    * The staleness nudge in handleStop reads this column; without it the only
    * option is nagging every turn, which does not work.
    */
+  /**
+   * Durable copy of the self-declared coherence fields (WI fe4d4acf).
+   *
+   * These live in the agent-channel row, which is destroyed both by a plugin
+   * reload (delete + re-insert) and by the reaper. `hot_path_status` is the one
+   * with operational teeth - PA's repurposing query reads it to decide who is
+   * idle-available, so after a reload PA reads the whole fleet as unknown.
+   *
+   * Separate from updateCurrentTask rather than more positional parameters:
+   * these are optional, independently-set fields and a five-argument setter
+   * invites callers to pass them in the wrong order.
+   */
+  persistCoherence(
+    sessionId: string,
+    fields: { warm_context?: string[]; hot_path_status?: string },
+  ): void {
+    // `undefined` = not part of this declaration; must NOT clear a prior value.
+    // Same semantics as refs, and for the same reason: most declarations omit
+    // these, so treating absent as "clear" would erase the durable copy on the
+    // next ordinary re-declaration.
+    try {
+      if (fields.warm_context !== undefined) {
+        this.db.run(`UPDATE session_registry SET warm_context = ? WHERE session_id = ?`, [
+          JSON.stringify(fields.warm_context),
+          sessionId,
+        ]);
+      }
+      if (fields.hot_path_status !== undefined) {
+        this.db.run(`UPDATE session_registry SET hot_path_status = ? WHERE session_id = ?`, [
+          fields.hot_path_status,
+          sessionId,
+        ]);
+      }
+    } catch {
+      /* pre-migration-25 DB - the live row still works, it just cannot be
+         restored after a reload, which is the status quo this fixes */
+    }
+  }
+
   updateCurrentTask(sessionId: string, task: string, refs?: string[]): void {
     const ts = now();
     this.db.run(

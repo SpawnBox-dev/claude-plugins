@@ -7,6 +7,8 @@ import {
   appendSystemEvent,
   setCurrentTask,
   setRefs,
+  setWarmContext,
+  setHotPathStatus,
   readSessions,
   type SystemEvent,
 } from "../engine/agent_channel_state";
@@ -1540,11 +1542,32 @@ function backfillRosterTask(ctx: HookCtx, sid: string, task: string): void {
     // repair, and creating one here would race the registration path.
     if (!mine) return;
 
-    // Already correct. This IS the guard: cheap, derived from the actual state,
-    // and it cannot go stale.
-    if (mine.current_task && mine.current_task.trim()) return;
+    // EACH FIELD IS REPAIRED ON ITS OWN CONDITION.
+    //
+    // This was a HIGH finding in SA-d4db6493's non-author review of 3fac23f,
+    // confirmed by execution before fixing. The first version returned early
+    // when `current_task` was present and did the refs / coherence restores
+    // BELOW that return - so any route repopulating the task first blocked the
+    // other repairs permanently. The common route did exactly that: a reload
+    // wipes the row, the session re-declares a task WITHOUT refs (which most
+    // declarations are), declareSelf writes current_task and leaves roster refs
+    // empty, and every subsequent tick returned before reaching them. A valid
+    // durable copy existed and the repair was structurally incapable of reading
+    // it back - silently, since the roster still rendered.
+    //
+    // The reviewer's population correction is worth keeping, because it points
+    // the opposite way from this WI's usual framing: PARKED sessions were never
+    // affected (they never re-declare, so the task stays NULL and everything
+    // restored). It is the ACTIVE, frequently-declaring sessions that lost refs.
+    //
+    // "Lost by one event" is not "restored by one condition".
+    const needTask = !(mine.current_task && mine.current_task.trim());
+    const needRefs = !(mine.refs && mine.refs.length > 0);
+    const needWarm = !(mine.warm_context && mine.warm_context.length > 0);
+    const needHot = !mine.hot_path_status;
+    if (!needTask && !needRefs && !needWarm && !needHot) return;
 
-    setCurrentTask(stateDir, sid, task);
+    if (needTask) setCurrentTask(stateDir, sid, task);
 
     // WI fe4d4acf: restore the CITED IDS in the same repair. The reload wiped
     // both, and repairing only the task would leave a declaration whose pointers
@@ -1554,17 +1577,35 @@ function backfillRosterTask(ctx: HookCtx, sid: string, task: string): void {
     // roster keeps its empty set rather than inventing one.
     try {
       const reg = ctx.db
-        .query(`SELECT refs FROM session_registry WHERE session_id = ?`)
-        .get(sid) as { refs: string | null } | undefined;
-      if (reg?.refs) {
+        .query(
+          `SELECT refs, warm_context, hot_path_status
+             FROM session_registry WHERE session_id = ?`
+        )
+        .get(sid) as
+        | { refs: string | null; warm_context: string | null; hot_path_status: string | null }
+        | undefined;
+
+      if (needRefs && reg?.refs) {
         const parsed = JSON.parse(reg.refs);
         if (Array.isArray(parsed) && parsed.length > 0) {
           setRefs(stateDir, sid, parsed as string[]);
         }
       }
+      if (needWarm && reg?.warm_context) {
+        const parsed = JSON.parse(reg.warm_context);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setWarmContext(stateDir, sid, parsed as string[]);
+        }
+      }
+      // hot_path_status is the one PA's repurposing query reads, so a lost
+      // value does not merely look untidy - it makes every lane read as
+      // unknown, and an unknown lane is indistinguishable from a busy one.
+      if (needHot && reg?.hot_path_status) {
+        setHotPathStatus(stateDir, sid, reg.hot_path_status);
+      }
     } catch {
-      /* pre-migration-24 DB, or corrupt JSON -> task is still repaired, which
-         is the more important half */
+      /* pre-migration-24/25 DB, or corrupt JSON -> the task is still repaired,
+         which is the more important half */
     }
   } catch {
     /* agent-channel absent or unreadable - the roster keeps its existing

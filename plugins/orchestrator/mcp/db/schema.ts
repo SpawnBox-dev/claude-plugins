@@ -465,6 +465,39 @@ CREATE INDEX IF NOT EXISTS idx_note_chunks_note ON note_chunks(note_id);
       }
     },
   },
+  {
+    version: 25,
+    name: "add_session_coherence_durable",
+    sql: `SELECT 1;`,
+    // WI fe4d4acf, completing what migration 24 started for `refs`.
+    //
+    // `warm_context` and `hot_path_status` also live ONLY in the agent-channel
+    // store, so they die with the row - on a reload AND on a reaper sweep.
+    // hot_path_status is the one with operational teeth: PA's repurposing query
+    // reads it to decide who is idle-available, so after every reload PA reads
+    // the entire fleet as unknown and cannot tell an available lane from a busy
+    // one.
+    //
+    // Chosen over the alternative of not deleting the row at all: that path
+    // touches removeOwnSession + the reaper, whose instance-guard exists
+    // because an unguarded delete once erased a LIVE session's row and left it
+    // invisible to the fleet for 2.5 hours (fb41a98 / e0f426c2), and whose
+    // session_departed timing peers act on. A durable copy is strictly less
+    // invasive and covers reaper deletion too, which the other approach does
+    // not.
+    customApply: (db) => {
+      const cols = db.query("PRAGMA table_info(session_registry)").all() as Array<{
+        name: string;
+      }>;
+      if (cols.length === 0) return;
+      if (!cols.some((c) => c.name === "warm_context")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN warm_context TEXT");
+      }
+      if (!cols.some((c) => c.name === "hot_path_status")) {
+        db.exec("ALTER TABLE session_registry ADD COLUMN hot_path_status TEXT");
+      }
+    },
+  },
 ];
 
 /**
