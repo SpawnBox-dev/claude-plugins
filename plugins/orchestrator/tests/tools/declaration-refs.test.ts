@@ -56,14 +56,22 @@ describe("resolveRefs: a pointer reads the record, it does not carry a copy", ()
     expect(r.missing).toBeUndefined();
   });
 
-  test("a dangling id is reported as missing, never silently dropped", () => {
+  test("an unresolved id is reported, never silently dropped - and NOT called missing", () => {
     // Dropping it would make a broken pointer indistinguishable from a peer
     // that simply cited less - which is precisely the invisible-gap failure
     // this whole arc exists to remove.
+    //
+    // WORDING IS LOAD-BEARING (changed 2026-08-11 after a fleet review). The
+    // old "(not found)" was a false statement: PA's roster was rendering it
+    // over six real commits, because `refs` resolves notes and work items and
+    // a commit SHA is neither. An unmatched id is hex-shaped whether it is a
+    // commit or a typo, so the label must not claim to know which - it states
+    // only what is actually true, that this is not a tracked record.
     const [r] = resolveRefs(db, ["deadbeef"]);
     expect(r.missing).toBe(true);
     expect(r.id8).toBe("deadbeef");
-    expect(r.label).toBe("(not found)");
+    expect(r.label).toBe("(not a tracked record)");
+    expect(r.label).not.toContain("not found"); // never assert absence again
   });
 
   test("labels strip markdown - the roster must not render half a bold marker", () => {
@@ -136,6 +144,48 @@ describe("resolveRefs: a pointer reads the record, it does not carry a copy", ()
     const globalDb = new Database(":memory:");
     applyMigrations(globalDb, "project");
     expect(resolveRefs(db, ["deadbeef"], globalDb)[0].missing).toBe(true);
+  });
+});
+
+describe("the note size cap must never block a CORRECTION", () => {
+  // Found 2026-08-11 by SA-d4db6493 in a fleet review, confirmed by execution
+  // against the live KB: note 6f098939 - which carries an INERT/must-not-wire
+  // SAFETY HOLD three sessions depend on - had grown to 71,948 chars and
+  // refused an append. The record most needing correction had become the one
+  // that could not take one, while a full `content` rewrite (the far more
+  // destructive operation) remained allowed because it only checks the NEW
+  // length.
+  //
+  // These pin the RULE, mirroring server.ts's guard, so the intent survives
+  // even though the check itself lives in the tool handler.
+  const CAP = 50_000;
+  const wouldRefuse = (currentLen: number, appendLen: number) => {
+    const projected = currentLen + 4 + 32 + appendLen;
+    return projected > CAP && currentLen <= CAP;
+  };
+
+  test("REFUSES an append that pushes a note from under the cap to over it", () => {
+    // The cap still does its job at the boundary - this is what stops a note
+    // growing into a bad shape (decision 3b962e67).
+    expect(wouldRefuse(49_000, 5_000)).toBe(true);
+  });
+
+  test("ALLOWS a correction to a note that is ALREADY over the cap", () => {
+    // The real case: 71,948 chars, a small correction. Refusing this preserves
+    // the wrong content and rejects the fix.
+    expect(wouldRefuse(71_948, 1_400)).toBe(false);
+  });
+
+  test("ALLOWS an ordinary append well under the cap", () => {
+    expect(wouldRefuse(10_000, 2_000)).toBe(false);
+  });
+
+  test("the boundary is the CURRENT length, not the projected one", () => {
+    // A note exactly at the cap is still 'under' and must be held to it; one
+    // char over is grandfathered. Stated explicitly because getting this
+    // backwards silently re-freezes every oversized record.
+    expect(wouldRefuse(CAP, 1_000)).toBe(true);
+    expect(wouldRefuse(CAP + 1, 1_000)).toBe(false);
   });
 });
 

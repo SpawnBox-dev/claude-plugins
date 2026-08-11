@@ -1558,9 +1558,32 @@ server.tool(
       return { content: [{ type: "text" as const, text: `Note content rewrite is ${content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (decision 3b962e67). Split into multiple linked notes.` }] };
     }
     if (append_content !== undefined) {
-      const projectedLen = (row.content?.length ?? 0) + 4 + 32 + append_content.length; // approx new timestamped block
-      if (projectedLen > NOTE_CONTENT_HARD_CHARS) {
-        return { content: [{ type: "text" as const, text: `Append would grow note to ~${projectedLen} chars (current ${row.content?.length ?? 0} + append ${append_content.length}) - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
+      const currentLen = row.content?.length ?? 0;
+      const projectedLen = currentLen + 4 + 32 + append_content.length; // approx new timestamped block
+      // A CORRECTION TO AN ALREADY-OVER-LIMIT NOTE IS NEVER REFUSED.
+      //
+      // The cap exists to stop a note GROWING into a bad shape (decision
+      // 3b962e67), and it should keep doing that. But applied to a note that is
+      // already over, it refuses the SAFE operation (an additive, timestamped
+      // correction) while still permitting the UNSAFE one (a full `content`
+      // rewrite, which only checks the new length). For a record that is over
+      // the limit precisely BECAUSE it is important and heavily appended, that
+      // is backwards: it freezes the wrong content in place and rejects the fix.
+      //
+      // Found 2026-08-11 by SA-d4db6493 during a fleet review and confirmed by
+      // execution: note 6f098939 - which carries an INERT / must-not-wire
+      // SAFETY HOLD that three sessions depend on - is 71,948 chars and refused
+      // a correction, having already accepted a peer's contradicting tag. The
+      // record most needing correction had become the one that could not take
+      // one, and the suggested remedy ("split into linked notes") is itself
+      // blocked, since splitting requires a write to the same record.
+      //
+      // So: still refuse an append that pushes a note from UNDER to OVER - that
+      // is the cap doing its job at the boundary. Grandfather notes already
+      // over it, and say so, so the size problem stays visible rather than
+      // silently forgiven.
+      if (projectedLen > NOTE_CONTENT_HARD_CHARS && currentLen <= NOTE_CONTENT_HARD_CHARS) {
+        return { content: [{ type: "text" as const, text: `Append would grow note from ${currentLen} to ~${projectedLen} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
       }
     }
 

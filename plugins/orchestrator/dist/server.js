@@ -25349,7 +25349,7 @@ function resolveRefs(db, ids, globalOverride) {
         }
       }
       if (!row) {
-        out.push({ id8: short, label: "(not found)", missing: true });
+        out.push({ id8: short, label: "(not a tracked record)", missing: true });
         continue;
       }
       const firstLine = (row.content || "").split(`
@@ -28566,9 +28566,10 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
     return { content: [{ type: "text", text: `Note content rewrite is ${content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Primitives should stay primitive (decision 3b962e67). Split into multiple linked notes.` }] };
   }
   if (append_content !== undefined) {
-    const projectedLen = (row.content?.length ?? 0) + 4 + 32 + append_content.length;
-    if (projectedLen > NOTE_CONTENT_HARD_CHARS2) {
-      return { content: [{ type: "text", text: `Append would grow note to ~${projectedLen} chars (current ${row.content?.length ?? 0} + append ${append_content.length}) - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
+    const currentLen = row.content?.length ?? 0;
+    const projectedLen = currentLen + 4 + 32 + append_content.length;
+    if (projectedLen > NOTE_CONTENT_HARD_CHARS2 && currentLen <= NOTE_CONTENT_HARD_CHARS2) {
+      return { content: [{ type: "text", text: `Append would grow note from ${currentLen} to ~${projectedLen} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS2}. Note is too big; split into linked notes (decision 3b962e67) instead of growing this one further.` }] };
     }
   }
   const updates = [];

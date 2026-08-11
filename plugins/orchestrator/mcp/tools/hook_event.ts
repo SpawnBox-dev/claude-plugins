@@ -2348,7 +2348,27 @@ export function resolveRefs(
         }
       }
       if (!row) {
-        out.push({ id8: short, label: "(not found)", missing: true });
+        // "(not found)" was a FALSE STATEMENT the system made about itself.
+        //
+        // Every lane in the 2026-08-11 fleet review independently reported
+        // this, and PA's own roster line was rendering it over six real
+        // commits: `55176ac`, `a3ca6e8`, `bcf65445`, `c87f6bbb`, `5f937bd2`,
+        // `94089615`. Those commits exist; `refs` simply resolves notes and
+        // work items, so it was reporting "this record is missing" about
+        // things that are not missing at all. SA-c452f4ae had already stopped
+        // citing commits in `refs` for exactly this reason - the wrong message
+        // was training people away from the field.
+        //
+        // The wording deliberately does NOT guess what the id is. An unmatched
+        // id is hex-shaped whether it is a commit SHA or a mistyped note id,
+        // so claiming "commit" would trade one confident falsehood for another.
+        // "not a tracked record" is true in both cases and points at the right
+        // question: wrong store, or wrong id.
+        //
+        // Whether commits should become first-class refs is deliberately left
+        // open - the fleet split on it (two lanes wanted resolution, two wanted
+        // rejection, all five wanted this message fixed first).
+        out.push({ id8: short, label: "(not a tracked record)", missing: true });
         continue;
       }
       const firstLine =
