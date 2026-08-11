@@ -1206,8 +1206,23 @@ export class AgentChannel {
               `transcript is still GROWING. That usually means alive-but-unreachable (MCP ` +
               `egress dropped), and it is also exactly what a RESTARTING transport looks ` +
               `like for a few seconds.\n` +
-              `  BASE RATE: 0 of the last 8 firings were a real fault. Start from "this is ` +
-              `probably fine" and make it earn escalation.\n` +
+              // 0.67.0: the hardcoded "0 of the last 8" is GONE. It was already
+              // stale (the method note e24d8156 records 0 real faults in 11),
+              // and the ingress alert had ALREADY learned this lesson at 0.34.0
+              // - "a stated base rate that can go stale is worse than no stated
+              // base rate: it carries the authority of a measurement with the
+              // durability of a comment." That fix was applied to one alert and
+              // never to its sibling, which is the same one-site-fixed shape as
+              // the step-1 gap above.
+              //
+              // Deliberately NOT re-derived here as a count: the honest framing
+              // survives without a number, and any number printed in the alert
+              // will rot again the moment the next firing lands.
+              `  PRESUMPTION: this alert has a long history of false alarms - every ` +
+              `documented firing to date resolved as quiet, busy, restarting or idle. ` +
+              `Start from "this is probably fine" and make it earn escalation. The current ` +
+              `count and the worked cases live in note e24d8156; read it rather than ` +
+              `trusting a number printed here.\n` +
               `  1. FREE CHECK FIRST - did this session POST to the channel after the alert ` +
               `timestamp above? If yes it is reachable, and you are done. Costs nothing; you ` +
               `already have the messages.\n` +
@@ -1561,11 +1576,45 @@ export class AgentChannel {
               // non-PA readers only ever have the text. Same lesson as putting
               // the base rate in the alert: encode the reasoning where the
               // reader is.
-              `TRIAGE - BRANCH ON WHAT YOU NEED, these are not a sequence:\n` +
-              `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime FIRST ` +
+              // 0.67.0: THE FREE, DECISIVE CHECK IS PROMOTED TO FIRST.
+              //
+              // "Did they post after the alert?" was the THIRD bullet, framed
+              // as one branch among several. It is neither - it is cheaper than
+              // every other step (the messages are already in the reader's
+              // context, no command runs) and it REFUTES OUTRIGHT, because a
+              // session that cannot see the channel cannot post to it.
+              //
+              // Two first-person reports in e24d8156 - firings #8 and #11 -
+              // record readers skipping it while holding the refuting messages,
+              // then reaching for a shell command. Both readers had the method
+              // note available; both followed the alert instead. The alert is
+              // what is in front of you when the alarm goes off, so it has to
+              // carry the cheapest step first rather than list it as an option.
+              `TRIAGE - DO THE FREE CHECK FIRST, then branch on what you need:\n` +
+              `  * FIRST, FREE, AND OFTEN DECISIVE -> did this session POST to the channel ` +
+              `AFTER the alert timestamp above? You already have those messages; no command ` +
+              `needed. If yes it is reachable and you are DONE - a session that cannot see ` +
+              `the channel cannot post to it. Two readers have skipped this step while ` +
+              `holding the refuting messages (e24d8156, firings #8 and #11); it does not ` +
+              `feel like evidence because it is not a measurement, but it outranks one.\n` +
+              `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime ` +
               `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, costs ` +
-              `nobody a turn. Sample twice a few seconds apart: GROWTH proves alive and ` +
-              `working, not parked.\n` +
+              `nobody a turn. GROWTH proves alive and working, not parked.\n` +
+              // 0.67.0: the sampling shape is corrected to the one firing #10
+              // MEASURED. The old text said "sample twice a few seconds apart",
+              // and a 20-second frozen window was then observed on a session
+              // that was provably running - it was executing the command doing
+              // the measuring. Transcripts flush at turn and tool-result
+              // boundaries, so a short flat window is not weak evidence, it is
+              // NO evidence. Firing #11 followed the old wording exactly and
+              // got a right answer from an instrument that could not have told
+              // it that it was wrong.
+              `    SAMPLING SHAPE MATTERS: three or more readings across 40-60 SECONDS, ` +
+              `with an INDEPENDENT third session as a live control (not just your own - ` +
+              `your own transcript can be frozen for your whole turn while you are ` +
+              `demonstrably alive). A short flat window is NOT a finding, it means the ` +
+              `instrument was too small; widen it or switch. Growth anywhere = alive, ` +
+              `conclusive, done.\n` +
               `    IT ONLY PROVES ONE DIRECTION. A FROZEN transcript does NOT prove parked ` +
               `- a session whose MCP transport has dropped is healthy, working and frozen ` +
               `too (measured: 11.37h, 2026-08-09). Frozen means "still unknown", never ` +
@@ -1579,9 +1628,8 @@ export class AgentChannel {
               `there?"). Liveness rides along free with the answer you already wanted, so ` +
               `asking costs nothing extra. A busy-but-healthy session answers; a parked ` +
               `one cannot.\n` +
-              `  * IT ANSWERED RECENTLY -> do nothing. A session that produced output ` +
-              `minutes ago is alive, and re-asking spends a peer's turn to learn what you ` +
-              `already know.\n` +
+              `  * IT ANSWERED RECENTLY (anywhere, not just the channel) -> do nothing. ` +
+              `Re-asking spends a peer's turn to learn what you already know.\n` +
               `  ONLY after a FROZEN transcript AND silence to a direct address should you ` +
               `ask the user to check that terminal (Enter/Escape, then /mcp). Asking a ` +
               `human to interrupt a working terminal is the expensive error here, and it ` +

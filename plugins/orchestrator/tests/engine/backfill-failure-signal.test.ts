@@ -152,10 +152,26 @@ describe("0.44.1: stderr EPIPE cannot kill the MCP server", () => {
 describe("0.44.1: egress_suspect alert carries the method note's procedure", () => {
   const SRC = readFileSync(join(import.meta.dir, "..", "..", "mcp", "engine", "agent_channel.ts"), "utf8");
 
+  // 0.67.0: STRIP COMMENTS AND ANCHOR TO THE TEMPLATE, don't slice a fixed
+  // character count off raw source.
+  //
+  // The old version took SRC.slice(i, i + 2600) with comments included, which
+  // broke twice over. (1) Adding rationale comments inside the alert pushed
+  // real text out of the window, failing an assertion about content that was
+  // still present. (2) Far worse: a COMMENT could SATISFY an assertion about
+  // what the reader sees - when the hardcoded base rate was replaced, the
+  // "prints the base rate" test kept passing because the phrase survived in a
+  // comment explaining its removal. A test that a comment can pass is not
+  // testing the alert; it is testing the file.
   function alertText(): string {
     const i = SRC.indexOf("[egress_suspect]");
     expect(i).toBeGreaterThan(-1);
-    return SRC.slice(i, i + 2600);
+    const end = SRC.indexOf("meta: {", i);
+    expect(end).toBeGreaterThan(i);
+    return SRC.slice(i, end)
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
   }
 
   test("it tells the reader to ADDRESS the subject - the only resolving step", () => {
@@ -175,8 +191,28 @@ describe("0.44.1: egress_suspect alert carries the method note's procedure", () 
     expect(address).toBeLessThan(human);
   });
 
-  test("it prints the base rate so the reader's prior is calibrated", () => {
-    expect(/0 (real )?(faults|of)/i.test(alertText())).toBe(true);
+  test("it calibrates the reader's prior toward 'probably fine'", () => {
+    // INTENT PRESERVED, MECHANISM CHANGED (0.67.0). This asserted a literal
+    // count ("0 of the last 8"). That number was stale within days - the
+    // method note recorded 0 real faults in 11 - and the INGRESS alert had
+    // already concluded at 0.34.0 that "a stated base rate that can go stale
+    // is worse than no stated base rate: it carries the authority of a
+    // measurement with the durability of a comment." The egress alert simply
+    // never got that fix.
+    //
+    // So the alert now carries the calibration qualitatively and points at the
+    // note for the live count. The test asserts the READER GETS CALIBRATED,
+    // which is what 0.44.1 actually wanted, rather than pinning a number whose
+    // rotting was the defect.
+    const t = alertText();
+    expect(/false alarm|probably fine|presumption/i.test(t)).toBe(true);
+    expect(/e24d8156/.test(t)).toBe(true); // and can find the live count
+  });
+
+  test("it does NOT hardcode a firing count that will rot", () => {
+    // The regression this closes: any literal "N of the last M" reintroduces a
+    // number nobody will update, printed with the authority of a measurement.
+    expect(/\d+ of the last \d+/i.test(alertText())).toBe(false);
   });
 
   test("it names bulk sidecar jobs as a known wait-out cause", () => {
