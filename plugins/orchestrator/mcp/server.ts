@@ -2,7 +2,7 @@ import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { sweepStateDir } from "./engine/state_gc";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -83,6 +83,14 @@ import { homedir } from "node:os";
 // in the shared active-session file.
 let cachedFallbackSessionId: string | null = null;
 
+// 0.69.0 (WI fda1a7f2): bounded-wait window for the per-PID file. The
+// SessionStart hook was measured writing it ~12s after MCP boot on
+// 2026-08-29, so we refuse the racy legacy file for this long rather than
+// adopt a sibling's session_id. Non-blocking - startAgentChannel()'s
+// existing 3s retry loop re-resolves until this expires.
+const PROCESS_START_MS = Date.now();
+const PER_PID_GRACE_MS = 15_000;
+
 /**
  * Find the PID of the claude.exe (or `claude` on unix) process in this
  * MCP child's ancestry. Returns null if walking fails or claude isn't
@@ -99,7 +107,31 @@ let cachedFallbackSessionId: string | null = null;
  * -EncodedCommand (UTF-16LE base64) instead of inline quoting so we don't
  * have to fight cmd.exe -> PowerShell escape layering.
  */
-function findClaudeAncestorPid(): number | null {
+/**
+ * 0.69.0 (WI fda1a7f2): the walk's outcome, with WHY it failed.
+ *
+ * Previously every failure mode returned a bare null: PowerShell throwing, the
+ * CIM query coming back empty, and the chain ending without a claude.exe were
+ * indistinguishable. Two separate investigations on 2026-08-29 hit that wall -
+ * one measured a null with claude.exe apparently 4 hops up, which no theory
+ * explains, and the ambiguous return is why it stayed unexplained.
+ */
+type AncestorWalk = { pid: number | null; reason: string };
+
+/** One-shot latch so a failing walk explains itself once, not per call. */
+let walkNullLogged = false;
+
+/**
+ * VERIFIED ancestry: walks the real process tree. Never consults CLAUDE_PID.
+ *
+ * This is the ONLY acceptable source for the DESTRUCTIVE dedup path. An
+ * inherited env var says "a claude with this PID exists"; it does NOT say
+ * "that claude is my ancestor" - and any process spawned under a claude window
+ * inherits it. On 2026-08-29 that distinction cost a live MCP: a rig whose
+ * CLAUDE_PID named a real, live claude.exe killed that window's server. A name
+ * check would have passed there; only the walk discriminates.
+ */
+function walkClaudeAncestorPid(): AncestorWalk {
   const start = process.pid;
   if (process.platform === "win32") {
     const script = `
@@ -107,24 +139,57 @@ $walk = ${start}
 for ($i = 0; $i -lt 8; $i++) {
   try {
     $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction Stop
-    if (-not $p) { break }
+    if (-not $p) { [Console]::Error.WriteLine('cim-empty:' + $walk); break }
     if ($p.Name -eq 'claude.exe' -or $p.Name -eq 'claude') { Write-Output $walk; exit 0 }
-    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { [Console]::Error.WriteLine('chain-end:' + $walk + ':' + $p.Name); break }
     $walk = $p.ParentProcessId
-  } catch { break }
+  } catch { [Console]::Error.WriteLine('cim-throw:' + $walk); break }
 }
+[Console]::Error.WriteLine('walk-exhausted:depth=' + $i)
 `;
-    try {
-      const encoded = Buffer.from(script, "utf16le").toString("base64");
-      const out = execSync(
-        `powershell.exe -NoProfile -EncodedCommand ${encoded}`,
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-      );
-      const pid = parseInt(out.trim(), 10);
-      return Number.isFinite(pid) && pid > 0 ? pid : null;
-    } catch {
-      return null;
+    // MARKERS USE CONCATENATION, NOT INTERPOLATION - this is load-bearing and
+    // it cost a live server. "chain-end:$walk:" makes PowerShell read `$walk:`
+    // as a DRIVE-QUALIFIED variable reference; the script then fails to PARSE,
+    // produces no stdout, and the walk returns null unconditionally - a
+    // diagnostic added to explain a null became a second cause of that null.
+    // The obvious repair, `${walk}`, is ALSO wrong here: this string is a JS
+    // template literal, so JavaScript would consume `${walk}` before PowerShell
+    // ever saw it. Concatenation removes both traps at once. If you edit these
+    // markers, run the script standalone and confirm it prints a PID.
+    // spawnSync, NOT execSync. execSync only surfaces stderr by THROWING, so on
+    // the ordinary exit-0 path - which is every "walked the chain and found no
+    // claude" case - the cause markers the script just wrote were discarded and
+    // the reason collapsed to a generic "no-claude-in-chain". The warden
+    // demonstrated it: a bogus pid emits `cim-empty` + `walk-exhausted` and the
+    // code never read either. spawnSync returns .stderr regardless of exit code,
+    // so the null now carries the token that explains it.
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const res = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-EncodedCommand", encoded],
+      { encoding: "utf8" },
+    );
+    // Extract OUR markers rather than dumping raw stderr. PowerShell wraps
+    // stderr in CLIXML (`#< CLIXML <Objs Version=...>` plus progress records),
+    // which is hundreds of characters of noise that would bury the tokens and
+    // push them past any truncation. Measured, not assumed - the raw capture
+    // came back as `#< CLIXML cim-empty:999999 walk-exhausted:depth=0 <Objs
+    // Version="1.1.0.1" xmlns=...`. Match the four known markers instead.
+    const tokens = ((res.stderr ?? "").toString().match(
+      /(?:cim-empty|cim-throw|chain-end|walk-exhausted):[^\s<]*/g,
+    ) ?? [])
+      .join(" ")
+      .slice(0, 200);
+    if (res.error) {
+      return {
+        pid: null,
+        reason: `exec-failed: ${res.error.message}${tokens ? ` | ${tokens}` : ""}`,
+      };
     }
+    const pid = parseInt((res.stdout ?? "").toString().trim(), 10);
+    if (Number.isFinite(pid) && pid > 0) return { pid, reason: "found" };
+    // Prefer the script's own token over a label we invented.
+    return { pid: null, reason: tokens || "no-claude-in-chain-no-tokens" };
   }
   // Unix path
   let pid: number | null = start;
@@ -134,26 +199,94 @@ for ($i = 0; $i -lt 8; $i++) {
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
-      if (rparen < 0) break;
+      if (rparen < 0) return { pid: null, reason: `stat-malformed:${pid}` };
       name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
       const fields = stat.slice(rparen + 2).split(/\s+/);
       ppid = parseInt(fields[1] ?? "0", 10);
     } catch {
-      break;
+      return { pid: null, reason: `proc-unreadable:${pid}` };
     }
-    if (name === "claude.exe" || name === "claude") return pid;
-    if (!ppid || ppid === pid) break;
+    if (name === "claude.exe" || name === "claude") return { pid, reason: "found" };
+    if (!ppid || ppid === pid) return { pid: null, reason: `chain-end:${pid}:${name}` };
     pid = ppid;
   }
-  return null;
+  return { pid: null, reason: "walk-exhausted" };
+}
+
+function findClaudeAncestorPid(): number | null {
+  // 0.69.0 (WI fda1a7f2): Claude Code sets CLAUDE_PID in the MCP server's
+  // environment - the PID of the owning claude process. Verified present
+  // alongside CLAUDE_CODE_SESSION_ID in three live sessions 2026-08-29.
+  // Preferring it removes a ~1-2s PowerShell cold start from the boot path,
+  // which is time spent inside the very window this race lives in.
+  //
+  // IDENTITY AND THE ORPHAN SELF-CHECK. The destructive dedup path must call
+  // walkClaudeAncestorPid() directly - see its doc comment for why an inherited
+  // env var is not ancestry.
+  //
+  // THE ASYMMETRY THAT DECIDES THIS ORDER (PA ruling 2026-08-29 16:37Z): the two
+  // consumers have opposite failure costs. A false null here makes the startup
+  // orphan check SHUT DOWN A HEALTHY SERVER - which is exactly what happened at
+  // 16:32:35Z, killing a live session's MCP one second after it started. A false
+  // null in the dedup path merely skips a cleanup. So this path prefers the env
+  // var, which cannot fail for parsing or CIM reasons, and only walks when the
+  // env is absent. A walk that can fail for any reason must never be able to
+  // kill a healthy server.
+  const envPid = Number.parseInt(process.env.CLAUDE_PID ?? "", 10);
+  if (Number.isFinite(envPid) && envPid > 0) {
+    // Verified fall-through on undefined / "" / "  " / "abc" / "0" - all parse
+    // to NaN or 0 and reach the walk below. Checked directly, not assumed.
+    //
+    // Existence check so a STALE CLAUDE_PID (dead window, PID not yet reused)
+    // isn't trusted forever. If we cannot confirm it, fall through to the walk
+    // rather than adopting a pid that may be gone.
+    if (getProcessCreationTime(envPid) !== null) return envPid;
+    emitLifecycle(
+      `claude-ancestor: CLAUDE_PID=${envPid} set but that process is not ` +
+        `resolvable; falling through to process-tree walk (WI fda1a7f2)\n`,
+    );
+  }
+
+  const walk = walkClaudeAncestorPid();
+  if (walk.pid === null && !walkNullLogged) {
+    walkNullLogged = true;
+    // BOTH SINKS - see the probe line's comment. MCP stderr IS captured per
+    // spawn; mcp-lifecycle.log is durable across them. Three investigations
+    // stalled on an unexplained null because no reason was recorded anywhere;
+    // this is the line that should finally name it.
+    const nullLine =
+      `claude-ancestor: WALK RETURNED NULL (reason=${walk.reason}) with ` +
+      `CLAUDE_PID=${process.env.CLAUDE_PID ?? "<unset>"} - per-PID session ` +
+      `resolution and dedup are degraded, and the orphan watchdog will not arm ` +
+      `for this process (WI fda1a7f2)`;
+    process.stderr.write(`[orchestrator] ${nullLine}\n`);
+    // Trailing newline is REQUIRED: emitLifecycleLine writes the string
+    // verbatim to both sinks and adds nothing, so a line without it runs into
+    // the next record and breaks any anchored grep over the lifecycle log.
+    emitLifecycle(nullLine + "\n");
+  }
+  return walk.pid;
 }
 
 function getFallbackSessionId(): string | undefined {
   if (cachedFallbackSessionId) return cachedFallbackSessionId;
 
-  const envId = process.env.CLAUDE_SESSION_ID;
+  // 0.69.0 (WI fda1a7f2) - THE ROOT CAUSE OF THE BINDING RACE.
+  // Claude Code sets CLAUDE_CODE_SESSION_ID. This step read CLAUDE_SESSION_ID,
+  // a name the harness never sets, so resolution step 2 was DEAD CODE for the
+  // plugin's entire life and every session fell through to the PID walk and
+  // the racy shared file. Verified 2026-08-29 across three live sessions:
+  // CLAUDE_CODE_SESSION_ID populated, CLAUDE_SESSION_ID empty.
+  // CLAUDE_SESSION_ID is kept as an alias in case a future harness sets it.
+  const envId =
+    process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
   if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) {
     cachedFallbackSessionId = envId;
+    process.stderr.write(
+      `[orchestrator] resolved session_id from ENV ` +
+        `(${process.env.CLAUDE_CODE_SESSION_ID ? "CLAUDE_CODE_SESSION_ID" : "CLAUDE_SESSION_ID"}): ` +
+        `${envId.slice(0, 8)}... (race-free - no file read)\n`,
+    );
     return envId;
   }
 
@@ -197,13 +330,38 @@ function getFallbackSessionId(): string | undefined {
     } catch {
       // Non-fatal - fall through to legacy
     }
+
+    // 0.69.0 (WI fda1a7f2): BOUNDED WAIT before trusting the racy legacy file.
+    // If we know our claude ancestor but its per-PID file hasn't appeared yet,
+    // the SessionStart hook simply hasn't run - measured at 12s behind MCP boot
+    // on 2026-08-29. Reading the shared file in that window is exactly how a
+    // server adopts a SIBLING's session_id.
+    //
+    // This does NOT block: startAgentChannel() already retries every 3s for 60s
+    // (see the retry loop at the bottom of this file), so returning undefined
+    // simply defers to the next attempt. Tool calls are unaffected - agents pass
+    // session_id explicitly, and resolveSessionId() returns that untouched.
+    if (Date.now() - PROCESS_START_MS < PER_PID_GRACE_MS) {
+      process.stderr.write(
+        `[orchestrator] per-PID file not yet written ` +
+          `(claude_pid=${claudePid}); deferring rather than racing the legacy ` +
+          `file - retry loop will re-resolve\n`,
+      );
+      return undefined;
+    }
   }
 
   // Legacy single-file fallback. Racy under concurrent siblings - the
-  // file holds the LAST session that ran SessionStart, which may not
-  // be us. Mitigated by the orphan-bun watchdog (0.30.23+) that kills
-  // buns whose parent claude.exe is gone within ~60s, so impostor races
-  // self-resolve.
+  // file holds the LAST session that ran SessionStart, which may not be us.
+  //
+  // 0.69.0 (WI fda1a7f2): a claim that the orphan-bun watchdog makes impostor
+  // races "self-resolve" used to sit here. IT IS FALSE and it sat directly
+  // above the buggy branch, which is likely why this survived ea1bec63 and
+  // 0.30.19-0.30.28. The watchdog reaps buns whose parent claude.exe is GONE;
+  // an impostor's parent is alive BY DEFINITION. Measured 2026-08-29: a bun
+  // held a wrong registration for 21 minutes with a healthy parent. The real
+  // safety nets are the env var above and the heartbeat reconcile in
+  // agent_channel.ts - not this fallback, which stays racy on purpose.
   const file = join(stateDir, "active-session");
   try {
     if (existsSync(file)) {
@@ -252,14 +410,64 @@ function getFallbackSessionId(): string | undefined {
   return undefined;
 }
 
-function resolveSessionId(explicit?: string): string | undefined {
-  // Cache explicit session_ids passed by tool calls so startAgentChannel's
-  // retry loop can pick them up even when CLAUDE_SESSION_ID env is unset.
-  // Claude Code routes session_id through tool args, not env vars, so this
-  // is the only reliable signal during MCP server lifetime.
-  if (explicit && /^[a-zA-Z0-9_-]+$/.test(explicit)) {
-    cachedFallbackSessionId = explicit;
+/**
+ * 0.69.0 (WI fda1a7f2): NON-CACHING authoritative identity read, for the
+ * agent-channel heartbeat reconcile.
+ *
+ * Deliberately NOT `getFallbackSessionId()`: that caches, so a server that
+ * latched a sibling's id at boot would keep returning the wrong answer forever
+ * and the reconcile could never fire. Deliberately does NOT consult the legacy
+ * shared `active-session` file either - that file is the race, and adopting it
+ * on a 30s timer would let a server drift onto whichever sibling booted last.
+ *
+ * Env first (race-free, no file read), then the per-PID file, which the hook
+ * has long since written by the first heartbeat tick. Cheap to call repeatedly:
+ * findClaudeAncestorPid() now returns CLAUDE_PID from the environment without
+ * spawning PowerShell.
+ *
+ * Returns undefined when neither source is readable - the caller MUST treat
+ * that as "cannot verify", not as "identity is fine", and say so out loud.
+ */
+function readAuthoritativeSessionId(): string | undefined {
+  const envId =
+    process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
+  if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) return envId;
+
+  const claudePid = findClaudeAncestorPid();
+  if (!claudePid) return undefined;
+
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  const perPidFile = join(
+    projectDir,
+    ".orchestrator-state",
+    `active-session-${claudePid}`,
+  );
+  try {
+    if (existsSync(perPidFile)) {
+      const raw = readFileSync(perPidFile, "utf8").trim();
+      if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) return raw;
+    }
+  } catch {
+    // Non-fatal - caller treats undefined as "cannot verify"
   }
+  return undefined;
+}
+
+function resolveSessionId(explicit?: string): string | undefined {
+  // 0.69.0 (WI fda1a7f2): IDENTITY IS NOT ATTRIBUTION. This used to cache the
+  // caller-supplied id as the server's own identity. That is the split-brain:
+  // agents pass session_id by hand and PA legitimately writes on peers' behalf
+  // with THEIR id (see 6a5fae2a), so one typo or one on-behalf write silently
+  // re-pointed this process's self-identity at another session.
+  //
+  // The explicit param now attributes THAT CALL ONLY. Self-identity comes from
+  // getFallbackSessionId() (env -> per-PID file -> legacy) and can never be set
+  // by a tool argument. The old caching existed to feed startAgentChannel's
+  // retry loop when the env var was "unset" - it was only ever unset because
+  // we were reading the wrong variable name, which is now fixed above.
   return explicit ?? getFallbackSessionId();
 }
 
@@ -2755,6 +2963,10 @@ function startAgentChannel(): void {
       // verdict events to resolveVerdict (when this is a subordinate
       // session with the env opt-in). Undefined for PA / opt-out.
       permissionRelay ?? undefined,
+      // 0.69.0 (WI fda1a7f2): authoritative, NON-CACHING identity read for the
+      // 30s heartbeat reconcile. This is what lets a server that registered
+      // under a sibling's session_id repair itself without a /mcp reconnect.
+      readAuthoritativeSessionId,
     );
     agentChannel.start();
     process.stderr.write(
@@ -3363,7 +3575,33 @@ if (initialParentClaudePid) {
   // 0.30.37 (WI for anthropics/claude-code#25976): kill older sibling MCPs
   // BEFORE arming the watchdog. The plugin manager's known race leaves stale
   // duplicates that the watchdog can't distinguish from legitimate runs.
-  killOlderDuplicateMcps(initialParentClaudePid);
+  //
+  // 0.69.0 (WI fda1a7f2) - THE KILL RUNS ONLY ON WALK-VERIFIED ANCESTRY.
+  // `initialParentClaudePid` may now come from CLAUDE_PID, which is INHERITED:
+  // every process spawned under a claude window carries it, including ones that
+  // are not that window's MCP. Killing on an asserted ancestor rather than a
+  // verified one is how a test rig destroyed a live MCP on 2026-08-29 - its
+  // CLAUDE_PID named a real, live claude.exe, so a name check would have passed
+  // and only the walk disagreed. Identity keeps the env fast path; this
+  // destructive path pays the ~1-2s walk once at boot, exactly as it did before
+  // today. Disagree or unresolvable -> skip the kill and say so.
+  const dedupWalk = walkClaudeAncestorPid();
+  if (dedupWalk.pid === null) {
+    process.stderr.write(
+      `[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk ` +
+        `(${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID ` +
+        `(WI fda1a7f2)\n`,
+    );
+  } else if (dedupWalk.pid !== initialParentClaudePid) {
+    process.stderr.write(
+      `[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} ` +
+        `disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is ` +
+        `not the MCP child of the window it inherited that value from ` +
+        `(WI fda1a7f2)\n`,
+    );
+  } else {
+    killOlderDuplicateMcps(dedupWalk.pid);
+  }
 
   const creationTimeNote = initialParentClaudeCreationTime
     ? ` created=${initialParentClaudeCreationTime.toISOString()}`
@@ -3403,17 +3641,35 @@ if (initialParentClaudePid) {
     }
   }, 30 * 1000).unref();
 } else {
-  // No claude.exe ancestor at startup - we're already an orphan (probably
-  // started from a test harness or stale process tree). Exit immediately
-  // rather than running indefinitely.
-  process.stderr.write(
-    `[orchestrator] no claude.exe ancestor at startup; refusing to run as orphan. Exiting.\n`,
-  );
-  // Use setImmediate so the server has a chance to init enough to log,
-  // then exit. shutdownOnce isn't defined yet at this point in module
-  // evaluation if you read top-to-bottom, but we're inside an IIFE-like
-  // block that runs after the function declarations, so it's safe.
-  setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
+  // 0.69.0 (WI fda1a7f2) - "CANNOT VERIFY" IS NOT "ORPHAN". THIS NO LONGER EXITS.
+  //
+  // It used to call shutdownOnce("no-claude-ancestor-at-startup"). On
+  // 2026-08-29 that killed a healthy session's MCP one second after `/mcp`,
+  // because a PowerShell parse error made the walk return null for every
+  // process. The inference "walk found nothing => I am an orphan" treats an
+  // UNRESOLVED question as a POSITIVE finding, and the cost of being wrong is
+  // asymmetric and severe: a genuine orphan lingering is cheap and self-limiting
+  // (it holds no row and the reaper prunes it), while a false positive destroys
+  // a working session's tooling. Worse, the shutdown was PARTIAL - the
+  // agent-channel half deleted the row and stopped while the stdio half kept
+  // serving tools - so the session looked healthy and was silently unaddressable.
+  //
+  // Measured the same day: CLAUDE_PID is ABSENT in a real MCP child's
+  // environment (present only in bash children), so the walk is the ONLY
+  // ancestry source in production and is correctness-critical. Any walk failure
+  // - CIM hiccup, PowerShell startup failure, an unexplained null like the one
+  // still open from 16:07Z - would otherwise take down a healthy server.
+  //
+  // We therefore keep running WITHOUT the orphan watchdog and say so loudly.
+  // Degraded, not dead: no parent to watch means we cannot detect the parent
+  // dying, which is a real gap - but it is the safe half of the trade.
+  const msg =
+    `no claude.exe ancestor resolved at startup. NOT exiting - "cannot verify" ` +
+    `is not "orphan" (WI fda1a7f2). Orphan watchdog is DISABLED for this ` +
+    `process; if the parent dies this server will linger until the reaper ` +
+    `prunes it. See the claude-ancestor line above for the walk's failure reason.`;
+  process.stderr.write(`[orchestrator] ${msg}\n`);
+  emitLifecycle(msg + "\n");
 }
 
 // ── Start server ────────────────────────────────────────────────────────
@@ -3484,6 +3740,39 @@ async function main() {
   // doesn't exist and resolveSessionId() returns undefined. The first call
   // here will return early. We retry every 3s for up to 60s until the
   // session is resolvable. Once started, the retry timer cancels itself.
+  // 0.69.0 (WI fda1a7f2) - BUN-ENV PROBE. This is a GATE, not a nicety.
+  // The whole env-first fix rests on the BUN inheriting CLAUDE_CODE_SESSION_ID,
+  // and evidence from a bash child does NOT transfer: the two environments
+  // provably diverge in both directions (the bun sees CLAUDE_PROJECT_DIR, bash
+  // does not). Printed from inside the bun so the answer is measured, not
+  // assumed. If CLAUDE_CODE_SESSION_ID reads ABSENT here, fix (1) is inert and
+  // the heartbeat reconcile is carrying the entire repair.
+  //
+  // SENTINEL `fda1a7f2-binding-probe-v1` is the marker VERIFY greps for to
+  // prove which bundle is actually running (content beats timestamps, 1ff5f968).
+  // BOTH SINKS, deliberately. An earlier revision moved this to emitLifecycle
+  // ONLY, on the belief that Claude Code discards an MCP server's stderr for
+  // real spawns. That belief is FALSE and the evidence is this very probe: its
+  // stderr output was recovered verbatim from
+  // %LOCALAPPDATA%\claude-cli-nodejs\Cache\<slug>\mcp-logs-plugin-orchestrator-core\*.jsonl
+  // for two real spawns (bun 13324 and bun 55588) on 2026-08-29, and that
+  // capture is what proved CLAUDE_PID is absent in a real bun. Dropping stderr
+  // would have thrown away the channel that answered the question.
+  // mcp-lifecycle.log is the durable sink; the MCP stderr log is the one that
+  // pairs a line with a specific spawn's pid. Keep both.
+  const probeLine =
+    `fda1a7f2-binding-probe-v1 bun-env: ` +
+    `CLAUDE_CODE_SESSION_ID=${
+      process.env.CLAUDE_CODE_SESSION_ID
+        ? `PRESENT(${process.env.CLAUDE_CODE_SESSION_ID.slice(0, 8)})`
+        : "ABSENT"
+    } ` +
+    `CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID ? "present" : "absent"} ` +
+    `CLAUDE_PID=${process.env.CLAUDE_PID ?? "absent"} ` +
+    `bun_pid=${process.pid}`;
+  process.stderr.write(`[orchestrator] ${probeLine}\n`);
+  emitLifecycle(probeLine + "\n");
+
   startAgentChannel();
   if (!agentChannel) {
     let attempts = 0;

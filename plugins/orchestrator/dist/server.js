@@ -6608,7 +6608,7 @@ function sweepStateDir(stateDir) {
 }
 
 // mcp/server.ts
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 
 // node_modules/zod/v3/external.js
 var exports_external = {};
@@ -26657,6 +26657,7 @@ class AgentChannel {
   selfSession;
   rawEmit;
   permissionRelay;
+  resolveTrueSessionId;
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
@@ -26674,12 +26675,57 @@ class AgentChannel {
   selfSizeAtEmit = null;
   clientTransportLastEmit = new Map;
   heartbeatFailures = 0;
-  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay) {
+  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay, resolveTrueSessionId) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
     this.selfSession = selfSession;
     this.rawEmit = rawEmit;
     this.permissionRelay = permissionRelay;
+    this.resolveTrueSessionId = resolveTrueSessionId;
+  }
+  reconcileInertLogged = false;
+  reconcileIdentity() {
+    if (!this.resolveTrueSessionId) {
+      if (!this.reconcileInertLogged) {
+        this.reconcileInertLogged = true;
+        process.stderr.write(`agent-channel: identity reconcile DISABLED (no resolver supplied) - ` + `a wrong binding cannot self-repair in this process (WI fda1a7f2)
+`);
+      }
+      return;
+    }
+    const truth = this.resolveTrueSessionId();
+    if (!truth) {
+      if (!this.reconcileInertLogged) {
+        this.reconcileInertLogged = true;
+        process.stderr.write(`agent-channel: identity reconcile INERT - no session id in env and ` + `no readable per-PID file. Cannot verify this server's binding; a ` + `wrong one will NOT self-repair (WI fda1a7f2)
+`);
+      }
+      return;
+    }
+    if (truth === this.selfSession.session_id)
+      return;
+    const from = this.selfSession.session_id;
+    process.stderr.write(`agent-channel: IDENTITY MISMATCH - registered as ${from.slice(0, 8)} but ` + `authoritative source says ${truth.slice(0, 8)}. Migrating roster row ` + `(WI fda1a7f2)
+`);
+    const migrated = {
+      ...this.selfSession,
+      session_id: truth,
+      id8: truth.slice(0, 8),
+      instance: INSTANCE_TOKEN
+    };
+    writeSession(this.projectStateDir, migrated);
+    const fromTranscript = this.peerTranscriptSize(from);
+    if (fromTranscript === null) {
+      removeOwnSession(this.projectStateDir, from, INSTANCE_TOKEN);
+      process.stderr.write(`agent-channel: released phantom row ${from.slice(0, 8)} ` + `(no transcript - no real session owns this id)
+`);
+    } else {
+      process.stderr.write(`agent-channel: LEFT row ${from.slice(0, 8)} in place ` + `(transcript exists, ${fromTranscript}B - a real session owns this ` + `id; deleting it would unregister the session we impersonated)
+`);
+    }
+    this.selfSession = migrated;
+    process.stderr.write(`agent-channel: identity repaired -> ${truth.slice(0, 8)} ` + `(offsets left untouched; new receiver starts at transcript EOF)
+`);
   }
   emit(ev) {
     if (this.pendingEmitAt === null) {
@@ -26777,6 +26823,9 @@ class AgentChannel {
   }
   heartbeat() {
     try {
+      try {
+        this.reconcileIdentity();
+      } catch {}
       this.syncRenameIntoName();
       const updated = {
         ...this.selfSession,
@@ -27552,7 +27601,10 @@ var PLUGIN_VERSION = (() => {
   }
 })();
 var cachedFallbackSessionId = null;
-function findClaudeAncestorPid() {
+var PROCESS_START_MS = Date.now();
+var PER_PID_GRACE_MS = 15000;
+var walkNullLogged = false;
+function walkClaudeAncestorPid() {
   const start = process.pid;
   if (process.platform === "win32") {
     const script = `
@@ -27560,21 +27612,27 @@ $walk = ${start}
 for ($i = 0; $i -lt 8; $i++) {
   try {
     $p = Get-CimInstance Win32_Process -Filter "ProcessId = $walk" -ErrorAction Stop
-    if (-not $p) { break }
+    if (-not $p) { [Console]::Error.WriteLine('cim-empty:' + $walk); break }
     if ($p.Name -eq 'claude.exe' -or $p.Name -eq 'claude') { Write-Output $walk; exit 0 }
-    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { break }
+    if (-not $p.ParentProcessId -or $p.ParentProcessId -eq 0 -or $p.ParentProcessId -eq $walk) { [Console]::Error.WriteLine('chain-end:' + $walk + ':' + $p.Name); break }
     $walk = $p.ParentProcessId
-  } catch { break }
+  } catch { [Console]::Error.WriteLine('cim-throw:' + $walk); break }
 }
+[Console]::Error.WriteLine('walk-exhausted:depth=' + $i)
 `;
-    try {
-      const encoded = Buffer.from(script, "utf16le").toString("base64");
-      const out = execSync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-      const pid2 = parseInt(out.trim(), 10);
-      return Number.isFinite(pid2) && pid2 > 0 ? pid2 : null;
-    } catch {
-      return null;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    const res = spawnSync("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], { encoding: "utf8" });
+    const tokens2 = ((res.stderr ?? "").toString().match(/(?:cim-empty|cim-throw|chain-end|walk-exhausted):[^\s<]*/g) ?? []).join(" ").slice(0, 200);
+    if (res.error) {
+      return {
+        pid: null,
+        reason: `exec-failed: ${res.error.message}${tokens2 ? ` | ${tokens2}` : ""}`
+      };
     }
+    const pid2 = parseInt((res.stdout ?? "").toString().trim(), 10);
+    if (Number.isFinite(pid2) && pid2 > 0)
+      return { pid: pid2, reason: "found" };
+    return { pid: null, reason: tokens2 || "no-claude-in-chain-no-tokens" };
   }
   let pid = start;
   for (let depth = 0;depth < 8 && pid; depth++) {
@@ -27584,27 +27642,48 @@ for ($i = 0; $i -lt 8; $i++) {
       const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
-        break;
+        return { pid: null, reason: `stat-malformed:${pid}` };
       name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
       const fields = stat.slice(rparen + 2).split(/\s+/);
       ppid = parseInt(fields[1] ?? "0", 10);
     } catch {
-      break;
+      return { pid: null, reason: `proc-unreadable:${pid}` };
     }
     if (name === "claude.exe" || name === "claude")
-      return pid;
+      return { pid, reason: "found" };
     if (!ppid || ppid === pid)
-      break;
+      return { pid: null, reason: `chain-end:${pid}:${name}` };
     pid = ppid;
   }
-  return null;
+  return { pid: null, reason: "walk-exhausted" };
+}
+function findClaudeAncestorPid() {
+  const envPid = Number.parseInt(process.env.CLAUDE_PID ?? "", 10);
+  if (Number.isFinite(envPid) && envPid > 0) {
+    if (getProcessCreationTime(envPid) !== null)
+      return envPid;
+    emitLifecycle(`claude-ancestor: CLAUDE_PID=${envPid} set but that process is not ` + `resolvable; falling through to process-tree walk (WI fda1a7f2)
+`);
+  }
+  const walk = walkClaudeAncestorPid();
+  if (walk.pid === null && !walkNullLogged) {
+    walkNullLogged = true;
+    const nullLine = `claude-ancestor: WALK RETURNED NULL (reason=${walk.reason}) with ` + `CLAUDE_PID=${process.env.CLAUDE_PID ?? "<unset>"} - per-PID session ` + `resolution and dedup are degraded, and the orphan watchdog will not arm ` + `for this process (WI fda1a7f2)`;
+    process.stderr.write(`[orchestrator] ${nullLine}
+`);
+    emitLifecycle(nullLine + `
+`);
+  }
+  return walk.pid;
 }
 function getFallbackSessionId() {
   if (cachedFallbackSessionId)
     return cachedFallbackSessionId;
-  const envId = process.env.CLAUDE_SESSION_ID;
+  const envId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
   if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) {
     cachedFallbackSessionId = envId;
+    process.stderr.write(`[orchestrator] resolved session_id from ENV ` + `(${process.env.CLAUDE_CODE_SESSION_ID ? "CLAUDE_CODE_SESSION_ID" : "CLAUDE_SESSION_ID"}): ` + `${envId.slice(0, 8)}... (race-free - no file read)
+`);
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -27623,6 +27702,11 @@ function getFallbackSessionId() {
         }
       }
     } catch {}
+    if (Date.now() - PROCESS_START_MS < PER_PID_GRACE_MS) {
+      process.stderr.write(`[orchestrator] per-PID file not yet written ` + `(claude_pid=${claudePid}); deferring rather than racing the legacy ` + `file - retry loop will re-resolve
+`);
+      return;
+    }
   }
   const file = join9(stateDir, "active-session");
   try {
@@ -27648,10 +27732,25 @@ function getFallbackSessionId() {
   } catch {}
   return;
 }
+function readAuthoritativeSessionId() {
+  const envId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
+  if (envId && /^[a-zA-Z0-9_-]+$/.test(envId))
+    return envId;
+  const claudePid = findClaudeAncestorPid();
+  if (!claudePid)
+    return;
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const perPidFile = join9(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
+  try {
+    if (existsSync9(perPidFile)) {
+      const raw = readFileSync5(perPidFile, "utf8").trim();
+      if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
+        return raw;
+    }
+  } catch {}
+  return;
+}
 function resolveSessionId(explicit) {
-  if (explicit && /^[a-zA-Z0-9_-]+$/.test(explicit)) {
-    cachedFallbackSessionId = explicit;
-  }
   return explicit ?? getFallbackSessionId();
 }
 var embeddingClient = null;
@@ -29342,7 +29441,7 @@ function startAgentChannel() {
         process.stderr.write(`agent-channel: notification failed (event suppressed): ${err instanceof Error ? err.message : String(err)}
 `);
       });
-    }, permissionRelay ?? undefined);
+    }, permissionRelay ?? undefined, readAuthoritativeSessionId);
     agentChannel.start();
     process.stderr.write(`agent-channel: started as ${role} session_id=${sessionId} id8=${self.id8} name=${name} state_dir=${stateDir} projects_hash_dir=${projectsHashDir}
 `);
@@ -29626,7 +29725,16 @@ foreach ($s in $siblings) {
 var initialParentClaudePid = findClaudeAncestorPid();
 var initialParentClaudeCreationTime = initialParentClaudePid !== null ? getProcessCreationTime(initialParentClaudePid) : null;
 if (initialParentClaudePid) {
-  killOlderDuplicateMcps(initialParentClaudePid);
+  const dedupWalk = walkClaudeAncestorPid();
+  if (dedupWalk.pid === null) {
+    process.stderr.write(`[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk (${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID (WI fda1a7f2)
+`);
+  } else if (dedupWalk.pid !== initialParentClaudePid) {
+    process.stderr.write(`[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is not the MCP child of the window it inherited that value from (WI fda1a7f2)
+`);
+  } else {
+    killOlderDuplicateMcps(dedupWalk.pid);
+  }
   const creationTimeNote = initialParentClaudeCreationTime ? ` created=${initialParentClaudeCreationTime.toISOString()}` : " (creation-time unavailable - PID-reuse defense disabled)";
   process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}${creationTimeNote} (tick every 30s)
 `);
@@ -29649,9 +29757,11 @@ if (initialParentClaudePid) {
     }
   }, 30000).unref();
 } else {
-  process.stderr.write(`[orchestrator] no claude.exe ancestor at startup; refusing to run as orphan. Exiting.
+  const msg = `no claude.exe ancestor resolved at startup. NOT exiting - "cannot verify" is not "orphan" (WI fda1a7f2). Orphan watchdog is DISABLED for this process; if the parent dies this server will linger until the reaper prunes it. See the claude-ancestor line above for the walk's failure reason.`;
+  process.stderr.write(`[orchestrator] ${msg}
 `);
-  setImmediate(() => shutdownOnce("no-claude-ancestor-at-startup"));
+  emitLifecycle(msg + `
+`);
 }
 async function main() {
   emitLifecycle(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
@@ -29668,6 +29778,11 @@ async function main() {
   sessionTracker.cleanup();
   const transport = new StdioServerTransport;
   await server.connect(transport);
+  const probeLine = `fda1a7f2-binding-probe-v1 bun-env: CLAUDE_CODE_SESSION_ID=${process.env.CLAUDE_CODE_SESSION_ID ? `PRESENT(${process.env.CLAUDE_CODE_SESSION_ID.slice(0, 8)})` : "ABSENT"} CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID ? "present" : "absent"} CLAUDE_PID=${process.env.CLAUDE_PID ?? "absent"} bun_pid=${process.pid}`;
+  process.stderr.write(`[orchestrator] ${probeLine}
+`);
+  emitLifecycle(probeLine + `
+`);
   startAgentChannel();
   if (!agentChannel) {
     let attempts = 0;

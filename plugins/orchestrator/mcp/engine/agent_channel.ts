@@ -693,7 +693,124 @@ export class AgentChannel {
     /** Optional. SA's MCP injects when receiving permission_request notifications
      *  from CC; PA's MCP leaves it undefined. */
     private permissionRelay?: PermissionRelayLike,
+    /** 0.69.0 (WI fda1a7f2). NON-CACHING authoritative identity read, called
+     *  once per heartbeat. Supplied by server.ts; undefined disables the
+     *  reconcile (and says so on the first tick rather than passing silently). */
+    private resolveTrueSessionId?: () => string | undefined,
   ) {}
+
+  /** One-shot latch so an inert reconcile logs once, not every 30s. */
+  private reconcileInertLogged = false;
+
+  /**
+   * 0.69.0 (WI fda1a7f2): repair a wrong session binding without human help.
+   *
+   * WHY THIS EXISTS: registration happens ONCE at startup, from whatever
+   * `resolveSessionId()` could see at that moment. When the SessionStart hook
+   * hadn't yet written the per-PID file, that was the racy shared file holding
+   * a SIBLING's id - so this server registered as another session, wrote its
+   * roster row, and subscribed to that session's mail under its `receiver_id8`.
+   * Measured 2026-08-29: two live servers on one row, and a third with no row
+   * at all, for 21 minutes with healthy parents. The server LEARNED its true id
+   * within seconds and never acted on it, because nothing ever re-registered.
+   *
+   * Runs from THIS server's own state (selfSession + an authoritative read) and
+   * never from a caller-supplied `session_id`: agents pass ids by hand and PA
+   * legitimately writes on peers' behalf with THEIR id (6a5fae2a), so a
+   * caller-triggered migration would let one typo move another window's row.
+   *
+   * OFFSETS ARE DELIBERATELY NOT TOUCHED. `processFile` initializes a missing
+   * offset to `stat.size` (EOF), so the migrated identity starts reading from
+   * NOW with no re-delivery storm - and the victim keeps its own read positions
+   * intact. Renaming offset rows would steal them from the rightful session.
+   */
+  private reconcileIdentity(): void {
+    if (!this.resolveTrueSessionId) {
+      if (!this.reconcileInertLogged) {
+        this.reconcileInertLogged = true;
+        process.stderr.write(
+          `agent-channel: identity reconcile DISABLED (no resolver supplied) - ` +
+            `a wrong binding cannot self-repair in this process (WI fda1a7f2)\n`,
+        );
+      }
+      return;
+    }
+
+    const truth = this.resolveTrueSessionId();
+    if (!truth) {
+      // 6a5fae2a shape: a guard that cannot fire must SAY it cannot fire,
+      // or a future incident reads a silent no-op as a passing check.
+      if (!this.reconcileInertLogged) {
+        this.reconcileInertLogged = true;
+        process.stderr.write(
+          `agent-channel: identity reconcile INERT - no session id in env and ` +
+            `no readable per-PID file. Cannot verify this server's binding; a ` +
+            `wrong one will NOT self-repair (WI fda1a7f2)\n`,
+        );
+      }
+      return;
+    }
+
+    if (truth === this.selfSession.session_id) return;
+
+    const from = this.selfSession.session_id;
+    process.stderr.write(
+      `agent-channel: IDENTITY MISMATCH - registered as ${from.slice(0, 8)} but ` +
+        `authoritative source says ${truth.slice(0, 8)}. Migrating roster row ` +
+        `(WI fda1a7f2)\n`,
+    );
+
+    const migrated: SessionEntry = {
+      ...this.selfSession,
+      session_id: truth,
+      id8: truth.slice(0, 8),
+      instance: INSTANCE_TOKEN,
+    };
+    // Upsert, not UPDATE: the target row may already exist (the rightful owner
+    // may have re-registered via /mcp reconnect while we held its id).
+    writeSession(this.projectStateDir, migrated);
+
+    // Release the row we were wrongly occupying - but the instance guard ALONE
+    // is not enough here, and assuming it was is the same mistake this whole
+    // work item is about.
+    //
+    // `removeOwnSession` deletes when `instance` matches our token. While
+    // mis-bound, BOTH servers were heartbeating that row and `instance` is
+    // last-writer-wins - so roughly half the time the guard reads "ours" about
+    // a row that belongs to a LIVE victim, and we would delete the row of the
+    // session we were already impersonating. It re-upserts within ~30s, but for
+    // that window it is absent from every peer's roster.
+    //
+    // Exact discriminator: does a transcript exist for `from`? A real session -
+    // live or departed - owns a `<session_id>.jsonl`; a phantom id (a window
+    // that never existed under that id) has none. Only phantoms are ours to
+    // delete. Leaving a departed session's row costs nothing: the stale reaper
+    // already collects it.
+    const fromTranscript = this.peerTranscriptSize(from);
+    if (fromTranscript === null) {
+      removeOwnSession(this.projectStateDir, from, INSTANCE_TOKEN);
+      process.stderr.write(
+        `agent-channel: released phantom row ${from.slice(0, 8)} ` +
+          `(no transcript - no real session owns this id)\n`,
+      );
+    } else {
+      process.stderr.write(
+        `agent-channel: LEFT row ${from.slice(0, 8)} in place ` +
+          `(transcript exists, ${fromTranscript}B - a real session owns this ` +
+          `id; deleting it would unregister the session we impersonated)\n`,
+      );
+    }
+
+    // ATOMIC WITH THE ROW MOVE: stop() releases `this.selfSession.session_id`
+    // under the same instance guard. Leaving this stale would make shutdown
+    // target the abandoned id - deleting a peer's row and orphaning our own.
+    this.selfSession = migrated;
+
+    process.stderr.write(
+      `agent-channel: identity repaired -> ${truth.slice(0, 8)} ` +
+        `(offsets left untouched; new receiver starts at transcript EOF)\n`,
+    );
+  }
 
   /**
    * Every injection into our own harness goes through here so WI d4873dfc can
@@ -949,6 +1066,16 @@ export class AgentChannel {
 
   private heartbeat(): void {
     try {
+      // 0.69.0 (WI fda1a7f2): reconcile BEFORE the heartbeat write, so the
+      // tick lands on the RIGHT row rather than refreshing a row we should not
+      // be holding. Wrapped in its own try/catch for the 0.55.0 reason spelled
+      // out below - nothing upstream of writeSession may be able to take the
+      // registry write down with it.
+      try {
+        this.reconcileIdentity();
+      } catch {
+        /* reconcile is best-effort; the heartbeat below must still land */
+      }
       this.syncRenameIntoName();
       // Publish the client-side liveness half. last_heartbeat_at below proves
       // the SERVER is alive; this proves the HARNESS can still hear it. A peer
