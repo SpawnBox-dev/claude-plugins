@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join9 } from "path";
-import { existsSync as existsSync9, readFileSync as readFileSync5, writeFileSync as writeFileSync2, statSync as statSync8, mkdirSync as mkdirSync4 } from "fs";
+import { resolve, join as join10 } from "path";
+import { existsSync as existsSync10, readFileSync as readFileSync6, writeFileSync as writeFileSync3, statSync as statSync8, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -23554,6 +23554,63 @@ This was already blocked last checkpoint and is blocked again in the same words.
 ` + `Then answer one question: WHAT CHANGED SINCE I LAST ASSERTED THIS? If nothing did and ` + `the wall is real, say so explicitly with the routes you ruled out - that is a fine ` + `answer and it survives this check. Real instances of it being WRONG: a file "search ` + `timed out, not retried" restated five times, where the directory was a sibling of the ` + `one being searched; and "needs the human's machine" carried a full day by a session ` + `already running on that machine.`;
 }
 
+// mcp/engine/client_claim.ts
+import { existsSync as existsSync5, readFileSync as readFileSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "fs";
+import { join as join4 } from "path";
+function claimPath(stateDir, pid) {
+  return join4(stateDir, `mcp-client-${pid}.claim`);
+}
+function writeClientClaim(stateDir, pid, processCreatedAt) {
+  try {
+    const claim = {
+      pid,
+      processCreatedAt: processCreatedAt ? processCreatedAt.toISOString() : null,
+      claimedAt: new Date().toISOString()
+    };
+    writeFileSync2(claimPath(stateDir, pid), JSON.stringify(claim), "utf8");
+  } catch {}
+}
+function readClientClaim(stateDir, pid) {
+  try {
+    const p = claimPath(stateDir, pid);
+    if (!existsSync5(p))
+      return null;
+    const raw = JSON.parse(readFileSync2(p, "utf8"));
+    if (typeof raw?.pid !== "number")
+      return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+function removeClientClaim(stateDir, pid) {
+  try {
+    unlinkSync2(claimPath(stateDir, pid));
+  } catch {}
+}
+function decideDuplicateKills(selfPid, candidates, readClaim, isPidLive) {
+  const kill = [];
+  const spared = [];
+  for (const c of candidates) {
+    if (c.pid === selfPid) {
+      spared.push({ pid: c.pid, reason: "self" });
+      continue;
+    }
+    const claim = readClaim(c.pid);
+    if (claim) {
+      if (isPidLive(c.pid, claim.processCreatedAt)) {
+        spared.push({
+          pid: c.pid,
+          reason: `holds a live client claim (claimed ${claim.claimedAt})`
+        });
+        continue;
+      }
+    }
+    kill.push(c.pid);
+  }
+  return { kill, spared };
+}
+
 // mcp/engine/orphan_watchdog.ts
 function decideWatchdogAction(liveness, currentStreak, threshold) {
   if (liveness === "alive")
@@ -23566,25 +23623,25 @@ function decideWatchdogAction(liveness, currentStreak, threshold) {
 }
 
 // mcp/engine/live_sessions.ts
-import { existsSync as existsSync6 } from "fs";
-import { join as join5 } from "path";
+import { existsSync as existsSync7 } from "fs";
+import { join as join6 } from "path";
 
 // mcp/engine/agent_channel_state.ts
 import {
-  readFileSync as readFileSync2,
-  existsSync as existsSync5,
+  readFileSync as readFileSync3,
+  existsSync as existsSync6,
   mkdirSync as mkdirSync3,
-  unlinkSync as unlinkSync2,
+  unlinkSync as unlinkSync3,
   readdirSync as readdirSync3,
   statSync as statSync3
 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 import { Database as Database2 } from "bun:sqlite";
 var SESSIONS_FILE = "sessions.json";
 var STATE_FILE = "state.json";
 var AGENT_CHANNEL_DB_FILE = "agent_channel.db";
 function ensureDir(dir) {
-  if (!existsSync5(dir))
+  if (!existsSync6(dir))
     mkdirSync3(dir, { recursive: true });
 }
 var tmpSweptDirs = new Set;
@@ -23603,11 +23660,11 @@ function sweepStaleTmpArtifacts(stateDir) {
   for (const name of entries) {
     if (!name.includes(".tmp."))
       continue;
-    const full = join4(stateDir, name);
+    const full = join5(stateDir, name);
     try {
       if (now3 - statSync3(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
         continue;
-      unlinkSync2(full);
+      unlinkSync3(full);
     } catch {}
   }
 }
@@ -23634,7 +23691,7 @@ function getDb(stateDir) {
   sweepStaleTmpArtifacts(stateDir);
   const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
   if (useInMemory && false) {}
-  const dbPath = useInMemory ? ":memory:" : join4(stateDir, AGENT_CHANNEL_DB_FILE);
+  const dbPath = useInMemory ? ":memory:" : join5(stateDir, AGENT_CHANNEL_DB_FILE);
   const db = new Database2(dbPath);
   if (!useInMemory) {
     db.exec("PRAGMA journal_mode = WAL;");
@@ -23764,16 +23821,16 @@ function setClientUnreachableSince(stateDir, session_id, iso) {
   prep(db, `UPDATE sessions SET client_unreachable_since = ? WHERE session_id = ?`).run(iso, session_id);
 }
 function migrateSessionsLegacy(stateDir, db) {
-  const legacyPath = join4(stateDir, SESSIONS_FILE);
-  if (!existsSync5(legacyPath))
+  const legacyPath = join5(stateDir, SESSIONS_FILE);
+  if (!existsSync6(legacyPath))
     return;
   let legacy = [];
   try {
-    const data = JSON.parse(readFileSync2(legacyPath, "utf8"));
+    const data = JSON.parse(readFileSync3(legacyPath, "utf8"));
     legacy = Array.isArray(data) ? data : data?.sessions ?? [];
   } catch {
     try {
-      unlinkSync2(legacyPath);
+      unlinkSync3(legacyPath);
     } catch {}
     return;
   }
@@ -23801,7 +23858,7 @@ function migrateSessionsLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync2(legacyPath);
+    unlinkSync3(legacyPath);
   } catch {}
 }
 function readSessions(stateDir) {
@@ -23881,15 +23938,15 @@ function removeOwnSession(stateDir, session_id, instance) {
         AND (instance IS NULL OR instance = ?)`).run(session_id, instance);
 }
 function migrateOverrideStateLegacy(stateDir, db) {
-  const legacyPath = join4(stateDir, STATE_FILE);
-  if (!existsSync5(legacyPath))
+  const legacyPath = join5(stateDir, STATE_FILE);
+  if (!existsSync6(legacyPath))
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync3(legacyPath, "utf8"));
   } catch {
     try {
-      unlinkSync2(legacyPath);
+      unlinkSync3(legacyPath);
     } catch {}
     return;
   }
@@ -23915,7 +23972,7 @@ function migrateOverrideStateLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync2(legacyPath);
+    unlinkSync3(legacyPath);
   } catch {}
 }
 function readOverrideState(stateDir) {
@@ -23936,15 +23993,15 @@ function readOverrideState(stateDir) {
   };
 }
 function migrateOffsetsLegacy(stateDir, db, receiverId8) {
-  const legacyPath = join4(stateDir, `offsets-${receiverId8}.json`);
-  if (!existsSync5(legacyPath))
+  const legacyPath = join5(stateDir, `offsets-${receiverId8}.json`);
+  if (!existsSync6(legacyPath))
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync2(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync3(legacyPath, "utf8"));
   } catch {
     try {
-      unlinkSync2(legacyPath);
+      unlinkSync3(legacyPath);
     } catch {}
     return;
   }
@@ -23962,7 +24019,7 @@ function migrateOffsetsLegacy(stateDir, db, receiverId8) {
     })();
   }
   try {
-    unlinkSync2(legacyPath);
+    unlinkSync3(legacyPath);
   } catch {}
 }
 function readOffsets(stateDir, receiverId8) {
@@ -24004,16 +24061,16 @@ function rowToSystemEvent(r) {
   };
 }
 function migrateSystemEventsLegacy(stateDir, db) {
-  const legacyPath = join4(stateDir, "system_events.jsonl");
-  if (!existsSync5(legacyPath))
+  const legacyPath = join5(stateDir, "system_events.jsonl");
+  if (!existsSync6(legacyPath))
     return;
   let lines = [];
   try {
-    lines = readFileSync2(legacyPath, "utf8").split(`
+    lines = readFileSync3(legacyPath, "utf8").split(`
 `).filter((l) => l.trim());
   } catch {
     try {
-      unlinkSync2(legacyPath);
+      unlinkSync3(legacyPath);
     } catch {}
     return;
   }
@@ -24037,7 +24094,7 @@ function migrateSystemEventsLegacy(stateDir, db) {
     })();
   }
   try {
-    unlinkSync2(legacyPath);
+    unlinkSync3(legacyPath);
   } catch {}
 }
 function appendSystemEvent(stateDir, event) {
@@ -24096,11 +24153,11 @@ function alertEmissionStats(stateDir, alertKind) {
 // mcp/engine/live_sessions.ts
 function getAgentChannelStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join5(projectDir, ".orchestrator-state", "agent-channel");
-  if (!existsSync6(stateDir))
+  const stateDir = join6(projectDir, ".orchestrator-state", "agent-channel");
+  if (!existsSync7(stateDir))
     return null;
-  const dbExists = existsSync6(join5(stateDir, "agent_channel.db"));
-  const legacyExists = existsSync6(join5(stateDir, "sessions.json"));
+  const dbExists = existsSync7(join6(stateDir, "agent_channel.db"));
+  const legacyExists = existsSync7(join6(stateDir, "sessions.json"));
   if (!dbExists && !legacyExists)
     return null;
   return stateDir;
@@ -24407,8 +24464,8 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { statSync as statSync4, readFileSync as readFileSync3 } from "fs";
-import { join as join6 } from "path";
+import { statSync as statSync4, readFileSync as readFileSync4 } from "fs";
+import { join as join7 } from "path";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -25743,7 +25800,7 @@ function wardenLedgerPath() {
   const root = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   if (!root)
     return null;
-  return join6(root, ".orchestrator-state", "warden-ledger.md");
+  return join7(root, ".orchestrator-state", "warden-ledger.md");
 }
 function wardenLedgerLiveness(ledgerPath) {
   let st;
@@ -25759,7 +25816,7 @@ function wardenLedgerLiveness(ledgerPath) {
   let ts;
   let loop;
   try {
-    const head = readFileSync3(ledgerPath).subarray(0, 8192).toString("utf8");
+    const head = readFileSync4(ledgerPath).subarray(0, 8192).toString("utf8");
     const mi = head.match(/instance=([^\s|]+)/i);
     const mt = head.match(/\bts=([^\s|]+)/i);
     if (mi)
@@ -26275,8 +26332,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync8, statSync as statSync7, readdirSync as readdirSync4 } from "fs";
-import { join as join8 } from "path";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync9, statSync as statSync7, readdirSync as readdirSync4 } from "fs";
+import { join as join9 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -26338,7 +26395,7 @@ function parseAddressing(content, sender, sessions) {
 }
 
 // mcp/engine/session_rename.ts
-import { statSync as statSync5, readFileSync as readFileSync4 } from "fs";
+import { statSync as statSync5, readFileSync as readFileSync5 } from "fs";
 var RENAME_RE = /The user named this session "([^"]*)"\. This may indicate the session's focus or intent\./g;
 function isInsideChannelEnvelope(content, index) {
   const before = content.slice(0, index);
@@ -26379,19 +26436,19 @@ function readLatestRename(transcriptPath, knownSize) {
     if (knownSize !== undefined && size === knownSize) {
       return { name: null, size };
     }
-    return { name: parseLatestRename(readFileSync4(transcriptPath, "utf8")), size };
+    return { name: parseLatestRename(readFileSync5(transcriptPath, "utf8")), size };
   } catch {
     return { name: null, size: knownSize ?? -1 };
   }
 }
 
 // mcp/engine/restart_witness.ts
-import { openSync, readSync, closeSync, existsSync as existsSync7, statSync as statSync6 } from "fs";
-import { join as join7 } from "path";
+import { openSync, readSync, closeSync, existsSync as existsSync8, statSync as statSync6 } from "fs";
+import { join as join8 } from "path";
 import { homedir as homedir3 } from "os";
 var RESTART_WINDOW_MS = 4 * 60 * 1000;
 function lifecycleLogPath() {
-  return join7(process.env.CLAUDE_CONFIG_DIR || join7(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+  return join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 }
 function lastCleanShutdownMs(logTail, sessionId) {
   let latest = null;
@@ -26422,7 +26479,7 @@ function restartExplainsSilence(lastRestart, now3, windowMs = RESTART_WINDOW_MS)
 }
 function readLifecycleTail(bytes = 64 * 1024, path2 = lifecycleLogPath()) {
   try {
-    if (!existsSync7(path2))
+    if (!existsSync8(path2))
       return "";
     const size = statSync6(path2).size;
     const start = Math.max(0, size - bytes);
@@ -26796,7 +26853,7 @@ class AgentChannel {
   }
   syncRenameIntoName() {
     try {
-      const path2 = join8(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const path2 = join9(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
       const { name, size } = readLatestRename(path2, this.lastRenameScanSize);
       this.lastRenameScanSize = size;
       if (name && name !== this.selfSession.name) {
@@ -26971,7 +27028,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -26979,7 +27036,7 @@ class AgentChannel {
   readTranscriptTail(sid) {
     let fd;
     try {
-      const path2 = join8(this.projectsHashDir, `${sid}.jsonl`);
+      const path2 = join9(this.projectsHashDir, `${sid}.jsonl`);
       const size = statSync7(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
@@ -27002,7 +27059,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -27042,7 +27099,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync7(join8(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -27120,9 +27177,9 @@ class AgentChannel {
     }
   }
   listJsonlFiles() {
-    if (!existsSync8(this.projectsHashDir))
+    if (!existsSync9(this.projectsHashDir))
       return [];
-    return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join8(this.projectsHashDir, f));
+    return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join9(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -27605,8 +27662,8 @@ async function handleRespondToPermission(input, ctx) {
 import { homedir as homedir4 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join9(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync5(pkgPath, "utf8")).version;
+    const pkgPath = join10(import.meta.dir, "..", "package.json");
+    return JSON.parse(readFileSync6(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -27650,7 +27707,7 @@ for ($i = 0; $i -lt 8; $i++) {
     let name = "";
     let ppid = 0;
     try {
-      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         return { pid: null, reason: `stat-malformed:${pid}` };
@@ -27698,13 +27755,13 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join9(projectDir, ".orchestrator-state");
+  const stateDir = join10(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join9(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join10(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync9(perPidFile)) {
-        const raw = readFileSync5(perPidFile, "utf8").trim();
+      if (existsSync10(perPidFile)) {
+        const raw = readFileSync6(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -27719,17 +27776,17 @@ function getFallbackSessionId() {
       return;
     }
   }
-  const file = join9(stateDir, "active-session");
+  const file = join10(stateDir, "active-session");
   try {
-    if (existsSync9(file)) {
-      const raw = readFileSync5(file, "utf8").trim();
+    if (existsSync10(file)) {
+      const raw = readFileSync6(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join9(stateDir, `active-session-${claudePid}`);
-          if (!existsSync9(perPidFile)) {
+          const perPidFile = join10(stateDir, `active-session-${claudePid}`);
+          if (!existsSync10(perPidFile)) {
             try {
-              writeFileSync2(perPidFile, raw, "utf8");
+              writeFileSync3(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
 `);
             } catch {}
@@ -27751,10 +27808,10 @@ function readAuthoritativeSessionId() {
   if (!claudePid)
     return;
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const perPidFile = join9(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
+  const perPidFile = join10(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
   try {
-    if (existsSync9(perPidFile)) {
-      const raw = readFileSync5(perPidFile, "utf8").trim();
+    if (existsSync10(perPidFile)) {
+      const raw = readFileSync6(perPidFile, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
         return raw;
     }
@@ -27821,9 +27878,9 @@ async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const sidecarStateDir = join9(homedir4(), ".claude", "orchestrator");
+  const sidecarStateDir = join10(homedir4(), ".claude", "orchestrator");
   try {
-    if (!existsSync9(sidecarStateDir))
+    if (!existsSync10(sidecarStateDir))
       mkdirSync4(sidecarStateDir, { recursive: true });
   } catch {}
   const portFile = resolve(sidecarStateDir, "sidecar.port");
@@ -27862,8 +27919,8 @@ async function startSidecar() {
       const age = Date.now() - (statSync8(lockFile).mtimeMs || 0);
       if (age > LOCK_STALE_MS) {
         try {
-          const { unlinkSync: unlinkSync3 } = await import("fs");
-          unlinkSync3(lockFile);
+          const { unlinkSync: unlinkSync4 } = await import("fs");
+          unlinkSync4(lockFile);
         } catch {}
         try {
           closeSync3(openSync3(lockFile, "wx"));
@@ -27891,22 +27948,22 @@ async function startSidecar() {
     console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
   }
   try {
-    const { unlinkSync: unlinkSync3 } = await import("fs");
-    unlinkSync3(portFile);
+    const { unlinkSync: unlinkSync4 } = await import("fs");
+    unlinkSync4(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile, "--model", ACTIVE_EMBED_MODEL_REPO];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync3 } = await import("fs");
-      unlinkSync3(portFile);
+      const { unlinkSync: unlinkSync4 } = await import("fs");
+      unlinkSync4(portFile);
     } catch {}
     result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
   }
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync3 } = await import("fs");
-      unlinkSync3(portFile);
+      const { unlinkSync: unlinkSync4 } = await import("fs");
+      unlinkSync4(portFile);
     } catch {}
     result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
   }
@@ -28107,8 +28164,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join9(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync9(fallbackFile);
+    const fallbackFile = join10(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync10(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -28140,7 +28197,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
   try {
-    const channelStateDir = join9(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const channelStateDir = join10(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
     const alertStats = alertEmissionStats(channelStateDir);
     if (alertStats.length > 0) {
       lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
@@ -29415,7 +29472,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join9(homedir4(), ".claude", "projects", projectHash);
+  const projectsHashDir = join10(homedir4(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -29431,7 +29488,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join9(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join10(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -29577,7 +29634,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join9(process.env.CLAUDE_CONFIG_DIR || join9(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
@@ -29591,11 +29648,18 @@ function logShutdownTrigger(trigger) {
 `);
 }
 var shutdownLogged = false;
+function orchestratorStateDir() {
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  return join10(projectDir, ".orchestrator-state");
+}
 function shutdownOnce(trigger) {
   if (shutdownLogged)
     return;
   shutdownLogged = true;
   logShutdownTrigger(trigger);
+  try {
+    removeClientClaim(orchestratorStateDir(), process.pid);
+  } catch {}
   if (agentChannel)
     agentChannel.stop();
 }
@@ -29671,7 +29735,7 @@ function checkParentClaudeExe(pid, expectedCreationTime) {
       }
       let stat;
       try {
-        stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+        stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
       } catch {
         return "undetermined";
       }
@@ -29722,22 +29786,54 @@ foreach ($s in $siblings) {
   # newer process. Skip the kill.
   if ($s.CreationDate -lt $myParentClaudeStart) { continue }
 
-  # Kill if sibling older than me, or same start time and lower PID (tiebreak).
-  if ($s.CreationDate -lt $myStart -or ($s.CreationDate -eq $myStart -and $s.ProcessId -lt $myPid)) {
-    Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "killed:$($s.ProcessId):created=$($s.CreationDate.ToString('o'))"
-  }
+  # 0.69.0 (WI ca509bb7): ENUMERATE ONLY - this script no longer kills anything.
+  # The age comparison that used to live here is gone: age was never evidence
+  # about which server holds the live client, and selecting on it killed the
+  # incumbent serving PA twice during reconnect churn. Emit every eligible
+  # sibling; JS decides, using client claims.
+  Write-Output ('sibling:' + $s.ProcessId + ':' + $s.CreationDate.ToString('o'))
 }
 `;
   try {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     const out = execSync(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1e4 });
-    const killed = out.split(`
-`).map((l) => l.trim()).filter((l) => l.startsWith("killed:"));
-    if (killed.length > 0) {
-      process.stderr.write(`[orchestrator] dedup: killed ${killed.length} older sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${killed.join("; ")}
+    const candidates = [];
+    for (const line of out.split(`
+`)) {
+      const m = line.trim().match(/^sibling:(\d+):(.*)$/);
+      if (!m)
+        continue;
+      const pid = Number.parseInt(m[1], 10);
+      if (Number.isFinite(pid) && pid > 0) {
+        candidates.push({ pid, createdAt: m[2]?.trim() || null });
+      }
+    }
+    if (candidates.length === 0)
+      return;
+    const stateDir = orchestratorStateDir();
+    const decision = decideDuplicateKills(myPid, candidates, (pid) => readClientClaim(stateDir, pid), (pid, expectedCreatedAt) => {
+      const actual = getProcessCreationTime(pid);
+      if (!actual)
+        return false;
+      if (!expectedCreatedAt)
+        return true;
+      return Math.abs(actual.getTime() - new Date(expectedCreatedAt).getTime()) <= 1000;
+    });
+    for (const s of decision.spared) {
+      process.stderr.write(`[orchestrator] dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)
 `);
     }
+    if (decision.kill.length === 0) {
+      process.stderr.write(`[orchestrator] dedup: ${candidates.length} sibling(s) eligible, none killable (WI ca509bb7)
+`);
+      return;
+    }
+    const killScript = decision.kill.map((pid) => `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`).join(`
+`) + `
+`;
+    execSync(`powershell.exe -NoProfile -EncodedCommand ${Buffer.from(killScript, "utf16le").toString("base64")}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1e4 });
+    process.stderr.write(`[orchestrator] dedup: killed ${decision.kill.length} clientless sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${decision.kill.join(", ")} (WI ca509bb7)
+`);
   } catch (err) {
     process.stderr.write(`[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}
 `);
@@ -29746,16 +29842,6 @@ foreach ($s in $siblings) {
 var initialParentClaudePid = findClaudeAncestorPid();
 var initialParentClaudeCreationTime = initialParentClaudePid !== null ? getProcessCreationTime(initialParentClaudePid) : null;
 if (initialParentClaudePid) {
-  const dedupWalk = walkClaudeAncestorPid();
-  if (dedupWalk.pid === null) {
-    process.stderr.write(`[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk (${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID (WI fda1a7f2)
-`);
-  } else if (dedupWalk.pid !== initialParentClaudePid) {
-    process.stderr.write(`[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is not the MCP child of the window it inherited that value from (WI fda1a7f2)
-`);
-  } else {
-    killOlderDuplicateMcps(dedupWalk.pid);
-  }
   const DEAD_TICKS_BEFORE_SHUTDOWN = 3;
   let consecutiveDeadTicks = 0;
   const creationTimeNote = initialParentClaudeCreationTime ? ` created=${initialParentClaudeCreationTime.toISOString()}` : " (creation-time unavailable - PID-reuse defense disabled)";
@@ -29804,7 +29890,7 @@ async function main() {
 `);
   try {
     const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    const swept = sweepStateDir(join9(projectRoot, ".orchestrator-state"));
+    const swept = sweepStateDir(join10(projectRoot, ".orchestrator-state"));
     if (swept.removed > 0 || swept.rotated > 0) {
       emitLifecycle(`[orchestrator] state-dir GC: removed ${swept.removed} stale marker(s), rotated ${swept.rotated} ledger backup(s), of ${swept.scanned} file(s)
 `);
@@ -29812,6 +29898,33 @@ async function main() {
   } catch {}
   sessionTracker = new SessionTracker(getProjectDb());
   sessionTracker.cleanup();
+  let dedupRan = false;
+  server.server.oninitialized = () => {
+    try {
+      const stateDir = orchestratorStateDir();
+      writeClientClaim(stateDir, process.pid, getProcessCreationTime(process.pid));
+      emitLifecycle(`client handshake complete - claim published for pid=${process.pid} (WI ca509bb7)
+`);
+      if (dedupRan)
+        return;
+      dedupRan = true;
+      const dedupWalk = walkClaudeAncestorPid();
+      if (dedupWalk.pid === null) {
+        process.stderr.write(`[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk (${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID (WI fda1a7f2)
+`);
+        return;
+      }
+      if (initialParentClaudePid !== null && dedupWalk.pid !== initialParentClaudePid) {
+        process.stderr.write(`[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is not the MCP child of the window it inherited that value from (WI fda1a7f2)
+`);
+        return;
+      }
+      killOlderDuplicateMcps(dedupWalk.pid);
+    } catch (err) {
+      process.stderr.write(`[orchestrator] dedup on handshake failed (non-fatal): ${err}
+`);
+    }
+  };
   const transport = new StdioServerTransport;
   await server.connect(transport);
   const probeLine = `fda1a7f2-binding-probe-v1 bun-env: CLAUDE_CODE_SESSION_ID=${process.env.CLAUDE_CODE_SESSION_ID ? `PRESENT(${process.env.CLAUDE_CODE_SESSION_ID.slice(0, 8)})` : "ABSENT"} CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID ? "present" : "absent"} CLAUDE_PID=${process.env.CLAUDE_PID ?? "absent"} bun_pid=${process.pid}`;

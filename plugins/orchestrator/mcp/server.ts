@@ -46,6 +46,13 @@ const PLUGIN_VERSION: string = (() => {
     return "0.0.0-unknown";
   }
 })();
+import {
+  decideDuplicateKills,
+  readClientClaim,
+  removeClientClaim,
+  writeClientClaim,
+  type SiblingCandidate,
+} from "./engine/client_claim";
 import { decideWatchdogAction } from "./engine/orphan_watchdog";
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
@@ -3242,10 +3249,30 @@ function logShutdownTrigger(trigger: string): void {
   );
 }
 let shutdownLogged = false;
+/**
+ * 0.69.0 (WI ca509bb7): the orchestrator state directory, resolved the same way
+ * every other consumer in this file resolves it.
+ */
+function orchestratorStateDir(): string {
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  return join(projectDir, ".orchestrator-state");
+}
+
 function shutdownOnce(trigger: string): void {
   if (shutdownLogged) return;
   shutdownLogged = true;
   logShutdownTrigger(trigger);
+  // 0.69.0 (WI ca509bb7): drop our client claim so a later server does not see
+  // a stale file and decline to reap us. The pid+creation-time check makes a
+  // leftover claim harmless anyway, but the normal path should leave no litter.
+  try {
+    removeClientClaim(orchestratorStateDir(), process.pid);
+  } catch {
+    // Never let housekeeping block shutdown.
+  }
   if (agentChannel) agentChannel.stop();
 }
 process.stdin.on("end", () => shutdownOnce("stdin-end"));
@@ -3572,11 +3599,12 @@ foreach ($s in $siblings) {
   # newer process. Skip the kill.
   if ($s.CreationDate -lt $myParentClaudeStart) { continue }
 
-  # Kill if sibling older than me, or same start time and lower PID (tiebreak).
-  if ($s.CreationDate -lt $myStart -or ($s.CreationDate -eq $myStart -and $s.ProcessId -lt $myPid)) {
-    Stop-Process -Id $s.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "killed:$($s.ProcessId):created=$($s.CreationDate.ToString('o'))"
-  }
+  # 0.69.0 (WI ca509bb7): ENUMERATE ONLY - this script no longer kills anything.
+  # The age comparison that used to live here is gone: age was never evidence
+  # about which server holds the live client, and selecting on it killed the
+  # incumbent serving PA twice during reconnect churn. Emit every eligible
+  # sibling; JS decides, using client claims.
+  Write-Output ('sibling:' + $s.ProcessId + ':' + $s.CreationDate.ToString('o'))
 }
 `;
   try {
@@ -3585,15 +3613,64 @@ foreach ($s in $siblings) {
       `powershell.exe -NoProfile -EncodedCommand ${encoded}`,
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 },
     );
-    const killed = out
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.startsWith("killed:"));
-    if (killed.length > 0) {
+
+    const candidates: SiblingCandidate[] = [];
+    for (const line of out.split("\n")) {
+      const m = line.trim().match(/^sibling:(\d+):(.*)$/);
+      if (!m) continue;
+      const pid = Number.parseInt(m[1]!, 10);
+      if (Number.isFinite(pid) && pid > 0) {
+        candidates.push({ pid, createdAt: m[2]?.trim() || null });
+      }
+    }
+    if (candidates.length === 0) return;
+
+    const stateDir = orchestratorStateDir();
+    const decision = decideDuplicateKills(
+      myPid,
+      candidates,
+      (pid) => readClientClaim(stateDir, pid),
+      (pid, expectedCreatedAt) => {
+        // Alive AND the same process that wrote the claim. Without the second
+        // half a claim file outliving its process would protect whatever
+        // inherits the pid number.
+        const actual = getProcessCreationTime(pid);
+        if (!actual) return false;
+        if (!expectedCreatedAt) return true;
+        return (
+          Math.abs(actual.getTime() - new Date(expectedCreatedAt).getTime()) <=
+          1000
+        );
+      },
+    );
+
+    for (const s of decision.spared) {
       process.stderr.write(
-        `[orchestrator] dedup: killed ${killed.length} older sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${killed.join("; ")}\n`,
+        `[orchestrator] dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)\n`,
       );
     }
+
+    if (decision.kill.length === 0) {
+      process.stderr.write(
+        `[orchestrator] dedup: ${candidates.length} sibling(s) eligible, none killable ` +
+          `(WI ca509bb7)\n`,
+      );
+      return;
+    }
+
+    const killScript =
+      decision.kill
+        .map((pid) => `Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`)
+        .join("\n") + "\n";
+    execSync(
+      `powershell.exe -NoProfile -EncodedCommand ${Buffer.from(killScript, "utf16le").toString("base64")}`,
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 },
+    );
+    process.stderr.write(
+      `[orchestrator] dedup: killed ${decision.kill.length} clientless sibling MCP(s) ` +
+        `sharing parent claude.exe pid=${myInitialParentClaudePid}: ` +
+        `${decision.kill.join(", ")} (WI ca509bb7)\n`,
+    );
   } catch (err) {
     // Non-fatal - the orphan watchdog is the second line of defense.
     process.stderr.write(
@@ -3628,23 +3705,19 @@ if (initialParentClaudePid) {
   // and only the walk disagreed. Identity keeps the env fast path; this
   // destructive path pays the ~1-2s walk once at boot, exactly as it did before
   // today. Disagree or unresolvable -> skip the kill and say so.
-  const dedupWalk = walkClaudeAncestorPid();
-  if (dedupWalk.pid === null) {
-    process.stderr.write(
-      `[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk ` +
-        `(${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID ` +
-        `(WI fda1a7f2)\n`,
-    );
-  } else if (dedupWalk.pid !== initialParentClaudePid) {
-    process.stderr.write(
-      `[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} ` +
-        `disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is ` +
-        `not the MCP child of the window it inherited that value from ` +
-        `(WI fda1a7f2)\n`,
-    );
-  } else {
-    killOlderDuplicateMcps(dedupWalk.pid);
-  }
+  // 0.69.0 (WI ca509bb7): DEDUP NO LONGER RUNS HERE.
+  //
+  // This block sits at MODULE LOAD - main() and server.connect() are both
+  // hundreds of lines below - so at this instant NO server in the window holds
+  // a client, including this one. Deciding who dies from here meant the only
+  // available signal was age, and a freshly spawned copy would reliably kill
+  // the incumbent that was actually serving the user. Measured twice in ten
+  // minutes on PA's window during reconnect churn.
+  //
+  // The kill is now deferred to `runDedupOnce()`, called from the MCP
+  // `oninitialized` handshake: only a server a client has actually talked to
+  // may clean up duplicates, and by then a sibling that holds a client has
+  // published a claim of its own. See mcp/engine/client_claim.ts.
 
   // 0.69.0 (WI 590bf9a9): N consecutive DETERMINED-dead observations before we
   // shut down. 3 x 30s bounds the extra orphan lifetime at ~90s, which is cheap
@@ -3815,6 +3888,59 @@ async function main() {
   // session that needed to process backlog from peer JSONLs at startup.
   // Empirically observed and root-caused 2026-05-11 on the dual-channel
   // Discord-ops session.
+  // 0.69.0 (WI ca509bb7): claim the client, THEN dedup - in that order, once.
+  //
+  // `oninitialized` fires only when a client completes the MCP handshake, which
+  // is the whole point: a server with no client cannot emit it and therefore
+  // cannot forge a claim. That is the bar anti-pattern 501675ba sets, after two
+  // guards failed it this session (a column both contenders wrote, and an
+  // inherited env var mistaken for a relationship).
+  //
+  // Ordering is load-bearing. We publish our OWN claim before scanning, so a
+  // sibling racing the same handshake sees us and spares us, exactly as we will
+  // see and spare it. Reversed, two servers initializing together could each
+  // scan before either had published, and conclude the other is clientless.
+  let dedupRan = false;
+  server.server.oninitialized = () => {
+    try {
+      const stateDir = orchestratorStateDir();
+      writeClientClaim(stateDir, process.pid, getProcessCreationTime(process.pid));
+      emitLifecycle(
+        `client handshake complete - claim published for pid=${process.pid} (WI ca509bb7)\n`,
+      );
+      if (dedupRan) return;
+      dedupRan = true;
+
+      // Ancestry decides ELIGIBILITY only (whose window a sibling belongs to),
+      // and must still be walk-verified - an inherited CLAUDE_PID proves a
+      // claude exists, never that it is ours. Claims decide who dies.
+      const dedupWalk = walkClaudeAncestorPid();
+      if (dedupWalk.pid === null) {
+        process.stderr.write(
+          `[orchestrator] dedup SKIPPED - could not verify claude ancestry by walk ` +
+            `(${dedupWalk.reason}); refusing to kill on an inherited CLAUDE_PID ` +
+            `(WI fda1a7f2)\n`,
+        );
+        return;
+      }
+      if (initialParentClaudePid !== null && dedupWalk.pid !== initialParentClaudePid) {
+        process.stderr.write(
+          `[orchestrator] dedup SKIPPED - walk-verified ancestor ${dedupWalk.pid} ` +
+            `disagrees with CLAUDE_PID ${initialParentClaudePid}. This process is ` +
+            `not the MCP child of the window it inherited that value from ` +
+            `(WI fda1a7f2)\n`,
+        );
+        return;
+      }
+      killOlderDuplicateMcps(dedupWalk.pid);
+    } catch (err) {
+      // A failed dedup must never take down a freshly connected server.
+      process.stderr.write(
+        `[orchestrator] dedup on handshake failed (non-fatal): ${err}\n`,
+      );
+    }
+  };
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
