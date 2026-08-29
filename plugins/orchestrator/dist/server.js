@@ -27737,9 +27737,7 @@ function findClaudeAncestorPid() {
   if (walk.pid === null && !walkNullLogged) {
     walkNullLogged = true;
     const nullLine = `claude-ancestor: WALK RETURNED NULL (reason=${walk.reason}) with ` + `CLAUDE_PID=${process.env.CLAUDE_PID ?? "<unset>"} - per-PID session ` + `resolution and dedup are degraded, and the orphan watchdog will not arm ` + `for this process (WI fda1a7f2)`;
-    process.stderr.write(`[orchestrator] ${nullLine}
-`);
-    emitLifecycle(nullLine + `
+    emitLifecycle(`[orchestrator] ${nullLine}
 `);
   }
   return walk.pid;
@@ -29820,11 +29818,11 @@ foreach ($s in $siblings) {
       return Math.abs(actual.getTime() - new Date(expectedCreatedAt).getTime()) <= 1000;
     });
     for (const s of decision.spared) {
-      process.stderr.write(`[orchestrator] dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)
+      emitLifecycle(`dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)
 `);
     }
     if (decision.kill.length === 0) {
-      process.stderr.write(`[orchestrator] dedup: ${candidates.length} sibling(s) eligible, none killable (WI ca509bb7)
+      emitLifecycle(`dedup: ${candidates.length} sibling(s) eligible, none killable (WI ca509bb7)
 `);
       return;
     }
@@ -29832,7 +29830,7 @@ foreach ($s in $siblings) {
 `) + `
 `;
     execSync(`powershell.exe -NoProfile -EncodedCommand ${Buffer.from(killScript, "utf16le").toString("base64")}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1e4 });
-    process.stderr.write(`[orchestrator] dedup: killed ${decision.kill.length} clientless sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${decision.kill.join(", ")} (WI ca509bb7)
+    emitLifecycle(`dedup: killed ${decision.kill.length} clientless sibling MCP(s) sharing parent claude.exe pid=${myInitialParentClaudePid}: ${decision.kill.join(", ")} (WI ca509bb7)
 `);
   } catch (err) {
     process.stderr.write(`[orchestrator] dedup: sibling scan failed (non-fatal, watchdog will catch): ${err}
@@ -29880,9 +29878,7 @@ if (initialParentClaudePid) {
   }, 30000).unref();
 } else {
   const msg = `no claude.exe ancestor resolved at startup. NOT exiting - "cannot verify" is not "orphan" (WI fda1a7f2). Orphan watchdog is DISABLED for this process; if the parent dies this server will linger until the reaper prunes it. See the claude-ancestor line above for the walk's failure reason.`;
-  process.stderr.write(`[orchestrator] ${msg}
-`);
-  emitLifecycle(msg + `
+  emitLifecycle(`[orchestrator] ${msg}
 `);
 }
 async function main() {
@@ -29928,9 +29924,7 @@ async function main() {
   const transport = new StdioServerTransport;
   await server.connect(transport);
   const probeLine = `fda1a7f2-binding-probe-v1 bun-env: CLAUDE_CODE_SESSION_ID=${process.env.CLAUDE_CODE_SESSION_ID ? `PRESENT(${process.env.CLAUDE_CODE_SESSION_ID.slice(0, 8)})` : "ABSENT"} CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID ? "present" : "absent"} CLAUDE_PID=${process.env.CLAUDE_PID ?? "absent"} bun_pid=${process.pid}`;
-  process.stderr.write(`[orchestrator] ${probeLine}
-`);
-  emitLifecycle(probeLine + `
+  emitLifecycle(`[orchestrator] ${probeLine}
 `);
   startAgentChannel();
   if (!agentChannel) {

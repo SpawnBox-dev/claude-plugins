@@ -267,11 +267,11 @@ function findClaudeAncestorPid(): number | null {
       `CLAUDE_PID=${process.env.CLAUDE_PID ?? "<unset>"} - per-PID session ` +
       `resolution and dedup are degraded, and the orphan watchdog will not arm ` +
       `for this process (WI fda1a7f2)`;
-    process.stderr.write(`[orchestrator] ${nullLine}\n`);
     // Trailing newline is REQUIRED: emitLifecycleLine writes the string
-    // verbatim to both sinks and adds nothing, so a line without it runs into
+    // verbatim to BOTH sinks and adds nothing, so a line without it runs into
     // the next record and breaks any anchored grep over the lifecycle log.
-    emitLifecycle(nullLine + "\n");
+    // One call is enough - it covers stderr and the file.
+    emitLifecycle(`[orchestrator] ${nullLine}\n`);
   }
   return walk.pid;
 }
@@ -3644,15 +3644,22 @@ foreach ($s in $siblings) {
       },
     );
 
+    // emitLifecycle, not bare stderr. These are the BEHAVIOURAL proof that the
+    // claim rule did something, and stderr alone puts them in the killer's
+    // per-window capture only - so a fleet-level gate grepping
+    // mcp-lifecycle.log would find nothing and could read that as "no spare
+    // occurred" rather than "looked in the wrong sink". Caught by SA-VERIFY.2
+    // before the 0.69.1 gate; it is the same sink mistake as the binding probe
+    // earlier today, one layer over.
     for (const s of decision.spared) {
-      process.stderr.write(
-        `[orchestrator] dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)\n`,
+      emitLifecycle(
+        `dedup: SPARED pid=${s.pid} - ${s.reason} (WI ca509bb7)\n`,
       );
     }
 
     if (decision.kill.length === 0) {
-      process.stderr.write(
-        `[orchestrator] dedup: ${candidates.length} sibling(s) eligible, none killable ` +
+      emitLifecycle(
+        `dedup: ${candidates.length} sibling(s) eligible, none killable ` +
           `(WI ca509bb7)\n`,
       );
       return;
@@ -3666,8 +3673,8 @@ foreach ($s in $siblings) {
       `powershell.exe -NoProfile -EncodedCommand ${Buffer.from(killScript, "utf16le").toString("base64")}`,
       { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10000 },
     );
-    process.stderr.write(
-      `[orchestrator] dedup: killed ${decision.kill.length} clientless sibling MCP(s) ` +
+    emitLifecycle(
+      `dedup: killed ${decision.kill.length} clientless sibling MCP(s) ` +
         `sharing parent claude.exe pid=${myInitialParentClaudePid}: ` +
         `${decision.kill.join(", ")} (WI ca509bb7)\n`,
     );
@@ -3828,8 +3835,7 @@ if (initialParentClaudePid) {
     `is not "orphan" (WI fda1a7f2). Orphan watchdog is DISABLED for this ` +
     `process; if the parent dies this server will linger until the reaper ` +
     `prunes it. See the claude-ancestor line above for the walk's failure reason.`;
-  process.stderr.write(`[orchestrator] ${msg}\n`);
-  emitLifecycle(msg + "\n");
+  emitLifecycle(`[orchestrator] ${msg}\n`);
 }
 
 // ── Start server ────────────────────────────────────────────────────────
@@ -3963,16 +3969,19 @@ async function main() {
   //
   // SENTINEL `fda1a7f2-binding-probe-v1` is the marker VERIFY greps for to
   // prove which bundle is actually running (content beats timestamps, 1ff5f968).
-  // BOTH SINKS, deliberately. An earlier revision moved this to emitLifecycle
-  // ONLY, on the belief that Claude Code discards an MCP server's stderr for
-  // real spawns. That belief is FALSE and the evidence is this very probe: its
-  // stderr output was recovered verbatim from
+  // BOTH SINKS - and emitLifecycle ALONE achieves that. emitLifecycleLine
+  // writes the file AND stderr, so an accompanying process.stderr.write is pure
+  // duplication: it is why this probe appeared TWICE per spawn in the captured
+  // mcp-logs earlier today.
+  //
+  // Both sinks matter and neither is redundant with the other. MCP stderr IS
+  // captured per spawn - recovered verbatim from
   // %LOCALAPPDATA%\claude-cli-nodejs\Cache\<slug>\mcp-logs-plugin-orchestrator-core\*.jsonl
-  // for two real spawns (bun 13324 and bun 55588) on 2026-08-29, and that
-  // capture is what proved CLAUDE_PID is absent in a real bun. Dropping stderr
-  // would have thrown away the channel that answered the question.
-  // mcp-lifecycle.log is the durable sink; the MCP stderr log is the one that
-  // pairs a line with a specific spawn's pid. Keep both.
+  // for bun 13324 and 55588, which is what proved CLAUDE_PID absent in a real
+  // bun - but it is per-window, so a fleet-level reader sees only
+  // mcp-lifecycle.log. A line that must be readable fleet-wide has to go
+  // through emitLifecycle; a stderr-only line is invisible to anyone outside
+  // that window.
   const probeLine =
     `fda1a7f2-binding-probe-v1 bun-env: ` +
     `CLAUDE_CODE_SESSION_ID=${
@@ -3983,8 +3992,7 @@ async function main() {
     `CLAUDE_SESSION_ID=${process.env.CLAUDE_SESSION_ID ? "present" : "absent"} ` +
     `CLAUDE_PID=${process.env.CLAUDE_PID ?? "absent"} ` +
     `bun_pid=${process.pid}`;
-  process.stderr.write(`[orchestrator] ${probeLine}\n`);
-  emitLifecycle(probeLine + "\n");
+  emitLifecycle(`[orchestrator] ${probeLine}\n`);
 
   startAgentChannel();
   if (!agentChannel) {
