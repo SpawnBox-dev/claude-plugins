@@ -46,6 +46,7 @@ const PLUGIN_VERSION: string = (() => {
     return "0.0.0-unknown";
   }
 })();
+import { decideWatchdogAction } from "./engine/orphan_watchdog";
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
 import { handleUpdateSessionTask } from "./tools/session_task";
@@ -3404,10 +3405,47 @@ function getProcessCreationTime(pid: number): Date | null {
  * orphan MCP runs forever. Confirmed root cause for two orphan buns observed
  * 2026-05-12 (34088 + 15640, both with PID-reuse-fooled watchdogs).
  */
-function isPidAliveAsClaudeExe(
+/**
+ * 0.69.0 (WI 590bf9a9): THREE STATES, NOT A BOOLEAN.
+ *
+ * "I could not determine whether the parent is alive" is not the same claim as
+ * "the parent is dead", and collapsing them let a single transient failure
+ * shut down a healthy server.
+ */
+type ParentLiveness = "alive" | "dead" | "undetermined";
+
+/**
+ * 0.69.0 (WI 590bf9a9) - was isPidAliveAsClaudeExe(): boolean.
+ *
+ * THE OLD COMMENT HERE JUSTIFIED "assume dead" WITH A COST MODEL THAT IS FALSE,
+ * and the model is what licensed the behaviour, so it is corrected rather than
+ * deleted. It read: *"the cost of a false positive (orphan thinks parent is
+ * dead and shuts down) is one terminal re-launch."*
+ *
+ * Measured 2026-08-29: the cost is NOT one re-launch. The shutdown is PARTIAL -
+ * the agent-channel half deletes the session row and stops while the stdio half
+ * keeps serving tools. The session then looks healthy from outside, still
+ * answers tool calls, and is SILENTLY UNADDRESSABLE, with no way to tell from
+ * inside. One instance cost ~25 minutes across three agents, two human `/mcp`
+ * interventions, and produced a rowless session that could not report its own
+ * state. A false positive here is expensive and quiet; the old model assumed it
+ * was cheap and loud.
+ *
+ * Determined-dead vs undetermined, per branch:
+ * - tasklist's own "INFO: No tasks..." IS an answer -> dead.
+ * - empty stdout is a FAILED INVOCATION, not an answer -> undetermined.
+ * - pid exists but is not claude -> the parent died and its pid was reused ->
+ *   dead. (Determined: we positively observed a different process.)
+ * - getProcessCreationTime returns null -> its OWN doc says callers must treat
+ *   null as "can't determine". Honoured here; it used to be read as death.
+ * - creation-time drift beyond tolerance -> a DIFFERENT claude holds the pid ->
+ *   dead.
+ * - any exception -> undetermined.
+ */
+function checkParentClaudeExe(
   pid: number,
   expectedCreationTime?: Date,
-): boolean {
+): ParentLiveness {
   try {
     if (process.platform === "win32") {
       // Fast path: tasklist for existence + name. ~50ms vs Get-CimInstance's
@@ -3419,14 +3457,15 @@ function isPidAliveAsClaudeExe(
         { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
       );
       const trimmed = out.trim();
-      if (!trimmed || trimmed.startsWith("INFO:")) return false;
+      if (trimmed.startsWith("INFO:")) return "dead";
+      if (!trimmed) return "undetermined";
       const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
       const name = firstCol.toLowerCase();
-      if (name !== "claude.exe" && name !== "claude") return false;
+      if (name !== "claude.exe" && name !== "claude") return "dead";
       // PID-reuse defense via creation-time match
       if (expectedCreationTime) {
         const actualCreation = getProcessCreationTime(pid);
-        if (!actualCreation) return false;
+        if (!actualCreation) return "undetermined";
         const drift = Math.abs(
           actualCreation.getTime() - expectedCreationTime.getTime(),
         );
@@ -3434,31 +3473,35 @@ function isPidAliveAsClaudeExe(
         // skew can come from timezone parsing / .NET ticks-vs-Date round-trip.
         // Genuine PID reuse with another claude.exe is seconds-to-minutes
         // apart, never within 1s.
-        if (drift > 1000) return false;
+        if (drift > 1000) return "dead";
       }
-      return true;
+      return "alive";
     } else {
       // Unix: process.kill(pid, 0) throws if dead. Then check /proc/<pid>/stat
       // comm field matches claude. Creation-time reuse defense not yet
       // implemented on Unix (TODO if/when an orphan-on-Unix case surfaces).
       try {
         process.kill(pid, 0);
-      } catch {
-        return false;
+      } catch (err: any) {
+        // ESRCH = no such process (determined). EPERM = it EXISTS but is not
+        // ours to signal, which is evidence of life, not death. Anything else
+        // is unclassified and must not advance a kill.
+        if (err?.code === "ESRCH") return "dead";
+        if (err?.code !== "EPERM") return "undetermined";
       }
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      let stat: string;
+      try {
+        stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      } catch {
+        return "undetermined";
+      }
       const rparen = stat.lastIndexOf(")");
-      if (rparen < 0) return false;
+      if (rparen < 0) return "undetermined";
       const name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
-      return name === "claude" || name === "claude.exe";
+      return name === "claude" || name === "claude.exe" ? "alive" : "dead";
     }
   } catch {
-    // Treat any unexpected error as "can't determine, assume dead" -
-    // conservative because the cost of a false positive (orphan thinks
-    // parent is dead and shuts down) is one terminal re-launch, while
-    // the cost of a false negative (orphan thinks parent is alive forever)
-    // is the very bug we're fixing.
-    return false;
+    return "undetermined";
   }
 }
 
@@ -3603,6 +3646,13 @@ if (initialParentClaudePid) {
     killOlderDuplicateMcps(dedupWalk.pid);
   }
 
+  // 0.69.0 (WI 590bf9a9): N consecutive DETERMINED-dead observations before we
+  // shut down. 3 x 30s bounds the extra orphan lifetime at ~90s, which is cheap
+  // against the measured cost of a false positive (a partial, silent shutdown
+  // that leaves a session serving tools while unaddressable).
+  const DEAD_TICKS_BEFORE_SHUTDOWN = 3;
+  let consecutiveDeadTicks = 0;
+
   const creationTimeNote = initialParentClaudeCreationTime
     ? ` created=${initialParentClaudeCreationTime.toISOString()}`
     : " (creation-time unavailable - PID-reuse defense disabled)";
@@ -3611,17 +3661,54 @@ if (initialParentClaudePid) {
   );
   setInterval(() => {
     try {
-      const alive = isPidAliveAsClaudeExe(
+      const liveness = checkParentClaudeExe(
         initialParentClaudePid,
         initialParentClaudeCreationTime ?? undefined,
       );
-      if (!alive) {
+      // 0.69.0 (WI 590bf9a9): the DECISION lives in mcp/engine/orphan_watchdog
+      // so it can be unit-tested without a live process tree. This file makes
+      // the observation; that module decides. Keep it that way - the streak rule
+      // shipped untested for as long as it lived inline here.
+      const decision = decideWatchdogAction(
+        liveness,
+        consecutiveDeadTicks,
+        DEAD_TICKS_BEFORE_SHUTDOWN,
+      );
+      const priorStreak = consecutiveDeadTicks;
+      consecutiveDeadTicks = decision.streak;
+
+      if (decision.action === "ignore") {
+        // An UNDETERMINED tick logs and neither advances nor resets the streak -
+        // it carries no information in either direction. Silence here is what let
+        // a transient tasklist failure read as a dead parent.
         process.stderr.write(
-          `[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. ` +
+          `[orchestrator] orphan watchdog tick UNDETERMINED for parent ` +
+            `pid=${initialParentClaudePid} - could not establish liveness. ` +
+            `Not counting toward shutdown (streak stays ${consecutiveDeadTicks}/` +
+            `${DEAD_TICKS_BEFORE_SHUTDOWN}). (WI 590bf9a9)\n`,
+        );
+      } else if (decision.action === "shutdown") {
+        process.stderr.write(
+          `[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running ` +
+            `(${consecutiveDeadTicks} consecutive determined-dead ticks). ` +
             `Shutting down to avoid becoming an orphan that clobbers live sessions.\n`,
         );
         shutdownOnce("parent-claude-gone");
+      } else if (decision.action === "wait") {
+        // Requiring consecutive CONFIRMED observations is the whole fix. A
+        // genuinely dead parent still gets us reaped - just not on one sample.
+        process.stderr.write(
+          `[orchestrator] orphan watchdog: parent pid=${initialParentClaudePid} reads DEAD ` +
+            `(${consecutiveDeadTicks}/${DEAD_TICKS_BEFORE_SHUTDOWN} consecutive) - ` +
+            `waiting for confirmation before shutdown (WI 590bf9a9)\n`,
+        );
       } else {
+        if (priorStreak > 0) {
+          process.stderr.write(
+            `[orchestrator] orphan watchdog: parent pid=${initialParentClaudePid} is ALIVE again - ` +
+              `clearing dead streak of ${priorStreak}\n`,
+          );
+        }
         // Visibility tick. Once every 30 ticks (15 min) - cheap and lets
         // post-mortems pinpoint exactly when the watchdog last confirmed
         // the parent alive vs. when it should have triggered.

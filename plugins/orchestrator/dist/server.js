@@ -23554,6 +23554,17 @@ This was already blocked last checkpoint and is blocked again in the same words.
 ` + `Then answer one question: WHAT CHANGED SINCE I LAST ASSERTED THIS? If nothing did and ` + `the wall is real, say so explicitly with the routes you ruled out - that is a fine ` + `answer and it survives this check. Real instances of it being WRONG: a file "search ` + `timed out, not retried" restated five times, where the directory was a sibling of the ` + `one being searched; and "needs the human's machine" carried a full day by a session ` + `already running on that machine.`;
 }
 
+// mcp/engine/orphan_watchdog.ts
+function decideWatchdogAction(liveness, currentStreak, threshold) {
+  if (liveness === "alive")
+    return { action: "clear", streak: 0 };
+  if (liveness === "undetermined") {
+    return { action: "ignore", streak: currentStreak };
+  }
+  const streak = currentStreak + 1;
+  return { action: streak >= threshold ? "shutdown" : "wait", streak };
+}
+
 // mcp/engine/live_sessions.ts
 import { existsSync as existsSync6 } from "fs";
 import { join as join5 } from "path";
@@ -29627,41 +29638,51 @@ function getProcessCreationTime(pid) {
   }
   return null;
 }
-function isPidAliveAsClaudeExe(pid, expectedCreationTime) {
+function checkParentClaudeExe(pid, expectedCreationTime) {
   try {
     if (process.platform === "win32") {
       const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
       const trimmed = out.trim();
-      if (!trimmed || trimmed.startsWith("INFO:"))
-        return false;
+      if (trimmed.startsWith("INFO:"))
+        return "dead";
+      if (!trimmed)
+        return "undetermined";
       const firstCol = trimmed.match(/^"([^"]+)"/)?.[1] ?? "";
       const name = firstCol.toLowerCase();
       if (name !== "claude.exe" && name !== "claude")
-        return false;
+        return "dead";
       if (expectedCreationTime) {
         const actualCreation = getProcessCreationTime(pid);
         if (!actualCreation)
-          return false;
+          return "undetermined";
         const drift = Math.abs(actualCreation.getTime() - expectedCreationTime.getTime());
         if (drift > 1000)
-          return false;
+          return "dead";
       }
-      return true;
+      return "alive";
     } else {
       try {
         process.kill(pid, 0);
-      } catch {
-        return false;
+      } catch (err) {
+        if (err?.code === "ESRCH")
+          return "dead";
+        if (err?.code !== "EPERM")
+          return "undetermined";
       }
-      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+      let stat;
+      try {
+        stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+      } catch {
+        return "undetermined";
+      }
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
-        return false;
+        return "undetermined";
       const name = stat.slice(stat.indexOf("(") + 1, rparen).toLowerCase();
-      return name === "claude" || name === "claude.exe";
+      return name === "claude" || name === "claude.exe" ? "alive" : "dead";
     }
   } catch {
-    return false;
+    return "undetermined";
   }
 }
 function killOlderDuplicateMcps(myInitialParentClaudePid) {
@@ -29735,17 +29756,32 @@ if (initialParentClaudePid) {
   } else {
     killOlderDuplicateMcps(dedupWalk.pid);
   }
+  const DEAD_TICKS_BEFORE_SHUTDOWN = 3;
+  let consecutiveDeadTicks = 0;
   const creationTimeNote = initialParentClaudeCreationTime ? ` created=${initialParentClaudeCreationTime.toISOString()}` : " (creation-time unavailable - PID-reuse defense disabled)";
   process.stderr.write(`[orchestrator] orphan watchdog armed - parent claude.exe pid=${initialParentClaudePid}${creationTimeNote} (tick every 30s)
 `);
   setInterval(() => {
     try {
-      const alive = isPidAliveAsClaudeExe(initialParentClaudePid, initialParentClaudeCreationTime ?? undefined);
-      if (!alive) {
-        process.stderr.write(`[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running. Shutting down to avoid becoming an orphan that clobbers live sessions.
+      const liveness = checkParentClaudeExe(initialParentClaudePid, initialParentClaudeCreationTime ?? undefined);
+      const decision = decideWatchdogAction(liveness, consecutiveDeadTicks, DEAD_TICKS_BEFORE_SHUTDOWN);
+      const priorStreak = consecutiveDeadTicks;
+      consecutiveDeadTicks = decision.streak;
+      if (decision.action === "ignore") {
+        process.stderr.write(`[orchestrator] orphan watchdog tick UNDETERMINED for parent pid=${initialParentClaudePid} - could not establish liveness. Not counting toward shutdown (streak stays ${consecutiveDeadTicks}/${DEAD_TICKS_BEFORE_SHUTDOWN}). (WI 590bf9a9)
+`);
+      } else if (decision.action === "shutdown") {
+        process.stderr.write(`[orchestrator] parent claude.exe pid=${initialParentClaudePid} no longer running (${consecutiveDeadTicks} consecutive determined-dead ticks). Shutting down to avoid becoming an orphan that clobbers live sessions.
 `);
         shutdownOnce("parent-claude-gone");
+      } else if (decision.action === "wait") {
+        process.stderr.write(`[orchestrator] orphan watchdog: parent pid=${initialParentClaudePid} reads DEAD (${consecutiveDeadTicks}/${DEAD_TICKS_BEFORE_SHUTDOWN} consecutive) - waiting for confirmation before shutdown (WI 590bf9a9)
+`);
       } else {
+        if (priorStreak > 0) {
+          process.stderr.write(`[orchestrator] orphan watchdog: parent pid=${initialParentClaudePid} is ALIVE again - clearing dead streak of ${priorStreak}
+`);
+        }
         if (Math.random() < 0.03333333333333333) {
           process.stderr.write(`[orchestrator] orphan watchdog tick - parent claude.exe pid=${initialParentClaudePid} still alive
 `);
