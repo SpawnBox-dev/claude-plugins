@@ -53,6 +53,13 @@ import {
   writeClientClaim,
   type SiblingCandidate,
 } from "./engine/client_claim";
+import {
+  decideInstallMismatch,
+  extractInstalledPaths,
+  formatMismatchLine,
+  normalizePath,
+  type InstallCheck,
+} from "./engine/install_mismatch";
 import { decideWatchdogAction } from "./engine/orphan_watchdog";
 import { SessionTracker } from "./engine/session_tracker";
 import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal";
@@ -1025,6 +1032,18 @@ server.tool(
     lines.push(
       `- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`
     );
+    // WI 61da44fa. Re-read live rather than reusing the startup verdict: the
+    // registry changes UNDER a running window, which is the whole condition.
+    // Only a mismatch prints - the version line above already covers the
+    // ordinary case, and a second "all fine" line would just be noise.
+    try {
+      const install = checkInstallMismatch();
+      if (install.verdict === "mismatch") {
+        lines.push(`- 🔴 **INSTALL MISMATCH**: ${formatMismatchLine(install)}`);
+      }
+    } catch {
+      /* diagnostics must never break the tool that reports them */
+    }
     if (agentChannel) {
       lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
     } else {
@@ -3240,6 +3259,42 @@ function logMcpLifecycle(line: string): void {
 function emitLifecycle(line: string): void {
   emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
 }
+/**
+ * Observation half of the install-mismatch self-check (WI 61da44fa). The
+ * DECISION lives in `engine/install_mismatch.ts` and is unit-tested; this reads
+ * the two facts it needs and never throws.
+ *
+ * `import.meta.dir` is used deliberately in preference to CLAUDE_PLUGIN_ROOT.
+ * The env var is what the harness SAYS, and the entire class of bug this check
+ * exists for is a self-reported value disagreeing with where the bytes actually
+ * came from. A module's own directory cannot misreport itself; every other
+ * candidate signal in this area has been caught lying at least once.
+ *
+ * Called at startup (for the durable log trail) and again inside system_status
+ * (fresh, because the registry can change UNDER a running window - which is
+ * precisely the condition being detected, and a startup-only check would miss
+ * it in the incumbent process every time).
+ */
+function checkInstallMismatch(): InstallCheck {
+  const caseFold = process.platform === "win32" || process.platform === "darwin";
+  const runningRoot = normalizePath(resolve(import.meta.dir, ".."), caseFold);
+  let installed: string[] = [];
+  try {
+    const registryPath = join(
+      process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+      "plugins",
+      "installed_plugins.json",
+    );
+    installed = extractInstalledPaths(
+      JSON.parse(readFileSync(registryPath, "utf8")),
+      "orchestrator",
+      caseFold,
+    );
+  } catch {
+    /* unreadable registry -> no paths -> verdict "unknown", never an alarm */
+  }
+  return decideInstallMismatch(runningRoot, installed);
+}
 function logShutdownTrigger(trigger: string): void {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
   emitLifecycle(
@@ -3851,6 +3906,25 @@ async function main() {
       `project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} ` +
       `role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}\n`,
   );
+
+  // WI 61da44fa: say out loud when this window is running a DIFFERENT copy of
+  // the plugin than the one installed. Emitted only on a real mismatch - the
+  // other three verdicts are silence, because an alarm that also fires on every
+  // developer run and every unreadable registry is one nobody reads.
+  //
+  // Note what this line is worth: on 2026-08-29 the banner above truthfully
+  // said `version=0.68.0` for 95 minutes while 0.69.0 was the installed copy,
+  // and no human or agent read that as a problem, because a version number
+  // reads as information rather than as a discrepancy. Stating the discrepancy
+  // is the entire contribution.
+  try {
+    const install = checkInstallMismatch();
+    if (install.verdict === "mismatch") {
+      emitLifecycle(`[orchestrator] ${formatMismatchLine(install)}\n`);
+    }
+  } catch {
+    /* a diagnostic must never be able to stop the server it diagnoses */
+  }
 
   // 0.48.0 (backlog item M + N): GC the state directory once per process.
   //

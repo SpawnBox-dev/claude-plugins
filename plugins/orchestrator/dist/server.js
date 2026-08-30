@@ -23611,6 +23611,66 @@ function decideDuplicateKills(selfPid, candidates, readClaim, isPidLive) {
   return { kill, spared };
 }
 
+// mcp/engine/install_mismatch.ts
+function normalizePath(p, caseFold) {
+  const slashed = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  return caseFold ? slashed.toLowerCase() : slashed;
+}
+function parentOf(normalized) {
+  const i = normalized.lastIndexOf("/");
+  return i <= 0 ? "" : normalized.slice(0, i);
+}
+function decideInstallMismatch(runningRoot, installedPaths) {
+  const base = { runningRoot, installedPaths };
+  if (installedPaths.length === 0) {
+    return {
+      ...base,
+      verdict: "unknown",
+      reason: "the plugin registry names no install for this plugin, so there is nothing to compare against"
+    };
+  }
+  if (installedPaths.includes(runningRoot)) {
+    return {
+      ...base,
+      verdict: "match",
+      reason: "running from the directory the plugin registry names as installed"
+    };
+  }
+  const runningParent = parentOf(runningRoot);
+  const sibling = installedPaths.find((p) => runningParent !== "" && parentOf(p) === runningParent);
+  if (sibling) {
+    return {
+      ...base,
+      verdict: "mismatch",
+      reason: `running from ${runningRoot} but the plugin registry names ${sibling} as installed - ` + `this window is on a different version of the plugin than the one installed`
+    };
+  }
+  return {
+    ...base,
+    verdict: "not-a-cache-copy",
+    reason: "running from outside the plugin cache (a source checkout or linked tree), so the installed path does not apply"
+  };
+}
+function extractInstalledPaths(registry2, pluginName, caseFold) {
+  const plugins = registry2?.plugins;
+  if (!plugins || typeof plugins !== "object")
+    return [];
+  const out = [];
+  for (const [key, value] of Object.entries(plugins)) {
+    if (key !== pluginName && !key.startsWith(`${pluginName}@`))
+      continue;
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      const p = entry?.installPath;
+      if (typeof p === "string" && p.length > 0)
+        out.push(normalizePath(p, caseFold));
+    }
+  }
+  return out;
+}
+function formatMismatchLine(check2) {
+  return `install-mismatch: this window is running the plugin from ${check2.runningRoot}, ` + `but installed_plugins.json names ${check2.installedPaths.join(", ")}. ` + `Restart THIS window to pick up the installed copy. ` + `Until then expect duplicate MCP servers under this window - the harness can ` + `start the plugin from either directory (WI 61da44fa). ` + `This is a statement of fact, not a fault: a deliberate rollback looks the same.`;
+}
+
 // mcp/engine/orphan_watchdog.ts
 function decideWatchdogAction(liveness, currentStreak, threshold) {
   if (liveness === "alive")
@@ -28154,6 +28214,12 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
+  try {
+    const install = checkInstallMismatch();
+    if (install.verdict === "mismatch") {
+      lines.push(`- \uD83D\uDD34 **INSTALL MISMATCH**: ${formatMismatchLine(install)}`);
+    }
+  } catch {}
   if (agentChannel) {
     lines.push(`- **Agent-channel**: ACTIVE - filewatcher running`);
   } else {
@@ -29640,6 +29706,16 @@ function logMcpLifecycle(line) {
 function emitLifecycle(line) {
   emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
 }
+function checkInstallMismatch() {
+  const caseFold = process.platform === "win32" || process.platform === "darwin";
+  const runningRoot = normalizePath(resolve(import.meta.dir, ".."), caseFold);
+  let installed = [];
+  try {
+    const registryPath = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir4(), ".claude"), "plugins", "installed_plugins.json");
+    installed = extractInstalledPaths(JSON.parse(readFileSync6(registryPath, "utf8")), "orchestrator", caseFold);
+  } catch {}
+  return decideInstallMismatch(runningRoot, installed);
+}
 function logShutdownTrigger(trigger) {
   const uptimeSec = Math.round((Date.now() - mcpStartMs) / 1000);
   emitLifecycle(`[orchestrator] shutdown triggered=${trigger} at=${new Date().toISOString()} pid=${process.pid} uptime_sec=${uptimeSec} session_id=${resolveSessionId() ?? "<none>"}
@@ -29884,6 +29960,13 @@ if (initialParentClaudePid) {
 async function main() {
   emitLifecycle(`[orchestrator] MCP server starting - version=${PLUGIN_VERSION} pid=${process.pid} session_id=${resolveSessionId() ?? "<none>"} project_dir=${process.env.CLAUDE_PROJECT_DIR ?? "<none>"} role=${process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE ?? "<default:subordinate>"}
 `);
+  try {
+    const install = checkInstallMismatch();
+    if (install.verdict === "mismatch") {
+      emitLifecycle(`[orchestrator] ${formatMismatchLine(install)}
+`);
+    }
+  } catch {}
   try {
     const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
     const swept = sweepStateDir(join10(projectRoot, ".orchestrator-state"));
