@@ -26723,6 +26723,13 @@ function deliveryObservedSince(size, baselineAtEmit) {
     return false;
   return size > (baselineAtEmit ?? 0);
 }
+function formatSessionJoined(entry) {
+  const head = `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`;
+  const declared = (entry.current_task ?? "").trim();
+  if (declared.length > 0)
+    return `${head} - task declared, see from_task.`;
+  return `${head} - NO TASK DECLARED YET. Its name is a string typed at a launcher, ` + `not an assignment record: do not infer its lane from it, and do not state ` + `one back to it. Wait for its own declaration.`;
+}
 function classifyClientTransport(opts) {
   if (opts.msSinceEmit === null)
     return "healthy";
@@ -27045,7 +27052,7 @@ class AgentChannel {
         continue;
       if (!this.knownSessions.has(sid)) {
         this.emit({
-          content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
+          content: formatSessionJoined(entry),
           meta: {
             from_session: entry.session_id,
             from_id8: entry.id8,

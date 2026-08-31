@@ -234,6 +234,50 @@ export function deliveryObservedSince(
   return size > (baselineAtEmit ?? 0);
 }
 
+/**
+ * PURE: the one-line body of a `session_joined` event.
+ *
+ * 0.69.3 (aee63728). `session_joined` fires the moment a peer appears in the
+ * roster - which is BEFORE that peer has finished its briefing and called
+ * update_session_task, so its roster line is genuinely empty in that window.
+ * The event used to carry name, id8 and role and nothing else, so a peer
+ * composing a welcome had exactly one lane-shaped signal available: the
+ * session NAME. Names are strings someone typed at a launcher.
+ *
+ * Measured 2026-08-31: five name-inferred-lane assignments in one evening
+ * across three authors, every one self-disclosed by its own author and none
+ * caught by any instrument. Two independent peers reached the SAME wrong lane
+ * for the same joining session, which is the tell that it is structural rather
+ * than careless - convergent inference from a shared blind spot reads as
+ * corroboration.
+ *
+ * The fix is to make the ABSENCE VISIBLE. A reader who is told "no task
+ * declared yet" is not guessing; a reader told only a name is. This is the
+ * same move as the transport alert's denominator - report what you measured,
+ * not just the verdict.
+ *
+ * Companion to 8ef4176f, which is this same window read from the other side:
+ * the JOINING agent adopting a peer's id as its own. One window, two
+ * directions - identity inbound, lane outbound.
+ *
+ * Exported for tests.
+ */
+export function formatSessionJoined(entry: {
+  name: string;
+  id8: string;
+  role: string;
+  current_task?: string | null;
+}): string {
+  const head = `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`;
+  const declared = (entry.current_task ?? "").trim();
+  if (declared.length > 0) return `${head} - task declared, see from_task.`;
+  return (
+    `${head} - NO TASK DECLARED YET. Its name is a string typed at a launcher, ` +
+    `not an assignment record: do not infer its lane from it, and do not state ` +
+    `one back to it. Wait for its own declaration.`
+  );
+}
+
 export function classifyClientTransport(opts: {
   /** null when nothing has been emitted, so no delivery is owed. */
   msSinceEmit: number | null;
@@ -1204,7 +1248,7 @@ export class AgentChannel {
       if (sid === this.selfSession.session_id) continue;
       if (!this.knownSessions.has(sid)) {
         this.emit({
-          content: `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`,
+          content: formatSessionJoined(entry),
           meta: {
             from_session: entry.session_id,
             from_id8: entry.id8,
