@@ -210,6 +210,30 @@ export const CLIENT_ALERT_REFRACTORY_MS = 30 * 60_000;
  *
  * PURE for TDD; the stat/publish glue lives in the heartbeat.
  */
+/**
+ * PURE: has the harness written anything since the emit baseline?
+ *
+ * 0.69.3 (cb376ece / 99c00385). The baseline is NULL when the transcript file
+ * did not exist at emit time - the normal state of a session's FIRST emit. The
+ * previous clear condition required a non-null baseline, so null meant the
+ * clear could never be satisfied and the anchor became immortal: the alert
+ * re-fired forever against an origin frozen at session start.
+ *
+ * An absent transcript is ZERO BYTES, not "unknown", so a null baseline reads
+ * as 0 and the first write counts as growth. `size === null` (we cannot stat
+ * it now) still returns false - that is genuinely unknown, and unknown must
+ * not be reported as observed delivery.
+ *
+ * Exported for tests.
+ */
+export function deliveryObservedSince(
+  size: number | null,
+  baselineAtEmit: number | null
+): boolean {
+  if (size === null) return false;
+  return size > (baselineAtEmit ?? 0);
+}
+
 export function classifyClientTransport(opts: {
   /** null when nothing has been emitted, so no delivery is owed. */
   msSinceEmit: number | null;
@@ -826,7 +850,26 @@ export class AgentChannel {
   private emit(ev: Parameters<EmitFn>[0]): void {
     if (this.pendingEmitAt === null) {
       this.pendingEmitAt = Date.now();
-      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id);
+      // 0.69.3 (cb376ece / 99c00385): `?? 0` is the whole fix for the immortal
+      // anchor. peerTranscriptSize returns NULL when the transcript file does
+      // not exist yet - which is exactly the state of a session at its FIRST
+      // emit, before the harness has created its .jsonl. The clear condition
+      // below then required `selfSizeAtEmit !== null`, so a null baseline made
+      // the clear UNSATISFIABLE: pendingEmitAt could never be released, and the
+      // alert re-fired forever against an origin frozen at session start, its
+      // elapsed figure growing by wall clock alone.
+      //
+      // That is why the false positives clustered on NEW sessions ~15 minutes
+      // (CLIENT_STALE_MS) after joining, each citing "a message sent at about
+      // your join time" - measured across three fresh sessions on 2026-08-31.
+      //
+      // An absent transcript is ZERO BYTES, not "unknown". Treating it as 0
+      // makes the first write count as growth and the detector stands itself
+      // down, which is what it was always documented to do. A transient stat
+      // failure also lands on 0 and clears early; that is the SAFE direction -
+      // a missed drop is recoverable noise, an immortal false positive trains
+      // the whole fleet to ignore the one alert nothing else can see.
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id) ?? 0;
     }
     this.rawEmit(ev);
   }
@@ -1024,7 +1067,9 @@ export class AgentChannel {
       // Any growth since the emit proves the harness wrote it down, so the
       // transport carried it. Clearing here is what makes the detector
       // self-standing-down on recovery.
-      if (size !== null && this.selfSizeAtEmit !== null && size > this.selfSizeAtEmit) {
+      // 0.69.3: one pure predicate, so the condition that was unsatisfiable is
+      // now pinned by tests rather than re-derived at each reading.
+      if (deliveryObservedSince(size, this.selfSizeAtEmit)) {
         this.pendingEmitAt = null;
         this.selfSizeAtEmit = null;
       }
@@ -1483,20 +1528,42 @@ export class AgentChannel {
           if (lastEmit === undefined || now - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
             this.clientTransportLastEmit.set(sid, now);
             const waitMin = Math.round((now - since) / 60_000);
+            const anchor = new Date(since).toISOString();
             this.emit({
               content:
-                `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP SERVER is ` +
-                `alive and heartbeating, but a message sent ${waitMin} minutes ago NEVER ` +
-                `LANDED: its transcript has not been written to since.\n` +
-                `  A healthy session records an incoming message the moment it is delivered, ` +
-                `even while idle or mid-turn. Silence after a send means it cannot RECEIVE - a ` +
-                `client-side transport drop, not a crash. Every other liveness alert keys on ` +
-                `the heartbeat, which stays perfectly fresh here, so this is the only signal ` +
-                `that sees it.\n` +
-                `  REMEDY: /mcp in THAT terminal reconnects it. It takes seconds.\n` +
-                `  BEFORE ESCALATING: a session deliberately working without orchestrator ` +
-                `tools looks identical from out here. Address it first - a reply proves the ` +
-                `client is fine and this was noise.\n` +
+                // 0.69.3 (f7bc27b8): this text used to assert "its transcript
+                // has not been written to since" as a FACT about the subject,
+                // while what the detector actually holds is ONE QUEUED MESSAGE
+                // WITH NO DELIVERY RECORD. Those are different propositions,
+                // and the strong form is what sent readers reaching for /mcp.
+                // It also shipped only its most EXPENSIVE check - "address it
+                // first" spends a peer's turn - while the two free ones sat
+                // undocumented in the KB. Order is now cheapest-first, the
+                // denominator travels with the verdict, and the base rate is
+                // stated so a reader can calibrate without a lookup.
+                `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP server is ` +
+                `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` +
+                `(${waitMin} min ago) has no delivery record: the transcript has not grown ` +
+                `since that emit.\n` +
+                `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` +
+                `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` +
+                `client-side transport drop. The second does not follow from the first, and ` +
+                `this detector has been wrong about it far more often than right.\n` +
+                `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` +
+                `99c00385 for a documented benign cause. A tally of zero does not make THIS ` +
+                `one false; it means check before you act.\n` +
+                `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:\n` +
+                `   1. Read this envelope's own from_task field. If it carries content ` +
+                `authored AFTER ${anchor}, the subject demonstrably received and wrote during ` +
+                `its claimed silence - refuted from inside this message, at zero cost.\n` +
+                `   2. Look for any channel message from the subject dated after ${anchor} in ` +
+                `the context you already have.\n` +
+                `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` +
+                `subordinate receives all channel traffic. Report "I did not receive one", ` +
+                `never "they have not posted".\n` +
+                `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` +
+                `that a lane which has declared it will stay silent will not answer if you ` +
+                `address it - do not read contractual silence as confirmation.\n` +
                 `  Note the subject cannot see this message.`,
               meta: {
                 from_session: entry.session_id,

@@ -398,6 +398,115 @@ export function detectsRiskyHeredoc(command: string): boolean {
   return BACKSLASH_ESCAPE_RE.test(command);
 }
 
+/**
+ * ── 0.69.3: the Claude-Session trailer, at the moment of commit ────────────
+ *
+ * WHY THIS IS CODE AND NOT A RULE. The trailer is the authorship guarantee -
+ * it is what links a commit to the session that produced it - and it is
+ * TYPED BY THE AGENT every time. Nothing validates it. Work item ab0ad62e
+ * catalogued the class: a convention that must be REMEMBERED at the moment of
+ * action has the same reliability as no convention at all. Measured on the
+ * spawnbox repo 2026-08-31: 296 of the last 300 commits carry it, and FOUR do
+ * not (47cef676, 6c5c3645, b30f5ca0, c2e0ab56 - all 2026-08-29, none carrying
+ * a trailer block at all). High diligence is still not a mechanism, and the
+ * four misses are what diligence looks like when it lapses.
+ *
+ * NON-BLOCKING, and that is a decision with a source, not an omission.
+ * Jarid's design principle (3d7099db, and the package he GO'd on 2026-07-13)
+ * explicitly retired the one approve/deny gate that used to live in this
+ * handler, rejecting "hard gates, sacrosanct rules" because agents "respect
+ * them so hard they lock themselves out of good judgment." The design test he
+ * adopted: does it encode a FACT (enables judgment) or a DECISION (cages it)?
+ * A warning naming the missing line is a fact. A refused commit is a decision,
+ * and it would be a strictly harder gate than the one this file already
+ * applies to a heredoc that once truncated a source file to zero bytes.
+ * If the fleet later wants teeth, this is one field: "allow" -> "deny".
+ *
+ * SELF-ARMING, so it cannot become fleet-wide wallpaper. The trailer is a
+ * per-project convention; the plugin ships to projects that have never heard
+ * of it. So the check stays SILENT until it has seen this project author one
+ * compliant commit - then, and only then, an omission is a real omission
+ * rather than a foreign convention imposed on a stranger's repo.
+ *
+ * IT ONLY SPEAKS ABOUT MESSAGES IT CAN ACTUALLY READ. When the message is not
+ * in the command - a bare `git commit` opening an editor, `-F somefile`, or an
+ * inherited message under --amend --no-edit - the hook says nothing, because
+ * "I cannot see it" and "it is missing" are different claims. That distinction
+ * is the whole substance of f7bc27b8, where a detector reported "cannot
+ * receive" while measuring transcript-write recency; shipping the same defect
+ * in the fix for it would be its own kind of joke.
+ */
+const GIT_COMMIT_RE =
+  /(?:^|[\n;&|(]|&&|\|\|)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git\b(?:\s+(?:-C\s+\S+|--git-dir=\S+|--work-tree=\S+))*\s+commit\b/;
+
+const SESSION_TRAILER_RE = /Claude-Session:/;
+
+/** The message text is IN the command, so its trailer can be read. */
+const INLINE_MSG_RE = /\s-[A-Za-z]*m(?:[=\s])|\s--message(?:[=\s])/;
+const STDIN_MSG_RE = /\s(?:-F|--file)(?:[=\s])\s*-(?:\s|$)/;
+const ANY_HEREDOC_RE = /<<-?\s*['"]?[A-Za-z_]/;
+
+/** The message is inherited from another commit, not authored in this command. */
+const INHERITS_MSG_RE = /\s(?:--no-edit|--reuse-message[=\s]|--reedit-message[=\s]|-C\s|-c\s)/;
+
+/** PURE: does this command author a commit message that carries the trailer?
+ *  Used to ARM the check per-project. Exported for tests. */
+export function commandCarriesSessionTrailer(command: string): boolean {
+  if (!command) return false;
+  if (!GIT_COMMIT_RE.test(command)) return false;
+  return SESSION_TRAILER_RE.test(command);
+}
+
+/** PURE: does this command author a VISIBLE commit message with no
+ *  Claude-Session trailer? Exported for tests. */
+export function detectsMissingSessionTrailer(command: string): boolean {
+  if (!command) return false;
+  const m = GIT_COMMIT_RE.exec(command);
+  if (!m) return false;
+  // Already compliant.
+  if (SESSION_TRAILER_RE.test(command)) return false;
+  // Flags are read only AFTER the `commit` token, so `git -C <path> commit`
+  // is not mistaken for `git commit -C <commit>` (reuse-message). Same two
+  // letters, opposite meanings, decided entirely by position.
+  const tail = command.slice(m.index + m[0].length);
+  if (INHERITS_MSG_RE.test(tail)) return false;
+  const messageIsVisible =
+    INLINE_MSG_RE.test(tail) || (STDIN_MSG_RE.test(tail) && ANY_HEREDOC_RE.test(command));
+  if (!messageIsVisible) return false;
+  return true;
+}
+
+export const SESSION_TRAILER_WARNING =
+  "[orch] THIS COMMIT MESSAGE HAS NO `Claude-Session:` TRAILER, AND NOTHING " +
+  "ELSE WILL EVER CHECK. The trailer is the authorship guarantee - it is the " +
+  "only link between the commit and the session that produced it - and it is " +
+  "typed by hand every time, so it fails silently and invisibly: git exits 0, " +
+  "a SHA is printed, and the attribution is simply gone. Measured on this " +
+  "project: 296 of the last 300 commits carry it and 4 do not, all four on a " +
+  "single day, none of them noticed at the time. High compliance is diligence, " +
+  "not a mechanism. Add both lines to the end of the message before running " +
+  "this:  Co-Authored-By: ... and  Claude-Session: <your session URL>.  If " +
+  "this commit deliberately has no trailer (a rebase fixup, a non-agent " +
+  "commit), proceed - this is a fact, not a gate, and your judgment governs.";
+
+/** plugin_state key: has this PROJECT ever authored a compliant commit? */
+const TRAILER_ARMED_KEY = "trailer_convention_armed";
+
+/** Has this project demonstrated it uses the trailer convention? */
+function trailerConventionArmed(db: Database): boolean {
+  return (
+    db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(TRAILER_ARMED_KEY) !== null
+  );
+}
+
+/** Record that this project uses the trailer, so omissions become meaningful. */
+function armTrailerConvention(db: Database): void {
+  db.run(
+    `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
+    [TRAILER_ARMED_KEY, now()]
+  );
+}
+
 export const HEREDOC_WARNING =
   "[orch] THIS HEREDOC CONTAINS BACKSLASH ESCAPES AND WILL LIKELY REWRITE THEM " +
   "SILENTLY. Git Bash + the interpreter reading stdin + backslash-bearing " +
@@ -1236,6 +1345,21 @@ function handlePreToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse 
     const cmd = (args.payload?.command as string | undefined) ?? "";
     if (detectsRiskyHeredoc(cmd)) {
       return { permissionDecision: "allow", additionalContext: HEREDOC_WARNING };
+    }
+    // 0.69.3: the Claude-Session trailer (ab0ad62e). Ordered AFTER the heredoc
+    // check because that one is about to destroy content and this one is about
+    // to lose attribution - both matter, only one is irreversible.
+    //
+    // A compliant commit ARMS the check for this project and says nothing.
+    // That ordering is deliberate: the arming pass must never also warn, or
+    // the very first compliant commit would be scolded for the omission it
+    // does not have.
+    if (commandCarriesSessionTrailer(cmd)) {
+      armTrailerConvention(ctx.db);
+      return {};
+    }
+    if (trailerConventionArmed(ctx.db) && detectsMissingSessionTrailer(cmd)) {
+      return { permissionDecision: "allow", additionalContext: SESSION_TRAILER_WARNING };
     }
     return {};
   }

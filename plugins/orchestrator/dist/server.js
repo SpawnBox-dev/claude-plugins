@@ -24687,6 +24687,43 @@ function detectsRiskyHeredoc(command) {
     return false;
   return BACKSLASH_ESCAPE_RE.test(command);
 }
+var GIT_COMMIT_RE = /(?:^|[\n;&|(]|&&|\|\|)\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*git\b(?:\s+(?:-C\s+\S+|--git-dir=\S+|--work-tree=\S+))*\s+commit\b/;
+var SESSION_TRAILER_RE = /Claude-Session:/;
+var INLINE_MSG_RE = /\s-[A-Za-z]*m(?:[=\s])|\s--message(?:[=\s])/;
+var STDIN_MSG_RE = /\s(?:-F|--file)(?:[=\s])\s*-(?:\s|$)/;
+var ANY_HEREDOC_RE = /<<-?\s*['"]?[A-Za-z_]/;
+var INHERITS_MSG_RE = /\s(?:--no-edit|--reuse-message[=\s]|--reedit-message[=\s]|-C\s|-c\s)/;
+function commandCarriesSessionTrailer(command) {
+  if (!command)
+    return false;
+  if (!GIT_COMMIT_RE.test(command))
+    return false;
+  return SESSION_TRAILER_RE.test(command);
+}
+function detectsMissingSessionTrailer(command) {
+  if (!command)
+    return false;
+  const m = GIT_COMMIT_RE.exec(command);
+  if (!m)
+    return false;
+  if (SESSION_TRAILER_RE.test(command))
+    return false;
+  const tail = command.slice(m.index + m[0].length);
+  if (INHERITS_MSG_RE.test(tail))
+    return false;
+  const messageIsVisible = INLINE_MSG_RE.test(tail) || STDIN_MSG_RE.test(tail) && ANY_HEREDOC_RE.test(command);
+  if (!messageIsVisible)
+    return false;
+  return true;
+}
+var SESSION_TRAILER_WARNING = "[orch] THIS COMMIT MESSAGE HAS NO `Claude-Session:` TRAILER, AND NOTHING " + "ELSE WILL EVER CHECK. The trailer is the authorship guarantee - it is the " + "only link between the commit and the session that produced it - and it is " + "typed by hand every time, so it fails silently and invisibly: git exits 0, " + "a SHA is printed, and the attribution is simply gone. Measured on this " + "project: 296 of the last 300 commits carry it and 4 do not, all four on a " + "single day, none of them noticed at the time. High compliance is diligence, " + "not a mechanism. Add both lines to the end of the message before running " + "this:  Co-Authored-By: ... and  Claude-Session: <your session URL>.  If " + "this commit deliberately has no trailer (a rebase fixup, a non-agent " + "commit), proceed - this is a fact, not a gate, and your judgment governs.";
+var TRAILER_ARMED_KEY = "trailer_convention_armed";
+function trailerConventionArmed(db) {
+  return db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(TRAILER_ARMED_KEY) !== null;
+}
+function armTrailerConvention(db) {
+  db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [TRAILER_ARMED_KEY, now()]);
+}
 var HEREDOC_WARNING = "[orch] THIS HEREDOC CONTAINS BACKSLASH ESCAPES AND WILL LIKELY REWRITE THEM " + "SILENTLY. Git Bash + the interpreter reading stdin + backslash-bearing " + "source is three escaping layers, and each REWRITES the content rather than " + "failing - you get a plausible-looking file, not an error. Observed six times " + "in one session: one truncated a source file to 0 bytes, one invented a bug " + "that did not exist and cost real debugging time, three produced silent " + "no-match or unterminated literals. Use Write for new files and Edit for " + "changes. If a shell script is genuinely required, String.raw and a quoted " + "delimiter each close one layer - but the reliable move is not to open them.";
 function detectsHedge(prompt) {
   if (!prompt)
@@ -25037,6 +25074,13 @@ function handlePreToolUse(ctx, args) {
     const cmd = args.payload?.command ?? "";
     if (detectsRiskyHeredoc(cmd)) {
       return { permissionDecision: "allow", additionalContext: HEREDOC_WARNING };
+    }
+    if (commandCarriesSessionTrailer(cmd)) {
+      armTrailerConvention(ctx.db);
+      return {};
+    }
+    if (trailerConventionArmed(ctx.db) && detectsMissingSessionTrailer(cmd)) {
+      return { permissionDecision: "allow", additionalContext: SESSION_TRAILER_WARNING };
     }
     return {};
   }
@@ -26674,6 +26718,11 @@ function classifyAbsence(opts) {
 var INSTANCE_TOKEN = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 var CLIENT_STALE_MS = 15 * 60000;
 var CLIENT_ALERT_REFRACTORY_MS = 30 * 60000;
+function deliveryObservedSince(size, baselineAtEmit) {
+  if (size === null)
+    return false;
+  return size > (baselineAtEmit ?? 0);
+}
 function classifyClientTransport(opts) {
   if (opts.msSinceEmit === null)
     return "healthy";
@@ -26858,7 +26907,7 @@ class AgentChannel {
   emit(ev) {
     if (this.pendingEmitAt === null) {
       this.pendingEmitAt = Date.now();
-      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id);
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id) ?? 0;
     }
     this.rawEmit(ev);
   }
@@ -26927,7 +26976,7 @@ class AgentChannel {
     const owed = this.pendingEmitAt;
     if (owed !== null) {
       const size = this.peerTranscriptSize(this.selfSession.session_id);
-      if (size !== null && this.selfSizeAtEmit !== null && size > this.selfSizeAtEmit) {
+      if (deliveryObservedSince(size, this.selfSizeAtEmit)) {
         this.pendingEmitAt = null;
         this.selfSizeAtEmit = null;
       }
@@ -27134,11 +27183,16 @@ class AgentChannel {
           if (lastEmit === undefined || now3 - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
             this.clientTransportLastEmit.set(sid, now3);
             const waitMin = Math.round((now3 - since) / 60000);
+            const anchor = new Date(since).toISOString();
             this.emit({
-              content: `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP SERVER is ` + `alive and heartbeating, but a message sent ${waitMin} minutes ago NEVER ` + `LANDED: its transcript has not been written to since.
-` + `  A healthy session records an incoming message the moment it is delivered, ` + `even while idle or mid-turn. Silence after a send means it cannot RECEIVE - a ` + `client-side transport drop, not a crash. Every other liveness alert keys on ` + `the heartbeat, which stays perfectly fresh here, so this is the only signal ` + `that sees it.
-` + `  REMEDY: /mcp in THAT terminal reconnects it. It takes seconds.
-` + `  BEFORE ESCALATING: a session deliberately working without orchestrator ` + `tools looks identical from out here. Address it first - a reply proves the ` + `client is fine and this was noise.
+              content: `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP server is ` + `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` + `(${waitMin} min ago) has no delivery record: the transcript has not grown ` + `since that emit.
+` + `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` + `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` + `client-side transport drop. The second does not follow from the first, and ` + `this detector has been wrong about it far more often than right.
+` + `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` + `99c00385 for a documented benign cause. A tally of zero does not make THIS ` + `one false; it means check before you act.
+` + `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:
+` + `   1. Read this envelope's own from_task field. If it carries content ` + `authored AFTER ${anchor}, the subject demonstrably received and wrote during ` + `its claimed silence - refuted from inside this message, at zero cost.
+` + `   2. Look for any channel message from the subject dated after ${anchor} in ` + `the context you already have.
+` + `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` + `subordinate receives all channel traffic. Report "I did not receive one", ` + `never "they have not posted".
+` + `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` + `that a lane which has declared it will stay silent will not answer if you ` + `address it - do not read contractual silence as confirmation.
 ` + `  Note the subject cannot see this message.`,
               meta: {
                 from_session: entry.session_id,
