@@ -26723,6 +26723,18 @@ function deliveryObservedSince(size, baselineAtEmit) {
     return false;
   return size > (baselineAtEmit ?? 0);
 }
+function formatClientTransportAlert(opts) {
+  const { name, id8, anchor, waitMin } = opts;
+  return `[client_transport_suspect] ${name} (${id8}) - its MCP server is ` + `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` + `(${waitMin} min ago) has no delivery record: the transcript has not grown ` + `since that emit.
+` + `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` + `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` + `client-side transport drop. The second does not follow from the first, and ` + `this detector has been wrong about it far more often than right.
+` + `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` + `99c00385 for a documented benign cause. A tally of zero does not make THIS ` + `one false; it means check before you act.
+` + `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:
+` + `   1. Read this envelope's own from_task field. If it carries content ` + `authored AFTER ${anchor}, the subject demonstrably received and wrote during ` + `its claimed silence - refuted from inside this message, at zero cost.
+` + `   2. Look for any channel message from the subject dated after ${anchor} in ` + `the context you already have.
+` + `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` + `subordinate receives all channel traffic. Report "I did not receive one", ` + `never "they have not posted".
+` + `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` + `that a lane which has declared it will stay silent will not answer if you ` + `address it - do not read contractual silence as confirmation.
+` + `  Note the subject cannot see this message.`;
+}
 function formatSessionJoined(entry) {
   const head = `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`;
   const declared = (entry.current_task ?? "").trim();
@@ -27192,15 +27204,12 @@ class AgentChannel {
             const waitMin = Math.round((now3 - since) / 60000);
             const anchor = new Date(since).toISOString();
             this.emit({
-              content: `[client_transport_suspect] ${entry.name} (${entry.id8}) - its MCP server is ` + `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` + `(${waitMin} min ago) has no delivery record: the transcript has not grown ` + `since that emit.
-` + `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` + `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` + `client-side transport drop. The second does not follow from the first, and ` + `this detector has been wrong about it far more often than right.
-` + `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` + `99c00385 for a documented benign cause. A tally of zero does not make THIS ` + `one false; it means check before you act.
-` + `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:
-` + `   1. Read this envelope's own from_task field. If it carries content ` + `authored AFTER ${anchor}, the subject demonstrably received and wrote during ` + `its claimed silence - refuted from inside this message, at zero cost.
-` + `   2. Look for any channel message from the subject dated after ${anchor} in ` + `the context you already have.
-` + `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` + `subordinate receives all channel traffic. Report "I did not receive one", ` + `never "they have not posted".
-` + `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` + `that a lane which has declared it will stay silent will not answer if you ` + `address it - do not read contractual silence as confirmation.
-` + `  Note the subject cannot see this message.`,
+              content: formatClientTransportAlert({
+                name: entry.name,
+                id8: entry.id8,
+                anchor,
+                waitMin
+              }),
               meta: {
                 from_session: entry.session_id,
                 from_id8: entry.id8,
