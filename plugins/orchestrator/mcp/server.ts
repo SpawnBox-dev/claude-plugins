@@ -556,6 +556,129 @@ async function trySpawn(
   }
 }
 
+/**
+ * Kill embed sidecars that NOTHING CAN ROUTE TO.
+ *
+ * 🔴 WHY ORPHANS EXIST AT ALL, AND WHY NOTHING REAPED THEM. The adopt path
+ * deliberately never kills a sidecar it did not start ("let it outlive us"),
+ * which is correct - killing a shared sidecar breaks every sibling. But it
+ * means that once a sidecar STOPS being the one the port file names, no code
+ * path may ever kill it. It keeps its port, keeps its RSS, and answers nobody.
+ *
+ * Measured 2026-09-05: three sidecar trees alive, 9.7 GB / 712 MB / 1 MB. The
+ * 9.7 GB one had not served a request in eight hours; the live one was the
+ * SMALLEST of the two current-model processes. Free memory was 1.7% of 32 GB
+ * and Windows was killing sibling sessions' background tasks during a
+ * production deploy.
+ *
+ * THE DISCRIMINATOR IS THE PORT FILE, NOT AGE AND NOT SIZE. Ranking candidates
+ * by RSS picks the leaker, which is exactly the process most likely to be an
+ * orphan. A process listening on a port the port file does not name cannot be
+ * reached by any session, so killing it is safe by construction.
+ *
+ * Guards, because "kill a python process" deserves them:
+ *  - only the spawn-lock HOLDER reaps, so this cannot race a peer's spawn;
+ *  - never touch the port-file port, nor a pid we are about to adopt;
+ *  - skip processes younger than MIN_ORPHAN_AGE_MS - a sidecar that has
+ *    started listening but not yet written the port file would otherwise look
+ *    exactly like an orphan;
+ *  - match only our own script path, never every python on the box;
+ *  - best-effort throughout: a reap failure must never block startup.
+ */
+const MIN_ORPHAN_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * 🔴 REAPING IS OPT-IN, AND THAT IS A DELIBERATE CHOICE, NOT TIMIDITY.
+ *
+ * "Adopters never kill a sidecar they did not start" is a SAFETY PROPERTY of
+ * the existing design, not an oversight. A session that adopted a sidecar holds
+ * an EmbeddingClient bound to that port; the port file ceasing to name it does
+ * not notify that session. So a reap can cost a live sibling its semantic
+ * search until its MCP restarts (it degrades to FTS5 keyword search rather than
+ * breaking, but it degrades silently).
+ *
+ * Weigh that against what reaping buys, AFTER the chunking fix landed: a
+ * sidecar's ceiling is now ~750 MB rather than unbounded, so three accumulated
+ * orphans cost ~2 GB, not the 9.7 GB that started this. The urgency that would
+ * justify overriding an intentional safety property is exactly what the other
+ * half of this fix removed.
+ *
+ * So: OFF by default, and orphans are always REPORTED by system_status whether
+ * or not this is set. Visibility has no downside and was the actual gap - the
+ * 9.7 GB process was invisible to every tool the fleet had.
+ */
+const REAP_ORPHANS = process.env.ORCHESTRATOR_REAP_ORPHAN_SIDECARS === "1";
+
+type SidecarProc = { pid: number; port: number; ageMs: number; rssMb: number };
+
+/** Every listening embed sidecar on this box. [] on any failure - callers must
+ *  not treat an empty list as proof that none exist. */
+async function listSidecars(): Promise<SidecarProc[]> {
+  try {
+    if (process.platform !== "win32") return [];
+    const { execFileSync } = await import("node:child_process");
+
+    const ps = `
+$ErrorActionPreference='SilentlyContinue'
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'embed_server\\.py' }
+$conns = Get-NetTCPConnection -State Listen
+$out = foreach ($p in $procs) {
+  $c = $conns | Where-Object { $_.OwningProcess -eq $p.ProcessId } | Select-Object -First 1
+  if ($c) {
+    [pscustomobject]@{
+      pid  = $p.ProcessId
+      port = $c.LocalPort
+      ageMs = [int]((Get-Date) - $p.CreationDate).TotalMilliseconds
+      rssMb = [int]($p.WorkingSetSize/1MB)
+    }
+  }
+}
+$out | ConvertTo-Json -Compress`.trim();
+
+    const raw = execFileSync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", ps],
+      { encoding: "utf8", timeout: 15000, windowsHide: true },
+    ).trim();
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw) as SidecarProc | SidecarProc[];
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+/** Sidecars nothing can route to, given the port the port file names. */
+function orphansOf(all: SidecarProc[], livePort: number | null): SidecarProc[] {
+  return all.filter(
+    (r) => r.pid !== process.pid && !(livePort !== null && r.port === livePort),
+  );
+}
+
+async function reapOrphanSidecars(livePort: number | null): Promise<void> {
+  if (!REAP_ORPHANS) return;
+  try {
+    for (const r of orphansOf(await listSidecars(), livePort)) {
+      // A sidecar that has started listening but not yet written the port file
+      // is indistinguishable from an orphan. Age is the only thing separating
+      // them, so it is a hard precondition rather than a heuristic.
+      if (r.ageMs < MIN_ORPHAN_AGE_MS) continue;
+      try {
+        process.kill(r.pid, "SIGKILL");
+        console.error(
+          `[embed] Reaped orphan sidecar pid ${r.pid} on port ${r.port} ` +
+            `(${r.rssMb} MB, nothing routes to it; live port is ${livePort ?? "none"})`,
+        );
+      } catch {
+        // Already gone, or not ours to kill. Either way, not fatal.
+      }
+    }
+  } catch {
+    // Opportunistic hygiene: never block startup.
+  }
+}
+
 async function startSidecar(): Promise<EmbeddingClient | null> {
   // Use CLAUDE_PLUGIN_ROOT (set by Claude Code for plugins) or fall back to import.meta.dir
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
@@ -770,6 +893,14 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   }
 
   sidecarProcess = result.proc;
+
+  // We just became the sidecar the port file names, so any OTHER live sidecar
+  // is now unreachable by every session on this box. This is the only moment
+  // where that is provable and where we hold the spawn lock, so it is the only
+  // safe place to reap. Awaited (not fire-and-forget) so it cannot overlap a
+  // peer's spawn after we release the lock below.
+  await reapOrphanSidecars(result.port);
+
   // Release only AFTER the port file is published, so a waiter that sees the
   // lock gone is guaranteed to find a port rather than racing us to spawn.
   releaseSpawnLock();
@@ -1072,6 +1203,73 @@ server.tool(
             ? ` - WARNING: ${staleModelCount} note(s) still carry vectors from a previous model and are INVISIBLE to semantic search until re-embedded (backfillChunks)`
             : ``),
       );
+
+      // THE COVERAGE FIGURE ABOVE IS A DB COUNT, NOT A LIVE PROBE - it reads
+      // "active, 100%" whatever the sidecar is doing, and would read the same
+      // with the sidecar dead. The line below is the only part of this block
+      // that costs a round trip to the process, so it is also the only part
+      // that can report the process being unwell.
+      //
+      // Added after a sidecar reached 9.7 GB on a shared 32 GB box and started
+      // getting sibling sessions' background tasks OOM-killed mid-deploy, while
+      // system_status reported perfect health throughout.
+      const h = embeddingClient ? await embeddingClient.health() : null;
+      if (h) {
+        const parts: string[] = [];
+        if (h.pid) parts.push(`pid ${h.pid}`);
+        if (typeof h.rss_mb === "number") parts.push(`${h.rss_mb} MB resident`);
+        if (typeof h.peak_rss_mb === "number") parts.push(`peak ${h.peak_rss_mb} MB`);
+        if (h.max_batch) parts.push(`max_batch ${h.max_batch}`);
+        if (parts.length) {
+          lines.push(`  - Sidecar: ${parts.join(", ")}`);
+          // ~500 MB is a loaded bge-base at rest. Growth is bounded by the
+          // largest batch ever embedded (see sidecar/embed_server.py), so a
+          // figure far above baseline means a big batch was served, not that
+          // the process is busy now - and it will not come back down on its own.
+          if (typeof h.rss_mb === "number" && h.rss_mb > 2048) {
+            lines.push(
+              `  - ⚠️ Sidecar is holding ${h.rss_mb} MB. This does not shrink on its own; ` +
+                `restart it when the fleet is idle to reclaim.`,
+            );
+          }
+        }
+
+        // ORPHANS. Reported whether or not reaping is enabled, because the
+        // whole problem on 2026-09-05 was that they were INVISIBLE: three
+        // sidecars alive, the largest of them serving nobody, and no tool in
+        // the fleet could say so. A process listening on a port the port file
+        // does not name cannot be reached by any session.
+        //
+        // Identify the live one by the PID /health reports, which is the one
+        // fact that comes from the process we are actually talking to. If an
+        // older sidecar omits `pid`, say so rather than guessing - misnaming
+        // the live sidecar as an orphan is the expensive direction of this
+        // error, and it is exactly the mistake made by hand that night
+        // (ranking by RSS picked the leaker, which was the orphan).
+        if (h.pid) {
+          const others = (await listSidecars()).filter(
+            (r) => r.pid !== h.pid && r.pid !== process.pid,
+          );
+          if (others.length) {
+            const mb = others.reduce((a, r) => a + r.rssMb, 0);
+            lines.push(
+              `  - ⚠️ ${others.length} ORPHANED sidecar(s) holding ${mb} MB total ` +
+                `(${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). ` +
+                `Nothing routes to these - the live sidecar is pid ${h.pid}. ` +
+                (REAP_ORPHANS
+                  ? `They will be reaped on the next sidecar spawn.`
+                  : `Safe to kill; auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1).`),
+            );
+          }
+        }
+      } else {
+        // A ready status with an unreachable /health is exactly the split the
+        // coverage line cannot show.
+        lines.push(
+          "  - Sidecar: /health did not answer, though embeddings are marked ready - " +
+            "the coverage figure above is from the database, not the process.",
+        );
+      }
     } else if (sidecarStatus === "starting") {
       lines.push("- **Embeddings**: starting up...");
     } else {

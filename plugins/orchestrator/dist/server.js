@@ -20730,6 +20730,19 @@ class EmbeddingClient {
       return false;
     }
   }
+  async health() {
+    try {
+      const controller = new AbortController;
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok)
+        return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }
   async embed(texts) {
     try {
       const controller = new AbortController;
@@ -28002,6 +28015,55 @@ async function trySpawn(cmd, portFile, label, timeoutMs) {
     return null;
   }
 }
+var MIN_ORPHAN_AGE_MS = 5 * 60 * 1000;
+var REAP_ORPHANS = process.env.ORCHESTRATOR_REAP_ORPHAN_SIDECARS === "1";
+async function listSidecars() {
+  try {
+    if (process.platform !== "win32")
+      return [];
+    const { execFileSync } = await import("child_process");
+    const ps = `
+$ErrorActionPreference='SilentlyContinue'
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'embed_server\\.py' }
+$conns = Get-NetTCPConnection -State Listen
+$out = foreach ($p in $procs) {
+  $c = $conns | Where-Object { $_.OwningProcess -eq $p.ProcessId } | Select-Object -First 1
+  if ($c) {
+    [pscustomobject]@{
+      pid  = $p.ProcessId
+      port = $c.LocalPort
+      ageMs = [int]((Get-Date) - $p.CreationDate).TotalMilliseconds
+      rssMb = [int]($p.WorkingSetSize/1MB)
+    }
+  }
+}
+$out | ConvertTo-Json -Compress`.trim();
+    const raw = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", timeout: 15000, windowsHide: true }).trim();
+    if (!raw)
+      return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+function orphansOf(all, livePort) {
+  return all.filter((r) => r.pid !== process.pid && !(livePort !== null && r.port === livePort));
+}
+async function reapOrphanSidecars(livePort) {
+  if (!REAP_ORPHANS)
+    return;
+  try {
+    for (const r of orphansOf(await listSidecars(), livePort)) {
+      if (r.ageMs < MIN_ORPHAN_AGE_MS)
+        continue;
+      try {
+        process.kill(r.pid, "SIGKILL");
+        console.error(`[embed] Reaped orphan sidecar pid ${r.pid} on port ${r.port} (${r.rssMb} MB, nothing routes to it; live port is ${livePort ?? "none"})`);
+      } catch {}
+    }
+  } catch {}
+}
 async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
@@ -28023,7 +28085,7 @@ async function startSidecar() {
           console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
           return client;
         }
-        console.error(`[embed] Sidecar on port ${existingPort} serves dim=${dim}, expected ${ACTIVE_EMBED_DIM} ` + `(${ACTIVE_EMBED_MODEL}). Not adopting it - spawning the correct model instead.`);
+        console.error(`[embed] Sidecar on port ${existingPort} serves dim=${dim}, expected ${ACTIVE_EMBED_DIM} (${ACTIVE_EMBED_MODEL}). Not adopting it - spawning the correct model instead.`);
       }
     }
   } catch {}
@@ -28130,6 +28192,7 @@ async function startSidecar() {
     return null;
   }
   sidecarProcess = result.proc;
+  await reapOrphanSidecars(result.port);
   releaseSpawnLock();
   return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
 }
@@ -28312,6 +28375,33 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   lines.push(`- **Knowledge base**: ${projectNotes} notes (project), ${globalNotes} notes (global)`);
   if (sidecarStatus === "ready") {
     lines.push(`- **Embeddings**: active (${embeddedCount}/${projectNotes} notes embedded, ${coveragePct}% coverage)` + (staleModelCount > 0 ? ` - WARNING: ${staleModelCount} note(s) still carry vectors from a previous model and are INVISIBLE to semantic search until re-embedded (backfillChunks)` : ``));
+    const h = embeddingClient ? await embeddingClient.health() : null;
+    if (h) {
+      const parts = [];
+      if (h.pid)
+        parts.push(`pid ${h.pid}`);
+      if (typeof h.rss_mb === "number")
+        parts.push(`${h.rss_mb} MB resident`);
+      if (typeof h.peak_rss_mb === "number")
+        parts.push(`peak ${h.peak_rss_mb} MB`);
+      if (h.max_batch)
+        parts.push(`max_batch ${h.max_batch}`);
+      if (parts.length) {
+        lines.push(`  - Sidecar: ${parts.join(", ")}`);
+        if (typeof h.rss_mb === "number" && h.rss_mb > 2048) {
+          lines.push(`  - \u26A0\uFE0F Sidecar is holding ${h.rss_mb} MB. This does not shrink on its own; restart it when the fleet is idle to reclaim.`);
+        }
+      }
+      if (h.pid) {
+        const others = (await listSidecars()).filter((r) => r.pid !== h.pid && r.pid !== process.pid);
+        if (others.length) {
+          const mb = others.reduce((a, r) => a + r.rssMb, 0);
+          lines.push(`  - \u26A0\uFE0F ${others.length} ORPHANED sidecar(s) holding ${mb} MB total (${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). Nothing routes to these - the live sidecar is pid ${h.pid}. ` + (REAP_ORPHANS ? `They will be reaped on the next sidecar spawn.` : `Safe to kill; auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1).`));
+        }
+      }
+    } else {
+      lines.push("  - Sidecar: /health did not answer, though embeddings are marked ready - the coverage figure above is from the database, not the process.");
+    }
   } else if (sidecarStatus === "starting") {
     lines.push("- **Embeddings**: starting up...");
   } else {

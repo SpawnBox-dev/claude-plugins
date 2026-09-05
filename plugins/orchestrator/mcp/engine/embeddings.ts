@@ -126,6 +126,41 @@ export class EmbeddingClient {
   }
 
   /**
+   * Full /health body, for diagnostics that need more than a boolean.
+   *
+   * Exists so system_status can report the sidecar's PID and resident size.
+   * On 2026-09-05 a sidecar reached 9.7 GB on a shared 32 GB box and nothing
+   * in the plugin could see it: `system_status` reported "Embeddings: active,
+   * 100% coverage" - a DB-derived count that reads healthy whatever the
+   * sidecar's footprint, and would read healthy with the sidecar dead. The
+   * footprint was only found by running Win32_Process by hand.
+   *
+   * Returns null on any error, like isAvailable(); older sidecars simply omit
+   * the memory fields, so callers must treat them as optional rather than
+   * assuming a number is present.
+   */
+  async health(): Promise<{
+    status?: string;
+    model?: string;
+    dim?: number;
+    pid?: number;
+    rss_mb?: number | null;
+    peak_rss_mb?: number | null;
+    max_batch?: number;
+  } | null> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this.baseUrl}/health`, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) return null;
+      return (await res.json()) as Awaited<ReturnType<EmbeddingClient["health"]>>;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Embed an array of texts via the sidecar.
    * POST /embed, 30s timeout, returns null on any error.
    */
