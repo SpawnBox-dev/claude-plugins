@@ -529,7 +529,25 @@ function armTrailerConvention(db: Database): void {
 // drifted quote from a correct one. Its countermeasures are non-authorial -
 // decline-on-sight, and ownership stated in a file under the author's name.
 
-/** Recipients named by an envelope opener. `@all` counts as many by nature. */
+/**
+ * Recipients named by an envelope opener. `@all` counts as many by nature.
+ *
+ * THE ACCEPTED FORMS DELIBERATELY MIRROR THE ROUTER, and must not be widened
+ * without widening it too. `addressing.ts` ADDRESS_RE recognises exactly
+ * `@PA`, `@PrimeAgent`, `@all` and `@SA-<8 hex>`; a NAME-form address such as
+ * `@SA-PORTAL-2026-09-04` matches nothing there, so an envelope addressed only
+ * in name-form ROUTES TO NOBODY. Verified 2026-09-05 against ADDRESS_RE:
+ * "@@@ @SA-PORTAL-2026-09-04,@SA-EYES-2026-09-04" yields zero recipients.
+ *
+ * So counting it as zero here is CORRECT rather than a gap: the lint's whole
+ * premise is "two readers will each bind the pronoun to themselves", and an
+ * envelope with no reachable recipients has no readers to confuse. Widening
+ * this pattern alone would make the lint fire on messages that were never
+ * delivered - a false positive with a confident explanation attached.
+ *
+ * (The silent non-delivery of a name-form envelope is a separate hazard and is
+ * not this function's to fix.)
+ */
 function envelopeRecipientCount(opener: string): number {
   const named = opener.match(/@(?:SA-[0-9a-f]{8}|PA|PrimeAgent)\b/gi) || [];
   if (/@all\b/i.test(opener)) return Math.max(2, named.length + 1);

@@ -6,6 +6,28 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-09-05 - Two forcing functions: an envelope pronoun lint, and the transport alert stops claiming reception from freshness (0.69.7, WI ab0ad62e + f7bc27b8)
+
+**Change.** (1) `findUnqualifiedEnvelopePronouns` + `composeEnvelopePronounWarning`: an advisory lint flagging a bare or possessive second-person pronoun in a `@@@` envelope addressed to 2+ lanes when no `@`-address sits within 8 words either side, wired into both Stop paths. (2) The `client_transport_suspect` alert's first free check no longer says a fresh `from_task` proves the subject "received and wrote".
+
+**Why (1).** Thirteen attribution drifts catalogued 2026-08-31, ALL subject-caught and ZERO instrument-caught, including two produced by the author of the pronoun rule in messages citing that rule. Per `4cfbbf83`, a convention that must be remembered at the moment of action has the reliability of no convention. Advisory per `3d7099db`: a fact that enables judgment, never a gate - "you" in a two-recipient envelope is sometimes perfectly clear, and only the author knows.
+
+**ARCHITECTURAL DEVIATION, and it is a fact rather than a choice.** The ruling asked for a lint "at composition time, before send". Not achievable: a `@@@` envelope is ASSISTANT TEXT, not a tool call, so there is no `PreToolUse` to intercept it the way the trailer check intercepts `git commit`; and the envelope is parsed on the RECEIVING session, so a channel-side lint would warn the reader - the one party who cannot know who was meant. The Stop hook is the only surface that sees the author's own text in the author's own context, and the turn-final rule already forces envelopes to be written last. It therefore fires immediately AFTER emission and before the next turn, leaving a correction possible. Wired into BOTH Stop paths because this is per-TURN state and must not sit behind the once-per-session `stop_<sid>` gate that `f86a4d4d` had to route around.
+
+**Why (2).** The shipped wording reintroduced the exact known-vs-inferred slippage the alert had been rewritten to remove - inside its own remedy, in the sentence ordered first and pinned by a test. A fresh `from_task` proves the subject executed `update_session_task`; the alert's proposition is about DELIVERY. Corrected to the stronger form rather than the weaker downgrade first filed: **content-dependent response** - writing proves it ran, acting on content that originated elsewhere proves it received.
+
+**Rejected.** (a) *Widening the recipient pattern to accept name-form addresses like `@SA-PORTAL-2026-09-04`* - raised in review, and the premise inverts on inspection: `addressing.ts` ADDRESS_RE recognises only `@PA`, `@PrimeAgent`, `@all`, `@SA-<8hex>`, so a name-form envelope ROUTES TO NOBODY (verified). Counting it as zero recipients is correct; widening would fire the lint on messages never delivered. Documented in the docblock instead, with the router named as the authority. (b) *Route 2 (a faithfully quoted line that drifts anyway)* stays out per the 08-31 20:46Z ruling: no lint can distinguish a drifted quote from a correct one. (c) *Weakening check 1 to "alive and executing"* - unnecessary once a valid reception proof was identified in the same field.
+
+**Test additions.** `tests/tools/envelope-pronoun-lint.test.ts` (9) - fires on EYES's real 18:23:37 specimen recovered VERBATIM from the 2026-08-31 transcripts, silent on single-recipient, silent on lane-qualified, silent outside envelopes, fenced code excluded, `@all` counted, unterminated envelope counted. MUTATION-PROVED three ways on a copy. `transport-alert-text.test.ts` gains a positive arm and a NEGATIVE arm rejecting the old sentence - the load-bearing one, since a wrong sentence can be absent from a present-phrase list while sitting in the text, which is how the defect survived the previous pinning test. Mutation-proved: restoring the old sentence turns it red.
+
+**Known limits, stated.** The lint does not judge whether a nearby address is the RIGHT one (in the specimen, "…are @SA-348a1d82's, not yours" is suppressed by proximity while still pointing at the other recipient; the envelope fires on a different sentence). And `readOwnTurnFinalText` adds a THIRD copy of the project-hash derivation - filed as `8d58c31b`.
+
+**Neither item closes on this publish**, per both items' own theses: `ab0ad62e` closes when the lint fires on a real fleet envelope; `f7bc27b8` when a reader is observed running a free check instead of `/mcp`.
+
+**Shipped:** `6a273c8`, `b2a9eec`, version bump 0.69.7. PA diff review approved 23:01Z.
+
+---
+
 ## 2026-09-05 - An append records WHO appended, in the marker rather than a revision row (0.69.6, WI fe3ec978 gap 6)
 
 **Change.** `appendToNoteContent` takes an optional `sessionId` and stamps it into the append marker: `--- <iso> · session <id8> ---`. Threaded from all three call sites; `update_work_item` uses `resolveSessionId()` since it takes no `session_id` param.
