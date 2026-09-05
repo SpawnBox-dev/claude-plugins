@@ -58,18 +58,44 @@ export function refreshNoteEmbedding(
   }
 }
 
+/**
+ * `sessionId` stamps WHO appended, in a guaranteed format, alongside WHEN.
+ *
+ * WHY NOT snapshotRevision HERE, WHICH IS THE OBVIOUS MOVE AND WAS PROPOSED:
+ * `note_revisions` stores the FULL prior body per row, and appends are the
+ * dominant write. Measured 2026-09-05 on this KB: 7,802 append events across
+ * 1,792 notes, against 1,115 revision rows total - appends outnumber snapshotted
+ * rewrites 7 to 1. Snapshotting each one costs an upper bound of 349 MB on a
+ * 776 MB database, and the cost is QUADRATIC in appends per note: `b2bdd253`
+ * alone (279 appends, 328 KB body) would hold ~87 MB of near-identical copies.
+ * A full-body snapshot also cannot say WHICH text was appended - you would have
+ * to diff consecutive rows to recover the delta the caller already had in hand.
+ *
+ * So the author goes in the marker: no schema change, no storage growth, and
+ * "who said this, when" becomes machine-readable rather than prose. A
+ * delta-shaped events table is the better long-term home (it stores the
+ * appendContent itself, not a copy of everything before it) and is scoped on
+ * work item fe3ec978 pending a schema ruling - this is the cheap half that
+ * needs no migration.
+ *
+ * The marker keeps the timestamp FIRST so the existing assertion
+ * (/\n\n--- \d{4}-\d{2}-\d{2}T/) still holds, and omits the author segment
+ * entirely when no session is known rather than emitting a placeholder.
+ */
 export function appendToNoteContent(
   db: Database,
   id: string,
   appendContent: string,
-  embeddingClient?: EmbeddingClient | null
+  embeddingClient?: EmbeddingClient | null,
+  sessionId?: string | null
 ): AppendResult {
   const row = db.query("SELECT content FROM notes WHERE id = ?").get(id) as { content: string } | null;
   if (!row) {
     return { appended: false, message: `No note found with id "${id}".` };
   }
   const timestamp = now();
-  const newContent = `${row.content}\n\n--- ${timestamp} ---\n${appendContent}`;
+  const who = sessionId ? ` · session ${sessionId.slice(0, 8)}` : "";
+  const newContent = `${row.content}\n\n--- ${timestamp}${who} ---\n${appendContent}`;
   const newKeywords = extractKeywords(newContent).join(",");
   db.run(
     `UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`,

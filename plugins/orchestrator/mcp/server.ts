@@ -2026,7 +2026,7 @@ server.tool(
       // 0.44.0: pass the client so the append re-embeds. Pre-fix the only
       // refresh in this handler sat behind `content !== undefined` below,
       // which this branch could never satisfy - defect 1 of insight 44d445bb.
-      appendToNoteContent(db, id, append_content, embeddingClient);
+      appendToNoteContent(db, id, append_content, embeddingClient, session_id);
       updates.push("append_content");
       // Re-read row so any fall-through UPDATE sees the appended content
       row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`)
@@ -2484,7 +2484,11 @@ server.tool(
     // helper update_note uses, so timestamp format and keyword re-extraction
     // stay identical across both tools.
     if (append_content !== undefined) {
-      appendToNoteContent(projectDb, id, append_content, embeddingClient);
+      // update_work_item takes no session_id param, and should not: per
+      // resolveSessionId's contract self-identity comes from the environment and
+      // "can never be set by a tool argument". For AUTHORSHIP that is the
+      // stronger source anyway - a caller-supplied id could name someone else.
+      appendToNoteContent(projectDb, id, append_content, embeddingClient, resolveSessionId());
       changes.push("append_content");
     }
     if (tags !== undefined) {

@@ -762,7 +762,7 @@ export async function handleRemember(
       // BECAUSE embedding similarity crossed a bar, then merges knowledge in
       // and left the target's vector describing only its pre-merge content -
       // degrading the very index that triggered it. See insight 1ad2c09d.
-      appendToNoteContent(db, targetId, input.content, embeddingClient);
+      appendToNoteContent(db, targetId, input.content, embeddingClient, input.session_id);
       return {
         stored: false,
         note_id: targetId,

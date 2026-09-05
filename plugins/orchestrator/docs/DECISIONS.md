@@ -6,6 +6,35 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-09-05 - An append records WHO appended, in the marker rather than a revision row (0.69.6, WI fe3ec978 gap 6)
+
+**Change.** `appendToNoteContent` takes an optional `sessionId` and stamps it into the append marker: `--- <iso> · session <id8> ---`. Threaded from all three call sites; `update_work_item` uses `resolveSessionId()` since it takes no `session_id` param.
+
+**Why.** Jarid, via PA: the KB should be consistent and correct as standing practice, so progress can be reconstructed from it alone. "Who said this, when" was a regex over prose.
+
+**Rejected - and this is the substance of the entry.** The proposed fix was to call `snapshotRevision` on the append path, reusing `note_revisions` (which already has `revised_by_session` and `revised_at`, populated on 1,108 of 1,115 rows). Measured on this KB before implementing:
+
+| | |
+|---|---|
+| append events | **7,802** across 1,792 notes |
+| `note_revisions` rows today | 1,115 |
+| upper bound if each append snapshotted | **349 MB** on a 776 MB database |
+| worst single note (`b2bdd253`) | 279 appends x 328 KB = **~87 MB** of near-identical copies |
+
+Appends outnumber snapshotted rewrites **7 to 1**, `snapshotRevision` copies the FULL prior body, and the cost is **quadratic in appends per note**. A full-body snapshot also cannot say WHICH text was appended - recovering the delta would need a diff of consecutive rows, when the caller had `appendContent` in hand the whole time. The right long-term home is a delta-shaped events table (scoped on `fe3ec978`, pending a schema ruling); this is the half that needs no migration.
+
+Also rejected: emitting a placeholder when no session is known. Absence is honest; a placeholder reads as a real author to whoever parses it later.
+
+**Ordering detail that mattered.** The author segment goes AFTER the timestamp so `update_note.test.ts`'s existing `/\n\n--- \d{4}-\d{2}-\d{2}T/` still holds - putting it first would have broken a test in another file.
+
+**Test additions.** `tests/tools/append-author.test.ts`, 5 tests: stamps the session; OMITS the segment with no session; the existing marker assertion still holds; the marker parses (timestamp + author + payload) as machine-readable rather than prose; successive appends each carry their own author.
+
+**Caught by the gate, worth recording:** `tsc` failed on `session_id` not being in scope at `server.ts:2487` - `update_work_item` never accepted one. The unit suite and `bun build` were both GREEN on that broken code, because neither typechecks. `bun run typecheck` is not optional in this repo.
+
+**Shipped:** version bump 0.69.6.
+
+---
+
 ## 2026-09-05 - The edited-file curation check moves onto the recurring path (0.69.5, WI f86a4d4d)
 
 **Change.** `composeEditedFileCuration` is now also composed into the RECORDS CHECKPOINT nudge (`tickStaleTask`), alongside `composeOpenItemsNudge`. It previously ran only from the Stop-hook housekeeping block. New optional `dedupe` flag applies fingerprint suppression (`edited_curation_fp_<sid>`) on the recurring path only.

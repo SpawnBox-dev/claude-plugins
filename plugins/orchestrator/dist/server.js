@@ -21375,15 +21375,16 @@ function refreshNoteEmbedding(db, id, content, embeddingClient) {
     return;
   }
 }
-function appendToNoteContent(db, id, appendContent, embeddingClient) {
+function appendToNoteContent(db, id, appendContent, embeddingClient, sessionId) {
   const row = db.query("SELECT content FROM notes WHERE id = ?").get(id);
   if (!row) {
     return { appended: false, message: `No note found with id "${id}".` };
   }
   const timestamp = now();
+  const who = sessionId ? ` \xB7 session ${sessionId.slice(0, 8)}` : "";
   const newContent = `${row.content}
 
---- ${timestamp} ---
+--- ${timestamp}${who} ---
 ${appendContent}`;
   const newKeywords = extractKeywords(newContent).join(",");
   db.run(`UPDATE notes SET content = ?, keywords = ?, updated_at = ? WHERE id = ?`, [newContent, newKeywords, timestamp, id]);
@@ -21874,7 +21875,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "update_existing") {
-      appendToNoteContent(db, targetId, input.content, embeddingClient);
+      appendToNoteContent(db, targetId, input.content, embeddingClient, input.session_id);
       return {
         stored: false,
         note_id: targetId,
@@ -28983,7 +28984,7 @@ server.tool("update_note", "Keep a note current. Use liberally whenever your rea
   }
   const updates = [];
   if (append_content !== undefined) {
-    appendToNoteContent(db, id, append_content, embeddingClient);
+    appendToNoteContent(db, id, append_content, embeddingClient, session_id);
     updates.push("append_content");
     row = db.query(`SELECT id, type, content, context, tags, keywords FROM notes WHERE id = ?`).get(id);
   }
@@ -29299,7 +29300,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     changes.push("content updated");
   }
   if (append_content !== undefined) {
-    appendToNoteContent(projectDb2, id, append_content, embeddingClient);
+    appendToNoteContent(projectDb2, id, append_content, embeddingClient, resolveSessionId());
     changes.push("append_content");
   }
   if (tags !== undefined) {
