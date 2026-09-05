@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { statSync, readFileSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 import type { SessionTracker } from "../engine/session_tracker";
 import { getLiveSessions, getAgentChannelStateDir } from "../engine/live_sessions";
 import {
@@ -504,6 +505,220 @@ function armTrailerConvention(db: Database): void {
   db.run(
     `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
     [TRAILER_ARMED_KEY, now()]
+  );
+}
+
+// ── Route-1 envelope pronoun lint (WI ab0ad62e, PA ruling 2026-08-31 20:46Z) ──
+//
+// A bare or possessive second-person pronoun inside a @@@ envelope addressed to
+// TWO OR MORE lanes binds differently for each reader. Thirteen attribution
+// drifts were catalogued on 2026-08-31, ALL subject-caught and ZERO
+// instrument-caught, and the decisive specimen is an author who had just
+// written the pronoun rule breaking it twice in messages citing it. Per note
+// 4cfbbf83, a convention that must be REMEMBERED at the moment of action has
+// the reliability of no convention at all.
+//
+// ADVISORY, per 3d7099db (Jarid's house style, same shape as the trailer and
+// heredoc checks): a fact that enables judgment, never a gate. There is no
+// legitimate-use exception to encode - "you" in a two-recipient envelope is
+// sometimes perfectly clear from context, and the author is the one who can
+// tell.
+//
+// ROUTE 2 (a faithfully quoted line that drifts anyway, with credit attached)
+// is deliberately OUT OF SCOPE and must stay out: no lint can distinguish a
+// drifted quote from a correct one. Its countermeasures are non-authorial -
+// decline-on-sight, and ownership stated in a file under the author's name.
+
+/** Recipients named by an envelope opener. `@all` counts as many by nature. */
+function envelopeRecipientCount(opener: string): number {
+  const named = opener.match(/@(?:SA-[0-9a-f]{8}|PA|PrimeAgent)\b/gi) || [];
+  if (/@all\b/i.test(opener)) return Math.max(2, named.length + 1);
+  return named.length;
+}
+
+/** How far from a pronoun an @-address still counts as qualifying it. */
+const PRONOUN_QUALIFY_WINDOW_WORDS = 8;
+
+export interface EnvelopePronounHit {
+  recipients: number;
+  pronoun: string;
+  /** The pronoun in its surrounding words, for the author to recognise. */
+  excerpt: string;
+}
+
+/**
+ * PURE. Unqualified second-person pronouns inside multi-recipient envelopes.
+ *
+ * A pronoun is QUALIFIED when an @-address sits within
+ * PRONOUN_QUALIFY_WINDOW_WORDS on either side - "@SA-abc123, your read" is
+ * unambiguous. Note this deliberately does NOT try to decide whether the nearby
+ * address is the RIGHT one: in the 18:23:37 specimen "…are @SA-348a1d82's, not
+ * yours" is qualified by proximity yet still points at the other recipient.
+ * Distinguishing that would require knowing the author's intent, which is
+ * exactly the judgment the advisory hands back to them.
+ */
+export function findUnqualifiedEnvelopePronouns(text: string): EnvelopePronounHit[] {
+  const hits: EnvelopePronounHit[] = [];
+  if (!text.includes("@@@")) return hits;
+
+  const lines = text.split("\n");
+  let open: { recipients: number; body: string[] } | null = null;
+
+  for (const line of lines) {
+    const openM = line.match(ENVELOPE_OPEN_LINE_RE);
+    if (openM && !open) {
+      const n = envelopeRecipientCount(openM[1]);
+      open = { recipients: n, body: [] };
+      continue;
+    }
+    if (open && ENVELOPE_CLOSE_LINE_RE.test(line)) {
+      if (open.recipients >= 2) hits.push(...scanBodyForPronouns(open.body.join("\n"), open.recipients));
+      open = null;
+      continue;
+    }
+    if (open) open.body.push(line);
+  }
+  // An unterminated envelope still counts - the drift is in the text either way.
+  if (open && open.recipients >= 2) {
+    hits.push(...scanBodyForPronouns(open.body.join("\n"), open.recipients));
+  }
+  return hits;
+}
+
+const ENVELOPE_OPEN_LINE_RE = /^[ \t]*@@@[ \t]+(@\S.*?)[ \t]*$/;
+const ENVELOPE_CLOSE_LINE_RE = /^[ \t]*@@@[ \t]*$/;
+const SECOND_PERSON_RE = /\b(you|your|yours|you're|yourself)\b/gi;
+
+function scanBodyForPronouns(body: string, recipients: number): EnvelopePronounHit[] {
+  // Fenced code is quoted material, not address-ee prose.
+  const withoutFences = body.replace(/```[\s\S]*?```/g, (m) => m.replace(/[^\n]/g, " "));
+  const words = withoutFences.split(/(\s+)/);
+  const out: EnvelopePronounHit[] = [];
+
+  const isAddress = (w: string) => /@(?:SA-[0-9a-f]{8}|PA|PrimeAgent|all)\b/i.test(w);
+
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    SECOND_PERSON_RE.lastIndex = 0;
+    if (!SECOND_PERSON_RE.test(w)) continue;
+
+    let qualified = false;
+    for (let d = 1; d <= PRONOUN_QUALIFY_WINDOW_WORDS * 2 && !qualified; d++) {
+      if (words[i - d] && isAddress(words[i - d])) qualified = true;
+      if (words[i + d] && isAddress(words[i + d])) qualified = true;
+    }
+    if (qualified) continue;
+
+    const from = Math.max(0, i - 10);
+    const excerpt = words.slice(from, i + 11).join("").replace(/\s+/g, " ").trim();
+    out.push({ recipients, pronoun: w.replace(/[^A-Za-z']/g, ""), excerpt: excerpt.slice(0, 160) });
+  }
+  return out;
+}
+
+/** Bytes of the author's own transcript to scan for the turn-final envelope. */
+const OWN_TAIL_BYTES = 96_000;
+/** plugin_state key: fingerprint of the last envelope we warned about. */
+const PRONOUN_FP_KEY_PREFIX = "envelope_pronoun_fp_";
+
+/**
+ * The author's last assistant text, from their OWN transcript.
+ *
+ * 🔴 WHY THE STOP HOOK AND NOT "BEFORE SEND". An @@@ envelope is ASSISTANT
+ * TEXT, not a tool call, so there is no PreToolUse to intercept it the way the
+ * trailer check intercepts `git commit`. And the envelope is parsed on the
+ * RECEIVING session, so a channel-side lint would warn the reader rather than
+ * the author - the wrong party, since the author is the only one who knows who
+ * they meant. Stop is the one surface that sees the author's own text in the
+ * author's own context, and the turn-final rule already forces envelopes to be
+ * the last thing written. So this fires immediately AFTER emission and before
+ * the next turn, which still leaves the author able to send a correction.
+ * That is a real deviation from "composition-time" and is stated rather than
+ * papered over.
+ *
+ * Returns null when the transcript cannot be read. "I cannot see it" and "it is
+ * clean" are different claims, and only silence is safe for the first.
+ */
+function readOwnTurnFinalText(sessionId: string): string | null {
+  try {
+    const projectDir =
+      process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    // Same derivation as server.ts:3091 and supersede.ts:102. NOTE: that is now
+    // a THIRD copy of this expression, which is the drift shape this codebase
+    // keeps finding; it wants hoisting into one helper.
+    const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+    const path = join(homedir(), ".claude", "projects", projectHash, `${sessionId}.jsonl`);
+    const size = statSync(path).size;
+    const start = Math.max(0, size - OWN_TAIL_BYTES);
+    const buf = readFileSync(path, "utf8").slice(start > 0 ? start : 0);
+
+    let last = "";
+    for (const line of buf.split("\n")) {
+      if (!line.startsWith("{")) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o?.type !== "assistant") continue;
+        const c = o?.message?.content;
+        const text =
+          typeof c === "string"
+            ? c
+            : Array.isArray(c)
+              ? c.map((p: any) => (typeof p === "string" ? p : (p?.text ?? ""))).join("\n")
+              : "";
+        if (text.trim()) last = text;
+      } catch {
+        /* a partial line at the tail boundary is expected */
+      }
+    }
+    return last || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stop-hook arm. Silent unless the author's turn-final text carries a
+ * multi-recipient envelope with an unattached pronoun, and silent again for a
+ * repeat of the same envelope (fingerprint), so a session that leaves one
+ * standing is not nagged every hand-back.
+ */
+function composeEnvelopePronounNudge(ctx: HookCtx, sessionId: string): string {
+  const text = readOwnTurnFinalText(sessionId);
+  if (!text) return "";
+  const hits = findUnqualifiedEnvelopePronouns(text);
+  if (hits.length === 0) return "";
+
+  const sid = sanitizeSessionId(sessionId);
+  const fp = `${hits.length}:${hits[0].excerpt}`;
+  const key = `${PRONOUN_FP_KEY_PREFIX}${sid}`;
+  try {
+    const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key) as
+      | { value: string }
+      | undefined;
+    if (prev?.value === fp) return "";
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [key, fp, now()]
+    );
+  } catch {
+    /* dedup is a nicety; never suppress the warning because state failed */
+  }
+  return composeEnvelopePronounWarning(hits);
+}
+
+export function composeEnvelopePronounWarning(hits: EnvelopePronounHit[]): string {
+  if (hits.length === 0) return "";
+  const shown = hits.slice(0, 3).map((h) => `  - "${h.pronoun}" in: ...${h.excerpt}...`).join("\n");
+  const more = hits.length > 3 ? `\n  ...and ${hits.length - 3} more.` : "";
+  return (
+    `[orch] AN ENVELOPE YOU JUST SENT TO ${hits[0].recipients} LANES USES AN UNATTACHED ` +
+    `SECOND-PERSON PRONOUN, AND EACH READER BINDS IT TO THEMSELVES.\n${shown}${more}\n` +
+    `  Thirteen attribution drifts were catalogued in one day, every one caught by a ` +
+    `PERSON and none by an instrument - including two produced by the author of the ` +
+    `pronoun rule, in messages citing that rule. Knowing it does not arm it. The fix is ` +
+    `one edit: name the lane beside the claim ("@SA-xxxxxxxx's read", not "your read"). ` +
+    `If the referent is already unambiguous here, send nothing - this is a fact for your ` +
+    `judgment, not a gate, and only you know who you meant.`
   );
 }
 
@@ -3086,7 +3301,15 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
     // agent. decision:"block" + reason is what actually reaches the model on
     // this event - it declines the stop and hands the text back, which is
     // exactly what a nudge needs to be acted on rather than merely displayed.
-    return staleTask ? { decision: "block", reason: `[orch] ${staleTask}` } : {};
+    // WI ab0ad62e route 1: the pronoun lint is per-TURN state like staleTask,
+    // not once-per-session housekeeping, so it must reach the agent here too -
+    // an envelope sent on the fortieth hand-back needs the warning as much as
+    // one sent on the first. (This is the same gate whose once-per-session
+    // scheduling f86a4d4d had to route around; do not put per-turn checks
+    // behind it.)
+    const pronounEarly = composeEnvelopePronounNudge(ctx, args.session_id);
+    const earlyParts = [staleTask ? `[orch] ${staleTask}` : "", pronounEarly].filter(Boolean);
+    return earlyParts.length ? { decision: "block", reason: earlyParts.join("\n\n") } : {};
   }
   ctx.db.run(
     `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`,
@@ -3163,6 +3386,11 @@ function handleStop(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
   parts.push(
     `**${n}. Save progress.** \`save_progress\` with summary, open questions, next steps.`
   );
+
+  // WI ab0ad62e route 1, first-hand-back path. Appended LAST and unnumbered: it
+  // is not a housekeeping step, it is a fact about the message just sent.
+  const pronoun = composeEnvelopePronounNudge(ctx, args.session_id);
+  if (pronoun) parts.push(pronoun);
 
   return { decision: "block", reason: parts.join("\n\n") };
 }

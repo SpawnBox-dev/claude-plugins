@@ -24540,6 +24540,7 @@ function handleUpdateSessionTask(tracker, args) {
 // mcp/tools/hook_event.ts
 import { statSync as statSync4, readFileSync as readFileSync4 } from "fs";
 import { join as join7 } from "path";
+import { homedir as homedir3 } from "os";
 function sanitizeSessionId(sid) {
   return sid.replace(/[^a-zA-Z0-9_-]/g, "");
 }
@@ -24737,6 +24738,131 @@ function trailerConventionArmed(db) {
 }
 function armTrailerConvention(db) {
   db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [TRAILER_ARMED_KEY, now()]);
+}
+function envelopeRecipientCount(opener) {
+  const named = opener.match(/@(?:SA-[0-9a-f]{8}|PA|PrimeAgent)\b/gi) || [];
+  if (/@all\b/i.test(opener))
+    return Math.max(2, named.length + 1);
+  return named.length;
+}
+var PRONOUN_QUALIFY_WINDOW_WORDS = 8;
+function findUnqualifiedEnvelopePronouns(text) {
+  const hits = [];
+  if (!text.includes("@@@"))
+    return hits;
+  const lines = text.split(`
+`);
+  let open = null;
+  for (const line of lines) {
+    const openM = line.match(ENVELOPE_OPEN_LINE_RE);
+    if (openM && !open) {
+      const n = envelopeRecipientCount(openM[1]);
+      open = { recipients: n, body: [] };
+      continue;
+    }
+    if (open && ENVELOPE_CLOSE_LINE_RE.test(line)) {
+      if (open.recipients >= 2)
+        hits.push(...scanBodyForPronouns(open.body.join(`
+`), open.recipients));
+      open = null;
+      continue;
+    }
+    if (open)
+      open.body.push(line);
+  }
+  if (open && open.recipients >= 2) {
+    hits.push(...scanBodyForPronouns(open.body.join(`
+`), open.recipients));
+  }
+  return hits;
+}
+var ENVELOPE_OPEN_LINE_RE = /^[ \t]*@@@[ \t]+(@\S.*?)[ \t]*$/;
+var ENVELOPE_CLOSE_LINE_RE = /^[ \t]*@@@[ \t]*$/;
+var SECOND_PERSON_RE = /\b(you|your|yours|you're|yourself)\b/gi;
+function scanBodyForPronouns(body, recipients) {
+  const withoutFences = body.replace(/```[\s\S]*?```/g, (m) => m.replace(/[^\n]/g, " "));
+  const words = withoutFences.split(/(\s+)/);
+  const out = [];
+  const isAddress = (w) => /@(?:SA-[0-9a-f]{8}|PA|PrimeAgent|all)\b/i.test(w);
+  for (let i = 0;i < words.length; i++) {
+    const w = words[i];
+    SECOND_PERSON_RE.lastIndex = 0;
+    if (!SECOND_PERSON_RE.test(w))
+      continue;
+    let qualified = false;
+    for (let d = 1;d <= PRONOUN_QUALIFY_WINDOW_WORDS * 2 && !qualified; d++) {
+      if (words[i - d] && isAddress(words[i - d]))
+        qualified = true;
+      if (words[i + d] && isAddress(words[i + d]))
+        qualified = true;
+    }
+    if (qualified)
+      continue;
+    const from = Math.max(0, i - 10);
+    const excerpt = words.slice(from, i + 11).join("").replace(/\s+/g, " ").trim();
+    out.push({ recipients, pronoun: w.replace(/[^A-Za-z']/g, ""), excerpt: excerpt.slice(0, 160) });
+  }
+  return out;
+}
+var OWN_TAIL_BYTES = 96000;
+var PRONOUN_FP_KEY_PREFIX = "envelope_pronoun_fp_";
+function readOwnTurnFinalText(sessionId) {
+  try {
+    const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
+    const path2 = join7(homedir3(), ".claude", "projects", projectHash, `${sessionId}.jsonl`);
+    const size = statSync4(path2).size;
+    const start = Math.max(0, size - OWN_TAIL_BYTES);
+    const buf = readFileSync4(path2, "utf8").slice(start > 0 ? start : 0);
+    let last = "";
+    for (const line of buf.split(`
+`)) {
+      if (!line.startsWith("{"))
+        continue;
+      try {
+        const o = JSON.parse(line);
+        if (o?.type !== "assistant")
+          continue;
+        const c = o?.message?.content;
+        const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => typeof p === "string" ? p : p?.text ?? "").join(`
+`) : "";
+        if (text.trim())
+          last = text;
+      } catch {}
+    }
+    return last || null;
+  } catch {
+    return null;
+  }
+}
+function composeEnvelopePronounNudge(ctx, sessionId) {
+  const text = readOwnTurnFinalText(sessionId);
+  if (!text)
+    return "";
+  const hits = findUnqualifiedEnvelopePronouns(text);
+  if (hits.length === 0)
+    return "";
+  const sid = sanitizeSessionId(sessionId);
+  const fp = `${hits.length}:${hits[0].excerpt}`;
+  const key = `${PRONOUN_FP_KEY_PREFIX}${sid}`;
+  try {
+    const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
+    if (prev?.value === fp)
+      return "";
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [key, fp, now()]);
+  } catch {}
+  return composeEnvelopePronounWarning(hits);
+}
+function composeEnvelopePronounWarning(hits) {
+  if (hits.length === 0)
+    return "";
+  const shown = hits.slice(0, 3).map((h) => `  - "${h.pronoun}" in: ...${h.excerpt}...`).join(`
+`);
+  const more = hits.length > 3 ? `
+  ...and ${hits.length - 3} more.` : "";
+  return `[orch] AN ENVELOPE YOU JUST SENT TO ${hits[0].recipients} LANES USES AN UNATTACHED ` + `SECOND-PERSON PRONOUN, AND EACH READER BINDS IT TO THEMSELVES.
+${shown}${more}
+` + `  Thirteen attribution drifts were catalogued in one day, every one caught by a ` + `PERSON and none by an instrument - including two produced by the author of the ` + `pronoun rule, in messages citing that rule. Knowing it does not arm it. The fix is ` + `one edit: name the lane beside the claim ("@SA-xxxxxxxx's read", not "your read"). ` + `If the referent is already unambiguous here, send nothing - this is a fact for your ` + `judgment, not a gate, and only you know who you meant.`;
 }
 var HEREDOC_WARNING = "[orch] THIS HEREDOC CONTAINS BACKSLASH ESCAPES AND WILL LIKELY REWRITE THEM " + "SILENTLY. Git Bash + the interpreter reading stdin + backslash-bearing " + "source is three escaping layers, and each REWRITES the content rather than " + "failing - you get a plausible-looking file, not an error. Observed six times " + "in one session: one truncated a source file to 0 bytes, one invented a bug " + "that did not exist and cost real debugging time, three produced silent " + "no-match or unterminated literals. Use Write for new files and Edit for " + "changes. If a shell script is genuinely required, String.raw and a quoted " + "delimiter each close one layer - but the reliable move is not to open them.";
 function detectsHedge(prompt) {
@@ -25762,7 +25888,11 @@ function handleStop(ctx, args) {
   const key = `stop_${args.session_id}`;
   const exists = ctx.db.query(`SELECT 1 FROM plugin_state WHERE key = ?`).get(key);
   if (exists) {
-    return staleTask ? { decision: "block", reason: `[orch] ${staleTask}` } : {};
+    const pronounEarly = composeEnvelopePronounNudge(ctx, args.session_id);
+    const earlyParts = [staleTask ? `[orch] ${staleTask}` : "", pronounEarly].filter(Boolean);
+    return earlyParts.length ? { decision: "block", reason: earlyParts.join(`
+
+`) } : {};
   }
   ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, '1', ?)`, [key, now()]);
   const fresh = countFreshSurfaced(ctx.db, args.session_id);
@@ -25801,6 +25931,9 @@ ${list}${more}`);
   parts.push(`**${n}. Capture (note).** Decisions, conventions, anti-patterns, architecture, risks, insights, user preferences from this session. \`code_refs: [paths]\` when about specific code.`);
   n++;
   parts.push(`**${n}. Save progress.** \`save_progress\` with summary, open questions, next steps.`);
+  const pronoun = composeEnvelopePronounNudge(ctx, args.session_id);
+  if (pronoun)
+    parts.push(pronoun);
   return { decision: "block", reason: parts.join(`
 
 `) };
@@ -26575,10 +26708,10 @@ function readLatestRename(transcriptPath, knownSize) {
 // mcp/engine/restart_witness.ts
 import { openSync, readSync, closeSync, existsSync as existsSync8, statSync as statSync6 } from "fs";
 import { join as join8 } from "path";
-import { homedir as homedir3 } from "os";
+import { homedir as homedir4 } from "os";
 var RESTART_WINDOW_MS = 4 * 60 * 1000;
 function lifecycleLogPath() {
-  return join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir3(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+  return join8(process.env.CLAUDE_CONFIG_DIR || join8(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 }
 function lastCleanShutdownMs(logTail, sessionId) {
   let latest = null;
@@ -27815,7 +27948,7 @@ async function handleRespondToPermission(input, ctx) {
 }
 
 // mcp/server.ts
-import { homedir as homedir4 } from "os";
+import { homedir as homedir5 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
     const pkgPath = join10(import.meta.dir, "..", "package.json");
@@ -28081,7 +28214,7 @@ async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const sidecarStateDir = join10(homedir4(), ".claude", "orchestrator");
+  const sidecarStateDir = join10(homedir5(), ".claude", "orchestrator");
   try {
     if (!existsSync10(sidecarStateDir))
       mkdirSync4(sidecarStateDir, { recursive: true });
@@ -29709,7 +29842,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join10(homedir4(), ".claude", "projects", projectHash);
+  const projectsHashDir = join10(homedir5(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -29871,7 +30004,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir4(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir5(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
@@ -29884,7 +30017,7 @@ function checkInstallMismatch() {
   const runningRoot = normalizePath(resolve(import.meta.dir, ".."), caseFold);
   let installed = [];
   try {
-    const registryPath = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir4(), ".claude"), "plugins", "installed_plugins.json");
+    const registryPath = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir5(), ".claude"), "plugins", "installed_plugins.json");
     installed = extractInstalledPaths(JSON.parse(readFileSync6(registryPath, "utf8")), "orchestrator", caseFold);
   } catch {}
   return decideInstallMismatch(runningRoot, installed);
