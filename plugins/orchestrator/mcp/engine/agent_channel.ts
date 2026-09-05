@@ -283,9 +283,24 @@ export function formatClientTransportAlert(opts: {
     `99c00385 for a documented benign cause. A tally of zero does not make THIS ` +
     `one false; it means check before you act.\n` +
     `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:\n` +
-    `   1. Read this envelope's own from_task field. If it carries content ` +
-    `authored AFTER ${anchor}, the subject demonstrably received and wrote during ` +
-    `its claimed silence - refuted from inside this message, at zero cost.\n` +
+    // 2026-09-01 02:44Z correction (WI f7bc27b8). The shipped wording said a
+    // fresh from_task proved the subject "received and wrote" - which is the
+    // exact known-vs-inferred slippage this alert was rewritten to remove,
+    // reintroduced inside its own remedy, in the sentence ordered FIRST and
+    // pinned by a test. A fresh from_task proves the subject executed
+    // update_session_task; the alert's proposition is about DELIVERY of one
+    // message, and tool-execution is not message-reception.
+    //
+    // The fix is not to weaken the check - a valid reception proof exists in the
+    // same field. CONTENT-DEPENDENT RESPONSE: writing proves the subject ran;
+    // acting on content that ORIGINATED ELSEWHERE proves it received. That keeps
+    // the free check first AND tells the reader what to look for.
+    `   1. Read this envelope's own from_task field. If it REACTS TO content that ` +
+    `originated after ${anchor} - quotes a ruling, adopts a correction, names an ` +
+    `item it was handed - the subject RECEIVED, and the delivery claim is refuted ` +
+    `from inside this message at zero cost. MERE FRESHNESS PROVES ONLY THAT IT ` +
+    `RAN: a fresh from_task means the subject executed update_session_task, which ` +
+    `is tool-execution, not message-reception.\n` +
     `   2. Look for any channel message from the subject dated after ${anchor} in ` +
     `the context you already have.\n` +
     `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` +

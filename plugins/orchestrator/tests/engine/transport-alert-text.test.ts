@@ -55,6 +55,33 @@ describe("0.69.3: client_transport_suspect wording", () => {
       expect(text()).not.toContain("its transcript has not been written to since");
       expect(text()).not.toContain("Silence after a send means it cannot RECEIVE");
     });
+
+    test("check 1 keys on CONTENT-DEPENDENT RESPONSE, not on mere freshness", () => {
+      // WI f7bc27b8, 2026-09-01 02:44Z. The first prescribed check used to say a
+      // fresh from_task proved the subject "received and wrote" - the very
+      // known-vs-inferred slippage this alert was rewritten to remove,
+      // reintroduced inside its own remedy. A fresh from_task proves the subject
+      // executed update_session_task; the alert's proposition is about DELIVERY.
+      //
+      // The correction is not a downgrade: acting on content that originated
+      // elsewhere DOES prove reception. So the check keeps full strength and
+      // gains a description of what to look for.
+      const t = text();
+      expect(t).toContain("REACTS TO content that originated after");
+      expect(t).toMatch(/quotes a ruling, adopts a correction, names an item it was handed/);
+      expect(t).toContain("MERE FRESHNESS PROVES ONLY THAT IT RAN");
+      expect(t).toContain("tool-execution, not message-reception");
+    });
+
+    test("REJECTS the superseded 'received and wrote' wording", () => {
+      // The negative arm. Every other assertion here checks a phrase is PRESENT,
+      // and a wrong sentence can be absent from that list while sitting happily
+      // in the text - which is exactly how this defect survived a pinning test
+      // that already asserted check 1 was present and correctly ordered.
+      // A test that pins wording pins wording; it is not a check on whether the
+      // wording is TRUE. This one arm is what makes the correction durable.
+      expect(text()).not.toContain("demonstrably received and wrote");
+    });
   });
 
   describe("the denominator travels with the verdict", () => {
