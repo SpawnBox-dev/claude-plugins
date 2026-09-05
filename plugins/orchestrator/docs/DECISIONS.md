@@ -6,6 +6,28 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-09-05 - The edited-file curation check moves onto the recurring path (0.69.5, WI f86a4d4d)
+
+**Change.** `composeEditedFileCuration` is now also composed into the RECORDS CHECKPOINT nudge (`tickStaleTask`), alongside `composeOpenItemsNudge`. It previously ran only from the Stop-hook housekeeping block. New optional `dedupe` flag applies fingerprint suppression (`edited_curation_fp_<sid>`) on the recurring path only.
+
+**Why.** Jarid asked whether the hooks actually support the spirit of the activity-based nudges: *"keep agents diligent in CRUDing everything in the orchestrator DB that they have context on and reason to, so the KB stays as coherent and current as possible as agents do ongoing work."* Auditing them against that found one structural gap, and **this file had already diagnosed and fixed the identical defect for a sibling check**. `tickStaleTask`'s own docblock:
+
+> "Called on every Stop, deliberately OUTSIDE the once-per-session housekeeping block: that block is gated by `stop_<sid>` and fires exactly once per session, so a staleness check placed inside it could only ever run at the FIRST hand-back, when the declaration is newest, and would never fire in practice. (The first draft did exactly that and was inert.)"
+
+`composeEditedFileCuration` was left inside that gate, where the same argument holds and is sharper: at the first hand-back you have edited the FEWEST files, so the single firing a session gets is the one with the least to say. Measured in session 28e29d5d (2026-09-05): it fired once, early, reporting nothing, then stayed silent through 45 further turns during which that session wrote 5 notes and appended to 5 more.
+
+It belongs on the recurring path specifically because that nudge is the "bring everything you maintain up to date" moment, and **a note invalidated by your own edit is the least visible thing you maintain** - you never opened the note, so nothing else in the session will ever surface it.
+
+**Rejected.** (a) *A generic "update everything" line* - already considered and rejected with fleet-scale evidence (note 60f2fdc2); VARIANTS carries four such lines every turn and that regime is what failed. Volume is not the lever: a nudge that names a ROW gets acted on, a nudge that restates a PRINCIPLE becomes chrome. This change adds no exhortation, only the specific rows. (b) *Moving the check out of the Stop block entirely* - the Stop caller fires at most once and must always render; suppression there would mean never rendering. Hence `dedupe` is opt-in per caller. (c) *Clearing `edited_files_<sid>` after each firing* - it is also read by the Stop block, and clearing would make the two callers interfere; a fingerprint suppresses repeats without destroying shared state. (d) *Touching `VARIANTS` in the same pass* - a separate ruling for Jarid with the measured false-positive data in front of him (PA instrumented one of its own turns: ~25 orch injections, 3 carried live state).
+
+**Test additions.** `tests/tools/edited-curation-recurring.test.ts`, 6 tests: fires and names the note id on the motivating case; silent when nothing edited; silent when edited files have no notes; **does not repeat an unchanged set** (the anti-chrome control); re-fires when a NEW note describes a touched file; still silent for the first 29 turns. **Verified RED before the fix** - 3 fail / 3 pass with the wiring disabled, where the three failures are exactly the fires-arms and the three passes are the known-negatives that must stay silent in both states. Full suite 1349 pass / 0 fail; `tsc --noEmit` clean; `dist` rebuilt (the build-gate test caught the missing rebuild).
+
+**Still open, not in this release:** cut or fact-gate `VARIANTS`; give maintenance its own arm on the checkpoint cadence; no nudge exists for appending to an already-`done` work item, which silently drops it out of every active sweep.
+
+**Shipped:** version bump 0.69.5, WI `f86a4d4d`.
+
+---
+
 ## 2026-09-05 - Bound the embed sidecar's memory, and make its footprint visible (0.69.4)
 
 **Change.**

@@ -1818,6 +1818,26 @@ function tickStaleTask(
     }
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
+
+    // WI f86a4d4d: the edited-file curation check ALSO belongs on the recurring
+    // path, not only in the once-per-session Stop block.
+    //
+    // The argument is this function's own docblock, applied to a sibling check.
+    // tickStaleTask was deliberately placed OUTSIDE the `stop_<sid>` gate
+    // because a staleness check inside it "could only ever run at the FIRST
+    // hand-back... and would never fire in practice". composeEditedFileCuration
+    // was left inside that gate, where the identical argument holds and is in
+    // fact sharper: at the first hand-back you have edited the FEWEST files, so
+    // the one firing a session gets is the one with the least to say. Measured
+    // 2026-09-05: it fired once, early, reporting nothing, then stayed silent
+    // through 45 turns of note-writing.
+    //
+    // It belongs here specifically because THIS nudge is the "bring everything
+    // you maintain up to date" moment, and a note made wrong by your own edit is
+    // the least visible thing you maintain - you never opened the note, so
+    // nothing else in the session will ever surface it.
+    const editedCuration = composeEditedFileCuration(ctx, sid, { dedupe: true });
+
     return (
       `**RECORDS CHECKPOINT** - your declared task is ${count} ${unit} old, so this is the ` +
       `moment to bring everything you maintain back up to date, not just the one field.\n` +
@@ -1827,6 +1847,7 @@ function tickStaleTask(
       `sends the whole fleet, and your own future self, the wrong picture. ` +
       `If it is still accurate, re-declaring it costs one call and resets this.` +
       composeOpenItemsNudge(ctx, sid) +
+      (editedCuration ? `\n- ${editedCuration}` : "") +
       // THE ASK IS DELIBERATELY OPEN (Jarid, 2026-08-10): "i don't want to limit its scope
       // by telling it what specifically to update, the agent should reason over the things
       // it knows it should be maintaining and bloody maintain them in whatever
@@ -1970,8 +1991,31 @@ export function tickStaleTaskAction(ctx: HookCtx, sessionId: string): string {
   return tickStaleTask(ctx, sessionId, TASK_ACTS_KEY_PREFIX, STALE_TASK_ACTIONS, "actions");
 }
 
-function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
-  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+/** Fingerprint of the last edited-file curation set rendered to a RECURRING
+ *  caller, so an unchanged set is not re-reported on every firing. */
+const EDITED_CURATION_FP_KEY_PREFIX = "edited_curation_fp_";
+
+/**
+ * `dedupe` is for RECURRING callers only.
+ *
+ * The Stop-hook caller fires at most once per session, so it must always
+ * render - suppressing there would mean never rendering at all. The RECORDS
+ * CHECKPOINT caller fires every STALE_TASK_TURNS/ACTIONS for the life of the
+ * session, and `edited_files_<sid>` ACCUMULATES (capped at 60, never cleared),
+ * so without suppression it would re-list the identical notes at every firing.
+ * That is precisely how a specific nudge decays into chrome (note 60f2fdc2) -
+ * the failure this file exists to prevent - so the recurring path reuses the
+ * same fingerprint discipline as composeOpenItemsNudge: a NEW note describing
+ * a file you touched changes the fingerprint and renders immediately, which is
+ * exactly when it is worth reading.
+ */
+function composeEditedFileCuration(
+  ctx: HookCtx,
+  sessionId: string,
+  opts: { dedupe?: boolean } = {}
+): string {
+  const sid = sanitizeSessionId(sessionId);
+  const key = `${EDITED_FILES_KEY_PREFIX}${sid}`;
   const row = ctx.db
     .query(`SELECT value FROM plugin_state WHERE key = ?`)
     .get(key) as { value: string } | undefined;
@@ -1980,6 +2024,19 @@ function composeEditedFileCuration(ctx: HookCtx, sessionId: string): string {
 
   const hits = findNotesDescribingEditedFiles(ctx.db, files);
   if (hits.length === 0) return "";
+
+  if (opts.dedupe) {
+    const fp = hits.map((h) => h.id).join("|");
+    const fpKey = `${EDITED_CURATION_FP_KEY_PREFIX}${sid}`;
+    const prev = ctx.db
+      .query(`SELECT value FROM plugin_state WHERE key = ?`)
+      .get(fpKey) as { value: string } | undefined;
+    if (prev?.value === fp) return "";
+    ctx.db.run(
+      `INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`,
+      [fpKey, fp, now()]
+    );
+  }
 
   const lines = hits
     .map(

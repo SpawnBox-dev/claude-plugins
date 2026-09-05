@@ -25274,8 +25274,10 @@ function tickStaleTask(ctx, sessionId, keyPrefix, threshold, unit) {
     }
     const task = row.current_task.trim();
     const snippet = task.slice(0, 60) + (task.length > 60 ? "..." : "");
+    const editedCuration = composeEditedFileCuration(ctx, sid, { dedupe: true });
     return `**RECORDS CHECKPOINT** - your declared task is ${count} ${unit} old, so this is the ` + `moment to bring everything you maintain back up to date, not just the one field.
-` + `- \`update_session_task\` if it has drifted. It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.` + composeOpenItemsNudge(ctx, sid) + `
+` + `- \`update_session_task\` if it has drifted. It currently reads: "${snippet}". ` + `This is not bookkeeping: it is what peers see in their roster, what rides on every ` + `channel message, and what YOU are rebuilt from after a compaction - so a stale one ` + `sends the whole fleet, and your own future self, the wrong picture. ` + `If it is still accurate, re-declaring it costs one call and resets this.` + composeOpenItemsNudge(ctx, sid) + (editedCuration ? `
+- ${editedCuration}` : "") + `
 - **Then do your own pass.** The checks above are only what this plugin can SEE - ` + `they are not the list. You know what you have actually been keeping up this session: ` + `notes, docs, a spec, a tracker, a scratch file, a README, a peer you owe an update. ` + `Bring all of it current now, in whatever form each one actually needs. The test is ` + `simple - if a compaction landed right now, what would you have to reconstruct from ` + `memory? Write that down instead.`;
   } catch {
     return "";
@@ -25322,8 +25324,10 @@ function tickStaleTaskDeclaration(ctx, sessionId) {
 function tickStaleTaskAction(ctx, sessionId) {
   return tickStaleTask(ctx, sessionId, TASK_ACTS_KEY_PREFIX, STALE_TASK_ACTIONS, "actions");
 }
-function composeEditedFileCuration(ctx, sessionId) {
-  const key = `${EDITED_FILES_KEY_PREFIX}${sanitizeSessionId(sessionId)}`;
+var EDITED_CURATION_FP_KEY_PREFIX = "edited_curation_fp_";
+function composeEditedFileCuration(ctx, sessionId, opts = {}) {
+  const sid = sanitizeSessionId(sessionId);
+  const key = `${EDITED_FILES_KEY_PREFIX}${sid}`;
   const row = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(key);
   const files = row?.value ? row.value.split(`
 `).filter(Boolean) : [];
@@ -25332,6 +25336,14 @@ function composeEditedFileCuration(ctx, sessionId) {
   const hits = findNotesDescribingEditedFiles(ctx.db, files);
   if (hits.length === 0)
     return "";
+  if (opts.dedupe) {
+    const fp = hits.map((h) => h.id).join("|");
+    const fpKey = `${EDITED_CURATION_FP_KEY_PREFIX}${sid}`;
+    const prev = ctx.db.query(`SELECT value FROM plugin_state WHERE key = ?`).get(fpKey);
+    if (prev?.value === fp)
+      return "";
+    ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [fpKey, fp, now()]);
+  }
   const lines = hits.map((h) => `  - **${h.id.slice(0, 8)}** [${h.type}] describes \`${h.file}\`: ${truncate(h.content, 110)}`).join(`
 `);
   return `**Stale-by-your-own-edit.** You changed ${files.length} file${files.length === 1 ? "" : "s"} this session. ` + `These notes describe files you touched:
