@@ -114,7 +114,51 @@ def _build_feed(encodings: list) -> dict:
     return feed
 
 
+# Largest batch handed to ONNX in one forward pass.
+#
+# 🔴 THIS BOUNDS A PERMANENT LEAK, NOT JUST A TRANSIENT SPIKE. Measured
+# 2026-09-05 on a sidecar that had reached 9.7 GB RSS on a 32 GB box shared by
+# the whole fleet, while Windows was killing background tasks during a
+# production deploy.
+#
+# ONNX Runtime's CPU memory arena (SessionOptions.enable_cpu_mem_arena, ON by
+# default) grows to the largest allocation it has ever served and NEVER RETURNS
+# IT. An unchunked _embed passes the caller's whole list to encode_batch, so a
+# single large call permanently raises the process floor. Measured, same box,
+# same model, identical workload:
+#
+#   phase                     unchunked      chunked(32)
+#   model loaded, 0 calls        505 MB          505 MB
+#   400 calls of batch=1         508 MB          508 MB   <- call COUNT is not it
+#   one batch=256              1,906 MB          709 MB
+#   one batch=512              3,402 MB          714 MB
+#   after 100 more small calls 3,402 MB          713 MB   <- never returned
+#   PEAK working set           3,572 MB          743 MB
+#
+# So growth tracks the LARGEST BATCH EVER EMBEDDED, not uptime and not call
+# count - which is why a sidecar doing ordinary query traffic sits near
+# baseline for days and one that served a single backfill stays huge until it
+# is killed. Chunking bounds both the retained floor and the transient peak;
+# the peak is the one that actually gets a process OOM-killed mid-deploy.
+#
+# Disabling the arena also bounds the floor (520 MB) but leaves a 2,595 MB
+# transient peak, so chunking is the better lever and the arena is left on for
+# its speed. Raising this constant re-raises the ceiling proportionally.
+MAX_BATCH = 32
+
+
 def _embed(texts: list[str]) -> list[list[float]]:
+    """Embed in bounded chunks so one large call cannot raise the floor."""
+    if len(texts) <= MAX_BATCH:
+        return _embed_batch(texts)
+
+    out: list[list[float]] = []
+    for i in range(0, len(texts), MAX_BATCH):
+        out.extend(_embed_batch(texts[i:i + MAX_BATCH]))
+    return out
+
+
+def _embed_batch(texts: list[str]) -> list[list[float]]:
     """Tokenize, run ONNX inference, mean-pool, L2-normalize."""
     _tokenizer.enable_padding(length=None)
     _tokenizer.enable_truncation(max_length=512)
@@ -137,6 +181,60 @@ def _embed(texts: list[str]) -> list[list[float]]:
     normalized = pooled / norms
 
     return normalized.tolist()
+
+
+def _rss_mb() -> tuple[float, float]:
+    """(resident MB, peak resident MB). Best-effort, never raises: this is
+    diagnostics, and a /health that 500s because a memory probe failed would be
+    strictly worse than one that reports nulls."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            import ctypes.wintypes as wt
+
+            class PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            c = PMC()
+            c.cb = ctypes.sizeof(c)
+            # restype MUST be set. GetCurrentProcess returns the pseudo-handle
+            # (HANDLE)-1; with ctypes' default c_int restype that truncates to
+            # 32 bits on a 64-bit build, GetProcessMemoryInfo then fails, and
+            # this function returns (None, None) through a perfectly clean path
+            # with no exception raised. /health kept serving 200 with null
+            # memory fields, which reads as "the sidecar does not report this"
+            # rather than "the probe is broken".
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            h = ctypes.c_void_p(k32.GetCurrentProcess())
+            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(c), c.cb):
+                return (round(c.WorkingSetSize / 1048576, 1),
+                        round(c.PeakWorkingSetSize / 1048576, 1))
+            return (None, None)
+
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux reports KB, macOS bytes.
+        peak_mb = peak / 1024 if sys.platform.startswith("linux") else peak / 1048576
+        rss_mb = None
+        try:
+            with open("/proc/self/statm") as f:
+                rss_mb = round(int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1048576, 1)
+        except Exception:
+            pass
+        return (rss_mb, round(peak_mb, 1))
+    except Exception:
+        return (None, None)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -163,10 +261,21 @@ class _Handler(BaseHTTPRequestHandler):
             # /health to decide whether an existing sidecar is safe to adopt;
             # a lie here means adopting a sidecar of the wrong model and
             # writing vectors tagged with a model that did not produce them.
+            # rss_mb and peak_rss_mb let a caller (and system_status) see the
+            # sidecar's footprint without a process survey. Tonight's 9.7 GB
+            # sidecar was invisible until someone ran Win32_Process by hand, and
+            # the process that LOOKED like the sidecar (largest RSS) was an
+            # orphan nothing routed to - so the number belongs on the endpoint
+            # that identity is already established through.
+            rss, peak = _rss_mb()
             self._send_json(200, {
                 "status": "ready",
                 "model": _model_id,
                 "dim": _embedding_dim,
+                "pid": os.getpid(),
+                "rss_mb": rss,
+                "peak_rss_mb": peak,
+                "max_batch": MAX_BATCH,
             })
         else:
             self._send_json(404, {"error": "not found"})
