@@ -6,6 +6,37 @@ Pair with [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) for the framework the R
 
 ---
 
+## 2026-09-05 - Bound the embed sidecar's memory, and make its footprint visible (0.69.4)
+
+**Change.**
+- `sidecar/embed_server.py`: `_embed` now chunks at `MAX_BATCH = 32` instead of passing the caller's whole list to `encode_batch` in one forward pass.
+- `/health` additionally reports `pid`, `rss_mb`, `peak_rss_mb` and `max_batch`.
+- `EmbeddingClient.health()` exposes the full `/health` body; `system_status` reports the live sidecar's pid/resident/peak/max_batch, warns above 2 GB, and lists ORPHANED sidecars (processes listening on a port the port file does not name, which no session can reach).
+- An orphan reaper exists but is **OFF by default** (`ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1`).
+
+**Why.** A sidecar reached 9.7 GB RSS on a 32 GB box shared by six agent sessions, and Windows began killing background tasks during a production deploy. The mechanism was measured, not assumed: ONNX Runtime's CPU memory arena (`enable_cpu_mem_arena`, on by default) grows to the largest allocation it has ever served and never returns it, so a single large call permanently raises the process floor.
+
+| phase | unchunked | arena off | chunked(32) |
+|---|---|---|---|
+| model loaded, 0 calls | 505 MB | 505 MB | 505 MB |
+| 400 calls of batch=1 | 508 MB | 508 MB | 508 MB |
+| one batch=256 | 1,906 MB | 516 MB | 709 MB |
+| one batch=512 | 3,402 MB | 519 MB | 714 MB |
+| after 100 more small calls | 3,402 MB | 521 MB | 713 MB |
+| **peak working set** | **3,572 MB** | 2,595 MB | **743 MB** |
+
+Growth tracks the **largest batch ever embedded** - not uptime, not call count. That is why a sidecar serving ordinary queries sits near baseline for days while one that served a single backfill stays huge until killed, and why "restart it" is a reclaim rather than a fix. Chunking is bit-exact: 200 texts of differing lengths (so chunk boundaries change padding width) produce vectors identical to a single unchunked pass, 200/200, max elementwise delta 0.000e+00, with a control confirming the comparison can detect a difference. That mattered more than the memory - a perturbation there would have degraded semantic search silently.
+
+This is the second occurrence. `ff07c4a8` recorded four sidecars with two orphans at 5,424 MB on 2026-08-27 and sat `planned` for nine days.
+
+**Rejected.** (a) *Disabling the arena* - bounds the floor to ~520 MB but leaves a 2,595 MB transient peak, and the peak is what gets a process OOM-killed mid-deploy; chunking bounds both, so the arena keeps its speed. (b) *"Have the plugin upgrade terminate the previous version's sidecar"* (the originally-filed fix) - since 0.45.1 the port file lives at a stable per-user path precisely so ONE sidecar serves all versions, so there is no previous-version sidecar to terminate. The real defect is orphan-ness, and reaping must key on ROUTING, not version. (c) *"Shut the sidecar down on session exit"* - the sidecar is deliberately shared, so a session reaping its own on exit breaks every sibling that adopted it. (d) *Reaping orphans by default* - "adopters never kill a sidecar they did not start" is a safety property, not an oversight: a session that adopted one holds a client bound to that port and is never notified when the port file changes, so a reap can silently cost a live sibling its semantic search. With the ceiling now ~750 MB, an un-reaped orphan costs ~750 MB rather than 5-10 GB - the urgency that would justify overriding an intentional safety property is exactly what the chunking fix removed. Reporting has no such downside and is unconditional.
+
+**Not claimed.** Throughput. The box was under concurrent fleet load and the chunked build's `batch=1` path - byte-identical code to the unchunked one - measured 38% apart, which is the noise floor and it swallows the effect being measured.
+
+**Test additions.** None in `bun test`; the evidence is an executed measurement harness against a throwaway sidecar on its own port file, plus a bit-exactness comparison against an unchunked control. `bun run typecheck` clean.
+
+**Shipped:** `2ab5101` (bound), `1c86e01` (visibility + opt-in reaper), version bump 0.69.4.
+
 ## 2026-07-11 - Role-aware + symmetric post-compact recovery + deterministic pre-compact capture (WI 2ad3240e)
 
 **Change.** Post-compaction recovery in `mcp/tools/hook_event.ts` is now tuned to the compacted session's own `role` (read from `sessions.role` in the agent-channel registry via `getLiveSessions()`), and is symmetric across PA and SA:
