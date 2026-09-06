@@ -6538,10 +6538,17 @@ function appendLifecycleLine(filePath, line, capBytes, nowIso) {
     appendFileSync(filePath, line);
   } catch {}
 }
-function emitLifecycleLine(writeStderr, writeFile, line) {
-  writeFile(line);
+var LEADING_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /;
+function stampLifecycleLine(line, nowIso) {
+  if (LEADING_STAMP.test(line))
+    return line;
+  return `${nowIso} ${line}`;
+}
+function emitLifecycleLine(writeStderr, writeFile, line, nowIso) {
+  const stamped = stampLifecycleLine(line, nowIso);
+  writeFile(stamped);
   try {
-    writeStderr(line);
+    writeStderr(stamped);
   } catch {}
 }
 
@@ -23684,6 +23691,15 @@ function extractInstalledPaths(registry2, pluginName, caseFold) {
 function formatMismatchLine(check2) {
   return `install-mismatch: this window is running the plugin from ${check2.runningRoot}, ` + `but installed_plugins.json names ${check2.installedPaths.join(", ")}. ` + `Restart THIS window to pick up the installed copy. ` + `Until then expect duplicate MCP servers under this window - the harness can ` + `start the plugin from either directory (WI 61da44fa). ` + `This is a statement of fact, not a fault: a deliberate rollback looks the same.`;
 }
+var MISMATCH_NUDGE_INTERVAL_MS = 10 * 60000;
+function shouldNudgeMismatch(lastNudgeMs, nowMs, intervalMs = MISMATCH_NUDGE_INTERVAL_MS) {
+  if (lastNudgeMs === null)
+    return true;
+  return nowMs - lastNudgeMs >= intervalMs;
+}
+function formatMismatchNudge(check2) {
+  return `[orch] \uD83D\uDD34 INSTALL MISMATCH - this window runs the plugin from ${check2.runningRoot} ` + `while ${check2.installedPaths.join(", ")} is installed. The harness may be running a ` + `SECOND, stale MCP server under this window, racing this one for your messages, so ` + `cross-session delivery here is a coin-flip and killing the extra process does not ` + `hold. Remedy: restart this window. Not the plugin's bug ` + `(WI 61da44fa, anthropics/claude-code#25976).`;
+}
 
 // mcp/engine/orphan_watchdog.ts
 function decideWatchdogAction(liveness, currentStreak, threshold) {
@@ -27036,6 +27052,38 @@ function appendEmitLog(stateDir, rec) {
 `);
   } catch {}
 }
+function summarizeScanGaps(records, receiverId8, sinceIso) {
+  const senders = new Set;
+  let count = 0;
+  let bytes = 0;
+  let firstTs = null;
+  let lastTs = null;
+  for (const r of records) {
+    if (r.event !== "scan_gap")
+      continue;
+    if (r.receiver_id8 !== receiverId8)
+      continue;
+    if (r.ts < sinceIso)
+      continue;
+    count++;
+    const span = (r.scan_to ?? 0) - (r.scan_from ?? 0);
+    if (span > 0)
+      bytes += span;
+    if (r.sender_id8)
+      senders.add(r.sender_id8);
+    if (firstTs === null || r.ts < firstTs)
+      firstTs = r.ts;
+    if (lastTs === null || r.ts > lastTs)
+      lastTs = r.ts;
+  }
+  return { count, bytes, senders: [...senders].sort(), firstTs, lastTs };
+}
+function formatScanGapWarning(s) {
+  if (s.count === 0)
+    return null;
+  const who = s.senders.length ? ` while reading ${s.senders.length} source transcript${s.senders.length === 1 ? "" : "s"}` + ` (${s.senders.join(", ")} - these name the FILES contended for, NOT sessions at fault)` : "";
+  return `DUPLICATE READER DETECTED: this session's message bookmark advanced past ` + `${s.bytes.toLocaleString()} bytes that this server never read, ${s.count} time` + `${s.count === 1 ? "" : "s"}${who}, since this process started ` + `(first ${s.firstTs}, last ${s.lastTs}). That means a SECOND process is ` + `consuming this session's inbound messages and racing this one for them. ` + `Cross-session delivery here is currently non-deterministic. ` + `THIS IS NOT PROOF OF LOSS - the other reader may have delivered every one ` + `of those bytes - but it is proof the read path is contended. ` + `Remedy: RESTART THIS WINDOW. Killing the extra process does not hold; it ` + `respawns within minutes (WI 61da44fa, anthropics/claude-code#25976).`;
+}
 
 // mcp/engine/agent_channel.ts
 var POLL_INTERVAL_MS = 1500;
@@ -28760,6 +28808,28 @@ server.tool("briefing", 'Get up to speed on the current project. Returns open th
 `;
     text += "Semantic search (embeddings) is not active. Call `install_embeddings` to check dependencies and enable it.\n";
   }
+  try {
+    const selfSid = resolveSessionId(session_id);
+    if (selfSid) {
+      const stateDir = join11(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+      const warning = formatScanGapWarning(summarizeScanGaps(readEmitLog(stateDir), selfSid.slice(0, 8), new Date(mcpStartMs).toISOString()));
+      if (warning)
+        text = `## \uD83D\uDD34 ${warning}
+
+${text}`;
+    }
+  } catch {}
+  try {
+    const install = checkInstallMismatch();
+    if (install.verdict === "mismatch") {
+      text = `## \uD83D\uDD34 INSTALL MISMATCH - READ BEFORE TRUSTING THIS SESSION'S MESSAGING
+` + `${formatMismatchLine(install)}
+
+Expect duplicate MCP servers under this window until it is restarted, racing each other for the same messages. Killing the extra process does NOT hold - it respawns within minutes. Restarting THIS window is the only remedy that converges. Background: WI 61da44fa, anthropics/claude-code#25976 - it is the harness's race, not the plugin's.
+
+` + text;
+    }
+  } catch {}
   return {
     content: [{ type: "text", text }]
   };
@@ -30159,9 +30229,36 @@ server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks 
     agent_id: args.agent_id,
     payload: Object.keys(payload).length > 0 ? payload : undefined
   });
+  if (args.event === "UserPromptSubmit") {
+    const prepend = (nudge) => {
+      result.additionalContext = result.additionalContext ? `${nudge}
+
+${result.additionalContext}` : nudge;
+    };
+    try {
+      const install = checkInstallMismatch();
+      if (install.verdict === "mismatch" && shouldNudgeMismatch(lastMismatchNudgeMs, Date.now())) {
+        lastMismatchNudgeMs = Date.now();
+        prepend(formatMismatchNudge(install));
+      }
+    } catch {}
+    try {
+      const selfSid = resolveSessionId(args.session_id);
+      if (selfSid && shouldNudgeMismatch(lastScanGapNudgeMs, Date.now())) {
+        const stateDir = join11(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+        const warning = formatScanGapWarning(summarizeScanGaps(readEmitLog(stateDir), selfSid.slice(0, 8), new Date(mcpStartMs).toISOString()));
+        if (warning) {
+          lastScanGapNudgeMs = Date.now();
+          prepend(`[orch] \uD83D\uDD34 ${warning}`);
+        }
+      }
+    } catch {}
+  }
   const envelope = buildHookEnvelope(args.event, result);
   return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
 });
+var lastMismatchNudgeMs = null;
+var lastScanGapNudgeMs = null;
 var agentChannel = null;
 var permissionRelay = null;
 function sanitizeChannelMeta(raw) {
@@ -30379,7 +30476,7 @@ function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
 }
 function emitLifecycle(line) {
-  emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
+  emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line, new Date().toISOString());
 }
 function checkInstallMismatch() {
   const caseFold = process.platform === "win32" || process.platform === "darwin";
