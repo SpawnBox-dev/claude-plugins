@@ -74,6 +74,8 @@ import {
   summarizeLoss,
   formatLossReport,
   readSeenWindow,
+  summarizeScanGaps,
+  formatScanGapWarning,
 } from "./engine/agent_channel_emitlog";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
@@ -1061,6 +1063,33 @@ server.tool(
     // Silent on every verdict but `mismatch`: `match`, `unknown` and
     // `not-a-cache-copy` are all ordinary, and a banner that fires on the
     // ordinary case is one people learn to skip.
+    // Scan-gap banner. Independent of the install check on purpose: a
+    // duplicate reader can arise from a SAME-VERSION restart, which produces
+    // no install mismatch at all and is invisible to every process-arithmetic
+    // proxy. This one keys on the symptom instead of the cause.
+    try {
+      const selfSid = resolveSessionId(session_id);
+      if (selfSid) {
+        const stateDir = join(
+          process.env.ORCHESTRATOR_PROJECT_ROOT ||
+            process.env.CLAUDE_PROJECT_DIR ||
+            process.cwd(),
+          ".orchestrator-state",
+          "agent-channel",
+        );
+        const warning = formatScanGapWarning(
+          summarizeScanGaps(
+            readEmitLog(stateDir),
+            selfSid.slice(0, 8),
+            new Date(mcpStartMs).toISOString(),
+          ),
+        );
+        if (warning) text = `## 🔴 ${warning}\n\n${text}`;
+      }
+    } catch {
+      /* diagnostics must never break the tool that reports them */
+    }
+
     try {
       const install = checkInstallMismatch();
       if (install.verdict === "mismatch") {
@@ -3105,6 +3134,11 @@ server.tool(
     // read as context rather than acted on as a decision, so prepending here
     // cannot alter a permission verdict or block a tool.
     if (args.event === "UserPromptSubmit") {
+      const prepend = (nudge: string) => {
+        result.additionalContext = result.additionalContext
+          ? `${nudge}\n\n${result.additionalContext}`
+          : nudge;
+      };
       try {
         const install = checkInstallMismatch();
         if (
@@ -3112,10 +3146,36 @@ server.tool(
           shouldNudgeMismatch(lastMismatchNudgeMs, Date.now())
         ) {
           lastMismatchNudgeMs = Date.now();
-          const nudge = formatMismatchNudge(install);
-          result.additionalContext = result.additionalContext
-            ? `${nudge}\n\n${result.additionalContext}`
-            : nudge;
+          prepend(formatMismatchNudge(install));
+        }
+      } catch {
+        /* diagnostics must never break the hook that carries them */
+      }
+      // Independent of the install check: a duplicate reader can arise from a
+      // SAME-VERSION restart, which produces no mismatch and is invisible to
+      // every process-arithmetic proxy. Same 10-minute cadence, separate
+      // timer, so one condition firing cannot mute the other.
+      try {
+        const selfSid = resolveSessionId(args.session_id);
+        if (selfSid && shouldNudgeMismatch(lastScanGapNudgeMs, Date.now())) {
+          const stateDir = join(
+            process.env.ORCHESTRATOR_PROJECT_ROOT ||
+              process.env.CLAUDE_PROJECT_DIR ||
+              process.cwd(),
+            ".orchestrator-state",
+            "agent-channel",
+          );
+          const warning = formatScanGapWarning(
+            summarizeScanGaps(
+              readEmitLog(stateDir),
+              selfSid.slice(0, 8),
+              new Date(mcpStartMs).toISOString(),
+            ),
+          );
+          if (warning) {
+            lastScanGapNudgeMs = Date.now();
+            prepend(`[orch] 🔴 ${warning}`);
+          }
         }
       } catch {
         /* diagnostics must never break the hook that carries them */
@@ -3129,6 +3189,9 @@ server.tool(
 
 /** Last time the install-mismatch nudge was emitted; null until the first. */
 let lastMismatchNudgeMs: number | null = null;
+/** Separate timer for the scan-gap nudge - the two conditions are
+ *  independent and one must never mute the other by sharing a clock. */
+let lastScanGapNudgeMs: number | null = null;
 
 // Cascade resolution helper now lives in `tools/cascade.ts` (shared with the
 // `resolution: close_existing` path in remember.ts). Imported above.

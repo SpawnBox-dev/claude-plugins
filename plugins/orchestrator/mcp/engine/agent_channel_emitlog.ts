@@ -810,3 +810,100 @@ export function appendEmitLog(stateDir: string, rec: EmitLogRecord): void {
     // Diagnostics must never break routing.
   }
 }
+
+// ===========================================================================
+// SCAN-GAP SURFACING (WI 6cf7437a / 61da44fa, 2026-09-06).
+//
+// WHY THIS EXISTS RATHER THAN A SCRIPT SOMEONE RUNS. `post-reload-check.mjs`
+// answers "is a second watcher consuming this session's transcripts?" - and it
+// is a thing a human must REMEMBER to run after a reload, which is the exact
+// shape of the defect it was built to catch. `install-mismatch` was correct,
+// fired five times, named the day's failure nine minutes ahead with the work
+// item attached, and changed nothing, because being right is not the same as
+// being read. So the server reports the symptom itself.
+//
+// WHY scan_gap AND NOT PROCESS ARITHMETIC. Every cheap proxy for "is there a
+// duplicate" failed in one direction or the other on 2026-09-06: a watcher
+// COUNT passed at four-versus-four with two duplicates live; a VERSION compare
+// produced a false positive on a healthy mid-rollout fleet; the registry's
+// `instance` column OSCILLATES last-writer-wins on the 30s heartbeat, so a
+// single read of it is a coin. `scan_gap` needs none of them. It fires when
+// this watcher's own bookmark advanced past bytes it never read, which can
+// only happen if something else moved it - and it does not care what that
+// something was, what version it runs, or which process the registry names.
+//
+// WHAT IT DOES NOT CLAIM, and the wording holds this line deliberately: A GAP
+// IS A RACE ARTIFACT, NOT A LOSS. The losing reader logs the gap; the winning
+// reader read those bytes and emitted them, and the message arrives. It
+// becomes real loss only when the winner is a reader with no live client. So
+// this reports a DEGRADED, WASTEFUL, NON-DETERMINISTIC state - which is worth
+// interrupting someone for - and stops short of asserting anything was lost.
+// An alert that overstates its evidence trains its readers to discount it.
+// ===========================================================================
+
+export interface ScanGapSummary {
+  /** How many gap records this receiver logged in the window. */
+  count: number;
+  /** Total bytes this watcher's bookmark skipped over. */
+  bytes: number;
+  /** Distinct senders whose transcripts were affected, for the report. */
+  senders: string[];
+  firstTs: string | null;
+  lastTs: string | null;
+}
+
+/**
+ * Gaps THIS receiver logged at or after `sinceIso`.
+ *
+ * Bounded to the caller's own `receiver_id8` because a peer's gaps are that
+ * peer's problem to report; mixing them would let a healthy window inherit a
+ * sick one's alarm. Comparison is ISO string ordering, which is correct only
+ * for the Z-suffixed UTC stamps this log writes - the same constraint the
+ * seen-window reader documents, and the reason nothing here parses dates.
+ */
+export function summarizeScanGaps(
+  records: EmitLogRecord[],
+  receiverId8: string,
+  sinceIso: string,
+): ScanGapSummary {
+  const senders = new Set<string>();
+  let count = 0;
+  let bytes = 0;
+  let firstTs: string | null = null;
+  let lastTs: string | null = null;
+  for (const r of records) {
+    if (r.event !== "scan_gap") continue;
+    if (r.receiver_id8 !== receiverId8) continue;
+    if (r.ts < sinceIso) continue;
+    count++;
+    const span = (r.scan_to ?? 0) - (r.scan_from ?? 0);
+    if (span > 0) bytes += span;
+    if (r.sender_id8) senders.add(r.sender_id8);
+    if (firstTs === null || r.ts < firstTs) firstTs = r.ts;
+    if (lastTs === null || r.ts > lastTs) lastTs = r.ts;
+  }
+  return { count, bytes, senders: [...senders].sort(), firstTs, lastTs };
+}
+
+/**
+ * One paragraph for a briefing banner or an every-turn nudge. `null` when
+ * there is nothing to say, so the caller has no verdict logic of its own.
+ */
+export function formatScanGapWarning(s: ScanGapSummary): string | null {
+  if (s.count === 0) return null;
+  const who = s.senders.length
+    ? ` across ${s.senders.length} sender${s.senders.length === 1 ? "" : "s"} (${s.senders.join(", ")})`
+    : "";
+  return (
+    `DUPLICATE READER DETECTED: this session's message bookmark advanced past ` +
+    `${s.bytes.toLocaleString()} bytes that this server never read, ${s.count} time` +
+    `${s.count === 1 ? "" : "s"}${who}, since this process started ` +
+    `(first ${s.firstTs}, last ${s.lastTs}). That means a SECOND process is ` +
+    `consuming this session's inbound messages and racing this one for them. ` +
+    `Cross-session delivery here is currently non-deterministic. ` +
+    `THIS IS NOT PROOF OF LOSS - the other reader may have delivered every one ` +
+    `of those bytes - but it is proof the read path is contended. ` +
+    `Remedy: RESTART THIS WINDOW. Killing the extra process does not hold; it ` +
+    `respawns within minutes (WI 61da44fa, anthropics/claude-code#25976).`
+  );
+}
