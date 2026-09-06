@@ -26595,7 +26595,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync10, statSync as statSync8, readdirSync as readdirSync4 } from "fs";
+import { openSync as openSync3, readSync as readSync3, closeSync as closeSync3, existsSync as existsSync10, statSync as statSync8, readdirSync as readdirSync4 } from "fs";
 import { join as join10 } from "path";
 
 // mcp/engine/addressing.ts
@@ -26863,7 +26863,17 @@ ${decisionSummary}` : decisionSummary
 }
 
 // mcp/engine/agent_channel_emitlog.ts
-import { appendFileSync as appendFileSync2, readFileSync as readFileSync6, statSync as statSync7, renameSync, existsSync as existsSync9, unlinkSync as unlinkSync4 } from "fs";
+import {
+  appendFileSync as appendFileSync2,
+  readFileSync as readFileSync6,
+  statSync as statSync7,
+  renameSync,
+  existsSync as existsSync9,
+  unlinkSync as unlinkSync4,
+  openSync as openSync2,
+  readSync as readSync2,
+  closeSync as closeSync2
+} from "fs";
 import { join as join9 } from "path";
 var MAX_BYTES = 4 * 1024 * 1024;
 var EMIT_LOG_BASENAME = "emit-log.jsonl";
@@ -26875,12 +26885,52 @@ function newEmitId() {
 function emitLogPath(stateDir) {
   return join9(stateDir, EMIT_LOG_BASENAME);
 }
+function readSeenWindow(transcriptPath, maxBytes = 4 * 1024 * 1024) {
+  let raw;
+  let truncated = false;
+  try {
+    const size = statSync7(transcriptPath).size;
+    if (size > maxBytes) {
+      const fd = openSync2(transcriptPath, "r");
+      try {
+        const buf = Buffer.allocUnsafe(maxBytes);
+        const read = readSync2(fd, buf, 0, maxBytes, size - maxBytes);
+        raw = buf.subarray(0, read).toString("utf8");
+        truncated = true;
+      } finally {
+        closeSync2(fd);
+      }
+    } else {
+      raw = readFileSync6(transcriptPath, "utf8");
+    }
+  } catch {
+    return { ids: [], since: null, measured: false };
+  }
+  if (truncated) {
+    const nl = raw.indexOf(`
+`);
+    raw = nl === -1 ? "" : raw.slice(nl + 1);
+  }
+  const since = truncated ? earliestTimestamp(raw) : null;
+  return { ids: extractSeenEmitIds(raw), since, measured: true };
+}
+function earliestTimestamp(slice) {
+  const m = /\\?"timestamp\\?":\\?"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^"\\]+)\\?"/.exec(slice);
+  return m ? m[1] : null;
+}
+function formatPerSender(discarded) {
+  return Object.entries(discarded).sort((a, b) => b[1] - a[1]).map(([sid, n]) => `${sid.slice(0, 8)}:${n}`).join(", ");
+}
 function formatLossReport(r) {
+  if (!r.measured) {
+    const disc = r.discardedTotal > 0 ? ` Separately, ${r.discardedTotal} message(s) WERE read and discarded ` + `because their sender could not be identified (${formatPerSender(r.discarded)}); ` + `that half is measured and is real.` : "";
+    return `CHANNEL DELIVERY COULD NOT BE MEASURED. This session's own transcript ` + `could not be read, so there is no way to tell which of the ` + `${r.observedEmits} notification(s) sent to it actually arrived. This is ` + `a broken instrument, NOT a finding of loss and NOT an all-clear - do ` + `not read it as either.${disc}`;
+  }
   if (r.discardedTotal === 0 && r.counterGaps === 0)
     return null;
   const parts = [];
   if (r.discardedTotal > 0) {
-    const per = Object.entries(r.discarded).sort((a, b) => b[1] - a[1]).map(([sid, n]) => `${sid.slice(0, 8)}:${n}`).join(", ");
+    const per = formatPerSender(r.discarded);
     parts.push(`${r.discardedTotal} message(s) were READ AND DISCARDED because their ` + `sender could not be identified (${per}). These never became ` + `notifications, so they leave NO gap at any receiver - this counter is ` + `the only thing that can see them.`);
   }
   if (r.counterGaps > 0) {
@@ -26906,7 +26956,8 @@ function readEmitLog(stateDir, path2 = emitLogPath(stateDir)) {
   }
   return out;
 }
-function summarizeLoss(records, receiverId8, seenEmitIds) {
+function summarizeLoss(records, receiverId8, window) {
+  const seenEmitIds = window.ids;
   const discarded = {};
   let discardedTotal = 0;
   for (const r of records) {
@@ -26918,13 +26969,30 @@ function summarizeLoss(records, receiverId8, seenEmitIds) {
     discarded[key] = (discarded[key] ?? 0) + 1;
     discardedTotal++;
   }
-  const sent = new Set(records.filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id).map((r) => r.emit_id));
+  const sent = new Set(records.filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id).filter((r) => !window.since || r.ts >= window.since).map((r) => r.emit_id));
+  if (!window.measured) {
+    return {
+      discarded,
+      discardedTotal,
+      counterGaps: 0,
+      observedEmits: sent.size,
+      measured: false,
+      since: window.since
+    };
+  }
   const seen = new Set(seenEmitIds);
   let missing = 0;
   for (const id of sent)
     if (!seen.has(id))
       missing++;
-  return { discarded, discardedTotal, counterGaps: missing, observedEmits: sent.size };
+  return {
+    discarded,
+    discardedTotal,
+    counterGaps: missing,
+    observedEmits: sent.size,
+    measured: true,
+    since: window.since
+  };
 }
 function extractSeenEmitIds(transcript) {
   const out = [];
@@ -27418,15 +27486,15 @@ class AgentChannel {
       const length = size - start;
       if (length <= 0)
         return "";
-      fd = openSync2(path2, "r");
+      fd = openSync3(path2, "r");
       const chunk = Buffer.allocUnsafe(length);
-      const n = readSync2(fd, chunk, 0, length, start);
+      const n = readSync3(fd, chunk, 0, length, start);
       return chunk.subarray(0, n).toString("utf8");
     } catch {
       return null;
     } finally {
       if (fd !== undefined)
-        closeSync2(fd);
+        closeSync3(fd);
     }
   }
   detectIngress(current, now3) {
@@ -27723,16 +27791,16 @@ class AgentChannel {
     let buf;
     let fd;
     try {
-      fd = openSync2(file, "r");
+      fd = openSync3(file, "r");
       const length = stat.size - lastOffset;
       const chunk = Buffer.allocUnsafe(length);
-      const bytesRead = readSync2(fd, chunk, 0, length, lastOffset);
+      const bytesRead = readSync3(fd, chunk, 0, length, lastOffset);
       buf = chunk.subarray(0, bytesRead).toString("utf8");
     } catch {
       return false;
     } finally {
       if (fd !== undefined)
-        closeSync2(fd);
+        closeSync3(fd);
     }
     const lines = buf.split(`
 `);
@@ -28387,9 +28455,9 @@ async function startSidecar() {
     } catch {}
   };
   try {
-    const { openSync: openSync3, closeSync: closeSync3 } = await import("fs");
+    const { openSync: openSync4, closeSync: closeSync4 } = await import("fs");
     try {
-      closeSync3(openSync3(lockFile, "wx"));
+      closeSync4(openSync4(lockFile, "wx"));
       holdsLock = true;
     } catch {
       const age = Date.now() - (statSync9(lockFile).mtimeMs || 0);
@@ -28399,7 +28467,7 @@ async function startSidecar() {
           unlinkSync5(lockFile);
         } catch {}
         try {
-          closeSync3(openSync3(lockFile, "wx"));
+          closeSync4(openSync4(lockFile, "wx"));
           holdsLock = true;
         } catch {}
       }
@@ -28720,12 +28788,9 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const selfSid = resolveSessionId();
     if (selfSid) {
       const records = readEmitLog(channelStateDir);
-      let seen = [];
-      try {
-        const hashDir = (process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd()).replace(/[\\/:]/g, "-").replace(/^-+/, "");
-        seen = extractSeenEmitIds(readFileSync7(join11(homedir5(), ".claude", "projects", hashDir, `${selfSid}.jsonl`), "utf8"));
-      } catch {}
-      const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), seen));
+      const hashDir = (process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd()).replace(/[\\/:]/g, "-").replace(/^-+/, "");
+      const window = readSeenWindow(join11(homedir5(), ".claude", "projects", hashDir, `${selfSid}.jsonl`));
+      const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), window));
       if (report) {
         lines.push(`- \uD83D\uDD34 **Channel loss**: ${report}`);
       }

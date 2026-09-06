@@ -26,6 +26,13 @@ import {
 //   - a clean window must produce NO output, so the report keeps meaning
 // ===========================================================================
 
+/** A successfully-read seen-window covering everything. The `measured` flag is
+ *  the point: an unreadable transcript is a THIRD state, neither clean nor
+ *  lossy, and tests that could not express it are how the blocker got in. */
+const win = (ids: string[], since: string | null = null) => ({ ids, since, measured: true });
+/** The failure case: the transcript could not be read at all. */
+const unread = { ids: [] as string[], since: null, measured: false };
+
 describe("parseEmitId", () => {
   test("splits a real generated id into epoch and sequence", () => {
     const id = newEmitId();
@@ -115,8 +122,61 @@ describe("formatLossReport", () => {
     // A report that prints a reassuring zero every time stops being read, and
     // then the one that matters is skimmed too.
     expect(
-      formatLossReport({ discarded: {}, discardedTotal: 0, counterGaps: 0, observedEmits: 40 }),
+      formatLossReport({
+        discarded: {},
+        discardedTotal: 0,
+        counterGaps: 0,
+        observedEmits: 40,
+        measured: true,
+      }),
     ).toBeNull();
+  });
+
+  describe("UNMEASURED is a third state - neither clean nor lossy", () => {
+    // THE BLOCKER PA CAUGHT. If the transcript read fails, the seen-set is
+    // empty, so every sent id looks missing and the report announced that
+    // EVERY message was lost - a maximal false alarm. Worse than a crash,
+    // because the block still produced output, so a broken instrument
+    // impersonated a finding.
+    test("never reports a number when the transcript could not be read", () => {
+      const out = formatLossReport({
+        discarded: {},
+        discardedTotal: 0,
+        counterGaps: 40, // what the old code would have computed
+        observedEmits: 40,
+        measured: false,
+      })!;
+      expect(out).toContain("COULD NOT BE MEASURED");
+      expect(out).toContain("NOT a finding of loss");
+      expect(out).toContain("NOT an all-clear");
+      // The fabricated total must not appear as a loss count.
+      expect(out).not.toContain("40 notification(s) were emitted and sent but never");
+    });
+
+    test("is never SILENT either - silence would claim a healthy check ran", () => {
+      expect(
+        formatLossReport({
+          discarded: {},
+          discardedTotal: 0,
+          counterGaps: 0,
+          observedEmits: 0,
+          measured: false,
+        }),
+      ).not.toBeNull();
+    });
+
+    test("still reports the discard half, which is measured independently", () => {
+      const out = formatLossReport({
+        discarded: { bbbbbbbb: 3 },
+        discardedTotal: 3,
+        counterGaps: 0,
+        observedEmits: 12,
+        measured: false,
+      })!;
+      expect(out).toContain("COULD NOT BE MEASURED");
+      expect(out).toContain("bbbbbbbb:3");
+      expect(out).toContain("that half is measured and is real");
+    });
   });
 
   test("reports discards even when the counter is clean", () => {
@@ -127,7 +187,7 @@ describe("formatLossReport", () => {
       discarded: { "3f2eac48-1df2-46f6-8db6-670efcb066a6": 2 },
       discardedTotal: 2,
       counterGaps: 0,
-      observedEmits: 40,
+      observedEmits: 40, measured: true,
     });
     expect(out).not.toBeNull();
     expect(out).toContain("READ AND DISCARDED");
@@ -140,7 +200,7 @@ describe("formatLossReport", () => {
       discarded: {},
       discardedTotal: 0,
       counterGaps: 3,
-      observedEmits: 40,
+      observedEmits: 40, measured: true,
     });
     expect(out).not.toBeNull();
     expect(out).toContain("never");
@@ -155,7 +215,7 @@ describe("formatLossReport", () => {
       discarded: { aaaaaaaa: 1, bbbbbbbb: 4 },
       discardedTotal: 5,
       counterGaps: 2,
-      observedEmits: 100,
+      observedEmits: 100, measured: true,
     })!;
     expect(out).toContain("READ AND DISCARDED");
     expect(out).toContain("past this plugin's boundary");
@@ -168,7 +228,7 @@ describe("formatLossReport", () => {
       discarded: { aaaaaaaa: 1 },
       discardedTotal: 1,
       counterGaps: 0,
-      observedEmits: 10,
+      observedEmits: 10, measured: true,
     })!;
     expect(out).toContain("re-ask");
     expect(out).toContain("emit_id");
@@ -217,13 +277,10 @@ describe("summarizeLoss - both detectors against one receiver", () => {
   test("counts discards for THIS receiver only", () => {
     // The log is shared by every session in the project, so a summary that
     // forgot to filter would report a peer's losses as this session's.
-    const r = summarizeLoss(
-      [
+    const r = summarizeLoss([
         rec({ event: "unknown_sender", receiver_id8: "aaaaaaaa", sender_id8: "bbbbbbbb" }),
         rec({ event: "unknown_sender", receiver_id8: "cccccccc", sender_id8: "bbbbbbbb" }),
-      ],
-      "aaaaaaaa",
-      [],
+      ], "aaaaaaaa", win([]),
     );
     expect(r.discardedTotal).toBe(1);
     expect(r.discarded).toEqual({ bbbbbbbb: 1 });
@@ -241,7 +298,7 @@ describe("summarizeLoss - both detectors against one receiver", () => {
     ];
     // Receiver saw 1 and 3. Id 2 was never sent, so the observed sequence is
     // 1,3 with no interior gap - not a loss.
-    const r = summarizeLoss(records, "aaaaaaaa", ["ep-1-a", "ep-3-c"]);
+    const r = summarizeLoss(records, "aaaaaaaa", win(["ep-1-a", "ep-3-c"]));
     expect(r.counterGaps).toBe(0);
   });
 
@@ -251,7 +308,7 @@ describe("summarizeLoss - both detectors against one receiver", () => {
       rec({ event: "sent", emit_id: "ep-2-b" }),
       rec({ event: "sent", emit_id: "ep-3-c" }),
     ];
-    const r = summarizeLoss(records, "aaaaaaaa", ["ep-1-a", "ep-3-c"]);
+    const r = summarizeLoss(records, "aaaaaaaa", win(["ep-1-a", "ep-3-c"]));
     expect(r.counterGaps).toBe(1);
     // Denominator is what we SENT (3), not what arrived (2) - "1 of 3 sent"
     // is the honest ratio; "1 of 2 observed" would understate the sample.
@@ -261,16 +318,55 @@ describe("summarizeLoss - both detectors against one receiver", () => {
   test("seen ids that were never sent by us are ignored, not counted as coverage", () => {
     // Guards the tautology: `seen` comes from the transcript and may contain
     // ids minted by some other process. Only ids WE sent can be expected.
-    const r = summarizeLoss([rec({ event: "sent", emit_id: "ep-5-a" })], "aaaaaaaa", [
+    const r = summarizeLoss([rec({ event: "sent", emit_id: "ep-5-a" })], "aaaaaaaa", win([
       "ep-5-a",
       "other-9-z",
-    ]);
+    ]));
     expect(r.observedEmits).toBe(1);
     expect(r.counterGaps).toBe(0);
   });
 
+  test("an unread transcript reports UNMEASURED, never a fabricated total", () => {
+    // End-to-end on the blocker: three ids sent, transcript unreadable. The
+    // pre-fix path returned counterGaps=3 and announced total loss.
+    const records = [
+      rec({ event: "sent", emit_id: "ep-1-a" }),
+      rec({ event: "sent", emit_id: "ep-2-b" }),
+      rec({ event: "sent", emit_id: "ep-3-c" }),
+    ];
+    const r = summarizeLoss(records, "aaaaaaaa", unread);
+    expect(r.measured).toBe(false);
+    expect(r.counterGaps).toBe(0);
+    expect(formatLossReport(r)).toContain("COULD NOT BE MEASURED");
+  });
+
+  test("emits SENT BEFORE the window are out of frame, not missing", () => {
+    // PA's ruling made concrete. A bounded tail cannot see old ids, and
+    // counting them would manufacture false gaps - the costlier error, since
+    // overcounting destroys the credibility of the only instrument that
+    // separates real loss from noise.
+    const records = [
+      rec({ event: "sent", emit_id: "old-1-a", ts: "2026-09-06T01:00:00.000Z" }),
+      rec({ event: "sent", emit_id: "new-2-b", ts: "2026-09-06T02:00:00.000Z" }),
+    ];
+    const r = summarizeLoss(records, "aaaaaaaa", win(["new-2-b"], "2026-09-06T01:30:00.000Z"));
+    expect(r.counterGaps).toBe(0);
+    expect(r.observedEmits).toBe(1); // denominator shrinks with the window too
+  });
+
+  test("a genuine loss INSIDE the window is still caught", () => {
+    // The complement: bounding must not become a way to never report anything.
+    const records = [
+      rec({ event: "sent", emit_id: "new-2-b", ts: "2026-09-06T02:00:00.000Z" }),
+      rec({ event: "sent", emit_id: "new-3-c", ts: "2026-09-06T02:00:01.000Z" }),
+    ];
+    const r = summarizeLoss(records, "aaaaaaaa", win(["new-2-b"], "2026-09-06T01:30:00.000Z"));
+    expect(r.counterGaps).toBe(1);
+    expect(r.observedEmits).toBe(2);
+  });
+
   test("a clean receiver produces a report that formats to null", () => {
-    const r = summarizeLoss([rec({ event: "sent", emit_id: "ep-1-a" })], "aaaaaaaa", ["ep-1-a"]);
+    const r = summarizeLoss([rec({ event: "sent", emit_id: "ep-1-a" })], "aaaaaaaa", win(["ep-1-a"]));
     expect(formatLossReport(r)).toBeNull();
   });
 });

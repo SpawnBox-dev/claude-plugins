@@ -71,7 +71,7 @@ import {
   readEmitLog,
   summarizeLoss,
   formatLossReport,
-  extractSeenEmitIds,
+  readSeenWindow,
 } from "./engine/agent_channel_emitlog";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
@@ -1343,22 +1343,27 @@ server.tool(
         // Seen ids come from THIS session's own transcript, never from the
         // emit log - comparing the log against itself is a tautology that can
         // never show a gap.
-        let seen: string[] = [];
-        try {
-          const hashDir = (
-            process.env.ORCHESTRATOR_PROJECT_ROOT ||
-            process.env.CLAUDE_PROJECT_DIR ||
-            process.cwd()
-          )
-            .replace(/[\\/:]/g, "-")
-            .replace(/^-+/, "");
-          seen = extractSeenEmitIds(
-            readFileSync(join(homedir(), ".claude", "projects", hashDir, `${selfSid}.jsonl`), "utf8"),
-          );
-        } catch {
-          // No transcript readable - the discard half still reports below.
-        }
-        const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), seen));
+        //
+        // readSeenWindow owns the failure case rather than a catch here. A
+        // swallowed read error used to leave `seen` empty, which made every
+        // sent id look missing and reported a TOTAL loss - a maximal false
+        // alarm wearing the clothes of a finding, because the block still
+        // produced output. The window now carries `measured`, and an
+        // unreadable transcript reports UNMEASURED instead of a number.
+        // It also bounds the read: the transcript grows all session, and an
+        // unbounded readFileSync of an ever-growing file is the ROOT-A shape
+        // even on a cold pull path.
+        const hashDir = (
+          process.env.ORCHESTRATOR_PROJECT_ROOT ||
+          process.env.CLAUDE_PROJECT_DIR ||
+          process.cwd()
+        )
+          .replace(/[\\/:]/g, "-")
+          .replace(/^-+/, "");
+        const window = readSeenWindow(
+          join(homedir(), ".claude", "projects", hashDir, `${selfSid}.jsonl`),
+        );
+        const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), window));
         if (report) {
           lines.push(`- 🔴 **Channel loss**: ${report}`);
         }

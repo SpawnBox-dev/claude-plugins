@@ -34,7 +34,17 @@
  * Diagnostic-only. Never throws: a logging failure must never disturb routing
  * (anti_pattern 798f741b - best-effort side effects killing their host).
  */
-import { appendFileSync, readFileSync, statSync, renameSync, existsSync, unlinkSync } from "fs";
+import {
+  appendFileSync,
+  readFileSync,
+  statSync,
+  renameSync,
+  existsSync,
+  unlinkSync,
+  openSync,
+  readSync,
+  closeSync,
+} from "fs";
 import { join } from "path";
 
 /** Keep the log bounded. One rotation only - this is a rolling diagnostic
@@ -197,27 +207,140 @@ export interface LossReport {
   /** Lines consumed without routing, by sender id8. */
   discarded: Record<string, number>;
   discardedTotal: number;
-  /** Emitted, sent, never enqueued at the receiver. */
+  /** Emitted, sent, never enqueued at the receiver. Meaningless unless
+   *  `measured` is true - see below. */
   counterGaps: number;
   /** How many notifications this receiver's producer SENT in the window. The
    *  denominator travels with the figure: "3 missing" means very different
    *  things out of 4 and out of 400. */
   observedEmits: number;
+  /**
+   * Whether the receiver's transcript was actually READ.
+   *
+   * THIS FIELD EXISTS BECAUSE ITS ABSENCE FABRICATED A TOTAL LOSS. If the
+   * transcript read throws, the seen-set is empty, so every sent id looks
+   * missing and the report announces that EVERY message was lost - a maximal,
+   * alarming, entirely false number. And it is worse than a crash would be:
+   * the block still produces output, so the failure impersonates a finding
+   * (the "swallowed catch reads as a pass" shape, in its most damaging
+   * direction). An unreadable transcript must say UNMEASURED, never a number.
+   */
+  measured: boolean;
+  /** Earliest instant the seen-window genuinely covers, or null when the whole
+   *  transcript was read. Bounds the `sent` set so both halves describe the
+   *  same window. */
+  since?: string | null;
+}
+
+/** What a receiver actually saw, plus the honest metadata about how much of
+ *  its own transcript that reading covered. */
+export interface SeenWindow {
+  ids: string[];
+  /** Earliest instant this window genuinely contains; null if it covers the
+   *  whole file. */
+  since: string | null;
+  /** False when the transcript could not be read at all. */
+  measured: boolean;
 }
 
 /**
- * Render the two detectors as one line. Returns null when BOTH are clean, so a
- * quiet window says nothing at all rather than printing a reassuring zero that
- * nobody reads.
+ * Read a bounded tail of a receiver's transcript and report BOTH the emit_ids
+ * in it and the instant that tail actually starts at.
+ *
+ * WHY THE WINDOW TRAVELS WITH THE IDS, rather than bounding both files by
+ * bytes (PA's ruling, 2026-09-06). Two byte windows over two files with
+ * different growth rates cannot agree, and they drift apart at a rate nobody
+ * is watching. The asymmetric hazard is what settles it: a transcript window
+ * NARROWER than the emit-log window manufactures FALSE GAPS, and a false gap
+ * is the costlier error - undercounting loses a signal, overcounting destroys
+ * the credibility of the only instrument that separates real loss from noise.
+ *
+ * So the caller does not pick two constants and keep them in sync by
+ * remembering to. It takes whatever window the tail genuinely covers and
+ * filters the sent-set to match, which makes the two halves agree BY
+ * CONSTRUCTION and makes "an old emit_id fell out of the window" impossible
+ * rather than merely unlikely.
+ */
+export function readSeenWindow(transcriptPath: string, maxBytes = 4 * 1024 * 1024): SeenWindow {
+  let raw: string;
+  let truncated = false;
+  try {
+    const size = statSync(transcriptPath).size;
+    if (size > maxBytes) {
+      const fd = openSync(transcriptPath, "r");
+      try {
+        const buf = Buffer.allocUnsafe(maxBytes);
+        const read = readSync(fd, buf, 0, maxBytes, size - maxBytes);
+        raw = buf.subarray(0, read).toString("utf8");
+        truncated = true;
+      } finally {
+        closeSync(fd);
+      }
+    } else {
+      raw = readFileSync(transcriptPath, "utf8");
+    }
+  } catch {
+    // The one case this whole field exists for.
+    return { ids: [], since: null, measured: false };
+  }
+
+  // A byte-offset tail almost always starts mid-line. Drop that fragment: its
+  // timestamp is unrecoverable and its emit_id may be cut in half, which would
+  // silently drop a real id and read as a gap.
+  if (truncated) {
+    const nl = raw.indexOf("\n");
+    raw = nl === -1 ? "" : raw.slice(nl + 1);
+  }
+
+  const since = truncated ? earliestTimestamp(raw) : null;
+  return { ids: extractSeenEmitIds(raw), since, measured: true };
+}
+
+/** First parseable ISO timestamp in a transcript slice. Matches the escaped
+ *  and unescaped forms for the same reason extractSeenEmitIds does. */
+function earliestTimestamp(slice: string): string | null {
+  const m = /\\?"timestamp\\?":\\?"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^"\\]+)\\?"/.exec(slice);
+  return m ? m[1] : null;
+}
+
+/** Worst-affected sender first, so the peer losing the most is not buried. */
+function formatPerSender(discarded: Record<string, number>): string {
+  return Object.entries(discarded)
+    .sort((a, b) => b[1] - a[1])
+    .map(([sid, n]) => `${sid.slice(0, 8)}:${n}`)
+    .join(", ");
+}
+
+/**
+ * Render the two detectors as one line. Returns null when BOTH are clean AND
+ * the reading was actually taken, so a quiet window says nothing at all rather
+ * than printing a reassuring zero nobody reads. An UNMEASURED reading is never
+ * silent - see the guard at the top.
  */
 export function formatLossReport(r: LossReport): string | null {
+  // UNMEASURED IS NOT CLEAN AND IT IS NOT A NUMBER. Falling silent here would
+  // claim the channel was checked and found healthy; printing counterGaps
+  // would claim every sent message was lost. Both are assertions the data
+  // cannot support, and the second is the one that fabricates an alarm.
+  if (!r.measured) {
+    const disc =
+      r.discardedTotal > 0
+        ? ` Separately, ${r.discardedTotal} message(s) WERE read and discarded ` +
+          `because their sender could not be identified (${formatPerSender(r.discarded)}); ` +
+          `that half is measured and is real.`
+        : "";
+    return (
+      `CHANNEL DELIVERY COULD NOT BE MEASURED. This session's own transcript ` +
+      `could not be read, so there is no way to tell which of the ` +
+      `${r.observedEmits} notification(s) sent to it actually arrived. This is ` +
+      `a broken instrument, NOT a finding of loss and NOT an all-clear - do ` +
+      `not read it as either.${disc}`
+    );
+  }
   if (r.discardedTotal === 0 && r.counterGaps === 0) return null;
   const parts: string[] = [];
   if (r.discardedTotal > 0) {
-    const per = Object.entries(r.discarded)
-      .sort((a, b) => b[1] - a[1])
-      .map(([sid, n]) => `${sid.slice(0, 8)}:${n}`)
-      .join(", ");
+    const per = formatPerSender(r.discarded);
     parts.push(
       `${r.discardedTotal} message(s) were READ AND DISCARDED because their ` +
         `sender could not be identified (${per}). These never became ` +
@@ -274,8 +397,9 @@ export function readEmitLog(stateDir: string, path = emitLogPath(stateDir)): Emi
 export function summarizeLoss(
   records: EmitLogRecord[],
   receiverId8: string,
-  seenEmitIds: string[],
+  window: SeenWindow,
 ): LossReport {
+  const seenEmitIds = window.ids;
   const discarded: Record<string, number> = {};
   let discardedTotal = 0;
   for (const r of records) {
@@ -288,9 +412,31 @@ export function summarizeLoss(
   // Only ids this receiver's own producer claims it SENT can be expected to
   // appear; an emit that never got sent is a different (already-logged)
   // failure and must not be double-counted as a harness drop.
+  //
+  // ...and only those sent WITHIN THE WINDOW the seen-set actually covers. An
+  // emit older than the tail we read is not missing, it is out of frame, and
+  // counting it would manufacture the false gaps this bounding exists to
+  // prevent.
   const sent = new Set(
-    records.filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id).map((r) => r.emit_id!),
+    records
+      .filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id)
+      .filter((r) => !window.since || r.ts >= window.since)
+      .map((r) => r.emit_id!),
   );
+
+  // If the transcript could not be read, the seen-set is empty for a reason
+  // that has nothing to do with delivery. Report the discards, which are
+  // measured independently, and say plainly that the other half is unknown.
+  if (!window.measured) {
+    return {
+      discarded,
+      discardedTotal,
+      counterGaps: 0,
+      observedEmits: sent.size,
+      measured: false,
+      since: window.since,
+    };
+  }
 
   // SET DIFFERENCE, NOT SEQUENCE INFERENCE. findCounterGaps below reconstructs
   // missing sequence numbers from the ids a receiver saw, which is the right
@@ -303,7 +449,14 @@ export function summarizeLoss(
   let missing = 0;
   for (const id of sent) if (!seen.has(id)) missing++;
 
-  return { discarded, discardedTotal, counterGaps: missing, observedEmits: sent.size };
+  return {
+    discarded,
+    discardedTotal,
+    counterGaps: missing,
+    observedEmits: sent.size,
+    measured: true,
+    since: window.since,
+  };
 }
 
 /**
