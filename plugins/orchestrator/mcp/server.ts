@@ -3528,7 +3528,12 @@ function logMcpLifecycle(line: string): void {
  * case this log exists for - can't skip the durable write. See emitLifecycleLine.
  */
 function emitLifecycle(line: string): void {
-  emitLifecycleLine((s) => process.stderr.write(s), logMcpLifecycle, line);
+  emitLifecycleLine(
+    (s) => process.stderr.write(s),
+    logMcpLifecycle,
+    line,
+    new Date().toISOString(),
+  );
 }
 /**
  * Observation half of the install-mismatch self-check (WI 61da44fa). The

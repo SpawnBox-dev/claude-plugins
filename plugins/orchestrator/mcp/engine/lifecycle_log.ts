@@ -67,14 +67,60 @@ export function appendLifecycleLine(
  * Sinks are injected so the ordering + swallow guarantees are unit-testable
  * without a live stderr pipe.
  */
+/** Matches an ISO-8601 UTC stamp at the very start of a line. */
+const LEADING_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /;
+
+/**
+ * Put a write-time ISO stamp at the FRONT of a lifecycle record (WI 61da44fa).
+ *
+ * WHY, and the measurement rather than the impression. On 2026-09-06 an agent
+ * looked in this log for today's events, filtered by date, got nothing back,
+ * and concluded nothing had been recorded. The plugin had in fact recorded the
+ * exact failure five times, in plain English, with a work-item id attached.
+ *
+ * The file was 7890 lines and 7707 of them DID carry a date - so "the log is
+ * undated" is false and was the first thing said about it. The real shape is
+ * worse: the dated 97.7% are the periodic `alive at=...` HEARTBEATS, and the
+ * lines carrying actual events - `MCP server starting` (55), `install-mismatch`
+ * (5), the binding probe, `client handshake complete` - carry no date at all.
+ * So a time-scoped read of this file returns nothing BUT the noise, and returns
+ * it in a shape that reads as "I looked and the period was quiet".
+ *
+ * Stamping at the single fan-out point rather than in each of the call sites'
+ * format strings is deliberate: a rule applied at ~12 call sites is a rule that
+ * the next new call site will not follow, and the undated lines above are what
+ * that looks like after a year. This is the construct-over-discipline move.
+ *
+ * DELIBERATE BEHAVIOURS:
+ *  - IDEMPOTENT. A line already leading with a stamp is returned untouched, so
+ *    a caller that pre-stamps (or a double-wrap during a refactor) cannot
+ *    produce `<iso> <iso> ...`.
+ *  - ONLY THE FIRST PHYSICAL LINE of a multi-line record is stamped. A crash
+ *    stack is one record; stamping every frame would corrupt the trace for
+ *    anything that parses it, and the continuation lines are already scoped by
+ *    the stamped line above them.
+ *  - The trailing newline is preserved exactly. Callers own it (the durable
+ *    sink appends the string verbatim), and eating it would run records
+ *    together.
+ *  - The existing `at=<iso>` fields are LEFT ALONE. They are now redundant with
+ *    the prefix, but they are what existing greps and any saved one-liners key
+ *    on, and breaking a reader to tidy a duplicate is a bad trade.
+ */
+export function stampLifecycleLine(line: string, nowIso: string): string {
+  if (LEADING_STAMP.test(line)) return line;
+  return `${nowIso} ${line}`;
+}
+
 export function emitLifecycleLine(
   writeStderr: (line: string) => void,
   writeFile: (line: string) => void,
   line: string,
+  nowIso: string,
 ): void {
-  writeFile(line);
+  const stamped = stampLifecycleLine(line, nowIso);
+  writeFile(stamped);
   try {
-    writeStderr(line);
+    writeStderr(stamped);
   } catch {
     // stderr may be a dead pipe during transport death - best-effort only.
   }

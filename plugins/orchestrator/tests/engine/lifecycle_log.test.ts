@@ -2,7 +2,11 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { appendLifecycleLine, emitLifecycleLine } from "../../mcp/engine/lifecycle_log";
+import {
+  appendLifecycleLine,
+  emitLifecycleLine,
+  stampLifecycleLine,
+} from "../../mcp/engine/lifecycle_log";
 
 let dir: string;
 beforeEach(() => {
@@ -66,6 +70,8 @@ describe("appendLifecycleLine", () => {
   });
 });
 
+const T = "2026-09-06T16:30:00.000Z";
+
 describe("emitLifecycleLine", () => {
   test("writes the durable file even when the stderr writer throws (transport-death safety)", () => {
     // The whole point: during transport death stderr is a dead pipe and its
@@ -76,9 +82,9 @@ describe("emitLifecycleLine", () => {
       throw new Error("EPIPE: broken pipe");
     };
     expect(() =>
-      emitLifecycleLine(stderr, (s) => fileCalls.push(s), "event\n"),
+      emitLifecycleLine(stderr, (s) => fileCalls.push(s), "event\n", T),
     ).not.toThrow();
-    expect(fileCalls).toEqual(["event\n"]);
+    expect(fileCalls).toEqual([`${T} event\n`]);
   });
 
   test("writes the file BEFORE stderr", () => {
@@ -87,11 +93,15 @@ describe("emitLifecycleLine", () => {
       () => order.push("stderr"),
       () => order.push("file"),
       "event\n",
+      T,
     );
     expect(order).toEqual(["file", "stderr"]);
   });
 
-  test("both sinks receive the exact line on the happy path", () => {
+  test("both sinks receive the exact SAME stamped line", () => {
+    // Not just "both got a line": the two sinks must agree byte-for-byte, or
+    // the durable file and the stderr trail disagree about when something
+    // happened and correlating them becomes guesswork.
     let fileLine = "";
     let stderrLine = "";
     emitLifecycleLine(
@@ -102,8 +112,56 @@ describe("emitLifecycleLine", () => {
         fileLine = s;
       },
       "L\n",
+      T,
     );
-    expect(fileLine).toBe("L\n");
-    expect(stderrLine).toBe("L\n");
+    expect(fileLine).toBe(`${T} L\n`);
+    expect(stderrLine).toBe(fileLine);
+  });
+});
+
+describe("stampLifecycleLine", () => {
+  test("THE MOTIVATING CASE: an event line that carried no date now carries one", () => {
+    // Verbatim shape of the line that was written 5 times on 2026-09-06 and
+    // found by nobody, because every reader scoped its search by date and this
+    // line had none. Asserting the real string, not a toy, so a format change
+    // at the call site cannot quietly re-open the hole.
+    const real =
+      "[orchestrator] install-mismatch: this window is running the plugin from " +
+      ".../orchestrator/0.69.10, but installed_plugins.json names .../0.69.11.\n";
+    const out = stampLifecycleLine(real, T);
+    expect(out.startsWith(`${T} [orchestrator] install-mismatch:`)).toBe(true);
+    // A date-scoped read must now find it - that is the whole repair.
+    expect(/^\d{4}-\d{2}-\d{2}T/.test(out)).toBe(true);
+  });
+
+  test("IDEMPOTENT: an already-stamped line is not stamped twice", () => {
+    const once = stampLifecycleLine("[orchestrator] boot\n", T);
+    expect(stampLifecycleLine(once, "2026-01-01T00:00:00.000Z")).toBe(once);
+  });
+
+  test("the trailing newline is preserved exactly", () => {
+    // The durable sink appends verbatim; eating the newline runs records
+    // together and every line-oriented reader downstream breaks at once.
+    expect(stampLifecycleLine("x\n", T).endsWith("\n")).toBe(true);
+    expect(stampLifecycleLine("x\n", T)).toBe(`${T} x\n`);
+  });
+
+  test("only the FIRST physical line of a multi-line record is stamped", () => {
+    // A crash stack is ONE record. Stamping every frame corrupts the trace for
+    // anything that parses it; the frames are already scoped by the stamped
+    // line above them.
+    const stack = "[orchestrator] crash\n  at foo()\n  at bar()\n";
+    const out = stampLifecycleLine(stack, T);
+    expect(out).toBe(`${T} ${stack}`);
+    expect(out.split("\n")[1]).toBe("  at foo()");
+  });
+
+  test("a line already carrying at=<iso> INSIDE it still gets a leading stamp", () => {
+    // The 7707 dated lines are dated mid-line via `at=`, which no line-leading
+    // date filter matches. If the idempotence guard were written as "contains a
+    // date" rather than "STARTS WITH one", those lines would stay unfindable
+    // and the fix would silently cover only 183 of 7890 lines.
+    const alive = `[orchestrator] alive at=${T} pid=24500\n`;
+    expect(stampLifecycleLine(alive, T)).toBe(`${T} ${alive}`);
   });
 });
