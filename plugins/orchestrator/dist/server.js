@@ -26886,6 +26886,12 @@ import {
 import { join as join9 } from "path";
 var MAX_BYTES = 4 * 1024 * 1024;
 var EMIT_LOG_BASENAME = "emit-log.jsonl";
+var seqByTarget = new Map;
+function nextSeq(epoch, targetId8) {
+  const n = (seqByTarget.get(targetId8) ?? 0) + 1;
+  seqByTarget.set(targetId8, n);
+  return `${epoch}:${n}`;
+}
 var counter = 0;
 function newEmitId() {
   counter = (counter + 1) % 1e6;
@@ -27907,6 +27913,7 @@ class AgentChannel {
               ts: new Date().toISOString(),
               event: "received",
               emit_id: m[1],
+              seq: /\bseq="([^"]+)"/.exec(body)?.[1],
               receiver_id8: this.selfSession.id8,
               sender_id8: /from_id8="([0-9a-f]{8})"/.exec(body)?.[1],
               src_offset: srcOffset,
@@ -28000,6 +28007,7 @@ class AgentChannel {
     const isPaused = !!overrideState.sa_pauses[sender.session_id];
     const isGlobalPaused = overrideState.pa_global_pause.active;
     const emitId = newEmitId();
+    const seq = nextSeq(INSTANCE_TOKEN, sender.id8);
     appendEmitLog(this.projectStateDir, {
       ts: new Date().toISOString(),
       event: "emit",
@@ -28026,6 +28034,7 @@ class AgentChannel {
         pa_global_pause: isGlobalPaused || undefined,
         sa_paused: isPaused || undefined,
         emit_id: emitId,
+        seq,
         ts: new Date().toISOString()
       }
     });

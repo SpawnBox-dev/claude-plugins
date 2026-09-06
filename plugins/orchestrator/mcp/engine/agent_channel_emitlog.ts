@@ -178,6 +178,13 @@ export interface EmitLogRecord {
   scan_to?: number;
   /** `scan` only: how many lines were handed to processEvent. */
   lines?: number;
+  /**
+   * Per-sender sequence, `<epoch>:<n>`, carried on both the emit and the
+   * receipt. A hole in a receiver's observed sequence proves a message existed
+   * and never arrived WITHOUT anything having logged it - which is the only
+   * way to detect a watcher that consumed bytes and emitted nothing.
+   */
+  seq?: string;
 }
 
 /**
@@ -212,6 +219,83 @@ export function unreadByteTotals(records: EmitLogRecord[]): Record<string, numbe
     out[key] = (out[key] ?? 0) + (r.scan_to - r.scan_from);
   }
   return out;
+}
+
+/**
+ * PER-SENDER SEQUENCE NUMBERS - the primitive that can see what nothing logged.
+ *
+ * WHY THIS EXISTS AND WHY IT OUTRANKS THE RECEIPT. Every delivery figure this
+ * investigation produced used `sent` rows as the denominator, and a watcher
+ * that consumed bytes and emitted NOTHING writes no `sent` row - so silent
+ * consumption, which was the actual bug, could never enter its own
+ * measurement. Both instruments were blind to the mechanism they were built to
+ * find, and the "clean" step function they showed was the shape of their
+ * coverage rather than the shape of the fault.
+ *
+ * A SEQUENCE GAP NEEDS NO RECORD OF THE MISSING ITEM. If a receiver holds 7, 8
+ * and 10 from one sender, it knows 9 existed and never arrived - with no join,
+ * no correlation, no clock, and crucially no cooperation from whatever dropped
+ * it. That is the difference between auditing what we already noticed and
+ * detecting what nothing wrote down.
+ *
+ * IT ALSO MAKES THE GAP LOCAL AND IMMEDIATE, which is what the requirement
+ * actually asks for: "PA sees what Jarid sees" fails SILENTLY today, because a
+ * hole in PA's view is invisible to PA. A sequence turns that from silent into
+ * loud for the cost of one integer.
+ *
+ * SCOPED PER (sender -> receiver) PAIR, because that is the only stream whose
+ * order either end can reason about. A global counter would show gaps for every
+ * message legitimately routed to somebody else.
+ *
+ * THE EPOCH IS NOT DECORATION. The counter resets when the process restarts, so
+ * a bare integer would read 40,41 then 1,2 as a 38-message catastrophe on every
+ * reload - and reloads are exactly when this system is most stressed. Sequences
+ * are only comparable within one epoch; see findCounterGaps for the same trap.
+ */
+const seqByTarget = new Map<string, number>();
+
+/** Next sequence for this receiver->target stream, as `<epoch>:<n>`. */
+export function nextSeq(epoch: string, targetId8: string): string {
+  const n = (seqByTarget.get(targetId8) ?? 0) + 1;
+  seqByTarget.set(targetId8, n);
+  return `${epoch}:${n}`;
+}
+
+export interface SeqGapReport {
+  /** Sequence numbers that must have existed and never arrived. */
+  missing: number[];
+  /** How many did arrive - the denominator that makes `missing` legible. */
+  observed: number;
+  /** Epochs seen. More than one means the sender restarted mid-window. */
+  epochs: string[];
+}
+
+/**
+ * Given the `seq` values a receiver actually saw from ONE sender, find the
+ * holes. Pure, and deliberately conservative at the edges.
+ */
+export function findSeqGaps(seqs: string[]): SeqGapReport {
+  const byEpoch = new Map<string, Set<number>>();
+  for (const s of seqs) {
+    const [epoch, nRaw] = String(s).split(":");
+    const n = Number(nRaw);
+    if (!epoch || !Number.isInteger(n)) continue;
+    if (!byEpoch.has(epoch)) byEpoch.set(epoch, new Set());
+    byEpoch.get(epoch)!.add(n);
+  }
+  const missing: number[] = [];
+  let observed = 0;
+  for (const [, set] of byEpoch) {
+    observed += set.size;
+    // INTERIOR ONLY. A number below the lowest seen means the window opened
+    // mid-stream; one above the highest has not been sent yet. Counting either
+    // manufactures loss out of where we happened to start looking, which is the
+    // error that produced two retracted figures today.
+    const lo = Math.min(...set);
+    const hi = Math.max(...set);
+    for (let i = lo + 1; i < hi; i++) if (!set.has(i)) missing.push(i);
+  }
+  return { missing, observed, epochs: [...byEpoch.keys()] };
 }
 
 let counter = 0;

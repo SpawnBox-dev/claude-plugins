@@ -27,7 +27,7 @@ import {
   looksRoutableAssistantText,
   type FilteredEvent,
 } from "./agent_channel_filter";
-import { appendEmitLog, newEmitId } from "./agent_channel_emitlog";
+import { appendEmitLog, newEmitId, nextSeq } from "./agent_channel_emitlog";
 import {
   readSessions,
   writeSession,
@@ -85,6 +85,10 @@ export interface ChannelNotification {
     addressed_to?: string[];
     pa_global_pause?: boolean;
     sa_paused?: boolean;
+    /** Per-sender sequence, `<epoch>:<n>`. A receiver detects its own gaps
+     *  LOCALLY from this - no join, no correlation, no cooperation from
+     *  whatever dropped the message. See nextSeq. */
+    seq?: string;
     /** WI 6cf7437a. Joins this notification to the producer's emit-log line,
      *  and renders as an attribute on the `<channel ...>` tag in the
      *  receiver's transcript - so a delivery question is answered by an exact
@@ -2509,6 +2513,12 @@ export class AgentChannel {
               ts: new Date().toISOString(),
               event: "received",
               emit_id: m[1],
+              // The sequence is the load-bearing half of the receipt. An
+              // emit_id only tells you a specific message arrived; the seq
+              // tells you which ones DID NOT, without anything having recorded
+              // them - the only way to see a watcher that consumed bytes and
+              // emitted nothing, which is what this whole item turned out to be.
+              seq: /\bseq="([^"]+)"/.exec(body)?.[1],
               receiver_id8: this.selfSession.id8,
               sender_id8: /from_id8="([0-9a-f]{8})"/.exec(body)?.[1],
               src_offset: srcOffset,
@@ -2699,6 +2709,18 @@ export class AgentChannel {
     // has no such failure mode. The key is [a-zA-Z_][a-zA-Z0-9_]* so Claude
     // Code's meta-key validator keeps it rather than dropping it.
     const emitId = newEmitId();
+    // Sequence rides in the meta beside the id, so it renders as an attribute
+    // on the `<channel ...>` tag in the RECEIVER's transcript. That is what
+    // makes a hole LOCALLY detectable: holding 7, 8, 10 from one sender is
+    // self-evidently missing 9, with no join and no cooperation from whatever
+    // dropped it - the one thing that can see the silent consumption this
+    // whole item turned out to be.
+    //
+    // Keyed on the SENDER, because that is the stream whose order a receiver
+    // can reason about. INSTANCE_TOKEN is the epoch: the counter restarts with
+    // the process, and without an epoch a reload would read as a huge
+    // fabricated gap at precisely the moment the system is most stressed.
+    const seq = nextSeq(INSTANCE_TOKEN, sender.id8);
     appendEmitLog(this.projectStateDir, {
       ts: new Date().toISOString(),
       event: "emit",
@@ -2733,6 +2755,7 @@ export class AgentChannel {
         pa_global_pause: isGlobalPaused || undefined,
         sa_paused: isPaused || undefined,
         emit_id: emitId,
+        seq,
         ts: new Date().toISOString(),
       },
     });
