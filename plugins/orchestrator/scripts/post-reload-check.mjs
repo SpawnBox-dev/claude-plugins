@@ -214,10 +214,28 @@ console.log(`  ${own.ok ? "PASS" : "FAIL"} - one watcher per session, each owned
 
 console.log("\n=== ARM 2: code currency (NOT an orphan test) ===");
 console.log(`  newest bundle: ${bundle ? `${bundle.version} @ ${new Date(bundle.mtime).toISOString()}` : "none found"}`);
-const stale = bundle ? procs.filter((p) => p.ms < bundle.mtime) : [];
+//
+// AGE ALONE IS NOT CURRENCY, and this arm passed at 16:30:15Z while a v0.69.10
+// watcher was serving PA. Process age was a proxy for "started before the
+// bundle existed, so it cannot contain it" - sound in one direction only. It is
+// blind to the case that actually happens here: a process started AFTER the
+// bundle but launched from an OLDER version directory. pid 33980 began at
+// 16:16:57Z, fifteen minutes after the 0.69.11 bundle's mtime, running 0.69.10.
+//
+// So test the VERSION DIRECTORY the process was launched from, which is what
+// "running the installed code" actually means, and keep the age test as a
+// second clause for the case the command line cannot be parsed.
+const stale = bundle
+  ? procs.filter((p) => (p.version && p.version !== "unknown"
+      ? p.version !== bundle.version
+      : p.ms < bundle.mtime))
+  : [];
 for (const p of stale) {
   const who = claims.get(p.pid);
-  console.log(`    ${p.pid}${who ? ` (${who})` : ""} started ${p.started} - PREDATES the bundle, cannot contain it`);
+  const why = p.version && p.version !== "unknown"
+    ? `launched from the ${p.version} directory, installed is ${bundle.version}`
+    : `started ${p.started} - PREDATES the bundle, cannot contain it`;
+  console.log(`    ${p.pid}${who ? ` (${who})` : ""} - ${why}`);
 }
 const arm2 = bundle !== null && stale.length === 0;
 console.log(`  ${arm2 ? "PASS" : "FAIL"} - every watcher is running the newest installed code`);
