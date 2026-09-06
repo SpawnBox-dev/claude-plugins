@@ -891,8 +891,18 @@ export function summarizeScanGaps(
  */
 export function formatScanGapWarning(s: ScanGapSummary): string | null {
   if (s.count === 0) return null;
+  // NAMED AS FILES, NOT AS SESSIONS, AND THE DISTINCTION IS NOT COSMETIC.
+  // `sender_id8` is derived at agent_channel.ts:2590 from the FILENAME being
+  // scanned - it is the contested transcript, not a party at fault. It is also
+  // the one column here that visibly varies (measured 2026-09-06: 195/74/14
+  // across three ids), which makes it look like the discriminator for "who is
+  // doubled" and it is not: the doubled reader is `receiver_id8` at :2589.
+  // Two of those three ids belong to sessions PROVEN single-watchered by
+  // parent chain, so a reader who took this list as an accusation would be
+  // wrong on 88 of 283 rows. Calling them transcripts removes the invitation.
   const who = s.senders.length
-    ? ` across ${s.senders.length} sender${s.senders.length === 1 ? "" : "s"} (${s.senders.join(", ")})`
+    ? ` while reading ${s.senders.length} source transcript${s.senders.length === 1 ? "" : "s"}` +
+      ` (${s.senders.join(", ")} - these name the FILES contended for, NOT sessions at fault)`
     : "";
   return (
     `DUPLICATE READER DETECTED: this session's message bookmark advanced past ` +

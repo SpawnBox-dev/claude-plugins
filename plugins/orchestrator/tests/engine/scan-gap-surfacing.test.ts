@@ -134,9 +134,27 @@ describe("formatScanGapWarning", () => {
   test("singular/plural does not read as a bug to whoever is already alarmed", () => {
     const one = summarizeScanGaps([FIELD[0]], "66e2a4f9", "2026-09-06T16:00:00.000Z");
     const w = formatScanGapWarning(one)!;
-    expect(w).toContain("1 time across");
-    expect(w).toContain("1 sender ");
+    expect(w).toContain("1 time while reading");
+    expect(w).toContain("1 source transcript ");
     expect(w).not.toContain("1 times");
-    expect(w).not.toContain("1 senders");
+    expect(w).not.toContain("1 source transcripts");
+  });
+
+  test("NAMES THE SENDER IDS AS FILES, NEVER AS SESSIONS AT FAULT", () => {
+    // `sender_id8` is derived from the FILENAME being scanned
+    // (agent_channel.ts:2590), so it identifies the contested transcript, not
+    // a party responsible. It is ALSO the only column here that visibly
+    // varies - 195/74/14 across three ids on 2026-09-06 - which makes it look
+    // like the discriminator for "who is doubled". It is not; that is
+    // `receiver_id8`. TWO OF THOSE THREE IDS WERE SESSIONS PROVEN
+    // SINGLE-WATCHERED BY PARENT CHAIN, so a reader taking this list as an
+    // accusation would be wrong on 88 of 283 rows - a 31% false-positive rate
+    // against a known-clean population. The wording has to close that door,
+    // because the banner is read during an incident by someone deciding which
+    // window to kill.
+    const w = formatScanGapWarning(s)!;
+    expect(w).toContain("NOT sessions at fault");
+    expect(w).toContain("FILES contended for");
+    expect(w).not.toContain("senders");
   });
 });
