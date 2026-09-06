@@ -57,6 +57,8 @@ import {
   decideInstallMismatch,
   extractInstalledPaths,
   formatMismatchLine,
+  formatMismatchNudge,
+  shouldNudgeMismatch,
   normalizePath,
   type InstallCheck,
 } from "./engine/install_mismatch";
@@ -1030,6 +1032,50 @@ server.tool(
     if (sidecarStatus !== "ready" && event === "startup") {
       text += "\n## Setup Available\n";
       text += "Semantic search (embeddings) is not active. Call `install_embeddings` to check dependencies and enable it.\n";
+    }
+
+    // ── install-mismatch banner (WI 61da44fa) ───────────────────────────
+    //
+    // WHY THE BRIEFING AND NOT JUST THE LOG, which is where this has been
+    // reported since 0.69.2. On 2026-09-06 this detector fired FIVE times and
+    // predicted the day's duplicate-MCP failure nine minutes before it
+    // happened, in plain English, with this work-item id attached. Every
+    // firing went into `~/.claude/orchestrator/mcp-lifecycle.log`, which no
+    // agent opens unprompted. Two agents and a warden then spent forty minutes
+    // rebuilding the same diagnosis from process tables and parent chains.
+    // THE DETECTION WAS NEVER THE DEFECT; THE ROUTING WAS. A diagnostic that
+    // is written where nobody reads it is worth what one that never fires is
+    // worth, and we now have a measured example of both in one day.
+    //
+    // PREPENDED, not appended: an agent that stops reading a long briefing
+    // early must still meet this, because it changes how every other line in
+    // the briefing should be trusted - a straddling window is one whose MCP
+    // may be racing a second, stale server for the same messages.
+    //
+    // ON EVERY EVENT, not just startup (unlike the embeddings notice above).
+    // The registry changes UNDER a running window - that IS the condition -
+    // so `resume` and `compact` are exactly the moments a long-lived session
+    // re-orients and needs to learn that its ground shifted mid-flight. The
+    // 2026-09-06 case straddled a session that had been running for two days.
+    //
+    // Silent on every verdict but `mismatch`: `match`, `unknown` and
+    // `not-a-cache-copy` are all ordinary, and a banner that fires on the
+    // ordinary case is one people learn to skip.
+    try {
+      const install = checkInstallMismatch();
+      if (install.verdict === "mismatch") {
+        text =
+          `## 🔴 INSTALL MISMATCH - READ BEFORE TRUSTING THIS SESSION'S MESSAGING\n` +
+          `${formatMismatchLine(install)}\n\n` +
+          `Expect duplicate MCP servers under this window until it is restarted, ` +
+          `racing each other for the same messages. Killing the extra process does ` +
+          `NOT hold - it respawns within minutes. Restarting THIS window is the ` +
+          `only remedy that converges. Background: WI 61da44fa, ` +
+          `anthropics/claude-code#25976 - it is the harness's race, not the plugin's.\n\n` +
+          text;
+      }
+    } catch {
+      /* diagnostics must never break the tool that reports them */
     }
 
     return {
@@ -3045,10 +3091,44 @@ server.tool(
       }
     );
 
+    // ── install-mismatch, surfaced where an agent actually meets it ──────
+    //
+    // The briefing banner catches a session at startup/resume/compact. This
+    // catches the long-running session that straddles an install MID-FLIGHT
+    // and never calls `briefing` again - which is exactly the 2026-09-06 case,
+    // a window that had been running for two days when the version changed
+    // underneath it. Rate-limited (see shouldNudgeMismatch) because the
+    // condition persists until restart and a per-turn repeat would train the
+    // reader to skip it.
+    //
+    // UserPromptSubmit only: it is the one event whose additionalContext is
+    // read as context rather than acted on as a decision, so prepending here
+    // cannot alter a permission verdict or block a tool.
+    if (args.event === "UserPromptSubmit") {
+      try {
+        const install = checkInstallMismatch();
+        if (
+          install.verdict === "mismatch" &&
+          shouldNudgeMismatch(lastMismatchNudgeMs, Date.now())
+        ) {
+          lastMismatchNudgeMs = Date.now();
+          const nudge = formatMismatchNudge(install);
+          result.additionalContext = result.additionalContext
+            ? `${nudge}\n\n${result.additionalContext}`
+            : nudge;
+        }
+      } catch {
+        /* diagnostics must never break the hook that carries them */
+      }
+    }
+
     const envelope = buildHookEnvelope(args.event as HookEvent, result);
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }] };
   }
 );
+
+/** Last time the install-mismatch nudge was emitted; null until the first. */
+let lastMismatchNudgeMs: number | null = null;
 
 // Cascade resolution helper now lives in `tools/cascade.ts` (shared with the
 // `resolution: close_existing` path in remember.ts). Imported above.

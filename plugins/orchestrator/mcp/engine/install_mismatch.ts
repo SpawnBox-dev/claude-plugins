@@ -196,3 +196,50 @@ export function formatMismatchLine(check: InstallCheck): string {
     `This is a statement of fact, not a fault: a deliberate rollback looks the same.`
   );
 }
+
+/**
+ * How often the every-turn nudge may repeat while a mismatch persists.
+ *
+ * The condition lasts until the window restarts, which can be hours, so an
+ * unconditional per-turn nudge would be pure noise and would train the reader
+ * to skip the one banner that matters. Ten minutes is short enough that a
+ * session which compacts or loses the briefing meets it again quickly, and
+ * long enough that it never dominates a working stretch.
+ */
+export const MISMATCH_NUDGE_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Gate for the every-turn nudge. Pure so the cadence is pinned by tests rather
+ * than re-derived by reading two timestamps at a call site.
+ *
+ * FIRES ON THE FIRST CALL (`lastNudgeMs === null`). The first turn after a
+ * straddle begins is the single most valuable moment to say so, and a gate
+ * that treats "never nudged" as "recently nudged" would swallow exactly that
+ * one - the check-that-cannot-fire-on-its-motivating-case shape, one layer
+ * along from where it already cost this work item forty minutes.
+ */
+export function shouldNudgeMismatch(
+  lastNudgeMs: number | null,
+  nowMs: number,
+  intervalMs: number = MISMATCH_NUDGE_INTERVAL_MS,
+): boolean {
+  if (lastNudgeMs === null) return true;
+  return nowMs - lastNudgeMs >= intervalMs;
+}
+
+/**
+ * The compact form for the every-turn hook. Deliberately NOT `formatMismatchLine`
+ * - that one is written for a durable log a human greps later and carries its own
+ * provenance caveat. This one interrupts an agent mid-task, so it leads with the
+ * consequence to the work in front of them and names the remedy in four words.
+ */
+export function formatMismatchNudge(check: InstallCheck): string {
+  return (
+    `[orch] 🔴 INSTALL MISMATCH - this window runs the plugin from ${check.runningRoot} ` +
+    `while ${check.installedPaths.join(", ")} is installed. The harness may be running a ` +
+    `SECOND, stale MCP server under this window, racing this one for your messages, so ` +
+    `cross-session delivery here is a coin-flip and killing the extra process does not ` +
+    `hold. Remedy: restart this window. Not the plugin's bug ` +
+    `(WI 61da44fa, anthropics/claude-code#25976).`
+  );
+}
