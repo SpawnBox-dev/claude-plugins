@@ -779,6 +779,10 @@ export class AgentChannel {
   private timer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private knownSessions = new Map<string, SessionEntry>();
+  /** WI 6cf7437a (c): lines consumed and discarded because their sender could
+   *  not be identified, keyed by sender session_id. Feeds the loss report;
+   *  see reportChannelLoss for why this is only HALF the coverage. */
+  private discarded = new Map<string, number>();
   /** DEFENSE-C (WI 8522c487): per-peer consecutive stale-observation tick
    *  count. A known peer absent from the fresh roster accrues misses; its
    *  departure is announced (and its row reaped) only at DEPART_GRACE_TICKS,
@@ -1985,6 +1989,22 @@ export class AgentChannel {
       // knownSessions - which now also holds peers held through the departure
       // grace (DEFENSE-C). detectSessionChanges refreshes currentRoster first.
       const sessions = Array.from(this.currentRoster.values());
+      // WI 6cf7437a: IDENTITY, not liveness, decides who is ALLOWED TO HAVE
+      // SPOKEN. `sessions` above stays the liveness roster and keeps deciding
+      // who is ADDRESSABLE; this second map answers only "whose transcript is
+      // this line from".
+      //
+      // Why a separate map is unavoidable: removeSession is an unconditional
+      // `DELETE FROM sessions` (agent_channel_state.ts) issued by a PEER at
+      // :1576 when its departure hysteresis fires, against a table every
+      // session shares. So one peer's reap deletes a session's row for the
+      // WHOLE FLEET, and until that session's next 30s heartbeat re-inserts
+      // it, every watcher fails to resolve it, consumes its lines, advances
+      // past them and emits nothing. That is the mechanism behind the
+      // contiguous RUNS of loss measured on 3f2eac48 over 01:00-01:30Z - runs,
+      // not scattered singles, because the blindness is a time window.
+      // A reload is simply the most reliable trigger, not a special case.
+      const identity = this.identityRoster();
       const overrideState = readOverrideState(this.projectStateDir);
 
       // Read offsets ONCE at tick start; mutate in memory; write ONCE at end.
@@ -1994,7 +2014,7 @@ export class AgentChannel {
       let mutated = false;
 
       for (const file of this.listJsonlFiles()) {
-        if (this.processFile(file, sessions, overrideState, offsets)) {
+        if (this.processFile(file, sessions, identity, overrideState, offsets)) {
           mutated = true;
         }
       }
@@ -2183,9 +2203,49 @@ export class AgentChannel {
    * Process new content in one JSONL file. Mutates `offsets` in place.
    * Returns true if the offset for this file changed (caller will batch-write).
    */
+  /**
+   * WI 6cf7437a. Everyone this watcher has EVER been able to identify, which
+   * is a strictly weaker and more durable question than "who is live".
+   *
+   * Three sources, unioned, cheapest first - and the ORDER matters only for
+   * freshness of the entry's name/current_task, never for membership:
+   *
+   *   1. currentRoster  - heartbeat-fresh peers. Today's behaviour, and the
+   *                       freshest copy of each entry.
+   *   2. knownSessions  - the in-process "ever seen" map. It is process-local,
+   *                       so a PEER's reap of the shared table cannot empty
+   *                       it, which is exactly the window we are covering.
+   *   3. readSessions() - an UNFILTERED read of the table (detectSessionChanges
+   *                       applies the heartbeat filter itself, so this is the
+   *                       raw rows). Covers a freshly-restarted watcher whose
+   *                       knownSessions is still being seeded.
+   *
+   * WHY THIS CANNOT WEDGE, which was PA's condition for approving it: a
+   * transcript whose session appears in NONE of the three is still skipped and
+   * its offset still advances, exactly as before. The wedge risk belonged to
+   * the rejected option of holding the offset until a sender resolves, which
+   * would stall forever on a transcript from a plain `claude` run that never
+   * registered. Nothing here holds an offset.
+   */
+  private identityRoster(): Map<string, SessionEntry> {
+    const identity = new Map<string, SessionEntry>();
+    try {
+      for (const s of readSessions(this.projectStateDir)) {
+        identity.set(s.session_id, s);
+      }
+    } catch {
+      // A locked/absent DB must not stop routing; the two in-memory sources
+      // below still resolve every peer this watcher has already seen.
+    }
+    for (const [sid, entry] of this.knownSessions) identity.set(sid, entry);
+    for (const [sid, entry] of this.currentRoster) identity.set(sid, entry);
+    return identity;
+  }
+
   private processFile(
     file: string,
     sessions: SessionEntry[],
+    identity: Map<string, SessionEntry>,
     overrideState: ReturnType<typeof readOverrideState>,
     offsets: Record<string, number>,
   ): boolean {
@@ -2271,7 +2331,10 @@ export class AgentChannel {
         .split(/[\\/]/)
         .pop()!
         .replace(/\.jsonl$/, "");
-      const sender = sessions.find((s) => s.session_id === senderId);
+      // Resolve on IDENTITY. The heartbeat filter still governs addressing and
+      // liveness below - it just no longer decides whether a line that was
+      // demonstrably written by a known session is allowed to be routed.
+      const sender = identity.get(senderId);
       if (!sender) {
         // CONSUMED BUT NOT ROUTED. The offset advances past this line either
         // way, so from the offsets table this is indistinguishable from a
@@ -2280,14 +2343,20 @@ export class AgentChannel {
         // would otherwise have been routed: an unknown sender is usually just
         // a transcript belonging to no registered session (a plain `claude`
         // run), and logging every line of those would swamp the file.
+        //
+        // After the identity fix this should be RARE and should mean what it
+        // says - no session by that id has ever registered - rather than "that
+        // peer's heartbeat happens to be late". A run of these against a
+        // session you know exists is now a real signal, not background.
         if (filterEvent(raw)) {
+          this.discarded.set(senderId, (this.discarded.get(senderId) ?? 0) + 1);
           appendEmitLog(this.projectStateDir, {
             ts: new Date().toISOString(),
             event: "unknown_sender",
             receiver_id8: this.selfSession.id8,
             sender_id8: senderId.slice(0, 8),
             src_offset: srcOffset,
-            detail: "sender absent from the fresh roster at routing time",
+            detail: "no session with this id in roster, known-sessions, or registry",
           });
         }
         continue;

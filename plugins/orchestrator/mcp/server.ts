@@ -66,7 +66,13 @@ import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal
 import { handleUpdateSessionTask } from "./tools/session_task";
 import { handleHookEvent, buildHookEnvelope, HOOK_EVENTS, type HookEvent } from "./tools/hook_event";
 import { AgentChannel } from "./engine/agent_channel";
-import { appendEmitLog } from "./engine/agent_channel_emitlog";
+import {
+  appendEmitLog,
+  readEmitLog,
+  summarizeLoss,
+  formatLossReport,
+  extractSeenEmitIds,
+} from "./engine/agent_channel_emitlog";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
 import { appendSystemEvent, alertEmissionStats } from "./engine/agent_channel_state";
@@ -1320,6 +1326,41 @@ server.tool(
           lines.push(
             `  - ${a.alert_kind} -> ${a.subject_session.slice(0, 8)}: ${a.emit_count}x${span}, last ${when}Z`
           );
+        }
+      }
+
+      // WI 6cf7437a (c): channel LOSS, from both detectors. Silent when clean -
+      // a report that prints a reassuring zero every time stops being read,
+      // and then the one that matters gets skimmed too.
+      //
+      // The two detectors see DISJOINT failures and neither is a superset:
+      // an identity miss never mints an emit_id, so it leaves no gap anywhere;
+      // a gap means an id WAS minted and sent, so nothing was discarded.
+      // Reporting on one alone is a subset that reads as full coverage.
+      const selfSid = resolveSessionId();
+      if (selfSid) {
+        const records = readEmitLog(channelStateDir);
+        // Seen ids come from THIS session's own transcript, never from the
+        // emit log - comparing the log against itself is a tautology that can
+        // never show a gap.
+        let seen: string[] = [];
+        try {
+          const hashDir = (
+            process.env.ORCHESTRATOR_PROJECT_ROOT ||
+            process.env.CLAUDE_PROJECT_DIR ||
+            process.cwd()
+          )
+            .replace(/[\\/:]/g, "-")
+            .replace(/^-+/, "");
+          seen = extractSeenEmitIds(
+            readFileSync(join(homedir(), ".claude", "projects", hashDir, `${selfSid}.jsonl`), "utf8"),
+          );
+        } catch {
+          // No transcript readable - the discard half still reports below.
+        }
+        const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), seen));
+        if (report) {
+          lines.push(`- 🔴 **Channel loss**: ${report}`);
         }
       }
     } catch {

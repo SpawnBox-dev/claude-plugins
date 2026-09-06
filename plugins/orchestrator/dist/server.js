@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join11 } from "path";
-import { existsSync as existsSync11, readFileSync as readFileSync6, writeFileSync as writeFileSync3, statSync as statSync9, mkdirSync as mkdirSync4 } from "fs";
+import { existsSync as existsSync11, readFileSync as readFileSync7, writeFileSync as writeFileSync3, statSync as statSync9, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -26863,7 +26863,7 @@ ${decisionSummary}` : decisionSummary
 }
 
 // mcp/engine/agent_channel_emitlog.ts
-import { appendFileSync as appendFileSync2, statSync as statSync7, renameSync, existsSync as existsSync9, unlinkSync as unlinkSync4 } from "fs";
+import { appendFileSync as appendFileSync2, readFileSync as readFileSync6, statSync as statSync7, renameSync, existsSync as existsSync9, unlinkSync as unlinkSync4 } from "fs";
 import { join as join9 } from "path";
 var MAX_BYTES = 4 * 1024 * 1024;
 var EMIT_LOG_BASENAME = "emit-log.jsonl";
@@ -26874,6 +26874,65 @@ function newEmitId() {
 }
 function emitLogPath(stateDir) {
   return join9(stateDir, EMIT_LOG_BASENAME);
+}
+function formatLossReport(r) {
+  if (r.discardedTotal === 0 && r.counterGaps === 0)
+    return null;
+  const parts = [];
+  if (r.discardedTotal > 0) {
+    const per = Object.entries(r.discarded).sort((a, b) => b[1] - a[1]).map(([sid, n]) => `${sid.slice(0, 8)}:${n}`).join(", ");
+    parts.push(`${r.discardedTotal} message(s) were READ AND DISCARDED because their ` + `sender could not be identified (${per}). These never became ` + `notifications, so they leave NO gap at any receiver - this counter is ` + `the only thing that can see them.`);
+  }
+  if (r.counterGaps > 0) {
+    parts.push(`${r.counterGaps} notification(s) were emitted and sent but never ` + `enqueued here, out of ${r.observedEmits} sent. That loss is past ` + `this plugin's boundary - the send completed.`);
+  }
+  return `CHANNEL LOSS DETECTED. ${parts.join(" ")} ` + `Both figures come from the emit log at <state>/${EMIT_LOG_BASENAME}, ` + `joined to the receiver's queue-operation rows on emit_id. Treat any peer ` + `message from this window as possibly missing, and re-ask rather than ` + `assuming silence meant nothing was said.`;
+}
+function readEmitLog(stateDir, path2 = emitLogPath(stateDir)) {
+  let raw;
+  try {
+    raw = readFileSync6(path2, "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of raw.split(`
+`)) {
+    if (!line)
+      continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {}
+  }
+  return out;
+}
+function summarizeLoss(records, receiverId8, seenEmitIds) {
+  const discarded = {};
+  let discardedTotal = 0;
+  for (const r of records) {
+    if (r.receiver_id8 !== receiverId8)
+      continue;
+    if (r.event !== "unknown_sender")
+      continue;
+    const key = r.sender_id8 ?? "unknown";
+    discarded[key] = (discarded[key] ?? 0) + 1;
+    discardedTotal++;
+  }
+  const sent = new Set(records.filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id).map((r) => r.emit_id));
+  const seen = new Set(seenEmitIds);
+  let missing = 0;
+  for (const id of sent)
+    if (!seen.has(id))
+      missing++;
+  return { discarded, discardedTotal, counterGaps: missing, observedEmits: sent.size };
+}
+function extractSeenEmitIds(transcript) {
+  const out = [];
+  const re = /emit_id=\\?"([a-z0-9-]+)\\?"/g;
+  let m;
+  while ((m = re.exec(transcript)) !== null)
+    out.push(m[1]);
+  return out;
 }
 function appendEmitLog(stateDir, rec) {
   try {
@@ -27045,6 +27104,7 @@ class AgentChannel {
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
+  discarded = new Map;
   pendingMisses = new Map;
   currentRoster = new Map;
   sizeAtStale = new Map;
@@ -27508,11 +27568,12 @@ class AgentChannel {
         this.detectIngress(this.currentRoster, ingressNow);
       }
       const sessions = Array.from(this.currentRoster.values());
+      const identity = this.identityRoster();
       const overrideState = readOverrideState(this.projectStateDir);
       const offsets = readOffsets(this.projectStateDir, this.selfSession.id8);
       let mutated = false;
       for (const file of this.listJsonlFiles()) {
-        if (this.processFile(file, sessions, overrideState, offsets)) {
+        if (this.processFile(file, sessions, identity, overrideState, offsets)) {
           mutated = true;
         }
       }
@@ -27628,7 +27689,20 @@ class AgentChannel {
       }
     }
   }
-  processFile(file, sessions, overrideState, offsets) {
+  identityRoster() {
+    const identity = new Map;
+    try {
+      for (const s of readSessions(this.projectStateDir)) {
+        identity.set(s.session_id, s);
+      }
+    } catch {}
+    for (const [sid, entry] of this.knownSessions)
+      identity.set(sid, entry);
+    for (const [sid, entry] of this.currentRoster)
+      identity.set(sid, entry);
+    return identity;
+  }
+  processFile(file, sessions, identity, overrideState, offsets) {
     let stat;
     try {
       stat = statSync8(file);
@@ -27676,16 +27750,17 @@ class AgentChannel {
         continue;
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
-      const sender = sessions.find((s) => s.session_id === senderId);
+      const sender = identity.get(senderId);
       if (!sender) {
         if (filterEvent(raw)) {
+          this.discarded.set(senderId, (this.discarded.get(senderId) ?? 0) + 1);
           appendEmitLog(this.projectStateDir, {
             ts: new Date().toISOString(),
             event: "unknown_sender",
             receiver_id8: this.selfSession.id8,
             sender_id8: senderId.slice(0, 8),
             src_offset: srcOffset,
-            detail: "sender absent from the fresh roster at routing time"
+            detail: "no session with this id in roster, known-sessions, or registry"
           });
         }
         continue;
@@ -28017,7 +28092,7 @@ import { homedir as homedir5 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
     const pkgPath = join11(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync6(pkgPath, "utf8")).version;
+    return JSON.parse(readFileSync7(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -28061,7 +28136,7 @@ for ($i = 0; $i -lt 8; $i++) {
     let name = "";
     let ppid = 0;
     try {
-      const stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         return { pid: null, reason: `stat-malformed:${pid}` };
@@ -28113,7 +28188,7 @@ function getFallbackSessionId() {
     const perPidFile = join11(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync11(perPidFile)) {
-        const raw = readFileSync6(perPidFile, "utf8").trim();
+        const raw = readFileSync7(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -28131,7 +28206,7 @@ function getFallbackSessionId() {
   const file = join11(stateDir, "active-session");
   try {
     if (existsSync11(file)) {
-      const raw = readFileSync6(file, "utf8").trim();
+      const raw = readFileSync7(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
@@ -28163,7 +28238,7 @@ function readAuthoritativeSessionId() {
   const perPidFile = join11(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
   try {
     if (existsSync11(perPidFile)) {
-      const raw = readFileSync6(perPidFile, "utf8").trim();
+      const raw = readFileSync7(perPidFile, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
         return raw;
     }
@@ -28640,6 +28715,19 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
         const when = new Date(a.last_emit_ms).toISOString().replace("T", " ").slice(0, 16);
         const span = a.first_emit_ms && a.emit_count > 1 ? ` over ${Math.max(1, Math.round((a.last_emit_ms - a.first_emit_ms) / 3600000))}h` : "";
         lines.push(`  - ${a.alert_kind} -> ${a.subject_session.slice(0, 8)}: ${a.emit_count}x${span}, last ${when}Z`);
+      }
+    }
+    const selfSid = resolveSessionId();
+    if (selfSid) {
+      const records = readEmitLog(channelStateDir);
+      let seen = [];
+      try {
+        const hashDir = (process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd()).replace(/[\\/:]/g, "-").replace(/^-+/, "");
+        seen = extractSeenEmitIds(readFileSync7(join11(homedir5(), ".claude", "projects", hashDir, `${selfSid}.jsonl`), "utf8"));
+      } catch {}
+      const report = formatLossReport(summarizeLoss(records, selfSid.slice(0, 8), seen));
+      if (report) {
+        lines.push(`- \uD83D\uDD34 **Channel loss**: ${report}`);
       }
     }
   } catch {}
@@ -30099,7 +30187,7 @@ function checkInstallMismatch() {
   let installed = [];
   try {
     const registryPath = join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "plugins", "installed_plugins.json");
-    installed = extractInstalledPaths(JSON.parse(readFileSync6(registryPath, "utf8")), "orchestrator", caseFold);
+    installed = extractInstalledPaths(JSON.parse(readFileSync7(registryPath, "utf8")), "orchestrator", caseFold);
   } catch {}
   return decideInstallMismatch(runningRoot, installed);
 }
@@ -30196,7 +30284,7 @@ function checkParentClaudeExe(pid, expectedCreationTime) {
       }
       let stat;
       try {
-        stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
+        stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
       } catch {
         return "undetermined";
       }

@@ -34,7 +34,7 @@
  * Diagnostic-only. Never throws: a logging failure must never disturb routing
  * (anti_pattern 798f741b - best-effort side effects killing their host).
  */
-import { appendFileSync, statSync, renameSync, existsSync, unlinkSync } from "fs";
+import { appendFileSync, readFileSync, statSync, renameSync, existsSync, unlinkSync } from "fs";
 import { join } from "path";
 
 /** Keep the log bounded. One rotation only - this is a rolling diagnostic
@@ -101,6 +101,235 @@ export function newEmitId(): string {
 
 export function emitLogPath(stateDir: string): string {
   return join(stateDir, EMIT_LOG_BASENAME);
+}
+
+/**
+ * WI 6cf7437a (c) - THE TWO DETECTORS SEE DISJOINT FAILURES, so a report built
+ * on either alone is a subset that reads as full coverage. PA, 2026-09-06.
+ *
+ *   unknown_sender  - the sender could not be identified, so the line was
+ *                     consumed and discarded. It never reached newEmitId, so
+ *                     NO emit_id was ever minted and NO gap appears anywhere.
+ *                     Invisible to the counter detector by construction.
+ *
+ *   counter gap     - an emit_id WAS minted and the notification sent, but the
+ *                     receiver has no enqueue row for it. Invisible to the
+ *                     unknown_sender detector, because routing succeeded.
+ *
+ * The emit_id's middle segment is a per-process monotonic counter, so a gap in
+ * the sequence a receiver actually saw means an emit that its own producer
+ * made and its own harness never enqueued.
+ *
+ * CAVEAT THE CALLER MUST HONOUR: the counter resets on MCP restart, and the
+ * leading timestamp segment changes with it. A sequence must therefore be
+ * grouped by that prefix before gaps are counted, or every restart reads as a
+ * huge fabricated loss. That is what `parseEmitId` + the grouping below exist
+ * for; do not re-derive a "simpler" version that compares raw counters.
+ */
+export interface ParsedEmitId {
+  /** Per-process epoch segment. Changes on every MCP restart. */
+  epoch: string;
+  /** Monotonic within one epoch. */
+  seq: number;
+}
+
+export function parseEmitId(id: string): ParsedEmitId | null {
+  const parts = id.split("-");
+  if (parts.length < 2) return null;
+  const seq = parseInt(parts[1], 36);
+  if (!Number.isFinite(seq)) return null;
+  return { epoch: parts[0], seq };
+}
+
+export interface CounterGapReport {
+  /** How many emitted-and-sent notifications never appeared at the receiver. */
+  missing: number;
+  /** The specific sequence numbers absent, per epoch, for a human to chase. */
+  gaps: Array<{ epoch: string; seq: number }>;
+  /** Emit ids actually observed. Reported so a caller can say "0 of 0", which
+   *  is a quiet window, distinctly from "0 of 400", which is real coverage. */
+  observed: number;
+}
+
+/**
+ * Given the emit_ids a receiver actually saw, reconstruct the ones its own
+ * producer must have minted but that never arrived, from the sequence alone.
+ *
+ * NOT ON A RUNTIME PATH, and that is deliberate rather than an oversight.
+ * summarizeLoss has the emit log, so it answers the same question exactly by
+ * set difference (which ids did we send that never arrived) instead of
+ * inferring interior sequence numbers - inference reports an id that was
+ * emitted but never sent as a harness drop, double-counting one failure as
+ * two. That bug was real and is pinned by a test.
+ *
+ * This is kept as the tested reference for a consumer that has ONLY the
+ * receiver's transcript and no emit log - the warden's standing check. What it
+ * encodes and a naive reimplementation will not is the restart-epoch trap: the
+ * counter resets on MCP restart, so raw counters must never be compared across
+ * epochs. Anyone rebuilding this check elsewhere should read these rules first.
+ */
+export function findCounterGaps(seenEmitIds: string[]): CounterGapReport {
+  const byEpoch = new Map<string, Set<number>>();
+  for (const id of seenEmitIds) {
+    const p = parseEmitId(id);
+    if (!p) continue;
+    if (!byEpoch.has(p.epoch)) byEpoch.set(p.epoch, new Set());
+    byEpoch.get(p.epoch)!.add(p.seq);
+  }
+  const gaps: Array<{ epoch: string; seq: number }> = [];
+  let observed = 0;
+  for (const [epoch, seqs] of byEpoch) {
+    observed += seqs.size;
+    // Only the interior is evidence. A missing seq BELOW the minimum seen just
+    // means the window opened mid-stream, and one ABOVE the maximum has not
+    // been emitted yet - counting either would manufacture losses out of where
+    // we happened to start looking.
+    const lo = Math.min(...seqs);
+    const hi = Math.max(...seqs);
+    for (let s = lo + 1; s < hi; s++) {
+      if (!seqs.has(s)) gaps.push({ epoch, seq: s });
+    }
+  }
+  return { missing: gaps.length, gaps, observed };
+}
+
+export interface LossReport {
+  /** Lines consumed without routing, by sender id8. */
+  discarded: Record<string, number>;
+  discardedTotal: number;
+  /** Emitted, sent, never enqueued at the receiver. */
+  counterGaps: number;
+  /** How many notifications this receiver's producer SENT in the window. The
+   *  denominator travels with the figure: "3 missing" means very different
+   *  things out of 4 and out of 400. */
+  observedEmits: number;
+}
+
+/**
+ * Render the two detectors as one line. Returns null when BOTH are clean, so a
+ * quiet window says nothing at all rather than printing a reassuring zero that
+ * nobody reads.
+ */
+export function formatLossReport(r: LossReport): string | null {
+  if (r.discardedTotal === 0 && r.counterGaps === 0) return null;
+  const parts: string[] = [];
+  if (r.discardedTotal > 0) {
+    const per = Object.entries(r.discarded)
+      .sort((a, b) => b[1] - a[1])
+      .map(([sid, n]) => `${sid.slice(0, 8)}:${n}`)
+      .join(", ");
+    parts.push(
+      `${r.discardedTotal} message(s) were READ AND DISCARDED because their ` +
+        `sender could not be identified (${per}). These never became ` +
+        `notifications, so they leave NO gap at any receiver - this counter is ` +
+        `the only thing that can see them.`,
+    );
+  }
+  if (r.counterGaps > 0) {
+    parts.push(
+      `${r.counterGaps} notification(s) were emitted and sent but never ` +
+        `enqueued here, out of ${r.observedEmits} sent. That loss is past ` +
+        `this plugin's boundary - the send completed.`,
+    );
+  }
+  return (
+    `CHANNEL LOSS DETECTED. ${parts.join(" ")} ` +
+    `Both figures come from the emit log at <state>/${EMIT_LOG_BASENAME}, ` +
+    `joined to the receiver's queue-operation rows on emit_id. Treat any peer ` +
+    `message from this window as possibly missing, and re-ask rather than ` +
+    `assuming silence meant nothing was said.`
+  );
+}
+
+/** Read the emit log back. Best-effort: a missing or partly-written file
+ *  yields whatever parsed, never an exception - this is a diagnostic read on a
+ *  file another process is appending to concurrently. */
+export function readEmitLog(stateDir: string, path = emitLogPath(stateDir)): EmitLogRecord[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  const out: EmitLogRecord[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      // A torn final line while another process appends. Skip it.
+    }
+  }
+  return out;
+}
+
+/**
+ * Combine both detectors for ONE receiver.
+ *
+ * `seenEmitIds` must be the ids that actually reached this session - read from
+ * its own transcript's `<channel ... emit_id="...">` attributes, NOT from the
+ * emit log, or the check becomes a tautology (the log would be compared
+ * against itself and could never show a gap).
+ */
+export function summarizeLoss(
+  records: EmitLogRecord[],
+  receiverId8: string,
+  seenEmitIds: string[],
+): LossReport {
+  const discarded: Record<string, number> = {};
+  let discardedTotal = 0;
+  for (const r of records) {
+    if (r.receiver_id8 !== receiverId8) continue;
+    if (r.event !== "unknown_sender") continue;
+    const key = r.sender_id8 ?? "unknown";
+    discarded[key] = (discarded[key] ?? 0) + 1;
+    discardedTotal++;
+  }
+  // Only ids this receiver's own producer claims it SENT can be expected to
+  // appear; an emit that never got sent is a different (already-logged)
+  // failure and must not be double-counted as a harness drop.
+  const sent = new Set(
+    records.filter((r) => r.receiver_id8 === receiverId8 && r.event === "sent" && r.emit_id).map((r) => r.emit_id!),
+  );
+
+  // SET DIFFERENCE, NOT SEQUENCE INFERENCE. findCounterGaps below reconstructs
+  // missing sequence numbers from the ids a receiver saw, which is the right
+  // tool when the emit log is unavailable - the warden's receiver-only check.
+  // Here the log IS available, so the exact answer is "which ids did we send
+  // that never arrived". Inferring interior sequence numbers instead reports a
+  // seq that was emitted but never sent as a harness drop, double-counting one
+  // failure as two; caught by the "a gap needs the id to have been SENT" test.
+  const seen = new Set(seenEmitIds);
+  let missing = 0;
+  for (const id of sent) if (!seen.has(id)) missing++;
+
+  return { discarded, discardedTotal, counterGaps: missing, observedEmits: sent.size };
+}
+
+/**
+ * Pull every `emit_id` ATTRIBUTE out of a receiver's own transcript.
+ *
+ * TWO TRAPS, both measured on real data:
+ *
+ * 1. Match the attribute, not the bare word. A `grep -c emit_id` over a
+ *    transcript also counts PROSE ABOUT emit_id - my own first reading of 4
+ *    hits was entirely my own writing, and taking it as coverage would have
+ *    claimed the harness kept the key when nothing had tested it.
+ *
+ * 2. Accept the ESCAPED form. The channel tag lives inside a JSON string in
+ *    the JSONL, so on disk it reads `emit_id=\"abc-1-z\"`, not
+ *    `emit_id="abc-1-z"`. A pattern anchored on the unescaped form matches
+ *    nothing and reads as ABSENCE rather than as a broken matcher - the
+ *    failure mode where an instrument narrows its own input and looks
+ *    self-consistent doing it. Callers that hand us JSON.parse'd content see
+ *    the unescaped form, so both must work.
+ */
+export function extractSeenEmitIds(transcript: string): string[] {
+  const out: string[] = [];
+  const re = /emit_id=\\?"([a-z0-9-]+)\\?"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(transcript)) !== null) out.push(m[1]);
+  return out;
 }
 
 export function appendEmitLog(stateDir: string, rec: EmitLogRecord): void {
