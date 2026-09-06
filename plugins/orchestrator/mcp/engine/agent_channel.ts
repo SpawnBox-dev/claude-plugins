@@ -793,6 +793,15 @@ export class AgentChannel {
    *  unread bytes. Process-local on purpose: it must not trust the table that
    *  lost the row. */
   private seenFiles = new Set<string>();
+  /** WI 6cf7437a: end offset of the LAST pass over each transcript, kept in
+   *  process. A new pass starting ABOVE this means bytes were never read.
+   *  Process-local for the same reason seenFiles is - it must not trust the
+   *  offsets table, which is what is suspected of losing position. */
+  private lastScanEnd = new Map<string, number>();
+  /** WI 6cf7437a: set once this watcher has conceded the session to a newer
+   *  instance. A retired watcher stops polling, stops heartbeating and stops
+   *  consuming offsets - which is the whole fix for orphaned MCP servers. */
+  private retired = false;
   /** DEFENSE-C (WI 8522c487): per-peer consecutive stale-observation tick
    *  count. A known peer absent from the fresh roster accrues misses; its
    *  departure is announced (and its row reaped) only at DEPART_GRACE_TICKS,
@@ -1204,6 +1213,72 @@ export class AgentChannel {
    * the shared state dir is the delivery route that still works, and peers read
    * the registry every tick.
    */
+  /**
+   * SELF-RETIREMENT: stand down when a newer instance has taken this session.
+   *
+   * THE BUG THIS CLOSES (root cause of 6cf7437a, note d628d93a). A reload or a
+   * `/mcp` reconnect ABANDONS the old MCP server rather than terminating it, so
+   * `stop()` never runs and the old process keeps polling forever. Measured
+   * 2026-09-06: SEVEN watchers alive for a four-session fleet, orphans aged 12,
+   * 15 and 25 hours. Every one of them read the SAME offsets row, consumed new
+   * transcript bytes and advanced the shared bookmark - but only the live
+   * process had a transport anyone was reading. The rest ate messages into
+   * nothing. Delivery fell 100% -> 48% -> 42% as orphans accumulated, and the
+   * ladder is one watcher, then two, then three.
+   *
+   * The `instance` column and INSTANCE_TOKEN already existed, used only to stop
+   * a departing instance deleting its successor's row. The claim half was never
+   * built: nothing ever asked "am I still the owner?".
+   *
+   * WHY started_at AND NOT THE INSTANCE TOKEN. Every process writes its own
+   * token on every heartbeat, so whoever wrote last appears to own the row and
+   * the field flickers between competitors - that flicker is how the bug was
+   * found. `started_at` is monotonic across a reload: a replacement always
+   * starts later than the process it replaced. Comparing it converges on
+   * exactly one winner, the newest, with every older instance retiring itself.
+   *
+   * ORDERING: this runs on the heartbeat, and a retired instance stops
+   * heartbeating, so it also stops competing for the row it just conceded.
+   */
+  private checkSuperseded(): void {
+    if (this.retired) return;
+    let rows;
+    try {
+      rows = readSessions(this.projectStateDir);
+    } catch {
+      // A locked or absent registry must never retire a healthy watcher -
+      // that would be the fix causing the outage it exists to prevent.
+      return;
+    }
+    const row = rows.find((s) => s.session_id === this.selfSession.session_id);
+    if (!row) return; // no row to concede; writeSession re-adds us next beat
+    const theirs = new Date(row.started_at).getTime();
+    const ours = new Date(this.selfSession.started_at).getTime();
+    if (!Number.isFinite(theirs) || !Number.isFinite(ours)) return;
+    if (theirs <= ours) return; // we are the newest, or it is our own row
+
+    this.retired = true;
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "retired",
+      receiver_id8: this.selfSession.id8,
+      detail:
+        `superseded: registry row started_at ${row.started_at} is newer than ` +
+        `this instance's ${this.selfSession.started_at}; standing down so a ` +
+        `stale watcher stops consuming this session's offsets`,
+    });
+    process.stderr.write(
+      `agent-channel: instance superseded (mine ${this.selfSession.started_at}, ` +
+        `live ${row.started_at}) - retiring this watcher\n`,
+    );
+    // Stop polling and stop heartbeating. Deliberately NOT removeOwnSession():
+    // the row belongs to the newer instance now and deleting it would take the
+    // live watcher's registration with it - the precise mistake the existing
+    // instance guard was written to prevent.
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+  }
+
   private checkOwnTransport(): void {
     const owed = this.pendingEmitAt;
     if (owed !== null) {
@@ -1284,6 +1359,11 @@ export class AgentChannel {
       // healthy in the lifecycle log. A telemetry probe must never be able to
       // do that, so it now runs AFTER the write and owns its own failure.
       try {
+        // Ownership FIRST: a superseded watcher must stop before it does any
+        // more work, and checkOwnTransport would otherwise have a retired
+        // instance emitting transport alerts about a session it no longer owns.
+        this.checkSuperseded();
+        if (this.retired) return;
         this.checkOwnTransport();
       } catch {
         /* detector is best-effort; the heartbeat above already landed */
@@ -1985,6 +2065,11 @@ export class AgentChannel {
   }
 
   private tick(): void {
+    // A retired watcher must not consume offsets. Belt and braces: the timer is
+    // already cleared on retirement, but a tick could be in flight at that
+    // moment, and one tick is enough to advance a shared bookmark past messages
+    // the live watcher then never sees. That is the entire bug.
+    if (this.retired) return;
     try {
       this.detectSessionChanges();
       // Ingress-death scan (WI 19294811), throttled to INGRESS_CHECK_INTERVAL_MS
@@ -2355,6 +2440,9 @@ export class AgentChannel {
 
     const lines = buf.split("\n");
     let consumed = 0;
+    /** Lines this pass actually handed to processEvent - the count that makes
+     *  "never read" distinguishable from "read and silently dropped". */
+    let iterated = 0;
     for (let i = 0; i < lines.length - 1; i++) {
       // Byte offset of THIS line within the sender's transcript, captured
       // before `consumed` advances past it (WI 6cf7437a). Logged with every
@@ -2394,6 +2482,42 @@ export class AgentChannel {
         .split(/[\\/]/)
         .pop()!
         .replace(/\.jsonl$/, "");
+
+      // THE RECEIPT (WI 6cf7437a). When the line is from OUR OWN transcript and
+      // carries a channel tag, that tag is a message that was DELIVERED TO US -
+      // the harness injected it and the harness wrote it down. Recording it here
+      // is the receiver asserting delivery directly.
+      //
+      // WHY THIS IS THE MISSING PRIMITIVE. Until now delivery was inferred by
+      // joining our emit-log to queue-operation rows written by a different
+      // process - an inference from a side effect. That indirection produced two
+      // false alarms in one afternoon and nearly triggered a four-version
+      // rollback on a number that turned out to be an enqueue race. A receipt is
+      // asserted by the party that would know, so `sent` without `received` is
+      // unambiguous rather than suggestive.
+      //
+      // It sits BEFORE the sender lookup and the self-suppression return on
+      // purpose: those correctly stop us ROUTING our own lines, but this is not
+      // routing, it is observing our own inbox.
+      if (senderId === this.selfSession.session_id) {
+        const ids = raw?.message?.content;
+        const body = typeof ids === "string" ? ids : "";
+        if (body.includes("<channel")) {
+          const m = /emit_id="([a-z0-9-]+)"/.exec(body);
+          if (m) {
+            appendEmitLog(this.projectStateDir, {
+              ts: new Date().toISOString(),
+              event: "received",
+              emit_id: m[1],
+              receiver_id8: this.selfSession.id8,
+              sender_id8: /from_id8="([0-9a-f]{8})"/.exec(body)?.[1],
+              src_offset: srcOffset,
+              event_type: /event_type="([a-z_]+)"/.exec(body)?.[1],
+              content_len: body.length,
+            });
+          }
+        }
+      }
       // Resolve on IDENTITY. The heartbeat filter still governs addressing and
       // liveness below - it just no longer decides whether a line that was
       // demonstrably written by a known session is allowed to be routed.
@@ -2425,8 +2549,45 @@ export class AgentChannel {
         continue;
       }
 
+      iterated++;
       this.processEvent(raw, sender, sessions, overrideState, srcOffset);
     }
+
+    // WI 6cf7437a - THE LAST UNINSTRUMENTED QUESTION: was the line ever READ?
+    //
+    // Every DECISION about a line is logged (unknown_sender, parse_failed,
+    // filter_dropped, offset_reset, emit). On 2026-09-06 at 14:13:57 an entry
+    // at offset 12518117 was skipped with delivered entries immediately either
+    // side, and ALL of those stayed silent. Eliminating every decision path
+    // leaves one possibility: the line was never iterated. Nothing could
+    // distinguish that from "iterated and lost somewhere unlogged".
+    //
+    // SILENT WHEN HEALTHY, so every entry is a finding (PA's requirement, and
+    // right - a per-scan success record would bury the log in routine noise on
+    // the highest-volume path in the file). We log only the pathological case:
+    // a byte range that NO pass ever read.
+    //
+    // Detected by comparing this pass's start against the previous pass's end
+    // for the same file. lastScanEnd is PROCESS-LOCAL for the same reason
+    // seenFiles is - it must not trust the offsets table, which is precisely
+    // what is suspected of losing position.
+    const prevEnd = this.lastScanEnd.get(file);
+    if (prevEnd !== undefined && lastOffset > prevEnd) {
+      appendEmitLog(this.projectStateDir, {
+        ts: new Date().toISOString(),
+        event: "scan_gap",
+        receiver_id8: this.selfSession.id8,
+        sender_id8: file.split(/[\\/]/).pop()!.replace(/\.jsonl$/, "").slice(0, 8),
+        scan_from: prevEnd,
+        scan_to: lastOffset,
+        lines: iterated,
+        detail:
+          `bytes [${prevEnd}, ${lastOffset}) were never read by this watcher - ` +
+          `the offset advanced past them without a scan`,
+      });
+    }
+    this.lastScanEnd.set(file, lastOffset + consumed);
+
     offsets[file] = lastOffset + consumed;
     return consumed > 0;
   }

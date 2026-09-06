@@ -1,11 +1,12 @@
 process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY = ":memory:";
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync } from "fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync, readFileSync, existsSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { AgentChannel, type ChannelNotification } from "../../mcp/engine/agent_channel";
 import { looksRoutableAssistantText } from "../../mcp/engine/agent_channel_filter";
+import { findGapCovering, unreadByteTotals } from "../../mcp/engine/agent_channel_emitlog";
 import {
   writeSession,
   closeAgentChannelDb,
@@ -280,6 +281,95 @@ describe("offset_reset: a vanished offset row is recorded, not a silent EOF jump
 });
 
 const pa8 = "aaaaaaaa";
+
+describe("scan_gap: bytes NO pass ever read", () => {
+  // WHY THIS EXISTS. On 2026-09-06 at 14:13:57 an entry at offset 12518117 was
+  // skipped with delivered entries immediately either side, and every DECISION
+  // detector stayed silent - no unknown_sender, no parse_failed, no
+  // filter_dropped, no offset_reset. Eliminating every decision path leaves
+  // one possibility nothing could confirm: the line was never read.
+  //
+  // SILENT WHEN HEALTHY was PA's requirement and is what lets this sit on the
+  // highest-volume path in the file. A per-scan success record would bury the
+  // log in routine noise; passes normally start exactly where the last ended.
+
+  test("SILENT during normal contiguous reading - the load-bearing arm", () => {
+    const rx: ChannelNotification[] = [];
+    const { chan, saJsonl } = setup(rx);
+    for (let i = 0; i < 3; i++) {
+      appendFileSync(
+        saJsonl,
+        JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "m" + i }] } }) + "\n",
+      );
+      (chan as any).tick();
+    }
+    expect(logRows().filter((r) => r.event === "scan_gap")).toHaveLength(0);
+    // and it really did route, so the fixture exercises the live path
+    expect(logRows().filter((r) => r.event === "emit").length).toBe(3);
+  });
+
+  test("FIRES when the offset jumps past unread bytes, and bounds the range", () => {
+    const rx: ChannelNotification[] = [];
+    const { chan, saJsonl } = setup(rx);
+    appendFileSync(
+      saJsonl,
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "read me" }] } }) + "\n",
+    );
+    (chan as any).tick();
+    const afterFirst = statSync(saJsonl).size;
+
+    // Content that SHOULD be read...
+    appendFileSync(
+      saJsonl,
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "skipped" }] } }) + "\n",
+    );
+    const skippedEnd = statSync(saJsonl).size;
+    // ...but the stored offset jumps past it, which is the failure being modelled.
+    const { writeAllOffsets } = require("../../mcp/engine/agent_channel_state");
+    writeAllOffsets(stateDir, "aaaaaaaa", { [saJsonl]: skippedEnd });
+    appendFileSync(
+      saJsonl,
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "later" }] } }) + "\n",
+    );
+    (chan as any).tick();
+
+    const gaps = logRows().filter((r) => r.event === "scan_gap");
+    expect(gaps.length).toBe(1);
+    expect(gaps[0].sender_id8).toBe("bbbbbbbb");
+    expect(gaps[0].scan_from).toBe(afterFirst);
+    expect(gaps[0].scan_to).toBe(skippedEnd);
+    expect(gaps[0].detail).toContain("never read");
+
+    // The skipped entry's offset is inside the reported gap.
+    expect(findGapCovering(logRows(), "bbbbbbbb", afterFirst)).not.toBeNull();
+    // A delivered entry's offset is NOT - the negative half of the join.
+    expect(findGapCovering(logRows(), "bbbbbbbb", skippedEnd)).toBeNull();
+  });
+
+  test("unreadByteTotals sums the loss per sender, and is 0 when healthy", () => {
+    expect(unreadByteTotals([])).toEqual({});
+    const rows = [
+      { ts: "t", event: "scan_gap", receiver_id8: "aaaaaaaa", sender_id8: "bbbbbbbb", scan_from: 10, scan_to: 40 },
+      { ts: "t", event: "scan_gap", receiver_id8: "aaaaaaaa", sender_id8: "bbbbbbbb", scan_from: 100, scan_to: 110 },
+      { ts: "t", event: "emit", receiver_id8: "aaaaaaaa", sender_id8: "bbbbbbbb" },
+    ] as any;
+    expect(unreadByteTotals(rows)).toEqual({ bbbbbbbb: 40 });
+  });
+
+  test("does not fire on a transcript's FIRST sight - ROOT-B is legitimate", () => {
+    const rx: ChannelNotification[] = [];
+    const pa = makeSession("prime", "aaaaaaaa", "PA-test");
+    const sa = makeSession("subordinate", "bbbbbbbb", "SA-writer");
+    writeSession(stateDir, pa);
+    writeSession(stateDir, sa);
+    writeFileSync(join(projectsHashDir, pa.session_id + ".jsonl"), "");
+    writeFileSync(join(projectsHashDir, sa.session_id + ".jsonl"), "pre-existing backlog\n");
+    const chan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => rx.push(n));
+    (chan as any).tick();
+    (chan as any).tick();
+    expect(logRows().filter((r) => r.event === "scan_gap")).toHaveLength(0);
+  });
+});
 
 describe("looksRoutableAssistantText - the predicate itself", () => {
   test("true for an array body with non-empty text", () => {

@@ -27187,6 +27187,8 @@ class AgentChannel {
   knownSessions = new Map;
   discarded = new Map;
   seenFiles = new Set;
+  lastScanEnd = new Map;
+  retired = false;
   pendingMisses = new Map;
   currentRoster = new Map;
   sizeAtStale = new Map;
@@ -27321,6 +27323,42 @@ class AgentChannel {
       }
     } catch {}
   }
+  checkSuperseded() {
+    if (this.retired)
+      return;
+    let rows;
+    try {
+      rows = readSessions(this.projectStateDir);
+    } catch {
+      return;
+    }
+    const row = rows.find((s) => s.session_id === this.selfSession.session_id);
+    if (!row)
+      return;
+    const theirs = new Date(row.started_at).getTime();
+    const ours = new Date(this.selfSession.started_at).getTime();
+    if (!Number.isFinite(theirs) || !Number.isFinite(ours))
+      return;
+    if (theirs <= ours)
+      return;
+    this.retired = true;
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "retired",
+      receiver_id8: this.selfSession.id8,
+      detail: `superseded: registry row started_at ${row.started_at} is newer than ` + `this instance's ${this.selfSession.started_at}; standing down so a ` + `stale watcher stops consuming this session's offsets`
+    });
+    process.stderr.write(`agent-channel: instance superseded (mine ${this.selfSession.started_at}, ` + `live ${row.started_at}) - retiring this watcher
+`);
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
   checkOwnTransport() {
     const owed = this.pendingEmitAt;
     if (owed !== null) {
@@ -27359,6 +27397,9 @@ class AgentChannel {
       };
       writeSession(this.projectStateDir, updated);
       try {
+        this.checkSuperseded();
+        if (this.retired)
+          return;
         this.checkOwnTransport();
       } catch {}
       if (this.heartbeatFailures > 0) {
@@ -27642,6 +27683,8 @@ class AgentChannel {
     return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join10(this.projectsHashDir, f));
   }
   tick() {
+    if (this.retired)
+      return;
     try {
       this.detectSessionChanges();
       const ingressNow = Date.now();
@@ -27831,6 +27874,7 @@ class AgentChannel {
     const lines = buf.split(`
 `);
     let consumed = 0;
+    let iterated = 0;
     for (let i = 0;i < lines.length - 1; i++) {
       const srcOffset = lastOffset + consumed;
       consumed += Buffer.byteLength(lines[i], "utf8") + 1;
@@ -27853,6 +27897,25 @@ class AgentChannel {
         continue;
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
+      if (senderId === this.selfSession.session_id) {
+        const ids = raw?.message?.content;
+        const body = typeof ids === "string" ? ids : "";
+        if (body.includes("<channel")) {
+          const m = /emit_id="([a-z0-9-]+)"/.exec(body);
+          if (m) {
+            appendEmitLog(this.projectStateDir, {
+              ts: new Date().toISOString(),
+              event: "received",
+              emit_id: m[1],
+              receiver_id8: this.selfSession.id8,
+              sender_id8: /from_id8="([0-9a-f]{8})"/.exec(body)?.[1],
+              src_offset: srcOffset,
+              event_type: /event_type="([a-z_]+)"/.exec(body)?.[1],
+              content_len: body.length
+            });
+          }
+        }
+      }
       const sender = identity.get(senderId);
       if (!sender) {
         if (filterEvent(raw)) {
@@ -27868,8 +27931,23 @@ class AgentChannel {
         }
         continue;
       }
+      iterated++;
       this.processEvent(raw, sender, sessions, overrideState, srcOffset);
     }
+    const prevEnd = this.lastScanEnd.get(file);
+    if (prevEnd !== undefined && lastOffset > prevEnd) {
+      appendEmitLog(this.projectStateDir, {
+        ts: new Date().toISOString(),
+        event: "scan_gap",
+        receiver_id8: this.selfSession.id8,
+        sender_id8: file.split(/[\\/]/).pop().replace(/\.jsonl$/, "").slice(0, 8),
+        scan_from: prevEnd,
+        scan_to: lastOffset,
+        lines: iterated,
+        detail: `bytes [${prevEnd}, ${lastOffset}) were never read by this watcher - ` + `the offset advanced past them without a scan`
+      });
+    }
+    this.lastScanEnd.set(file, lastOffset + consumed);
     offsets[file] = lastOffset + consumed;
     return consumed > 0;
   }

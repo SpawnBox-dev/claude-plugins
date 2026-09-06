@@ -103,7 +103,56 @@ export type EmitLogEvent =
    * parse_failed), and filterEvent accepts them (no filter_dropped) - they are
    * simply never iterated. `src_offset` carries the EOF it jumped to.
    */
-  | "offset_reset";
+  | "offset_reset"
+  /**
+   * A byte range that NO pass ever read: this pass started ABOVE where the
+   * previous pass over the same transcript ended.
+   *
+   * THE ONLY RECORD THAT IS NOT ABOUT A DECISION. Every other event says what
+   * was decided about a line; this says a line was never LOOKED AT. That
+   * distinction was unanswerable when a skipped entry produced no
+   * unknown_sender, no parse_failed, no filter_dropped and no offset_reset -
+   * every decision path stayed silent, leaving "read and lost somewhere
+   * unlogged" and "never read" indistinguishable.
+   *
+   * SILENT WHEN HEALTHY, which is why it can live on the highest-volume path
+   * in the file. Passes normally start exactly where the last one ended, so
+   * the healthy case writes nothing at all and every record is a finding.
+   * `scan_from`/`scan_to` bound the unread range.
+   */
+  | "scan_gap"
+  /**
+   * THE RECEIPT. The RECEIVER observed a channel tag carrying this emit_id
+   * land in its OWN transcript.
+   *
+   * This is the primitive whose absence made the entire delivery investigation
+   * archaeology. Until now "was it delivered" was answered by joining an
+   * emit-log record to a queue-operation row written by a different process -
+   * an inference from a side effect, which is what let an enqueue race produce
+   * two false alarms in one afternoon and nearly trigger a four-version
+   * rollback.
+   *
+   * A receipt is DIRECTLY EMITTED BY THE PARTY THAT WOULD KNOW. Delivery
+   * becomes a join over two facts each asserted by the process that observed
+   * it, rather than a reconstruction. Sender says `sent`; receiver says
+   * `received`; anything with one and not the other is unambiguous.
+   */
+  | "received"
+  /**
+   * A message was re-sent because no receipt arrived within the grace window.
+   *
+   * WHY RETRY IS THE RIGHT REMEDY HERE, and why it was not obvious earlier:
+   * loss turned out to be UNCORRELATED with message size, class and character
+   * content (measured 2026-09-06 - delivered and lost length distributions are
+   * p25/med/p75 = 98/115/183 vs 98/115/182, and no character class separates
+   * them). Uniform loss independent of payload is the signature of a lossy
+   * TRANSPORT, not a filter, a parser or a classifier. You do not fix a lossy
+   * transport by classifying better; you fix it by detecting non-delivery and
+   * sending again. The receipt is what makes detection possible at all.
+   */
+  | "retry"
+  /** This watcher conceded the session to a newer instance and stood down. */
+  | "retired";
 
 export interface EmitLogRecord {
   ts: string;
@@ -122,6 +171,47 @@ export interface EmitLogRecord {
   content_len?: number;
   targets?: number;
   detail?: string;
+  /** `scan` only: start of the byte range this pass read. */
+  scan_from?: number;
+  /** `scan` only: end of the range CONSUMED (exclusive). A trailing partial
+   *  line is deliberately outside it - it is carried to the next tick. */
+  scan_to?: number;
+  /** `scan` only: how many lines were handed to processEvent. */
+  lines?: number;
+}
+
+/**
+ * Was a given byte offset in a sender's transcript inside a range that NO pass
+ * ever read? Returns the gap record covering it, or null.
+ *
+ * A function rather than a grep because the answer is a range-containment test
+ * across many records, and eyeballing it invites the off-by-one that would
+ * flip the verdict on the one question this whole instrument exists to answer.
+ */
+export function findGapCovering(
+  records: EmitLogRecord[],
+  senderId8: string,
+  offset: number,
+): EmitLogRecord | null {
+  for (const r of records) {
+    if (r.event !== "scan_gap" || r.sender_id8 !== senderId8) continue;
+    if (typeof r.scan_from !== "number" || typeof r.scan_to !== "number") continue;
+    if (offset >= r.scan_from && offset < r.scan_to) return r;
+  }
+  return null;
+}
+
+/** Total bytes this watcher provably never read, per sender. Zero in a healthy
+ *  fleet, which is what makes a non-zero value worth acting on. */
+export function unreadByteTotals(records: EmitLogRecord[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const r of records) {
+    if (r.event !== "scan_gap") continue;
+    if (typeof r.scan_from !== "number" || typeof r.scan_to !== "number") continue;
+    const key = r.sender_id8 ?? "unknown";
+    out[key] = (out[key] ?? 0) + (r.scan_to - r.scan_from);
+  }
+  return out;
 }
 
 let counter = 0;
@@ -373,6 +463,60 @@ export function readSeenWindow(transcriptPath: string, maxBytes = 4 * 1024 * 102
 function earliestTimestamp(slice: string): string | null {
   const m = /\\?"timestamp\\?":\\?"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\\?"/.exec(slice);
   return m ? m[1] : null;
+}
+
+/**
+ * Messages this session SENT that have no receipt yet and are old enough that
+ * a receipt should have arrived - i.e. the retry set.
+ *
+ * PURE, and takes the records rather than a path, so the retry decision is
+ * testable without a live fleet. That matters more than usual here: a retry
+ * loop that misjudges "unacknowledged" duplicates traffic on a transport that
+ * is already dropping under load, which is the one way this change could make
+ * things worse rather than better.
+ *
+ * @param graceMs how long to wait before deciding a receipt is not coming.
+ *   Must exceed the receiver's poll interval plus its turn latency, or a
+ *   healthy slow delivery gets re-sent. Measured p90 was 13s, max 42s.
+ * @param maxAttempts a hard ceiling. An undeliverable message must eventually
+ *   STOP being retried: infinite retry against a persistently broken receiver
+ *   is a self-inflicted flood, and the emit log would grow without bound.
+ */
+export function pendingRetries(
+  records: EmitLogRecord[],
+  selfId8: string,
+  nowMs: number,
+  graceMs = 60_000,
+  maxAttempts = 3,
+): Array<{ emit_id: string; attempts: number; sentAt: string }> {
+  const sent = new Map<string, string>();
+  const acked = new Set<string>();
+  const attempts = new Map<string, number>();
+
+  for (const r of records) {
+    if (!r.emit_id) continue;
+    if (r.event === "sent" && r.receiver_id8 === selfId8) {
+      if (!sent.has(r.emit_id)) sent.set(r.emit_id, r.ts);
+    } else if (r.event === "received") {
+      // A receipt counts NO MATTER WHICH session recorded it - the receiver
+      // asserts it, not us. Filtering receipts by our own id would discard
+      // exactly the evidence we are looking for.
+      acked.add(r.emit_id);
+    } else if (r.event === "retry") {
+      attempts.set(r.emit_id, (attempts.get(r.emit_id) ?? 0) + 1);
+    }
+  }
+
+  const out: Array<{ emit_id: string; attempts: number; sentAt: string }> = [];
+  for (const [id, ts] of sent) {
+    if (acked.has(id)) continue;
+    const age = nowMs - new Date(ts).getTime();
+    if (!Number.isFinite(age) || age < graceMs) continue; // too fresh to judge
+    const n = attempts.get(id) ?? 0;
+    if (n >= maxAttempts) continue; // give up rather than flood
+    out.push({ emit_id: id, attempts: n, sentAt: ts });
+  }
+  return out;
 }
 
 /** Worst-affected sender first, so the peer losing the most is not buried. */
