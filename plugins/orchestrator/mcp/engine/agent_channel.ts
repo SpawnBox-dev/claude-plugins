@@ -22,7 +22,11 @@ import { join } from "path";
 import { parseAddressing } from "./addressing";
 import { readLatestRename } from "./session_rename";
 import { lastCleanShutdownMs, readLifecycleTail, restartExplainsSilence } from "./restart_witness";
-import { filterEvent, type FilteredEvent } from "./agent_channel_filter";
+import {
+  filterEvent,
+  looksRoutableAssistantText,
+  type FilteredEvent,
+} from "./agent_channel_filter";
 import { appendEmitLog, newEmitId } from "./agent_channel_emitlog";
 import {
   readSessions,
@@ -783,6 +787,12 @@ export class AgentChannel {
    *  not be identified, keyed by sender session_id. Feeds the loss report;
    *  see reportChannelLoss for why this is only HALF the coverage. */
   private discarded = new Map<string, number>();
+  /** WI 6cf7437a: transcripts this PROCESS has already tracked. Distinguishes
+   *  a genuinely-new transcript (ROOT-B, skip the backlog correctly) from an
+   *  offset row that VANISHED and re-initialised to EOF, silently discarding
+   *  unread bytes. Process-local on purpose: it must not trust the table that
+   *  lost the row. */
+  private seenFiles = new Set<string>();
   /** DEFENSE-C (WI 8522c487): per-peer consecutive stale-observation tick
    *  count. A known peer absent from the fresh roster accrues misses; its
    *  departure is announced (and its row reaped) only at DEPART_GRACE_TICKS,
@@ -2264,9 +2274,45 @@ export class AgentChannel {
     // the joiner. Init to current EOF and skip the backlog. `undefined` (no
     // offset row) is the genuine first-sight signal, distinct from a real 0.
     if (offsets[file] === undefined) {
+      // WI 6cf7437a - THE THIRD SILENT PATH, and the only one whose signature
+      // matches the measured drops.
+      //
+      // ROOT-B is correct for a genuinely new transcript: skip the backlog.
+      // But `undefined` also occurs when a row we ALREADY HAD disappears, and
+      // then this jumps to EOF and silently discards every byte written since
+      // the last tick. That produces exactly what was measured - a contiguous
+      // span consumed-but-never-emitted, with no unknown_sender (the sender
+      // resolves fine), no parse failure (the lines parse fine), and no filter
+      // drop (filterEvent returns assistant_text for them). Verified on the
+      // 4,091-char specimen at 745977db offset 1851702: it parses, it is
+      // ARRAY[text], and filterEvent yields assistant_text. It should have
+      // emitted, so it was never iterated.
+      //
+      // A row can vanish because writeAllOffsets DELETEs rows for this
+      // receiver whose path is not in the map it was handed, and that map is
+      // built from listJsonlFiles() - so one transient readdir miss (an
+      // OneDrive-backed directory here) drops the row, and the next tick
+      // re-inits to EOF.
+      //
+      // seenFiles is process-local, so it distinguishes the two cases without
+      // trusting the very table that lost the row.
+      if (this.seenFiles.has(file)) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "offset_reset",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: file.split(/[\\/]/).pop()!.replace(/\.jsonl$/, "").slice(0, 8),
+          src_offset: stat.size,
+          detail:
+            "offset row vanished for a transcript already tracked this process; " +
+            "re-initialised to EOF, so any bytes written since the last tick were skipped unread",
+        });
+      }
+      this.seenFiles.add(file);
       offsets[file] = stat.size;
       return true; // persist EOF offset; nothing to process this tick
     }
+    this.seenFiles.add(file);
     const lastOffset = offsets[file];
     if (stat.size === lastOffset) return false;
     if (stat.size < lastOffset) {
@@ -2322,7 +2368,24 @@ export class AgentChannel {
       let raw: any;
       try {
         raw = JSON.parse(line);
-      } catch {
+      } catch (err) {
+        // CONSUMED AND LOST, PERMANENTLY. The offset advances past this line
+        // regardless, so a parse failure here is indistinguishable from a
+        // successful route on every surface we had - which is one of the two
+        // remaining candidates for the measured drops on 6cf7437a (a 4,091
+        // char turn-final text at 745977db offset 1851702, consumed by all
+        // four watchers with no emit and no sent record anywhere).
+        //
+        // Expected count in a healthy fleet is ZERO, so this logs every one.
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "parse_failed",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: file.split(/[\\/]/).pop()!.replace(/\.jsonl$/, "").slice(0, 8),
+          src_offset: srcOffset,
+          content_len: line.length,
+          detail: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+        });
         continue;
       }
 
@@ -2376,7 +2439,41 @@ export class AgentChannel {
     srcOffset?: number,
   ): void {
     const ev = filterEvent(raw);
-    if (!ev) return;
+    if (!ev) {
+      // THE SECOND SILENT PATH (WI 6cf7437a). A bare `return` here is correct
+      // for the overwhelming majority - tool_result lines, system entries -
+      // and logging those would bury everything else. But when the entry is
+      // visibly routable assistant prose and the filter still said no, that is
+      // a line a peer expected and never got, and nothing recorded it.
+      //
+      // The predicate is deliberately NOT written from filterEvent's own
+      // branches: if filterEvent's logic is what is wrong, a predicate reusing
+      // it could never disagree with it.
+      if (looksRoutableAssistantText(raw)) {
+        // SELF vs PEER, and the distinction is what keeps this detector
+        // useful (PA, 2026-09-06). This log runs BEFORE the self-suppression
+        // below, so our OWN routable text that the filter rejects lands here
+        // too - and no peer was ever owed that one. It is still a genuine
+        // filter bug when it fires, so it is not noise and should not be
+        // dropped; but an expected count of zero is what makes a single entry
+        // a finding, and mixing in self-events would erode exactly that. Mark
+        // it instead of hiding it, so a reader can count peer-owed losses
+        // without losing the self signal.
+        const isSelf = sender.session_id === this.selfSession.session_id;
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "filter_dropped",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: sender.id8,
+          src_offset: srcOffset,
+          event_type: "assistant_text",
+          detail:
+            (isSelf ? "SELF (no peer was owed this): " : "PEER-OWED: ") +
+            "filterEvent returned null for an entry carrying non-empty assistant text",
+        });
+      }
+      return;
+    }
 
     // Self-event suppression: an instance never re-fires its own session's events
     if (sender.session_id === this.selfSession.session_id) return;

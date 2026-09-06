@@ -73,7 +73,37 @@ export type EmitLogEvent =
    *  this log. */
   | "unknown_sender"
   /** Consumed, addressed to us, but the per-paragraph filter left nothing. */
-  | "paragraph_filtered";
+  | "paragraph_filtered"
+  /**
+   * A transcript line could not be JSON-parsed, so it was skipped - and the
+   * offset advanced past it anyway, which makes the loss permanent and
+   * invisible. Previously a bare `catch { continue }`.
+   *
+   * Expected count in a healthy fleet: ZERO. That is why logging every one
+   * costs nothing and why a single occurrence is worth chasing.
+   */
+  | "parse_failed"
+  /**
+   * `filterEvent` returned null for an assistant entry that DID carry
+   * non-empty text - i.e. a line that should have routed and did not.
+   *
+   * The general filterEvent-null case is deliberately NOT logged: it fires on
+   * every tool_result line across ~100 tracked transcripts and would bury the
+   * signal. This narrow case is the opposite - it should never happen, so its
+   * count is zero until something is wrong.
+   */
+  | "filter_dropped"
+  /**
+   * An offset row for a transcript this process was ALREADY tracking went
+   * missing, so the watcher re-initialised to EOF and skipped every byte
+   * written since its last tick.
+   *
+   * This is the only one of the three whose signature matches the measured
+   * losses: the sender resolves (no unknown_sender), the lines parse (no
+   * parse_failed), and filterEvent accepts them (no filter_dropped) - they are
+   * simply never iterated. `src_offset` carries the EOF it jumped to.
+   */
+  | "offset_reset";
 
 export interface EmitLogRecord {
   ts: string;

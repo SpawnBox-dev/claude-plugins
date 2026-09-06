@@ -26802,6 +26802,15 @@ function summarizeToolUse(name, input) {
   }
   return `[tool: ${name}]`;
 }
+function looksRoutableAssistantText(raw) {
+  if (!raw || typeof raw !== "object" || raw.type !== "assistant")
+    return false;
+  const blocks = raw.message?.content;
+  if (Array.isArray(blocks)) {
+    return blocks.some((b) => b?.type === "text" && typeof b.text === "string" && b.text.trim() !== "");
+  }
+  return typeof blocks === "string" && blocks.trim() !== "";
+}
 function filterEvent(raw) {
   if (!raw || typeof raw !== "object" || !("type" in raw))
     return null;
@@ -27177,6 +27186,7 @@ class AgentChannel {
   heartbeatTimer = null;
   knownSessions = new Map;
   discarded = new Map;
+  seenFiles = new Set;
   pendingMisses = new Map;
   currentRoster = new Map;
   sizeAtStale = new Map;
@@ -27782,9 +27792,21 @@ class AgentChannel {
       return false;
     }
     if (offsets[file] === undefined) {
+      if (this.seenFiles.has(file)) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "offset_reset",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: file.split(/[\\/]/).pop().replace(/\.jsonl$/, "").slice(0, 8),
+          src_offset: stat.size,
+          detail: "offset row vanished for a transcript already tracked this process; " + "re-initialised to EOF, so any bytes written since the last tick were skipped unread"
+        });
+      }
+      this.seenFiles.add(file);
       offsets[file] = stat.size;
       return true;
     }
+    this.seenFiles.add(file);
     const lastOffset = offsets[file];
     if (stat.size === lastOffset)
       return false;
@@ -27818,7 +27840,16 @@ class AgentChannel {
       let raw;
       try {
         raw = JSON.parse(line);
-      } catch {
+      } catch (err) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "parse_failed",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: file.split(/[\\/]/).pop().replace(/\.jsonl$/, "").slice(0, 8),
+          src_offset: srcOffset,
+          content_len: line.length,
+          detail: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)
+        });
         continue;
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
@@ -27844,8 +27875,21 @@ class AgentChannel {
   }
   processEvent(raw, sender, sessions, overrideState, srcOffset) {
     const ev = filterEvent(raw);
-    if (!ev)
+    if (!ev) {
+      if (looksRoutableAssistantText(raw)) {
+        const isSelf = sender.session_id === this.selfSession.session_id;
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "filter_dropped",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: sender.id8,
+          src_offset: srcOffset,
+          event_type: "assistant_text",
+          detail: (isSelf ? "SELF (no peer was owed this): " : "PEER-OWED: ") + "filterEvent returned null for an entry carrying non-empty assistant text"
+        });
+      }
       return;
+    }
     if (sender.session_id === this.selfSession.session_id)
       return;
     const fullAddr = parseAddressing(ev.content, sender, sessions);

@@ -78,6 +78,39 @@ function summarizeToolUse(name: string, input: any): string {
   return `[tool: ${name}]`;
 }
 
+/**
+ * Would a reader looking at this raw entry EXPECT it to route? (WI 6cf7437a)
+ *
+ * True only for an assistant entry carrying a non-empty text block - the shape
+ * that becomes an `assistant_text` event and reaches peers as prose. Used to
+ * decide whether a `filterEvent` null is worth logging.
+ *
+ * WHY THE NARROW PREDICATE RATHER THAN LOGGING EVERY NULL. filterEvent returns
+ * null for every tool_result line in every tracked transcript, and a busy
+ * fleet tracks ~100 of them; logging all of that is megabytes per minute that
+ * buries the one line anybody needs. This predicate selects the cases where
+ * filterEvent said "nothing to route" about something that visibly IS routable
+ * prose. In a healthy fleet that count is ZERO, so the log stays silent and a
+ * single entry is a real finding rather than noise to scroll past.
+ *
+ * Deliberately independent of filterEvent's own internals: it asks what a
+ * HUMAN would expect from the entry, so that if filterEvent's logic is what is
+ * wrong, this still disagrees with it. A predicate written by reusing
+ * filterEvent's own branches could never catch filterEvent being wrong.
+ */
+export function looksRoutableAssistantText(raw: any): boolean {
+  if (!raw || typeof raw !== "object" || raw.type !== "assistant") return false;
+  const blocks = raw.message?.content;
+  if (Array.isArray(blocks)) {
+    return blocks.some(
+      (b: any) => b?.type === "text" && typeof b.text === "string" && b.text.trim() !== "",
+    );
+  }
+  // A string body is routable prose to any reader, even though filterEvent's
+  // assistant branch requires an array - which is itself a candidate cause.
+  return typeof blocks === "string" && blocks.trim() !== "";
+}
+
 export function filterEvent(raw: any): FilteredEvent | null {
   if (!raw || typeof raw !== "object" || !("type" in raw)) return null;
 
