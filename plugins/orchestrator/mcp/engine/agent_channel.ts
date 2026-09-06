@@ -23,6 +23,7 @@ import { parseAddressing } from "./addressing";
 import { readLatestRename } from "./session_rename";
 import { lastCleanShutdownMs, readLifecycleTail, restartExplainsSilence } from "./restart_witness";
 import { filterEvent, type FilteredEvent } from "./agent_channel_filter";
+import { appendEmitLog, newEmitId } from "./agent_channel_emitlog";
 import {
   readSessions,
   writeSession,
@@ -80,6 +81,12 @@ export interface ChannelNotification {
     addressed_to?: string[];
     pa_global_pause?: boolean;
     sa_paused?: boolean;
+    /** WI 6cf7437a. Joins this notification to the producer's emit-log line,
+     *  and renders as an attribute on the `<channel ...>` tag in the
+     *  receiver's transcript - so a delivery question is answered by an exact
+     *  id match instead of a content substring probe. Only routed events carry
+     *  one; locally-generated alerts (session_joined, *_suspect) do not. */
+    emit_id?: string;
     ts: string;
   };
 }
@@ -2243,6 +2250,11 @@ export class AgentChannel {
     const lines = buf.split("\n");
     let consumed = 0;
     for (let i = 0; i < lines.length - 1; i++) {
+      // Byte offset of THIS line within the sender's transcript, captured
+      // before `consumed` advances past it (WI 6cf7437a). Logged with every
+      // routing decision so a reader can go straight to the originating line
+      // instead of correlating on timestamps.
+      const srcOffset = lastOffset + consumed;
       consumed += Buffer.byteLength(lines[i], "utf8") + 1; // +1 for \n
       const line = lines[i].trim();
       if (!line) continue;
@@ -2260,9 +2272,28 @@ export class AgentChannel {
         .pop()!
         .replace(/\.jsonl$/, "");
       const sender = sessions.find((s) => s.session_id === senderId);
-      if (!sender) continue;
+      if (!sender) {
+        // CONSUMED BUT NOT ROUTED. The offset advances past this line either
+        // way, so from the offsets table this is indistinguishable from a
+        // successful emit - which is exactly the ambiguity that made the
+        // 6cf7437a losses unattributable. Log it, but only for lines that
+        // would otherwise have been routed: an unknown sender is usually just
+        // a transcript belonging to no registered session (a plain `claude`
+        // run), and logging every line of those would swamp the file.
+        if (filterEvent(raw)) {
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "unknown_sender",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderId.slice(0, 8),
+            src_offset: srcOffset,
+            detail: "sender absent from the fresh roster at routing time",
+          });
+        }
+        continue;
+      }
 
-      this.processEvent(raw, sender, sessions, overrideState);
+      this.processEvent(raw, sender, sessions, overrideState, srcOffset);
     }
     offsets[file] = lastOffset + consumed;
     return consumed > 0;
@@ -2273,6 +2304,7 @@ export class AgentChannel {
     sender: SessionEntry,
     sessions: SessionEntry[],
     overrideState: ReturnType<typeof readOverrideState>,
+    srcOffset?: number,
   ): void {
     const ev = filterEvent(raw);
     if (!ev) return;
@@ -2308,13 +2340,49 @@ export class AgentChannel {
         sender,
         sessions,
       );
-      if (!filtered) return;
+      if (!filtered) {
+        // Addressed to us, but nothing survived the per-paragraph filter. The
+        // sender believes it reached us; we produce nothing. Logged because
+        // this is the second producer path that drops an event a receiver was
+        // expecting (WI 6cf7437a).
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "paragraph_filtered",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: sender.id8,
+          src_offset: srcOffset,
+          event_type: ev.event_type,
+          content_len: ev.content.length,
+          detail: "addressed to us but no paragraph survived filtering",
+        });
+        return;
+      }
       emitContent = filtered;
       emitTargets = [myId];
     }
 
     const isPaused = !!overrideState.sa_pauses[sender.session_id];
     const isGlobalPaused = overrideState.pa_global_pause.active;
+
+    // WI 6cf7437a: emit_id travels in the meta, so it renders as an attribute
+    // on the `<channel ...>` tag in the RECEIVER's transcript. That makes the
+    // producer log and the receiver's queue-operation rows joinable EXACTLY,
+    // instead of by content substring - PA's warden reported its substring
+    // probe returning different answers at different match lengths, and an id
+    // has no such failure mode. The key is [a-zA-Z_][a-zA-Z0-9_]* so Claude
+    // Code's meta-key validator keeps it rather than dropping it.
+    const emitId = newEmitId();
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "emit",
+      emit_id: emitId,
+      receiver_id8: this.selfSession.id8,
+      sender_id8: sender.id8,
+      src_offset: srcOffset,
+      event_type: ev.event_type,
+      content_len: emitContent.length,
+      targets: emitTargets.length,
+    });
 
     this.emit({
       content: decorateChannelContent(
@@ -2337,6 +2405,7 @@ export class AgentChannel {
         addressed_to: emitTargets.length > 0 ? emitTargets : undefined,
         pa_global_pause: isGlobalPaused || undefined,
         sa_paused: isPaused || undefined,
+        emit_id: emitId,
         ts: new Date().toISOString(),
       },
     });

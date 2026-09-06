@@ -6518,8 +6518,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // mcp/server.ts
-import { resolve, join as join10 } from "path";
-import { existsSync as existsSync10, readFileSync as readFileSync6, writeFileSync as writeFileSync3, statSync as statSync8, mkdirSync as mkdirSync4 } from "fs";
+import { resolve, join as join11 } from "path";
+import { existsSync as existsSync11, readFileSync as readFileSync6, writeFileSync as writeFileSync3, statSync as statSync9, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -26595,8 +26595,8 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync9, statSync as statSync7, readdirSync as readdirSync4 } from "fs";
-import { join as join9 } from "path";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, existsSync as existsSync10, statSync as statSync8, readdirSync as readdirSync4 } from "fs";
+import { join as join10 } from "path";
 
 // mcp/engine/addressing.ts
 var PA_PREFIX_RE = /^\s*(PA|PrimeAgent)\s*,/i;
@@ -26860,6 +26860,35 @@ ${decisionSummary}` : decisionSummary
     return { event_type: "summary", content: raw.summary };
   }
   return null;
+}
+
+// mcp/engine/agent_channel_emitlog.ts
+import { appendFileSync as appendFileSync2, statSync as statSync7, renameSync, existsSync as existsSync9, unlinkSync as unlinkSync4 } from "fs";
+import { join as join9 } from "path";
+var MAX_BYTES = 4 * 1024 * 1024;
+var EMIT_LOG_BASENAME = "emit-log.jsonl";
+var counter = 0;
+function newEmitId() {
+  counter = (counter + 1) % 1e6;
+  return Date.now().toString(36) + "-" + counter.toString(36) + "-" + Math.floor(Math.random() * 46656).toString(36);
+}
+function emitLogPath(stateDir) {
+  return join9(stateDir, EMIT_LOG_BASENAME);
+}
+function appendEmitLog(stateDir, rec) {
+  try {
+    const path2 = emitLogPath(stateDir);
+    try {
+      if (statSync7(path2).size > MAX_BYTES) {
+        const prev = path2 + ".1";
+        if (existsSync9(prev))
+          unlinkSync4(prev);
+        renameSync(path2, prev);
+      }
+    } catch {}
+    appendFileSync2(path2, JSON.stringify(rec) + `
+`);
+  } catch {}
 }
 
 // mcp/engine/agent_channel.ts
@@ -27140,7 +27169,7 @@ class AgentChannel {
   }
   syncRenameIntoName() {
     try {
-      const path2 = join9(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const path2 = join10(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
       const { name, size } = readLatestRename(path2, this.lastRenameScanSize);
       this.lastRenameScanSize = size;
       if (name && name !== this.selfSession.name) {
@@ -27315,7 +27344,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -27323,8 +27352,8 @@ class AgentChannel {
   readTranscriptTail(sid) {
     let fd;
     try {
-      const path2 = join9(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync7(path2).size;
+      const path2 = join10(this.projectsHashDir, `${sid}.jsonl`);
+      const size = statSync8(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
@@ -27346,7 +27375,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -27388,7 +27417,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync7(join9(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -27466,9 +27495,9 @@ class AgentChannel {
     }
   }
   listJsonlFiles() {
-    if (!existsSync9(this.projectsHashDir))
+    if (!existsSync10(this.projectsHashDir))
       return [];
-    return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join9(this.projectsHashDir, f));
+    return readdirSync4(this.projectsHashDir).filter((f) => f.endsWith(".jsonl")).map((f) => join10(this.projectsHashDir, f));
   }
   tick() {
     try {
@@ -27602,7 +27631,7 @@ class AgentChannel {
   processFile(file, sessions, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync7(file);
+      stat = statSync8(file);
     } catch {
       return false;
     }
@@ -27635,6 +27664,7 @@ class AgentChannel {
 `);
     let consumed = 0;
     for (let i = 0;i < lines.length - 1; i++) {
+      const srcOffset = lastOffset + consumed;
       consumed += Buffer.byteLength(lines[i], "utf8") + 1;
       const line = lines[i].trim();
       if (!line)
@@ -27647,14 +27677,25 @@ class AgentChannel {
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
       const sender = sessions.find((s) => s.session_id === senderId);
-      if (!sender)
+      if (!sender) {
+        if (filterEvent(raw)) {
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "unknown_sender",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderId.slice(0, 8),
+            src_offset: srcOffset,
+            detail: "sender absent from the fresh roster at routing time"
+          });
+        }
         continue;
-      this.processEvent(raw, sender, sessions, overrideState);
+      }
+      this.processEvent(raw, sender, sessions, overrideState, srcOffset);
     }
     offsets[file] = lastOffset + consumed;
     return consumed > 0;
   }
-  processEvent(raw, sender, sessions, overrideState) {
+  processEvent(raw, sender, sessions, overrideState, srcOffset) {
     const ev = filterEvent(raw);
     if (!ev)
       return;
@@ -27671,13 +27712,36 @@ class AgentChannel {
       if (!fullAddr.targets.includes(myId))
         return;
       const filtered = filterParagraphsForReceiver(ev.content, myId, sender, sessions);
-      if (!filtered)
+      if (!filtered) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "paragraph_filtered",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: sender.id8,
+          src_offset: srcOffset,
+          event_type: ev.event_type,
+          content_len: ev.content.length,
+          detail: "addressed to us but no paragraph survived filtering"
+        });
         return;
+      }
       emitContent = filtered;
       emitTargets = [myId];
     }
     const isPaused = !!overrideState.sa_pauses[sender.session_id];
     const isGlobalPaused = overrideState.pa_global_pause.active;
+    const emitId = newEmitId();
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "emit",
+      emit_id: emitId,
+      receiver_id8: this.selfSession.id8,
+      sender_id8: sender.id8,
+      src_offset: srcOffset,
+      event_type: ev.event_type,
+      content_len: emitContent.length,
+      targets: emitTargets.length
+    });
     this.emit({
       content: decorateChannelContent(emitContent, sender, ev.event_type, emitTargets, fullAddr.pa_addressed, sessions),
       meta: {
@@ -27692,6 +27756,7 @@ class AgentChannel {
         addressed_to: emitTargets.length > 0 ? emitTargets : undefined,
         pa_global_pause: isGlobalPaused || undefined,
         sa_paused: isPaused || undefined,
+        emit_id: emitId,
         ts: new Date().toISOString()
       }
     });
@@ -27951,7 +28016,7 @@ async function handleRespondToPermission(input, ctx) {
 import { homedir as homedir5 } from "os";
 var PLUGIN_VERSION = (() => {
   try {
-    const pkgPath = join10(import.meta.dir, "..", "package.json");
+    const pkgPath = join11(import.meta.dir, "..", "package.json");
     return JSON.parse(readFileSync6(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
@@ -28042,12 +28107,12 @@ function getFallbackSessionId() {
     return envId;
   }
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const stateDir = join10(projectDir, ".orchestrator-state");
+  const stateDir = join11(projectDir, ".orchestrator-state");
   const claudePid = findClaudeAncestorPid();
   if (claudePid) {
-    const perPidFile = join10(stateDir, `active-session-${claudePid}`);
+    const perPidFile = join11(stateDir, `active-session-${claudePid}`);
     try {
-      if (existsSync10(perPidFile)) {
+      if (existsSync11(perPidFile)) {
         const raw = readFileSync6(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
@@ -28063,15 +28128,15 @@ function getFallbackSessionId() {
       return;
     }
   }
-  const file = join10(stateDir, "active-session");
+  const file = join11(stateDir, "active-session");
   try {
-    if (existsSync10(file)) {
+    if (existsSync11(file)) {
       const raw = readFileSync6(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
-          const perPidFile = join10(stateDir, `active-session-${claudePid}`);
-          if (!existsSync10(perPidFile)) {
+          const perPidFile = join11(stateDir, `active-session-${claudePid}`);
+          if (!existsSync11(perPidFile)) {
             try {
               writeFileSync3(perPidFile, raw, "utf8");
               process.stderr.write(`[orchestrator] wrote self-healing per-PID file ${perPidFile} = ${raw.slice(0, 8)}... ` + `(future restarts will use this instead of racing legacy)
@@ -28095,9 +28160,9 @@ function readAuthoritativeSessionId() {
   if (!claudePid)
     return;
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const perPidFile = join10(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
+  const perPidFile = join11(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
   try {
-    if (existsSync10(perPidFile)) {
+    if (existsSync11(perPidFile)) {
       const raw = readFileSync6(perPidFile, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
         return raw;
@@ -28214,9 +28279,9 @@ async function startSidecar() {
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
   const requirementsPath = resolve(pluginRoot, "sidecar/requirements.txt");
-  const sidecarStateDir = join10(homedir5(), ".claude", "orchestrator");
+  const sidecarStateDir = join11(homedir5(), ".claude", "orchestrator");
   try {
-    if (!existsSync10(sidecarStateDir))
+    if (!existsSync11(sidecarStateDir))
       mkdirSync4(sidecarStateDir, { recursive: true });
   } catch {}
   const portFile = resolve(sidecarStateDir, "sidecar.port");
@@ -28252,11 +28317,11 @@ async function startSidecar() {
       closeSync3(openSync3(lockFile, "wx"));
       holdsLock = true;
     } catch {
-      const age = Date.now() - (statSync8(lockFile).mtimeMs || 0);
+      const age = Date.now() - (statSync9(lockFile).mtimeMs || 0);
       if (age > LOCK_STALE_MS) {
         try {
-          const { unlinkSync: unlinkSync4 } = await import("fs");
-          unlinkSync4(lockFile);
+          const { unlinkSync: unlinkSync5 } = await import("fs");
+          unlinkSync5(lockFile);
         } catch {}
         try {
           closeSync3(openSync3(lockFile, "wx"));
@@ -28284,22 +28349,22 @@ async function startSidecar() {
     console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
   }
   try {
-    const { unlinkSync: unlinkSync4 } = await import("fs");
-    unlinkSync4(portFile);
+    const { unlinkSync: unlinkSync5 } = await import("fs");
+    unlinkSync5(portFile);
   } catch {}
   const baseArgs = ["--port", "0", "--port-file", portFile, "--model", ACTIVE_EMBED_MODEL_REPO];
   let result = await trySpawn(["uvx", "--with-requirements", requirementsPath, "python", sidecarPath, ...baseArgs], portFile, "uvx", 60000);
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync4 } = await import("fs");
-      unlinkSync4(portFile);
+      const { unlinkSync: unlinkSync5 } = await import("fs");
+      unlinkSync5(portFile);
     } catch {}
     result = await trySpawn(["python", sidecarPath, ...baseArgs], portFile, "python", 30000);
   }
   if (!result) {
     try {
-      const { unlinkSync: unlinkSync4 } = await import("fs");
-      unlinkSync4(portFile);
+      const { unlinkSync: unlinkSync5 } = await import("fs");
+      unlinkSync5(portFile);
     } catch {}
     result = await trySpawn(["python3", sidecarPath, ...baseArgs], portFile, "python3", 30000);
   }
@@ -28489,7 +28554,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   try {
     const self = process.argv[1];
     if (self) {
-      bundleStamp = ` - bundle ${statSync8(self).mtime.toISOString()}`;
+      bundleStamp = ` - bundle ${statSync9(self).mtime.toISOString()}`;
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
@@ -28507,8 +28572,8 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     const claudeProjectDir = process.env.CLAUDE_PROJECT_DIR;
     const cwd = process.cwd();
     const resolvedProjectDir = orchProjectRoot || claudeProjectDir || cwd;
-    const fallbackFile = join10(resolvedProjectDir, ".orchestrator-state", "active-session");
-    const fallbackExists = existsSync10(fallbackFile);
+    const fallbackFile = join11(resolvedProjectDir, ".orchestrator-state", "active-session");
+    const fallbackExists = existsSync11(fallbackFile);
     lines.push(`- **Agent-channel**: INACTIVE`);
     lines.push(`    - CLAUDE_SESSION_ID env: ${envSid}`);
     lines.push(`    - ORCHESTRATOR_PROJECT_ROOT env: ${orchProjectRoot ?? "unset"}`);
@@ -28567,7 +28632,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
     lines.push(`  - Expected migration 13 to be applied. Check with: bun test, then re-run a briefing.`);
   }
   try {
-    const channelStateDir = join10(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
+    const channelStateDir = join11(process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".orchestrator-state", "agent-channel");
     const alertStats = alertEmissionStats(channelStateDir);
     if (alertStats.length > 0) {
       lines.push(`- **Liveness alerts fired** (rate only - correctness is not tracked):`);
@@ -29842,7 +29907,7 @@ function startAgentChannel() {
     return;
   }
   const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
-  const projectsHashDir = join10(homedir5(), ".claude", "projects", projectHash);
+  const projectsHashDir = join11(homedir5(), ".claude", "projects", projectHash);
   const roleEnv = process.env.ORCHESTRATOR_AGENT_ROLE ?? process.env.SPAWNBOX_AGENT_ROLE;
   const role = roleEnv === "prime" ? "prime" : "subordinate";
   const name = process.env.ORCHESTRATOR_AGENT_NAME ?? process.env.SPAWNBOX_AGENT_NAME ?? `auto-${sessionId.slice(0, 8)}`;
@@ -29858,7 +29923,7 @@ function startAgentChannel() {
     current_task: null,
     ...kind ? { kind } : {}
   };
-  const stateDir = join10(projectDir, ".orchestrator-state", "agent-channel");
+  const stateDir = join11(projectDir, ".orchestrator-state", "agent-channel");
   if (PERMISSION_RELAY_ENABLED && role === "subordinate") {
     permissionRelay = new PermissionRelay(getProjectDb(), {
       selfSessionId: sessionId,
@@ -29869,14 +29934,30 @@ function startAgentChannel() {
   }
   try {
     agentChannel = new AgentChannel(stateDir, projectsHashDir, self, (notif) => {
+      const meta = sanitizeChannelMeta(notif.meta);
+      const emitId = typeof meta.emit_id === "string" ? meta.emit_id : undefined;
+      const logTransport = (event, detail) => {
+        appendEmitLog(stateDir, {
+          ts: new Date().toISOString(),
+          event,
+          emit_id: emitId,
+          receiver_id8: self.id8,
+          sender_id8: typeof meta.from_id8 === "string" ? meta.from_id8 : undefined,
+          event_type: typeof meta.event_type === "string" ? meta.event_type : undefined,
+          content_len: notif.content.length,
+          detail
+        });
+      };
       server.server.notification({
         method: "notifications/claude/channel",
         params: {
           content: notif.content,
-          meta: sanitizeChannelMeta(notif.meta)
+          meta
         }
-      }).catch((err) => {
-        process.stderr.write(`agent-channel: notification failed (event suppressed): ${err instanceof Error ? err.message : String(err)}
+      }).then(() => logTransport("sent")).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        logTransport("send_failed", msg);
+        process.stderr.write(`agent-channel: notification failed (event suppressed): ${msg}
 `);
       });
     }, permissionRelay ?? undefined, readAuthoritativeSessionId);
@@ -30004,7 +30085,7 @@ function startAgentChannel() {
   }
 }
 var mcpStartMs = Date.now();
-var MCP_LIFECYCLE_LOG = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir5(), ".claude"), "orchestrator", "mcp-lifecycle.log");
+var MCP_LIFECYCLE_LOG = join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "orchestrator", "mcp-lifecycle.log");
 var MCP_LOG_CAP_BYTES = 2097152;
 function logMcpLifecycle(line) {
   appendLifecycleLine(MCP_LIFECYCLE_LOG, line, MCP_LOG_CAP_BYTES, new Date().toISOString());
@@ -30017,7 +30098,7 @@ function checkInstallMismatch() {
   const runningRoot = normalizePath(resolve(import.meta.dir, ".."), caseFold);
   let installed = [];
   try {
-    const registryPath = join10(process.env.CLAUDE_CONFIG_DIR || join10(homedir5(), ".claude"), "plugins", "installed_plugins.json");
+    const registryPath = join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "plugins", "installed_plugins.json");
     installed = extractInstalledPaths(JSON.parse(readFileSync6(registryPath, "utf8")), "orchestrator", caseFold);
   } catch {}
   return decideInstallMismatch(runningRoot, installed);
@@ -30030,7 +30111,7 @@ function logShutdownTrigger(trigger) {
 var shutdownLogged = false;
 function orchestratorStateDir() {
   const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  return join10(projectDir, ".orchestrator-state");
+  return join11(projectDir, ".orchestrator-state");
 }
 function shutdownOnce(trigger) {
   if (shutdownLogged)
@@ -30275,7 +30356,7 @@ async function main() {
   } catch {}
   try {
     const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
-    const swept = sweepStateDir(join10(projectRoot, ".orchestrator-state"));
+    const swept = sweepStateDir(join11(projectRoot, ".orchestrator-state"));
     if (swept.removed > 0 || swept.rotated > 0) {
       emitLifecycle(`[orchestrator] state-dir GC: removed ${swept.removed} stale marker(s), rotated ${swept.rotated} ledger backup(s), of ${swept.scanned} file(s)
 `);

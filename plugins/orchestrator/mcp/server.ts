@@ -66,6 +66,7 @@ import { depositSignal, depositSignalBatch, WEAK_DEPOSIT } from "./engine/signal
 import { handleUpdateSessionTask } from "./tools/session_task";
 import { handleHookEvent, buildHookEnvelope, HOOK_EVENTS, type HookEvent } from "./tools/hook_event";
 import { AgentChannel } from "./engine/agent_channel";
+import { appendEmitLog } from "./engine/agent_channel_emitlog";
 import type { SessionEntry } from "./engine/agent_channel_state";
 import { PermissionRelay } from "./engine/permission_relay";
 import { appendSystemEvent, alertEmissionStats } from "./engine/agent_channel_state";
@@ -3172,19 +3173,41 @@ function startAgentChannel(): void {
         // server alive even if a single notification fails to deliver.
         // Channel events are best-effort - a missed one is better than a
         // crashed MCP.
+        // WI 6cf7437a: record the TRANSPORT outcome, keyed by the emit_id the
+        // router already logged. Without this, "the receiver has no queue row"
+        // has two indistinguishable causes - we never sent it, or we sent it
+        // and Claude Code never enqueued it. The pair of log lines separates
+        // them: `emit` with no `sent` means the send never completed; `emit` +
+        // `sent` with no enqueue row on the receiver puts the loss squarely
+        // past our boundary.
+        const meta = sanitizeChannelMeta(notif.meta);
+        const emitId = typeof meta.emit_id === "string" ? meta.emit_id : undefined;
+        const logTransport = (event: "sent" | "send_failed", detail?: string) => {
+          appendEmitLog(stateDir, {
+            ts: new Date().toISOString(),
+            event,
+            emit_id: emitId,
+            receiver_id8: self.id8,
+            sender_id8: typeof meta.from_id8 === "string" ? meta.from_id8 : undefined,
+            event_type: typeof meta.event_type === "string" ? meta.event_type : undefined,
+            content_len: notif.content.length,
+            detail,
+          });
+        };
         server.server
           .notification({
             method: "notifications/claude/channel",
             params: {
               content: notif.content,
-              meta: sanitizeChannelMeta(notif.meta),
+              meta,
             },
           })
+          .then(() => logTransport("sent"))
           .catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logTransport("send_failed", msg);
             process.stderr.write(
-              `agent-channel: notification failed (event suppressed): ${
-                err instanceof Error ? err.message : String(err)
-              }\n`,
+              `agent-channel: notification failed (event suppressed): ${msg}\n`,
             );
           });
       },
