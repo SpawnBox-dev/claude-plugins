@@ -287,19 +287,61 @@ export function readSeenWindow(transcriptPath: string, maxBytes = 4 * 1024 * 102
   // A byte-offset tail almost always starts mid-line. Drop that fragment: its
   // timestamp is unrecoverable and its emit_id may be cut in half, which would
   // silently drop a real id and read as a gap.
-  if (truncated) {
-    const nl = raw.indexOf("\n");
-    raw = nl === -1 ? "" : raw.slice(nl + 1);
+  if (!truncated) {
+    // Whole file. `since: null` means exactly that, and nothing else.
+    return { ids: extractSeenEmitIds(raw), since: null, measured: true };
   }
 
-  const since = truncated ? earliestTimestamp(raw) : null;
+  // A byte-offset tail almost always starts mid-line. Drop that fragment: its
+  // timestamp is unrecoverable and its emit_id may be cut in half, which would
+  // silently drop a real id and read as a gap. If there is no newline at all,
+  // one line was larger than the whole window and nothing survives.
+  const nl = raw.indexOf("\n");
+  raw = nl === -1 ? "" : raw.slice(nl + 1);
+
+  const since = earliestTimestamp(raw);
+  if (since === null) {
+    // AN UNANCHORABLE WINDOW IS UNMEASURED, NOT CLEAN. This is the same
+    // principle as the read failure above, and it has to be applied here too
+    // because the consequence is identical and worse-looking: with
+    // `measured: true` and `since: null`, summarizeLoss's `!window.since`
+    // branch applies NO filter, comparing a BOUNDED seen-set against an
+    // UNBOUNDED sent-set. Every out-of-frame emit then looks missing.
+    //
+    // EXECUTED SPECIMENS (PA, reproduced here before this fix): a tail with
+    // ids but no timestamp key reported 1 of 2; a transcript whose single line
+    // exceeded the window reported 2 of 2 - a total fabricated loss with
+    // `measured` true, i.e. exactly the defect the UNMEASURED path was added
+    // to remove, re-entering through truncation instead of through a catch.
+    // A >4MB single line is not exotic when the files are 91MB and one large
+    // tool result produces it.
+    //
+    // So `since: null` now has ONE meaning - "whole file" - and every other
+    // outcome routes to the honest path.
+    return { ids: [], since: null, measured: false };
+  }
   return { ids: extractSeenEmitIds(raw), since, measured: true };
 }
 
-/** First parseable ISO timestamp in a transcript slice. Matches the escaped
- *  and unescaped forms for the same reason extractSeenEmitIds does. */
+/**
+ * First ISO timestamp in a transcript slice, in the ONE shape whose
+ * lexicographic order matches chronological order.
+ *
+ * THE SHAPE IS ASSERTED, NOT TRUSTED (PA, 2026-09-06). summarizeLoss compares
+ * `r.ts >= window.since` as STRINGS, which is only sound while both sides are
+ * UTC with a `Z` suffix. A `+02:00` offset form sorts by its literal digits
+ * and silently misorders - it would not throw, it would quietly include or
+ * exclude the wrong emits and shift a loss count nobody could explain.
+ *
+ * A tail whose first timestamp is not that shape therefore yields null, which
+ * routes to UNMEASURED - the honest answer - rather than to a comparison that
+ * is wrong in a way no test would catch later.
+ *
+ * Matches the escaped and unescaped forms for the same reason
+ * extractSeenEmitIds does: on disk this sits inside a JSON string.
+ */
 function earliestTimestamp(slice: string): string | null {
-  const m = /\\?"timestamp\\?":\\?"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^"\\]+)\\?"/.exec(slice);
+  const m = /\\?"timestamp\\?":\\?"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\\?"/.exec(slice);
   return m ? m[1] : null;
 }
 
@@ -329,9 +371,16 @@ export function formatLossReport(r: LossReport): string | null {
           `because their sender could not be identified (${formatPerSender(r.discarded)}); ` +
           `that half is measured and is real.`
         : "";
+    // Two causes reach here and the wording must fit BOTH: the transcript
+    // could not be read at all, or it was read but the window it covers could
+    // not be anchored in time (a tail with no timestamp, or a single line
+    // larger than the window). Saying only "could not be read" would be a
+    // small false statement in the second case, in a message whose entire
+    // purpose is not overstating what is known.
     return (
       `CHANNEL DELIVERY COULD NOT BE MEASURED. This session's own transcript ` +
-      `could not be read, so there is no way to tell which of the ` +
+      `could not be read, or the portion read could not be anchored to a ` +
+      `start time, so there is no way to tell which of the ` +
       `${r.observedEmits} notification(s) sent to it actually arrived. This is ` +
       `a broken instrument, NOT a finding of loss and NOT an all-clear - do ` +
       `not read it as either.${disc}`

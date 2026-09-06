@@ -1,10 +1,14 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import {
   parseEmitId,
   findCounterGaps,
   formatLossReport,
   summarizeLoss,
   extractSeenEmitIds,
+  readSeenWindow,
   newEmitId,
   type EmitLogRecord,
 } from "../../mcp/engine/agent_channel_emitlog";
@@ -232,6 +236,109 @@ describe("formatLossReport", () => {
     })!;
     expect(out).toContain("re-ask");
     expect(out).toContain("emit_id");
+  });
+});
+
+describe("readSeenWindow: an unanchorable window is UNMEASURED, not clean", () => {
+  // PA's executed specimens, reproduced before the fix and pinned after it.
+  //
+  // THE TRAP THESE EXIST FOR: `since: null` used to mean EITHER "I read the
+  // whole file, no bound needed" OR "I truncated and could not tell where my
+  // window starts". summarizeLoss's `!window.since` branch applies NO filter,
+  // so the second meaning compared a BOUNDED seen-set against an UNBOUNDED
+  // sent-set and every out-of-frame emit looked missing - with `measured`
+  // true, so it printed a number. That is the exact defect the UNMEASURED path
+  // was added to remove, re-entering through truncation instead of a catch.
+  //
+  // These drive the real file path rather than a hand-built SeenWindow,
+  // because the bug lived in how the window was CONSTRUCTED, and a test that
+  // builds the window itself would have passed throughout.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "seenwindow-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const write = (name: string, contents: string) => {
+    const p = join(dir, name);
+    writeFileSync(p, contents);
+    return p;
+  };
+  const SENT: EmitLogRecord[] = [
+    { ts: "2026-09-06T01:00:00.000Z", event: "sent", receiver_id8: "aaaaaaaa", emit_id: "ep-1-a" },
+    { ts: "2026-09-06T02:00:00.000Z", event: "sent", receiver_id8: "aaaaaaaa", emit_id: "ep-2-b" },
+  ];
+
+  test("CONTROL: a truncated tail WITH a timestamp bounds correctly and stays silent", () => {
+    // Proves the instrument still works where it should - without this arm the
+    // two below would also pass on a readSeenWindow that always said unmeasured.
+    const p = write(
+      "ok.jsonl",
+      `{"pad":"${"x".repeat(400)}"}\n` +
+        `{"timestamp":"2026-09-06T01:30:00.000Z","c":"<channel emit_id=\\"ep-2-b\\">hi</channel>"}\n`,
+    );
+    const w = readSeenWindow(p, 200);
+    expect(w.measured).toBe(true);
+    expect(w.since).toBe("2026-09-06T01:30:00.000Z");
+    const r = summarizeLoss(SENT, "aaaaaaaa", w);
+    expect(r.counterGaps).toBe(0);
+    expect(formatLossReport(r)).toBeNull();
+  });
+
+  test("a truncated tail with NO timestamp key reports UNMEASURED, not 1 of 2", () => {
+    const p = write(
+      "nots.jsonl",
+      `{"pad":"${"x".repeat(400)}"}\n` + `{"c":"<channel emit_id=\\"ep-2-b\\">hi</channel>"}\n`,
+    );
+    const w = readSeenWindow(p, 200);
+    expect(w.measured).toBe(false);
+    const r = summarizeLoss(SENT, "aaaaaaaa", w);
+    expect(r.counterGaps).toBe(0);
+    expect(formatLossReport(r)).toContain("COULD NOT BE MEASURED");
+  });
+
+  test("a single line LARGER than the window reports UNMEASURED, not a total loss", () => {
+    // PA's blocker. Not exotic: transcripts here run to 91MB and one large
+    // tool result makes a >4MB line.
+    const p = write("huge.jsonl", `{"pad":"${"y".repeat(5000)}"}\n`);
+    const w = readSeenWindow(p, 200);
+    expect(w.measured).toBe(false);
+    expect(w.ids).toEqual([]);
+    const r = summarizeLoss(SENT, "aaaaaaaa", w);
+    expect(r.counterGaps).toBe(0);
+    expect(r.measured).toBe(false);
+    expect(formatLossReport(r)).toContain("COULD NOT BE MEASURED");
+  });
+
+  test("an unbounded read keeps since: null, which now has exactly one meaning", () => {
+    const p = write(
+      "small.jsonl",
+      `{"timestamp":"2026-09-06T02:00:00.000Z","c":"<channel emit_id=\\"ep-2-b\\">hi</channel>"}\n`,
+    );
+    const w = readSeenWindow(p, 1024 * 1024);
+    expect(w.measured).toBe(true);
+    expect(w.since).toBeNull(); // whole file - the ONLY meaning of null now
+    expect(w.ids).toEqual(["ep-2-b"]);
+  });
+
+  test("a non-UTC timestamp is refused rather than compared as a string", () => {
+    // `r.ts >= window.since` is a STRING compare, sound only for Z-suffixed
+    // UTC. A +02:00 form sorts by its literal digits and would silently
+    // include or exclude the wrong emits - wrong in a way no later test
+    // catches. Refusing routes to UNMEASURED, which is the honest answer.
+    const p = write(
+      "offset.jsonl",
+      `{"pad":"${"x".repeat(400)}"}\n` +
+        `{"timestamp":"2026-09-06T01:30:00.000+02:00","c":"<channel emit_id=\\"ep-2-b\\">x</channel>"}\n`,
+    );
+    expect(readSeenWindow(p, 200).measured).toBe(false);
+  });
+
+  test("a missing file is UNMEASURED too - the original catch case still holds", () => {
+    const w = readSeenWindow(join(dir, "nope.jsonl"));
+    expect(w.measured).toBe(false);
   });
 });
 

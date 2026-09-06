@@ -26906,16 +26906,20 @@ function readSeenWindow(transcriptPath, maxBytes = 4 * 1024 * 1024) {
   } catch {
     return { ids: [], since: null, measured: false };
   }
-  if (truncated) {
-    const nl = raw.indexOf(`
-`);
-    raw = nl === -1 ? "" : raw.slice(nl + 1);
+  if (!truncated) {
+    return { ids: extractSeenEmitIds(raw), since: null, measured: true };
   }
-  const since = truncated ? earliestTimestamp(raw) : null;
+  const nl = raw.indexOf(`
+`);
+  raw = nl === -1 ? "" : raw.slice(nl + 1);
+  const since = earliestTimestamp(raw);
+  if (since === null) {
+    return { ids: [], since: null, measured: false };
+  }
   return { ids: extractSeenEmitIds(raw), since, measured: true };
 }
 function earliestTimestamp(slice) {
-  const m = /\\?"timestamp\\?":\\?"([0-9]{4}-[0-9]{2}-[0-9]{2}T[^"\\]+)\\?"/.exec(slice);
+  const m = /\\?"timestamp\\?":\\?"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\\?"/.exec(slice);
   return m ? m[1] : null;
 }
 function formatPerSender(discarded) {
@@ -26924,7 +26928,7 @@ function formatPerSender(discarded) {
 function formatLossReport(r) {
   if (!r.measured) {
     const disc = r.discardedTotal > 0 ? ` Separately, ${r.discardedTotal} message(s) WERE read and discarded ` + `because their sender could not be identified (${formatPerSender(r.discarded)}); ` + `that half is measured and is real.` : "";
-    return `CHANNEL DELIVERY COULD NOT BE MEASURED. This session's own transcript ` + `could not be read, so there is no way to tell which of the ` + `${r.observedEmits} notification(s) sent to it actually arrived. This is ` + `a broken instrument, NOT a finding of loss and NOT an all-clear - do ` + `not read it as either.${disc}`;
+    return `CHANNEL DELIVERY COULD NOT BE MEASURED. This session's own transcript ` + `could not be read, or the portion read could not be anchored to a ` + `start time, so there is no way to tell which of the ` + `${r.observedEmits} notification(s) sent to it actually arrived. This is ` + `a broken instrument, NOT a finding of loss and NOT an all-clear - do ` + `not read it as either.${disc}`;
   }
   if (r.discardedTotal === 0 && r.counterGaps === 0)
     return null;
