@@ -209,5 +209,64 @@ export function filterEvent(raw: any): FilteredEvent | null {
     return { event_type: "summary", content: raw.summary };
   }
 
+  // ── A MESSAGE TYPED WHILE THE SESSION IS MID-TURN (WI ebd29e32) ──────────
+  //
+  // Claude Code does NOT record a mid-turn typed message as a `type:"user"`
+  // entry. It absorbs it into the running turn and writes THREE records
+  // instead, none of which any branch above matches:
+  //
+  //   1. `queue-operation` / enqueue  - the text, at the moment it was typed
+  //   2. `queue-operation` / remove   - the same text, `reason:"absorbed_mid_turn"`
+  //   3. `attachment` / `queued_command` - the text as `attachment.prompt`
+  //
+  // So until now a mid-turn message fell through to the `return null` below.
+  // Nothing rejected it and nothing logged it - there was simply no branch for
+  // its type - which is why it produced no `unknown_sender`, no `parse_failed`
+  // and no filter-drop signal, the three places an investigator would look.
+  //
+  // MEASURED 2026-09-06: every message the user typed to a working SA was
+  // invisible to PA. Not intermittent, not a race - deterministic, by record
+  // type. Only a message typed while the session was IDLE became a `user`
+  // record and routed.
+  //
+  // WHY THE `attachment` RECORD IS THE EMIT SOURCE AND THE OTHER TWO ARE NOT.
+  // All three carry the same text, so emitting per matching record would send
+  // every mid-turn message to PA three times. The attachment is the only one
+  // that is self-describing: it carries `prompt`, `origin`, `source_uuid` and
+  // its own `timestamp`, so it can be authenticated as human-typed rather than
+  // inferred from position. The two queue-operation rows stay where they are
+  // already handled, in `parseIngressTail` (agent_channel.ts:669), which reads
+  // them as ingress liveness and must keep skipping them here.
+  //
+  // `origin.kind === "human"` is REQUIRED, not decorative: a queued_command can
+  // also be machine-originated (a replayed or injected command), and forwarding
+  // those to PA would put words in the user's mouth.
+  if (raw.type === "attachment") {
+    const att = raw.attachment;
+    if (
+      att?.type === "queued_command" &&
+      att?.origin?.kind === "human" &&
+      typeof att?.prompt === "string" &&
+      att.prompt.trim() !== ""
+    ) {
+      // Same echo-prevention the `user` branch applies: a channel injection or
+      // a pasted `← core:` line must not be re-broadcast just because it
+      // arrived through the queue instead of as a typed prompt.
+      if (/^\s*<channel\b/.test(att.prompt)) return null;
+      if (/^\s*←\s*core:/i.test(att.prompt)) return null;
+
+      // MARKED, because "typed while busy" and "typed at idle" mean different
+      // things to a reader: the first was absorbed into a turn already in
+      // flight and may not have been acted on yet, the second started the turn.
+      // The prefix is deliberate - the receiver renders `content`, so a marker
+      // carried in a side field would not reach the eye that needs it.
+      return {
+        event_type: "user_input",
+        content: `[typed mid-turn] ${att.prompt}`,
+      };
+    }
+    return null;
+  }
+
   return null;
 }

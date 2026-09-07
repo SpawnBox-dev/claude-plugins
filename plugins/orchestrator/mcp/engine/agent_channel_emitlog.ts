@@ -152,7 +152,20 @@ export type EmitLogEvent =
    */
   | "retry"
   /** This watcher conceded the session to a newer instance and stood down. */
-  | "retired";
+  | "retired"
+  /**
+   * A transcript was already larger than the first-sight backfill cap when this
+   * watcher first saw it, so it was seeded at EOF and any first prompt already
+   * in the file was never read (WI ebd29e32).
+   *
+   * This is the ONE case where the first-prompt fix deliberately declines to
+   * act, and it must say so: silence here would be indistinguishable from the
+   * bug it replaces. Expected count in a healthy fleet is ZERO - a fresh
+   * transcript's opening burst is far under the cap - so a record means either
+   * a startup injection grew past it or the watcher met a transcript with real
+   * history, and those want different answers. `src_offset` carries the size.
+   */
+  | "backfill_skipped";
 
 export interface EmitLogRecord {
   ts: string;

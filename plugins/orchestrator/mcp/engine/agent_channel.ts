@@ -102,6 +102,17 @@ export interface ChannelNotification {
 export type EmitFn = (n: ChannelNotification) => void;
 
 const POLL_INTERVAL_MS = 1500;
+/**
+ * Largest transcript (bytes) this watcher will scan from 0 on FIRST SIGHT to
+ * recover a first prompt that was flushed ahead of our first poll (WI ebd29e32).
+ *
+ * A brand-new transcript's opening burst is startup context plus one prompt.
+ * The measured worst case was 93,709 bytes; 256KB leaves headroom for a
+ * heavier SessionStart injection without ever approaching the megabyte reads
+ * ROOT-B exists to prevent. Anything already larger than this at first sight
+ * has history behind it, which is precisely the case that must NOT be replayed.
+ */
+const FIRST_SIGHT_BACKFILL_MAX_BYTES = 262_144;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 90_000;
 // DEFENSE-C (WI 8522c487): consecutive stale-observation ticks a peer must be
@@ -797,6 +808,27 @@ export class AgentChannel {
    *  unread bytes. Process-local on purpose: it must not trust the table that
    *  lost the row. */
   private seenFiles = new Set<string>();
+  /**
+   * WI ebd29e32: state for a pending first-sight backfill pass over a
+   * transcript, keyed by path. Process-local like seenFiles - it is about THIS
+   * watcher's first look at the file.
+   *
+   * `floorMs` is the sender's registered `started_at`: records older than it
+   * are pre-join history and must not be replayed.
+   *
+   * `untilOffset` is THE FILE'S SIZE AT FIRST SIGHT, and it is what keeps the
+   * floor honest. The backfill pass runs a tick later, by which time live
+   * content has usually been appended - and judging THAT by the floor would
+   * drop any record without a parseable `timestamp`, reintroducing the exact
+   * class of silent loss this item exists to remove (it cost the ROOT-B and
+   * multibyte suites a real regression before this bound was added). Only bytes
+   * that were already in the file when we met it are history; everything from
+   * `untilOffset` on is live and is judged by the filter alone.
+   */
+  private firstSightBackfill = new Map<
+    string,
+    { floorMs: number; untilOffset: number }
+  >();
   /** WI 6cf7437a: end offset of the LAST pass over each transcript, kept in
    *  process. A new pass starting ABOVE this means bytes were never read.
    *  Process-local for the same reason seenFiles is - it must not trust the
@@ -2398,6 +2430,66 @@ export class AgentChannel {
         });
       }
       this.seenFiles.add(file);
+
+      // ── FIRST-PROMPT BACKFILL (WI ebd29e32) ───────────────────────────────
+      //
+      // Seeding at EOF is right for a transcript with history behind it, and
+      // WRONG for one that was BORN moments ago - because Claude Code does not
+      // create the `.jsonl` until the first user prompt, then flushes the whole
+      // startup block (SessionStart hook, skill bodies, injected context) and
+      // that prompt together, in one burst, before our next 1.5s poll.
+      //
+      // MEASURED 2026-09-06: SA 704c0c2c's transcript was created 0.41s AFTER
+      // the user's prompt and 3m05s after its session_joined. At our first
+      // sight it was ALREADY 93,709 bytes, with the human prompt at byte 11718
+      // - below the seed, so it was skipped unread. The control session that
+      // same night had only ~14KB flushed at first sight, so its prompt landed
+      // ABOVE the seed and routed normally.
+      //
+      // THE LOSS THEREFORE SCALES WITH STARTUP-CONTEXT VOLUME, not with timing:
+      // the more context a session is launched with, the more certainly its
+      // first typed instruction is lost. Richly-bootstrapped SAs lost it every
+      // time; plain sessions never did. That is why it read as intermittent.
+      //
+      // THE RULE. Do not trust file birthtime (this checkout is OneDrive-synced
+      // and its timestamps are not reliable). Instead scan [0, EOF) and emit
+      // only records at or after the sender's registered `started_at`. That
+      // covers the burst - the prompt postdates the join - and stays silent on
+      // a `--resume` of a long transcript, where ALL history predates the new
+      // join. The floor is applied in the read loop below; setting the offset
+      // to 0 here is what makes those bytes reachable at all.
+      //
+      // BOUNDED: a transcript already larger than the cap at first sight cannot
+      // be a fresh burst, so it keeps the old EOF behaviour and says so rather
+      // than reading megabytes synchronously on the shared event loop - the
+      // very starvation ROOT-B exists to prevent.
+      const senderSid = file.split(/[\\/]/).pop()!.replace(/\.jsonl$/, "");
+      const joinedAtMs = Date.parse(identity.get(senderSid)?.started_at ?? "");
+      if (
+        Number.isFinite(joinedAtMs) &&
+        stat.size > 0 &&
+        stat.size <= FIRST_SIGHT_BACKFILL_MAX_BYTES
+      ) {
+        this.firstSightBackfill.set(file, {
+          floorMs: joinedAtMs,
+          untilOffset: stat.size,
+        });
+        offsets[file] = 0;
+        return true; // process [0, EOF) next tick, gated by the join floor
+      }
+      if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "backfill_skipped",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: senderSid.slice(0, 8),
+          src_offset: stat.size,
+          detail:
+            `transcript was ${stat.size} bytes at first sight, over the ` +
+            `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` +
+            "first prompt already in the file was not read",
+        });
+      }
       offsets[file] = stat.size;
       return true; // persist EOF offset; nothing to process this tick
     }
@@ -2479,6 +2571,22 @@ export class AgentChannel {
           detail: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
         });
         continue;
+      }
+
+      // FIRST-SIGHT BACKFILL FLOOR (WI ebd29e32). Set only while replaying the
+      // opening burst of a transcript we have just met. Anything older than the
+      // sender's registered join is pre-existing history - a `--resume` of a
+      // long transcript reaches here with EVERY record below the floor and so
+      // emits nothing, which is the property that makes reading from 0 safe.
+      //
+      // A record with no parseable timestamp is SKIPPED during backfill rather
+      // than forwarded: it cannot be shown to postdate the join, and the cost
+      // of dropping one is a missing line whereas the cost of forwarding one is
+      // replayed history reaching peers as if it were new.
+      const backfill = this.firstSightBackfill.get(file);
+      if (backfill !== undefined && srcOffset < backfill.untilOffset) {
+        const recordMs = Date.parse(raw?.timestamp ?? "");
+        if (!Number.isFinite(recordMs) || recordMs < backfill.floorMs) continue;
       }
 
       // Sender derived from JSONL filename: <session_id>.jsonl
@@ -2597,6 +2705,12 @@ export class AgentChannel {
       });
     }
     this.lastScanEnd.set(file, lastOffset + consumed);
+
+    // The backfill pass is over the moment we have read the opening burst
+    // (WI ebd29e32). Clearing it here - rather than leaving it to expire - is
+    // what keeps the floor from ever gating steady-state routing: from the next
+    // tick on, every record is judged only by the filter, exactly as before.
+    this.firstSightBackfill.delete(file);
 
     offsets[file] = lastOffset + consumed;
     return consumed > 0;

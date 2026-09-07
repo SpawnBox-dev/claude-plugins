@@ -26884,6 +26884,20 @@ ${decisionSummary}` : decisionSummary
   if (raw.type === "summary" && typeof raw.summary === "string") {
     return { event_type: "summary", content: raw.summary };
   }
+  if (raw.type === "attachment") {
+    const att = raw.attachment;
+    if (att?.type === "queued_command" && att?.origin?.kind === "human" && typeof att?.prompt === "string" && att.prompt.trim() !== "") {
+      if (/^\s*<channel\b/.test(att.prompt))
+        return null;
+      if (/^\s*\u2190\s*core:/i.test(att.prompt))
+        return null;
+      return {
+        event_type: "user_input",
+        content: `[typed mid-turn] ${att.prompt}`
+      };
+    }
+    return null;
+  }
   return null;
 }
 
@@ -27087,6 +27101,7 @@ function formatScanGapWarning(s) {
 
 // mcp/engine/agent_channel.ts
 var POLL_INTERVAL_MS = 1500;
+var FIRST_SIGHT_BACKFILL_MAX_BYTES = 262144;
 var HEARTBEAT_INTERVAL_MS = 30000;
 var STALE_THRESHOLD_MS = 90000;
 var DEPART_GRACE_TICKS = 20;
@@ -27241,6 +27256,7 @@ class AgentChannel {
   knownSessions = new Map;
   discarded = new Map;
   seenFiles = new Set;
+  firstSightBackfill = new Map;
   lastScanEnd = new Map;
   retired = false;
   pendingMisses = new Map;
@@ -27900,6 +27916,26 @@ class AgentChannel {
         });
       }
       this.seenFiles.add(file);
+      const senderSid = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
+      const joinedAtMs = Date.parse(identity.get(senderSid)?.started_at ?? "");
+      if (Number.isFinite(joinedAtMs) && stat.size > 0 && stat.size <= FIRST_SIGHT_BACKFILL_MAX_BYTES) {
+        this.firstSightBackfill.set(file, {
+          floorMs: joinedAtMs,
+          untilOffset: stat.size
+        });
+        offsets[file] = 0;
+        return true;
+      }
+      if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "backfill_skipped",
+          receiver_id8: this.selfSession.id8,
+          sender_id8: senderSid.slice(0, 8),
+          src_offset: stat.size,
+          detail: `transcript was ${stat.size} bytes at first sight, over the ` + `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` + "first prompt already in the file was not read"
+        });
+      }
       offsets[file] = stat.size;
       return true;
     }
@@ -27949,6 +27985,12 @@ class AgentChannel {
           detail: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)
         });
         continue;
+      }
+      const backfill = this.firstSightBackfill.get(file);
+      if (backfill !== undefined && srcOffset < backfill.untilOffset) {
+        const recordMs = Date.parse(raw?.timestamp ?? "");
+        if (!Number.isFinite(recordMs) || recordMs < backfill.floorMs)
+          continue;
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
       if (senderId === this.selfSession.session_id) {
@@ -28003,6 +28045,7 @@ class AgentChannel {
       });
     }
     this.lastScanEnd.set(file, lastOffset + consumed);
+    this.firstSightBackfill.delete(file);
     offsets[file] = lastOffset + consumed;
     return consumed > 0;
   }
