@@ -24,13 +24,18 @@ Flagging it ONCE was fine; flagging it at every bootstrap is the
 gate-on-a-settled-preference anti-pattern. Read the effort, state it in the
 readiness line, and move on.
 
-> **Known inconsistency, do not "fix" it silently:** `pa-start.ps1:252` still
-> passes `--effort xhigh`, from the 2026-06-30 default this text used to
-> describe. The user's saved `/effort` setting is what actually took effect
-> (PA d34f8547 launched and ran at `high`). That launcher line lives in the
-> **spawnbox** repo, not this one, so it is not this skill's to change - if it
-> still reads `xhigh` when you get here, surface it to Jarid as a one-line
-> cleanup rather than editing it mid-bootstrap.
+**The launcher agrees, as of 2026-09-06.** `pa-start.ps1` passes
+`--effort high` (spawnbox `1ecef11c`), so the launcher flag and this skill now
+say the same thing. They were briefly out of step - the launcher still forced
+`xhigh` from the 2026-06-30 default while Jarid's saved `/effort` setting was
+what actually took effect - and PA d34f8547 launched and ran at `high` under
+exactly that split.
+
+> **They live in different repos and must be changed together.** This skill is
+> in `claude-plugins`; the launcher is in `spawnbox`. A future effort change
+> that touches only one of them reproduces the split above, where the flag says
+> one thing, the running session another, and this text a third - and nothing
+> errors. If you find them disagreeing, say so rather than trusting either.
 
 For a one-off deeper pass you may `/effort max` for that single turn, but do
 NOT make it the session default.
