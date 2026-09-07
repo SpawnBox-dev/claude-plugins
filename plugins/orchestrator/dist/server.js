@@ -23972,7 +23972,34 @@ function writeSession(stateDir, entry) {
        id8 = excluded.id8,
        role = excluded.role,
        name = excluded.name,
-       started_at = excluded.started_at,
+       -- WI 9082182d: MONOTONIC, NOT LAST-WRITER-WINS. This clause used to read
+       -- started_at = excluded.started_at, and that alone made checkSuperseded
+       -- - the root-cause fix for the orphan-watcher bug 6cf7437a - UNREACHABLE
+       -- rather than merely unexercised.
+       --
+       -- heartbeat() calls writeSession and then checkSuperseded, synchronously.
+       -- With an unconditional overwrite, an OLD watcher stamped its own older
+       -- started_at onto the shared row and then read that value straight back,
+       -- so the theirs-less-than-or-equal-to-ours guard always took the early
+       -- exit. Zero retirements ever fired in production while orphans aged 12,
+       -- 15 and 25 hours and delivery fell 100 -> 48 -> 42 percent.
+       --
+       -- The docblock on checkSuperseded had rejected the instance column for
+       -- flickering under exactly this pressure, then chose a field written by
+       -- THIS SAME unconditional UPSERT. Making the store refuse to go backwards
+       -- is what makes "started_at is monotonic across a reload" actually true,
+       -- rather than true only if the loser politely stops writing.
+       --
+       -- Fixed HERE and not by reordering heartbeat(): the 0.55.0 ordering
+       -- (writeSession lands before any detector that can throw) is load-bearing
+       -- - a detector that takes the registry write down with it makes the
+       -- session INVISIBLE to peers rather than merely degraded.
+       --
+       -- COALESCE guards the NULL case: SQLite scalar MAX returns NULL if any
+       -- argument is NULL, which would erase the column instead of holding it.
+       -- Both values come from Date.toISOString(), so lexical and chronological
+       -- order agree.
+       started_at = MAX(excluded.started_at, COALESCE(sessions.started_at, excluded.started_at)),
        last_heartbeat_at = excluded.last_heartbeat_at,
        -- 0.57.0: COALESCE, not a plain overwrite. current_task belongs with the
        -- self-declared columns above, but was left in the clobber set while

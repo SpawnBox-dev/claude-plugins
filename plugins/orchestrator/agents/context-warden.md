@@ -294,7 +294,14 @@ just idle" gate.
   (false `session_departed`) while it is ALIVE; it cannot self-detect
   (anti_pattern 6ef0c61f). Discriminator: registry-absent/stale BUT transcript
   (`~/.claude/projects/<hash>/<session_id>.jsonl`) mtime FRESH / still GROWING =
-  egress-dead, not gone. Fix: `/mcp` reconnect.
+  egress-dead, not gone. **Fix: restart that window - NOT `/mcp`.** Both restore
+  the transport, but a `/mcp` reconnect ABANDONS the old MCP server instead of
+  terminating it (`stop()` never runs), so it leaves a second watcher polling the
+  same transcripts and advancing the same offsets row. That is the orphan bug
+  6cf7437a: seven watchers for a four-session fleet, orphans aged 12/15/25 hours,
+  delivery 100% -> 48% -> 42%. A window restart leaves exactly one reader. Only
+  recommend `/mcp` when a restart is genuinely not available, and say what it
+  costs when you do.
 - **Ingress-death** (event loop PARKED, e.g. an open `/mcp` menu): the session's
   heartbeat stays FRESH and channel deliveries keep ENQUEUEing, but no turn runs
   to process them - it goes silent while the roster shows it healthy. Discriminator:
@@ -302,7 +309,9 @@ just idle" gate.
   dequeued since the last real (non-queue-op) turn, and the last real entry is a
   completed turn (not a `user` entry or a pending `tool_use` - those are just a
   long turn / extended-thinking, still alive). Fix: check that terminal for an
-  open menu/prompt - Enter/Escape, then `/mcp` if still dead.
+  open menu/prompt - Enter/Escape first, since a parked loop needs no reconnect
+  at all. If it is still dead after that, **restart the window** for the reason
+  above; reach for `/mcp` only if a restart is not available.
 
 ## Verify-on-demand (a core duty, not a favor)
 
