@@ -2477,18 +2477,41 @@ export class AgentChannel {
         offsets[file] = 0;
         return true; // process [0, EOF) next tick, gated by the join floor
       }
-      if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
-        appendEmitLog(this.projectStateDir, {
-          ts: new Date().toISOString(),
-          event: "backfill_skipped",
-          receiver_id8: this.selfSession.id8,
-          sender_id8: senderSid.slice(0, 8),
-          src_offset: stat.size,
-          detail:
-            `transcript was ${stat.size} bytes at first sight, over the ` +
-            `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` +
-            "first prompt already in the file was not read",
-        });
+      // EVERY path that declines the backfill must leave a row (PA, review of
+      // ebc8613). There are two, and only the size one was logged at first -
+      // the other is the same silent-miss shape this whole item is about.
+      if (stat.size > 0) {
+        if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "backfill_skipped",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderSid.slice(0, 8),
+            src_offset: stat.size,
+            detail:
+              `transcript was ${stat.size} bytes at first sight, over the ` +
+              `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` +
+              "first prompt already in the file was not read",
+          });
+        } else if (!Number.isFinite(joinedAtMs)) {
+          // No registry row for this sender at first sight - the registry write
+          // racing the transcript, or a session registered under another id.
+          // The floor is undefinable, so the backfill cannot run safely and we
+          // fall back to the EOF seed. That is the ONE remaining way D1 can
+          // still lose a first prompt, so it must not be silent: without this
+          // row it looks identical to a healthy first sight.
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "backfill_skipped",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderSid.slice(0, 8),
+            src_offset: stat.size,
+            detail:
+              `no join time for ${senderSid.slice(0, 8)} at first sight (no identity row), ` +
+              "so the post-join floor is undefinable; seeded at EOF, and any first " +
+              "prompt already in the file was not read",
+          });
+        }
       }
       offsets[file] = stat.size;
       return true; // persist EOF offset; nothing to process this tick

@@ -230,6 +230,35 @@ describe("WI ebd29e32 D1 - first prompt beneath the startup burst", () => {
     expect(contents.some((c) => c.includes("HISTORICAL"))).toBe(false);
   });
 
+  test("no identity row for the sender: falls back to EOF and SAYS SO", () => {
+    // The other way to decline the backfill, and the only remaining way D1 can
+    // still lose a first prompt: the registry write racing the transcript, or a
+    // session registered under a different id. With no join time the floor is
+    // undefinable, so the safe move is the old EOF seed - but it must leave a
+    // row, or it looks exactly like a healthy first sight.
+    const pa = makeSession("prime", "aaaaaaaa", "PA-test", JOIN);
+    writeSession(stateDir, pa);
+    writeFileSync(join(projectsHashDir, `${pa.session_id}.jsonl`), "");
+    // Deliberately NOT registered - no writeSession for this one.
+    const strangerJsonl = join(
+      projectsHashDir,
+      "cccccccc-1234-5678-9abc-def012345678.jsonl",
+    );
+    writeFileSync(strangerJsonl, userRecord("first prompt", "2026-09-06T23:49:45.393Z") + "\n");
+
+    const rx: ChannelNotification[] = [];
+    const chan = new AgentChannel(stateDir, projectsHashDir, pa, (n) => rx.push(n));
+    (chan as any).tick();
+    (chan as any).tick();
+
+    expect(routed(rx).length).toBe(0);
+    const skipped = logRows().filter(
+      (r) => r.event === "backfill_skipped" && r.sender_id8 === "cccccccc",
+    );
+    expect(skipped.length).toBe(1);
+    expect(skipped[0].detail).toContain("no join time");
+  });
+
   test("a transcript already over the cap is seeded at EOF and SAYS SO", () => {
     // The one case the fix declines to act on. It must announce itself: silence
     // here would be indistinguishable from the bug this replaces.

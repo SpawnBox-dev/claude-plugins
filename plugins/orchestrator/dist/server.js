@@ -27926,15 +27926,26 @@ class AgentChannel {
         offsets[file] = 0;
         return true;
       }
-      if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
-        appendEmitLog(this.projectStateDir, {
-          ts: new Date().toISOString(),
-          event: "backfill_skipped",
-          receiver_id8: this.selfSession.id8,
-          sender_id8: senderSid.slice(0, 8),
-          src_offset: stat.size,
-          detail: `transcript was ${stat.size} bytes at first sight, over the ` + `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` + "first prompt already in the file was not read"
-        });
+      if (stat.size > 0) {
+        if (stat.size > FIRST_SIGHT_BACKFILL_MAX_BYTES) {
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "backfill_skipped",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderSid.slice(0, 8),
+            src_offset: stat.size,
+            detail: `transcript was ${stat.size} bytes at first sight, over the ` + `${FIRST_SIGHT_BACKFILL_MAX_BYTES}-byte backfill cap; seeded at EOF, so any ` + "first prompt already in the file was not read"
+          });
+        } else if (!Number.isFinite(joinedAtMs)) {
+          appendEmitLog(this.projectStateDir, {
+            ts: new Date().toISOString(),
+            event: "backfill_skipped",
+            receiver_id8: this.selfSession.id8,
+            sender_id8: senderSid.slice(0, 8),
+            src_offset: stat.size,
+            detail: `no join time for ${senderSid.slice(0, 8)} at first sight (no identity row), ` + "so the post-join floor is undefinable; seeded at EOF, and any first " + "prompt already in the file was not read"
+          });
+        }
       }
       offsets[file] = stat.size;
       return true;
