@@ -623,7 +623,48 @@ const MIN_ORPHAN_AGE_MS = 5 * 60 * 1000;
  */
 const REAP_ORPHANS = process.env.ORCHESTRATOR_REAP_ORPHAN_SIDECARS === "1";
 
-type SidecarProc = { pid: number; port: number; ageMs: number; rssMb: number };
+/**
+ * How long the ADOPT probe waits before concluding a sidecar is unreachable and
+ * spawning a ~2 GB replacement. See the probe site in startSidecar() for the
+ * measured spawn storm this exists to prevent, and EmbeddingClient.isAvailable
+ * for why the caller - not the client - owns this number.
+ */
+const ADOPT_PROBE_MS = 30_000;
+
+/**
+ * ⚠️ THE TWO PREMISES OF THE OPT-IN DECISION ABOVE WERE BOTH MEASURED FALSE ON
+ * 2026-09-07, AND THE DECISION SHOULD BE RE-TAKEN RATHER THAN INHERITED.
+ *
+ * The reasoning above is sound given its inputs. Its inputs are wrong:
+ *
+ * 1. "a sidecar's ceiling is now ~750 MB, so three orphans cost ~2 GB". Measured
+ *    resident sizes that day: 2,505 MB, 2,364 MB, 2,328 MB, 1,508 MB. The
+ *    ceiling is off by roughly 3x, so the cost side of the trade-off - the
+ *    thing that made OFF-by-default affordable - was understated by gigabytes.
+ *    Note that system_status ALREADY warns above 2,048 MB, so two parts of this
+ *    same file disagree about what a normal sidecar weighs.
+ *
+ * 2. "orphans are always REPORTED by system_status whether or not this is set."
+ *    They were not. The orphan report was nested inside the branch where
+ *    /health ANSWERED, so a fleet whose live sidecar had stopped responding got
+ *    "/health did not answer" and NO orphan list - with four orphans alive and
+ *    ~4.6 GB held. The visibility that justifies leaving reaping off failed in
+ *    precisely the situation that needs it. That nesting is fixed below; this
+ *    note stays because the DECISION was made on the assumption it worked.
+ *
+ * Do not read the block above as settled. It is a good argument from figures
+ * that no longer describe this system.
+ */
+
+// Classification lives in engine/sidecar_orphans.ts so it can be EXECUTED by a
+// test. The predicate here was always correct; what failed was that the caller
+// could not reach it when /health went quiet - see that file's header.
+import {
+  classifyOrphans,
+  identifyLive,
+  totalRssMb,
+  type SidecarProc,
+} from "./engine/sidecar_orphans";
 
 /** Every listening embed sidecar on this box. [] on any failure - callers must
  *  not treat an empty list as proof that none exist. */
@@ -663,11 +704,41 @@ $out | ConvertTo-Json -Compress`.trim();
   }
 }
 
-/** Sidecars nothing can route to, given the port the port file names. */
+/**
+ * The port the port file names, or null if it cannot be read.
+ *
+ * This is the SAME discriminator the reaper uses, and it is available whether
+ * or not the live sidecar is answering - which is the whole point. Identifying
+ * the live sidecar by the pid /health reports is more direct, but it is only
+ * available when /health works, and the moment you most need to know what is
+ * holding memory is the moment /health has stopped answering.
+ */
+async function livePortFromFile(): Promise<number | null> {
+  try {
+    const p = resolve(join(homedir(), ".claude", "orchestrator"), "sidecar.port");
+    const n = parseInt((await Bun.file(p).text()).trim(), 10);
+    return !isNaN(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sidecars nothing can route to, given the port the port file names.
+ *
+ *  Delegates to the shared classifier so the reaper and `system_status` cannot
+ *  drift into disagreeing about what an orphan is - the reaper KILLS on this
+ *  answer and the status tool INVITES a human to kill on it, so two
+ *  implementations would be two chances to kill the wrong process.
+ *
+ *  ⚠️ ONE DELIBERATE BEHAVIOUR CHANGE, stated because it is a kill path. When
+ *  `livePort` is null the old spelling returned EVERY sidecar (`!(false)` is
+ *  true), i.e. "if you cannot tell which one is live, kill them all". The
+ *  shared classifier returns NONE instead. Unreachable in practice - the only
+ *  call site passes `result.port` immediately after a successful spawn - but if
+ *  it ever does fire, killing nothing is the correct direction of this error by
+ *  this file's own reasoning. */
 function orphansOf(all: SidecarProc[], livePort: number | null): SidecarProc[] {
-  return all.filter(
-    (r) => r.pid !== process.pid && !(livePort !== null && r.port === livePort),
-  );
+  return classifyOrphans(all, identifyLive(null, livePort), process.pid);
 }
 
 async function reapOrphanSidecars(livePort: number | null): Promise<void> {
@@ -735,7 +806,21 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     const existingPort = parseInt(content.trim(), 10);
     if (!isNaN(existingPort) && existingPort > 0) {
       const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
-      if (await client.isAvailable()) {
+      // 🔴 THIS PROBE DECIDES ADOPT-OR-SPAWN, SO ITS TIMEOUT IS A MEMORY BUDGET.
+      //
+      // A sidecar mid-backfill is alive and correct but does not answer /health
+      // inside the 2 s default. The old spelling therefore called a healthy
+      // sidecar dead and spawned a duplicate - which immediately began its OWN
+      // backfill, so the NEXT session's probe failed the same way. That is a
+      // self-amplifying spawn storm, and it is not theoretical: 2026-09-07, six
+      // sidecars across four generations, ~4.6 GB reclaimed and then two more
+      // (~4.0 GB) spawned within 34 minutes, while a `cargo check` on the same
+      // box was OOM-killed five consecutive times.
+      //
+      // ADOPT_PROBE_MS is deliberately far longer than a health check needs.
+      // Waiting is cheap and bounded; spawning is ~2 GB and permanent until
+      // something reaps it.
+      if (await client.isAvailable(ADOPT_PROBE_MS)) {
         // 0.47.1: HEALTHY IS NOT ENOUGH - it must serve the RIGHT MODEL.
         //
         // Across a model change the old sidecar is still alive and still
@@ -1319,41 +1404,66 @@ server.tool(
           }
         }
 
-        // ORPHANS. Reported whether or not reaping is enabled, because the
-        // whole problem on 2026-09-05 was that they were INVISIBLE: three
-        // sidecars alive, the largest of them serving nobody, and no tool in
-        // the fleet could say so. A process listening on a port the port file
-        // does not name cannot be reached by any session.
-        //
-        // Identify the live one by the PID /health reports, which is the one
-        // fact that comes from the process we are actually talking to. If an
-        // older sidecar omits `pid`, say so rather than guessing - misnaming
-        // the live sidecar as an orphan is the expensive direction of this
-        // error, and it is exactly the mistake made by hand that night
-        // (ranking by RSS picked the leaker, which was the orphan).
-        if (h.pid) {
-          const others = (await listSidecars()).filter(
-            (r) => r.pid !== h.pid && r.pid !== process.pid,
-          );
-          if (others.length) {
-            const mb = others.reduce((a, r) => a + r.rssMb, 0);
-            lines.push(
-              `  - ⚠️ ${others.length} ORPHANED sidecar(s) holding ${mb} MB total ` +
-                `(${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). ` +
-                `Nothing routes to these - the live sidecar is pid ${h.pid}. ` +
-                (REAP_ORPHANS
-                  ? `They will be reaped on the next sidecar spawn.`
-                  : `Safe to kill; auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1).`),
-            );
-          }
-        }
       } else {
         // A ready status with an unreachable /health is exactly the split the
         // coverage line cannot show.
         lines.push(
           "  - Sidecar: /health did not answer, though embeddings are marked ready - " +
-            "the coverage figure above is from the database, not the process.",
+            "the coverage figure above is from the database, not the process. " +
+            "This does NOT mean the fleet's sidecar is down: it may be busy (a " +
+            "backfill does not answer inside the probe timeout), or this session's " +
+            "client may be bound to a port that has since moved. Compare the port " +
+            "below with the one this client holds before concluding anything.",
         );
+      }
+
+      // ORPHANS. Reported whether or not reaping is enabled, because the whole
+      // problem on 2026-09-05 was that they were INVISIBLE: three sidecars
+      // alive, the largest of them serving nobody, and no tool in the fleet
+      // could say so. A process listening on a port the port file does not name
+      // cannot be reached by any session.
+      //
+      // 🔴 THIS BLOCK USED TO SIT INSIDE `if (h.pid)`, WHICH MEANT IT WAS
+      // SILENT EXACTLY WHEN IT MATTERED. Preferring /health's pid was the right
+      // instinct - it is the one fact that comes from the process we are truly
+      // talking to, and misnaming the live sidecar as an orphan is the
+      // expensive direction of this error. But nesting the whole report under
+      // it meant that when /health stopped answering, the fleet got "/health
+      // did not answer" and NO orphan list. Measured 2026-09-07: exactly that,
+      // with four orphans alive holding ~4.6 GB on a box where compiles were
+      // being OOM-killed. The report has to survive the outage it describes.
+      //
+      // So: use /health's pid when it is there, and fall back to the PORT FILE -
+      // the same discriminator the reaper uses - when it is not. Say which one
+      // was used, because a reader must be able to weigh the claim.
+      {
+        const all = await listSidecars();
+        const live = identifyLive(h?.pid ?? null, await livePortFromFile());
+        const others = classifyOrphans(all, live, process.pid);
+        if (others.length) {
+          const mb = totalRssMb(others);
+          lines.push(
+            `  - ⚠️ ${others.length} ORPHANED sidecar(s) holding ${mb} MB total ` +
+              `(${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). ` +
+              `Nothing routes to these - ` +
+              (live.kind === "pid"
+                ? `the live sidecar is pid ${live.pid} (per /health).`
+                : `the port file names :${live.kind === "port" ? live.port : "?"} (/health did not answer, so the live process is identified by port, not pid).`) +
+              ` ` +
+              (REAP_ORPHANS
+                ? `They will be reaped on the next sidecar spawn.`
+                : `Auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1). ` +
+                  `Before killing one by hand, confirm no session is still bound to its port - ` +
+                  `a superseded sidecar can still be SERVING a client that bound before the port file moved.`),
+          );
+        } else if (live.kind === "unknown" && all.length > 1) {
+          // More than one process but none classifiable: say so rather than
+          // printing nothing, which reads identically to "all clear".
+          lines.push(
+            `  - ${all.length} sidecar process(es) alive and none could be classified ` +
+              `(no /health pid and no readable port file). Nothing is being claimed about which is live.`,
+          );
+        }
       }
     } else if (sidecarStatus === "starting") {
       lines.push("- **Embeddings**: starting up...");

@@ -20948,10 +20948,13 @@ class EmbeddingClient {
   constructor(baseUrl) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
-  async isAvailable() {
+  get url() {
+    return this.baseUrl;
+  }
+  async isAvailable(timeoutMs = 2000) {
     try {
       const controller = new AbortController;
-      const timeout = setTimeout(() => controller.abort(), 2000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(`${this.baseUrl}/health`, {
         signal: controller.signal
       });
@@ -28683,6 +28686,29 @@ async function handleRespondToPermission(input, ctx) {
 
 // mcp/server.ts
 import { homedir as homedir5 } from "os";
+
+// mcp/engine/sidecar_orphans.ts
+function identifyLive(healthPid, portFilePort) {
+  if (typeof healthPid === "number" && healthPid > 0)
+    return { kind: "pid", pid: healthPid };
+  if (typeof portFilePort === "number" && portFilePort > 0)
+    return { kind: "port", port: portFilePort };
+  return { kind: "unknown" };
+}
+function classifyOrphans(all, live, selfPid) {
+  if (live.kind === "unknown")
+    return [];
+  return all.filter((r) => {
+    if (r.pid === selfPid)
+      return false;
+    return live.kind === "pid" ? r.pid !== live.pid : r.port !== live.port;
+  });
+}
+function totalRssMb(procs) {
+  return procs.reduce((a, r) => a + r.rssMb, 0);
+}
+
+// mcp/server.ts
 var PLUGIN_VERSION = (() => {
   try {
     const pkgPath = join11(import.meta.dir, "..", "package.json");
@@ -28897,6 +28923,7 @@ async function trySpawn(cmd, portFile, label, timeoutMs) {
 }
 var MIN_ORPHAN_AGE_MS = 5 * 60 * 1000;
 var REAP_ORPHANS = process.env.ORCHESTRATOR_REAP_ORPHAN_SIDECARS === "1";
+var ADOPT_PROBE_MS = 30000;
 async function listSidecars() {
   try {
     if (process.platform !== "win32")
@@ -28927,8 +28954,17 @@ $out | ConvertTo-Json -Compress`.trim();
     return [];
   }
 }
+async function livePortFromFile() {
+  try {
+    const p = resolve(join11(homedir5(), ".claude", "orchestrator"), "sidecar.port");
+    const n = parseInt((await Bun.file(p).text()).trim(), 10);
+    return !isNaN(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
 function orphansOf(all, livePort) {
-  return all.filter((r) => r.pid !== process.pid && !(livePort !== null && r.port === livePort));
+  return classifyOrphans(all, identifyLive(null, livePort), process.pid);
 }
 async function reapOrphanSidecars(livePort) {
   if (!REAP_ORPHANS)
@@ -28959,7 +28995,7 @@ async function startSidecar() {
     const existingPort = parseInt(content.trim(), 10);
     if (!isNaN(existingPort) && existingPort > 0) {
       const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
-      if (await client.isAvailable()) {
+      if (await client.isAvailable(ADOPT_PROBE_MS)) {
         const dim = (await client.embed(["model check"]))?.[0]?.length ?? 0;
         if (dim === ACTIVE_EMBED_DIM) {
           console.error(`[embed] Reusing existing sidecar on port ${existingPort} (shared across sessions)`);
@@ -29294,15 +29330,19 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
           lines.push(`  - \u26A0\uFE0F Sidecar is holding ${h.rss_mb} MB. This does not shrink on its own; restart it when the fleet is idle to reclaim.`);
         }
       }
-      if (h.pid) {
-        const others = (await listSidecars()).filter((r) => r.pid !== h.pid && r.pid !== process.pid);
-        if (others.length) {
-          const mb = others.reduce((a, r) => a + r.rssMb, 0);
-          lines.push(`  - \u26A0\uFE0F ${others.length} ORPHANED sidecar(s) holding ${mb} MB total (${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). Nothing routes to these - the live sidecar is pid ${h.pid}. ` + (REAP_ORPHANS ? `They will be reaped on the next sidecar spawn.` : `Safe to kill; auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1).`));
-        }
-      }
     } else {
-      lines.push("  - Sidecar: /health did not answer, though embeddings are marked ready - the coverage figure above is from the database, not the process.");
+      lines.push("  - Sidecar: /health did not answer, though embeddings are marked ready - the coverage figure above is from the database, not the process. This does NOT mean the fleet's sidecar is down: it may be busy (a backfill does not answer inside the probe timeout), or this session's client may be bound to a port that has since moved. Compare the port below with the one this client holds before concluding anything.");
+    }
+    {
+      const all = await listSidecars();
+      const live = identifyLive(h?.pid ?? null, await livePortFromFile());
+      const others = classifyOrphans(all, live, process.pid);
+      if (others.length) {
+        const mb = totalRssMb(others);
+        lines.push(`  - \u26A0\uFE0F ${others.length} ORPHANED sidecar(s) holding ${mb} MB total (${others.map((r) => `pid ${r.pid} on :${r.port}, ${r.rssMb} MB`).join("; ")}). Nothing routes to these - ` + (live.kind === "pid" ? `the live sidecar is pid ${live.pid} (per /health).` : `the port file names :${live.kind === "port" ? live.port : "?"} (/health did not answer, so the live process is identified by port, not pid).`) + ` ` + (REAP_ORPHANS ? `They will be reaped on the next sidecar spawn.` : `Auto-reaping is off (set ORCHESTRATOR_REAP_ORPHAN_SIDECARS=1). Before killing one by hand, confirm no session is still bound to its port - a superseded sidecar can still be SERVING a client that bound before the port file moved.`));
+      } else if (live.kind === "unknown" && all.length > 1) {
+        lines.push(`  - ${all.length} sidecar process(es) alive and none could be classified (no /health pid and no readable port file). Nothing is being claimed about which is live.`);
+      }
     }
   } else if (sidecarStatus === "starting") {
     lines.push("- **Embeddings**: starting up...");

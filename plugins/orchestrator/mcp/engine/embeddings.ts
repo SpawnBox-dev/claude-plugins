@@ -105,14 +105,34 @@ export class EmbeddingClient {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
   }
 
+  /** The sidecar this client is bound to. Diagnostics only. */
+  get url(): string {
+    return this.baseUrl;
+  }
+
   /**
    * Check if the sidecar is up and ready.
-   * GET /health, 2s timeout, returns true only if status=ready.
+   * GET /health, returns true only if status=ready.
+   *
+   * 🔴 THE TIMEOUT IS A POLICY CHOICE, NOT A DETAIL, BECAUSE THE ADOPT PATH
+   * SPAWNS A 2 GB PROCESS WHEN THIS RETURNS FALSE.
+   *
+   * A sidecar mid-backfill does not answer /health inside 2 s. It is alive,
+   * correct, and about to be useful - but a 2 s probe calls it dead, the adopt
+   * path spawns a duplicate, and the duplicate immediately starts its own
+   * backfill. Measured 2026-09-07: four sidecars from four generations alive at
+   * once, ~4.6 GB, then two MORE spawned within 34 minutes of a reclaim, each
+   * ~1.5-2.5 GB, on a 32 GB box where a `cargo check` was being OOM-killed.
+   * The remedy manufactured the condition it treated.
+   *
+   * So callers that will SPAWN on a false must pass a generous timeout; callers
+   * that only want a fast liveness read keep the short default. Being slow to
+   * conclude "dead" costs seconds. Concluding it wrongly costs gigabytes.
    */
-  async isAvailable(): Promise<boolean> {
+  async isAvailable(timeoutMs = 2000): Promise<boolean> {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(`${this.baseUrl}/health`, {
         signal: controller.signal,
       });
