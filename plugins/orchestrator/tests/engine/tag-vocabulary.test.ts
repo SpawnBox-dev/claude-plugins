@@ -43,12 +43,36 @@ const LIVE: TagStat[] = [
 const vocab = buildVocabulary(LIVE);
 
 describe("normalization primitives", () => {
-  test("folds only case and separator, never digits or dates", () => {
+  test("folds only case and separator CHOICE, never digits or dates", () => {
     expect(normalizeTagKey("anti-pattern")).toBe(normalizeTagKey("anti_pattern"));
     expect(normalizeTagKey("UX")).toBe(normalizeTagKey("ux"));
     // The over-normalisation that inflated an earlier collision count 304 -> 503.
     expect(normalizeTagKey("2026-09-06")).not.toBe(normalizeTagKey("2026-09-07"));
     expect(normalizeTagKey("related:aabbccdd")).not.toBe(normalizeTagKey("related:11223344"));
+  });
+
+  test("SEPARATORS ARE UNIFIED, NOT REMOVED - a handle is not a spelling", () => {
+    // Found by the live dry run: stripping separators made `yakuzer__` and
+    // `yakuzer` one token, which folds one Discord handle into another. That is
+    // a claim about identity, not orthography.
+    expect(normalizeTagKey("yakuzer__")).not.toBe(normalizeTagKey("yakuzer"));
+    // Same class, less alarming but still a preference rather than a bug:
+    expect(normalizeTagKey("event-bus")).not.toBe(normalizeTagKey("eventbus"));
+    expect(normalizeTagKey("lemonsqueezy")).not.toBe(normalizeTagKey("lemon-squeezy"));
+    expect(normalizeTagKey("phase2")).not.toBe(normalizeTagKey("phase-2"));
+    // ...while the genuine same-token cases still fold.
+    expect(normalizeTagKey("quality-gate")).toBe(normalizeTagKey("quality_gate"));
+    expect(normalizeTagKey("Lane:Portal")).toBe(normalizeTagKey("lane:portal"));
+  });
+
+  test("a separator-count difference is never auto-applied to someone's note", () => {
+    const v = buildVocabulary([
+      { tag: "yakuzer", count: 40 },
+      { tag: "yakuzer__", count: 5 },
+    ]);
+    const [d] = decideTags(["yakuzer__"], v);
+    expect(d.action).not.toBe("canonicalised");
+    expect(d.output).toBe("yakuzer__");
   });
 
   test("a namespace is an identifier, not any string containing a colon", () => {

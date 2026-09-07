@@ -51,16 +51,30 @@ export interface TagVocabulary {
 }
 
 /**
- * Fold the two differences that never carry meaning: case, and the choice
- * between `-` and `_`.
+ * Fold the two differences that never carry meaning: case, and the CHOICE
+ * between `-` and `_` at a position where both spellings have a separator.
  *
- * Deliberately NOT folding anything else. Stripping digits or dates would
- * collapse `2026-09-06` into `2026-09-07`, and masking ids would collapse
- * unrelated `related:<id8>` tags - the exact over-normalisation that inflated
- * an earlier count of these collisions from 304 to 503 before it was caught.
+ * SEPARATORS ARE UNIFIED, NOT REMOVED, and that distinction is load-bearing.
+ * An earlier version stripped them, which made `yakuzer__` and `yakuzer` the
+ * same token - a Discord handle folded into a different Discord handle, which
+ * is a claim about WHO SOMEONE IS rather than how a word is spelled. The live
+ * dry run surfaced five such applications, plus `event-bus`/`eventbus`,
+ * `lemonsqueezy`/`lemon-squeezy` and `SmartTooltip`/`smarttooltip`.
+ *
+ * Adding or removing a separator changes the token. `foot-gun` and `footgun`
+ * plainly mean the same thing, but which one is canonical is a PREFERENCE, and
+ * this function's output is applied automatically to other people's notes. It
+ * may only fold differences that are unambiguously the same token written two
+ * ways. Everything else is a suggestion for a human, which is what the
+ * `novel` path is for.
+ *
+ * Also deliberately NOT folding digits or dates: that would collapse
+ * `2026-09-06` into `2026-09-07`, and masking ids would collapse unrelated
+ * `related:<id8>` tags - the over-normalisation that inflated an earlier count
+ * of these collisions from 304 to 503 before it was caught.
  */
 export function normalizeTagKey(tag: string): string {
-  return tag.toLowerCase().replace(/[-_]/g, "");
+  return tag.toLowerCase().replace(/[-_]/g, "-");
 }
 
 /** Split `ns:value` once, or null when the tag carries no namespace. */

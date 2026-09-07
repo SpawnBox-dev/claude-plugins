@@ -19575,7 +19575,7 @@ class StdioServerTransport {
 
 // mcp/engine/tag_vocabulary.ts
 function normalizeTagKey(tag) {
-  return tag.toLowerCase().replace(/[-_]/g, "");
+  return tag.toLowerCase().replace(/[-_]/g, "-");
 }
 function splitNamespace(tag) {
   const i = tag.indexOf(":");
