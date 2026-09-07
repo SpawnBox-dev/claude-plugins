@@ -3187,6 +3187,17 @@ server.tool(
   }
 );
 
+/**
+ * WI f7fef3b7: has a client completed the MCP handshake with THIS process?
+ *
+ * Set in `server.server.oninitialized` far below and read by the agent-channel
+ * via a callback, so a superseded watcher that is actually serving a user
+ * refuses to stand down. Declared here because the channel is constructed
+ * before that handler can fire; the callback defers the read, so ordering is
+ * safe and the value is simply `false` until the handshake lands.
+ */
+let clientHandshakeComplete = false;
+
 /** Last time the install-mismatch nudge was emitted; null until the first. */
 let lastMismatchNudgeMs: number | null = null;
 /** Separate timer for the scan-gap nudge - the two conditions are
@@ -3408,6 +3419,11 @@ function startAgentChannel(): void {
       // 30s heartbeat reconcile. This is what lets a server that registered
       // under a sibling's session_id repair itself without a /mcp reconnect.
       readAuthoritativeSessionId,
+      // WI f7fef3b7: lets checkSuperseded refuse to stand down while THIS
+      // process is the one holding a client. Read lazily on each heartbeat -
+      // the channel is constructed before the handshake can land, so passing
+      // the boolean itself would freeze it at `false` forever.
+      () => clientHandshakeComplete,
     );
     agentChannel.start();
     process.stderr.write(
@@ -4401,6 +4417,12 @@ async function main() {
   // scan before either had published, and conclude the other is clientless.
   let dedupRan = false;
   server.server.oninitialized = () => {
+    // WI f7fef3b7: the same handshake that authorises the dedup kill also
+    // authorises REFUSING to retire. A server with no client cannot reach this
+    // line, which is what makes it the one ownership signal a contender cannot
+    // forge. Set before anything below can throw - a failed dedup must not
+    // leave us looking clientless to checkSuperseded.
+    clientHandshakeComplete = true;
     try {
       const stateDir = orchestratorStateDir();
       writeClientClaim(stateDir, process.pid, getProcessCreationTime(process.pid));

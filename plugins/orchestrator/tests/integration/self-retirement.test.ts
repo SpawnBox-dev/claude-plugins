@@ -93,10 +93,34 @@ const retiredRows = () => {
     .filter((r) => r.event === "retired");
 };
 
-/** A watcher for this session whose own start time is `startedAt`. */
-function watcher(startedAt: string, rx: ChannelNotification[] = []) {
-  return new AgentChannel(stateDir, projectsHashDir, entry(startedAt), (n) => rx.push(n));
+/** A watcher for this session whose own start time is `startedAt`.
+ *  `hasClient` mirrors server.ts's `oninitialized` signal (WI f7fef3b7);
+ *  omitted means "no client", which is the retire-eligible default. */
+function watcher(
+  startedAt: string,
+  rx: ChannelNotification[] = [],
+  hasClient?: boolean,
+) {
+  return new AgentChannel(
+    stateDir,
+    projectsHashDir,
+    entry(startedAt),
+    (n) => rx.push(n),
+    undefined,
+    undefined,
+    hasClient === undefined ? undefined : () => hasClient,
+  );
 }
+
+const deferredRows = () => {
+  const p = join(stateDir, "emit-log.jsonl");
+  if (!existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((r) => r.event === "retire_deferred");
+};
 
 describe("WI 9082182d - a superseded watcher stands down", () => {
   test("THE ARM THAT WAS RED: the OLD watcher retires once a newer instance holds the row", () => {
@@ -150,6 +174,73 @@ describe("WI 9082182d - a superseded watcher stands down", () => {
 
     expect((solo as any).retired).toBeFalsy();
     expect(retiredRows().length).toBe(0);
+  });
+
+  // =========================================================================
+  // WI f7fef3b7 - THE REGRESSION THE ARM ABOVE CAUSED IN PRODUCTION.
+  //
+  // Shipped in 0.69.14/0.69.15, the retirement above fired on PA's window
+  // TWICE in one night and deafened its inbound channel both times (364
+  // messages sent into a void on the first occurrence; recurrence within 90 s
+  // of a reconnect). Claude Code's plugin-manager race spawns a fresh server
+  // that NO CLIENT IS ATTACHED TO; it writes a newer started_at, wins the
+  // comparison, and the incumbent actually serving the user stands down.
+  //
+  // Spawn order does not track client attachment, and on that window the two
+  // were reliably inverted. The guard uses the one signal a contender cannot
+  // forge - a completed MCP handshake - which is the same bar server.ts's
+  // dedup path already adopted for the identical failure.
+  // =========================================================================
+  test("REGRESSION f7fef3b7: a superseded watcher HOLDING A CLIENT does not retire", () => {
+    writeSession(stateDir, entry(NEW_START));
+
+    // Older instance, but it is the one a client handshook with - i.e. the
+    // incumbent that is actually serving the user.
+    const incumbent = watcher(OLD_START, [], true);
+    (incumbent as any).heartbeat();
+    (incumbent as any).heartbeat();
+
+    expect((incumbent as any).retired).toBeFalsy();
+    expect(retiredRows().length).toBe(0);
+    // and it must SAY it declined, exactly once, or the decision is invisible
+    expect(deferredRows().length).toBe(1);
+    expect(deferredRows()[0].detail).toContain("client handshake");
+  });
+
+  test("f7fef3b7: a superseded watcher with NO client still retires", () => {
+    // The orphan case retirement exists for must keep working - the guard must
+    // narrow the behaviour, not disable it.
+    writeSession(stateDir, entry(NEW_START));
+
+    const orphan = watcher(OLD_START, [], false);
+    (orphan as any).heartbeat();
+
+    expect((orphan as any).retired).toBe(true);
+    expect(retiredRows().length).toBe(1);
+    expect(deferredRows().length).toBe(0);
+  });
+
+  test("f7fef3b7: UNKNOWN client state is treated as no-client (fail to prior behaviour)", () => {
+    // No callback supplied - tests and embedders that cannot answer keep the
+    // pre-guard behaviour rather than silently never retiring.
+    writeSession(stateDir, entry(NEW_START));
+
+    const unknown = watcher(OLD_START); // hasClient undefined
+    (unknown as any).heartbeat();
+
+    expect((unknown as any).retired).toBe(true);
+  });
+
+  test("f7fef3b7: the decline is logged ONCE, not once per heartbeat", () => {
+    // The condition persists until the client moves, so an unconditional line
+    // would write every 30 s forever and bury the one that matters.
+    writeSession(stateDir, entry(NEW_START));
+
+    const incumbent = watcher(OLD_START, [], true);
+    for (let i = 0; i < 5; i++) (incumbent as any).heartbeat();
+
+    expect(deferredRows().length).toBe(1);
+    expect((incumbent as any).retired).toBeFalsy();
   });
 
   test("a retired watcher stops beating, so it stops competing for the row", () => {

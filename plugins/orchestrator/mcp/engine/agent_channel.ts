@@ -829,6 +829,11 @@ export class AgentChannel {
     string,
     { floorMs: number; untilOffset: number }
   >();
+  /** WI f7fef3b7: log the retire-deferred decision once per process, not once
+   *  per heartbeat. The condition persists until the client moves, so an
+   *  unconditional line would write every 30s forever and bury the one that
+   *  matters. */
+  private retireDeferredLogged = false;
   /** WI 6cf7437a: end offset of the LAST pass over each transcript, kept in
    *  process. A new pass starting ABOVE this means bytes were never read.
    *  Process-local for the same reason seenFiles is - it must not trust the
@@ -910,6 +915,18 @@ export class AgentChannel {
      *  once per heartbeat. Supplied by server.ts; undefined disables the
      *  reconcile (and says so on the first tick rather than passing silently). */
     private resolveTrueSessionId?: () => string | undefined,
+    /**
+     * WI f7fef3b7. Has a client completed the MCP handshake with THIS process?
+     * Supplied by server.ts from its `oninitialized` handler; undefined in
+     * tests and in any embedder that cannot answer, which is treated as "no
+     * client" and therefore retire-eligible - the pre-existing behaviour.
+     *
+     * This is the ONLY signal in reach that a contender cannot forge: a server
+     * with no client cannot complete a handshake, exactly as the dedup path
+     * already argues at server.ts's `oninitialized` (WI ca509bb7). See
+     * checkSuperseded for why the alternative was catastrophic.
+     */
+    private hasClientHandshake?: () => boolean,
   ) {}
 
   /** One-shot latch so an inert reconcile logs once, not every 30s. */
@@ -1292,6 +1309,60 @@ export class AgentChannel {
     const ours = new Date(this.selfSession.started_at).getTime();
     if (!Number.isFinite(theirs) || !Number.isFinite(ours)) return;
     if (theirs <= ours) return; // we are the newest, or it is our own row
+
+    // ── WI f7fef3b7: NEVER STAND DOWN WHILE WE HOLD THE CLIENT ──────────────
+    //
+    // WHAT THIS COST. Shipped without this guard (0.69.14/0.69.15), the check
+    // above retired PA's watcher TWICE in one night and deafened its inbound
+    // channel both times - 364 messages sent into a void on the first
+    // occurrence, and it recurred within 90 seconds of a reconnect. Nothing
+    // else went red: heartbeat stayed fresh, emit/sent kept climbing, zero
+    // send_failed, transcript still growing, MCP tool calls still answered.
+    // The only instrument that showed it was the receipt.
+    //
+    // WHY started_at ALONE IS THE WRONG QUESTION. It answers "who started
+    // last", and Claude Code's plugin-manager race (WI 61da44fa,
+    // anthropics/claude-code#25976) SPAWNS A FRESH SERVER THAT NO CLIENT IS
+    // ATTACHED TO. That newcomer writes a newer started_at, wins the
+    // comparison, and the incumbent - the one actually serving the user -
+    // dutifully stands down. Spawn order does not track client attachment, and
+    // on this window the two were reliably INVERTED.
+    //
+    // This is the bar anti-pattern 501675ba already set and I failed to apply:
+    // do not decide ownership with a value both contenders write. `started_at`
+    // is written by every heartbeat of every contender - the exact objection
+    // the docblock above raises against the `instance` column, restated one
+    // field along. server.ts's dedup path had already learned this and moved
+    // its kill decision behind the `oninitialized` handshake for the identical
+    // reason ("a freshly spawned copy would reliably kill the incumbent that
+    // was actually serving the user"). Retirement now uses the same bar.
+    //
+    // FAIL-SAFE BY CONSTRUCTION. Unknown (no callback) reads as "no client" and
+    // stays retire-eligible, so tests and embedders keep the old behaviour. If
+    // BOTH contenders somehow report a client, neither retires - and that is
+    // merely the pre-0.69.14 status quo (a wasteful orphan), never a silenced
+    // session. The failure we are avoiding is strictly worse than the one we
+    // tolerate.
+    if (this.hasClientHandshake?.() === true) {
+      if (!this.retireDeferredLogged) {
+        this.retireDeferredLogged = true;
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "retire_deferred",
+          receiver_id8: this.selfSession.id8,
+          detail:
+            `superseded by a row started_at ${row.started_at} (ours ` +
+            `${this.selfSession.started_at}) but THIS process holds a completed ` +
+            "client handshake, so standing down would deafen the session it serves; " +
+            "staying up (WI f7fef3b7)",
+        });
+        process.stderr.write(
+          "agent-channel: superseded but holding a live client - NOT retiring " +
+            `(mine ${this.selfSession.started_at}, live ${row.started_at})\n`,
+        );
+      }
+      return;
+    }
 
     this.retired = true;
     appendEmitLog(this.projectStateDir, {

@@ -165,7 +165,18 @@ export type EmitLogEvent =
    * a startup injection grew past it or the watcher met a transcript with real
    * history, and those want different answers. `src_offset` carries the size.
    */
-  | "backfill_skipped";
+  | "backfill_skipped"
+  /**
+   * This watcher was superseded by a newer registry row but DECLINED to stand
+   * down, because a client has completed the MCP handshake with this process
+   * (WI f7fef3b7).
+   *
+   * Written once per process. A row here is the fix working: without it, the
+   * incumbent that actually serves the user retires in favour of a
+   * clientless server the plugin-manager race just spawned, and the session
+   * goes silent with every other instrument still green.
+   */
+  | "retire_deferred";
 
 export interface EmitLogRecord {
   ts: string;

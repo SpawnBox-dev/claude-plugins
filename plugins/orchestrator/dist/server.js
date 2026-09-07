@@ -27278,12 +27278,14 @@ class AgentChannel {
   rawEmit;
   permissionRelay;
   resolveTrueSessionId;
+  hasClientHandshake;
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
   discarded = new Map;
   seenFiles = new Set;
   firstSightBackfill = new Map;
+  retireDeferredLogged = false;
   lastScanEnd = new Map;
   retired = false;
   pendingMisses = new Map;
@@ -27300,13 +27302,14 @@ class AgentChannel {
   selfSizeAtEmit = null;
   clientTransportLastEmit = new Map;
   heartbeatFailures = 0;
-  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay, resolveTrueSessionId) {
+  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay, resolveTrueSessionId, hasClientHandshake) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
     this.selfSession = selfSession;
     this.rawEmit = rawEmit;
     this.permissionRelay = permissionRelay;
     this.resolveTrueSessionId = resolveTrueSessionId;
+    this.hasClientHandshake = hasClientHandshake;
   }
   reconcileInertLogged = false;
   reconcileIdentity() {
@@ -27438,6 +27441,20 @@ class AgentChannel {
       return;
     if (theirs <= ours)
       return;
+    if (this.hasClientHandshake?.() === true) {
+      if (!this.retireDeferredLogged) {
+        this.retireDeferredLogged = true;
+        appendEmitLog(this.projectStateDir, {
+          ts: new Date().toISOString(),
+          event: "retire_deferred",
+          receiver_id8: this.selfSession.id8,
+          detail: `superseded by a row started_at ${row.started_at} (ours ` + `${this.selfSession.started_at}) but THIS process holds a completed ` + "client handshake, so standing down would deafen the session it serves; " + "staying up (WI f7fef3b7)"
+        });
+        process.stderr.write("agent-channel: superseded but holding a live client - NOT retiring " + `(mine ${this.selfSession.started_at}, live ${row.started_at})
+`);
+      }
+      return;
+    }
     this.retired = true;
     appendEmitLog(this.projectStateDir, {
       ts: new Date().toISOString(),
@@ -30338,6 +30355,7 @@ ${result.additionalContext}` : nudge;
   const envelope = buildHookEnvelope(args.event, result);
   return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
 });
+var clientHandshakeComplete = false;
 var lastMismatchNudgeMs = null;
 var lastScanGapNudgeMs = null;
 var agentChannel = null;
@@ -30426,7 +30444,7 @@ function startAgentChannel() {
         process.stderr.write(`agent-channel: notification failed (event suppressed): ${msg}
 `);
       });
-    }, permissionRelay ?? undefined, readAuthoritativeSessionId);
+    }, permissionRelay ?? undefined, readAuthoritativeSessionId, () => clientHandshakeComplete);
     agentChannel.start();
     process.stderr.write(`agent-channel: started as ${role} session_id=${sessionId} id8=${self.id8} name=${name} state_dir=${stateDir} projects_hash_dir=${projectsHashDir}
 `);
@@ -30832,6 +30850,7 @@ async function main() {
   sessionTracker.cleanup();
   let dedupRan = false;
   server.server.oninitialized = () => {
+    clientHandshakeComplete = true;
     try {
       const stateDir = orchestratorStateDir();
       writeClientClaim(stateDir, process.pid, getProcessCreationTime(process.pid));
