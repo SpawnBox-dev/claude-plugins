@@ -20,7 +20,7 @@
  * corpus would end up with two canonical forms - which is the bug.
  *
  * WHY IT MUST NOT RUN ON A MIXED FLEET. Canonicalisation happens at WRITE time
- * in whichever MCP server handles the write. Until every window runs >= 0.69.17,
+ * in whichever MCP server handles the write. Until every window runs >= 0.69.18,
  * ungoverned sessions keep writing `lane:portal` behind the backfill. Running
  * early is not harmful, it is just wasted - and it makes the before/after
  * numbers unreadable.
@@ -35,6 +35,11 @@
  *      so the whole run is reversible from the table the schema already keeps.
  *   4. ONE TRANSACTION. Partial application would leave the corpus in a state
  *      neither the old nor the new rules describe.
+ *   5. COMPARE-AND-SWAP PER NOTE. The plan is computed from a read taken ~4.7
+ *      minutes before the commit (measured, see the apply block), and peers are
+ *      writing this same column. A note whose tags moved since the plan is
+ *      SKIPPED AND NAMED rather than overwritten, so a concurrent `add_tags`
+ *      cannot be silently discarded. Re-run to pick the skipped ones up.
  */
 
 import { Database } from "bun:sqlite";
@@ -59,7 +64,12 @@ console.log(`db     : ${DB_PATH}`);
 console.log(`mode   : ${APPLY ? "APPLY (will write)" : "DRY RUN (writes nothing)"}`);
 console.log();
 
-const db = new Database(DB_PATH, { readonly: !APPLY });
+// `{ readonly: false }` IS NOT "OPEN FOR WRITING" - it is no flags at all, and
+// bun:sqlite raises SQLITE_MISUSE (errno 21) at open. The original spelling meant
+// `--apply` could never run: it printed "APPLY (will write)" and then died on line
+// one of the work, which is why the apply path had no executed specimen until
+// 2026-09-07. Verified on bun 1.3.10. The mode must be stated positively.
+const db = new Database(DB_PATH, APPLY ? { readwrite: true } : { readonly: true });
 
 // ── read the corpus ────────────────────────────────────────────────────────
 const rows = db
@@ -110,7 +120,30 @@ for (const r of rows) {
     if (d.action === "canonicalised") pairs.push([d.input, d.output]);
     if (!seen.has(d.output)) { seen.add(d.output); out.push(d.output); }
   }
-  if (pairs.length === 0) continue;
+
+  // A NOTE CARRYING BOTH SPELLINGS RETURNS NO DECISION FOR THE SECOND ONE.
+  // `decideTags` short-circuits on `emitted.has(output)`, so when a note already
+  // holds the canonical form, the variant beside it is dropped from the decisions
+  // array rather than reported as canonicalised. Keying the plan off `pairs` then
+  // skipped the note entirely - and that is not an edge case, it is THE case: this
+  // corpus's largest collision is `anti_pattern` (1018) against `anti-pattern` (53),
+  // and the notes that carry both are exactly the ones a filter on either spelling
+  // gets wrong. Measured 2026-09-07 against a copy of the live DB: 55 applications
+  // across 53 notes were being silently left behind - 41 `anti-pattern`, 12
+  // `quality-gate`, 2 `work-item` - every one of them a both-spellings note, and
+  // NONE of them a note carrying the variant alone.
+  //
+  // So the plan is driven off the STRING, which is the thing the job actually
+  // changes, and the dropped inputs are re-decided one at a time purely to
+  // attribute them in the report.
+  const decided = new Set(decisions.map((d) => d.input));
+  for (const t of parsed) {
+    const tag = t.trim();
+    if (!tag || decided.has(tag)) continue;
+    const solo = decideTags([tag], vocab)[0];
+    if (solo && solo.output !== tag) pairs.push([tag, solo.output]);
+  }
+
   const after = out.join(",");
   if (after === r.tags) continue;
   changes.push({ id: r.id, before: r.tags, after, pairs });
@@ -146,7 +179,8 @@ if (changes.length > 0) {
 
 if (!APPLY) {
   console.log("DRY RUN - nothing written. Re-run with --apply to commit.");
-  console.log("Run it only when every window is on >= 0.69.17 and the fleet is quiet.");
+  console.log("Run it only when every window is on >= 0.69.18. (0.69.17 shipped a normaliser that");
+  console.log("stripped separators rather than unifying them, so a fleet on it writes the wrong canon.)");
   process.exit(0);
 }
 
@@ -164,17 +198,59 @@ const snapshot = db.prepare(
    SELECT lower(hex(randomblob(16))), id, content, context, tags, keywords, confidence, code_refs, ?, ? FROM notes WHERE id = ?`,
 );
 const update = db.prepare(`UPDATE notes SET tags = ?, updated_at = ? WHERE id = ?`);
+const readCurrent = db.prepare(`SELECT tags FROM notes WHERE id = ?`);
+
+// COMPARE-AND-SWAP, BECAUSE THE PLANNING PASS IS NOT INSTANT AND THE FLEET IS NOT
+// PAUSED. The plan is computed from a read taken at process start, and on the live
+// corpus that read-to-commit gap is a RANGE, not a number: 30 s, 120 s and 281 s
+// measured on the same box on 2026-09-07 over ~10,870 notes. The spread is page
+// cache and memory pressure, not corpus size - the slow readings were taken while
+// ~4.6 GB sat in orphaned embed sidecars and the 810 MB database could not stay
+// cached. Do not quote a single figure here; the point is only that the gap is
+// large enough for a peer to write inside it, and it widens exactly when the box
+// is busiest, which is when peers are most likely to be writing.
+// A blind `UPDATE ... WHERE id = ?` writes a
+// whole-column value derived from that stale read, so any `update_note(add_tags:)`
+// a peer session lands inside the gap is overwritten and the peer's tag is gone -
+// silently, and with no error anywhere. `update_note` is itself a read-modify-write
+// on this column (server.ts ~2194-2210), so this is last-writer-wins between two
+// writers of the same shape, not a hazard the backfill invents.
+//
+// So: re-read each note INSIDE the transaction and apply only if it still holds the
+// exact string the plan was computed from. A note that moved is SKIPPED and NAMED,
+// which turns silent loss into a visible, re-runnable remainder. This is strictly
+// better than excluding rows by a "written in the last N minutes" lookback, because
+// a lookback taken before a 4.7-minute planning pass cannot see a write that lands
+// during it.
+const skipped: Array<{ id: string; expected: string; found: string }> = [];
 
 const run = db.transaction((list: Change[]) => {
   for (const c of list) {
+    const now = readCurrent.get(c.id) as { tags: string | null } | undefined;
+    const current = now?.tags ?? "";
+    if (current !== c.before) {
+      skipped.push({ id: c.id, expected: c.before, found: current });
+      continue;
+    }
     snapshot.run(stamp, session, c.id);
     update.run(c.after, stamp, c.id);
   }
 });
 run(changes);
 
-console.log(`APPLIED: ${changes.length} notes rewritten, ${totalApps} tag applications normalised.`);
+const applied = changes.length - skipped.length;
+console.log(`APPLIED: ${applied} notes rewritten (of ${changes.length} planned).`);
 console.log(`Every touched note was snapshotted to note_revisions at ${stamp} (revised_by_session=${session}).`);
+if (skipped.length > 0) {
+  console.log();
+  console.log(`SKIPPED ${skipped.length} note(s) - their tags changed after the plan was computed, so applying`);
+  console.log(`the planned value would have discarded a concurrent write. Nothing was lost; re-run to pick them up.`);
+  for (const s of skipped) {
+    console.log(`  ${s.id}`);
+    console.log(`    planned from: ${s.expected}`);
+    console.log(`    found now   : ${s.found}`);
+  }
+}
 
 // ── post-condition: the collisions we set out to fix are gone ──────────────
 const after = db
@@ -183,13 +259,20 @@ const after = db
 const afterCounts = new Map<string, number>();
 for (const r of after) for (const t of parseTagList(r.tags)) afterCounts.set(t, (afterCounts.get(t) ?? 0) + 1);
 
+const rewrittenFrom = new Set([...pairTally.keys()].map((k) => k.split(" -> ")[0]));
 let residual = 0;
-for (const [from] of pairTally) {
-  const tag = from.split(" -> ")[0];
-  residual += afterCounts.get(tag) ?? 0;
-}
-console.log(`POST-CHECK: remaining uses of the rewritten spellings: ${residual} (expected 0).`);
-if (residual !== 0) {
-  console.error("*** post-check FAILED - some rewritten spellings survive. Investigate before trusting the run.");
+for (const tag of rewrittenFrom) residual += afterCounts.get(tag) ?? 0;
+
+// A SKIPPED NOTE IS AN EXPECTED SURVIVOR, NOT A FAILURE. The bar is 0 only when
+// every planned row applied; when the CAS declined some, the old spellings that
+// remain must be exactly the ones sitting on those notes and no others - which is
+// a sharper check than "0", because it fails if the run left a spelling behind
+// ANYWHERE ELSE.
+let allowed = 0;
+for (const s of skipped) for (const t of parseTagList(s.found)) if (rewrittenFrom.has(t)) allowed++;
+
+console.log(`POST-CHECK: remaining uses of the rewritten spellings: ${residual} (expected ${allowed}${skipped.length > 0 ? `, all on the ${skipped.length} skipped note(s)` : ""}).`);
+if (residual !== allowed) {
+  console.error("*** post-check FAILED - rewritten spellings survive somewhere other than the skipped notes. Investigate before trusting the run.");
   process.exit(1);
 }
