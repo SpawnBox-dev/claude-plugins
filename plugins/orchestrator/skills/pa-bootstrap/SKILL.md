@@ -1,6 +1,6 @@
 ---
 name: pa-bootstrap
-description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Confirms PA is on the latest Opus (or Fable when available) + xhigh effort, confirms role=prime, reads active sessions from the SQLite agent-channel registry (agent_channel.db), verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
+description: Bootstrap the PrimeAgent (PA) session. Run as the first command after pa-start.bat launches PA. Confirms PA is on the latest Opus (or Fable when available) and reads its effort (high as of 2026-09-06), confirms role=prime, reads active sessions from the SQLite agent-channel registry (agent_channel.db), runs the post-reload ownership check for orphaned watchers, verifies agent-channel is wired, and outputs a readiness status line. Idempotent.
 ---
 
 # Bootstrap the PrimeAgent
@@ -13,11 +13,27 @@ to re-run.
 
 ### 1. Confirm runtime config (model + effort)
 
-**Effort** is already handled by the launcher: `pa-start.ps1` starts PA at
-`--effort xhigh`, the standing default as of 2026-06-30 (changed from
-`max` - max over-analyzes and is too slow for orchestration cadence). No
-action needed. For a one-off deeper pass you may `/effort max` for that
-single turn, but do NOT make it the session default.
+**Effort: `high` is what Jarid wants as of 2026-09-06. DO NOT FLAG IT AS A
+DEVIATION.** Verbatim, 23:50Z, in reply to PA flagging that effort was `high`
+rather than the `xhigh` this skill used to call the standing default: *"nope,
+high is preferred right now for me"* (user_pattern `ae022b81`). He set it
+himself via `/effort`, so it is his saved default and it will keep coming back
+as `high`.
+
+Flagging it ONCE was fine; flagging it at every bootstrap is the
+gate-on-a-settled-preference anti-pattern. Read the effort, state it in the
+readiness line, and move on.
+
+> **Known inconsistency, do not "fix" it silently:** `pa-start.ps1:252` still
+> passes `--effort xhigh`, from the 2026-06-30 default this text used to
+> describe. The user's saved `/effort` setting is what actually took effect
+> (PA d34f8547 launched and ran at `high`). That launcher line lives in the
+> **spawnbox** repo, not this one, so it is not this skill's to change - if it
+> still reads `xhigh` when you get here, surface it to Jarid as a one-line
+> cleanup rather than editing it mid-bootstrap.
+
+For a one-off deeper pass you may `/effort max` for that single turn, but do
+NOT make it the session default.
 
 **Model** is intentionally NOT pinned by the launcher, so PA inherits your
 Claude Code default. Confirm PA is on the LATEST / most-capable model:
@@ -101,6 +117,42 @@ Currently orchestrating:
 ```
 
 If zero SAs active, output `No SAs currently active. Run sa-start.bat to spin one up.`
+
+### 3.5. Run the post-reload ownership check (orphaned watchers)
+
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/post-reload-check.mjs"
+```
+
+**Why this is a standard bootstrap step and not an on-demand tool.** An
+orphaned MCP watcher - one left behind by a `/plugin update`, a
+`/reload-plugins`, or a `/mcp` reconnect - keeps polling, advances the shared
+offsets row, and consumes peers' messages into nothing. Measured (WI
+`6cf7437a`): seven watchers for a four-session fleet, orphans aged 12, 15 and
+25 hours, delivery falling 100% -> 48% -> 42%. **None of the roster queries
+above can see this** - an orphan holds no session row, so steps 2 and 3 report
+a perfectly healthy fleet while messages are being eaten.
+
+It earned its place on 2026-09-06: run at PA bootstrap it found and killed a
+genuinely abandoned watcher (a `bun` process with no live `claude.exe`
+ancestor) that the bootstrap prose had no way to notice, and separately
+surfaced that the running fleet was split across bundle versions.
+
+**Reading the result:**
+- **Arm 1 (ownership) is the one that matters.** A root `claude.exe` with two
+  watchers has an orphan; a watcher with no live `claude.exe` ancestor is
+  abandoned outright. Only ownership encodes "orphan" - a count cannot separate
+  "four healthy" from "two healthy plus two orphans", and every cheaper proxy
+  has produced a false verdict in one direction or the other (the script's own
+  header documents three).
+- **Arm 2 (code currency) failing is NOT a fault.** A mixed-version fleet is
+  the ordinary state right after an install, and PA's own watcher will commonly
+  be on the older bundle when the plugin updated after that watcher spawned
+  (insight `00d525a0`). Report it; do not act on it.
+- Pass `--kill` only to remove a watcher arm 1 has identified as abandoned, and
+  say which PID and why in your readiness output. **Never kill on a version
+  mismatch alone** - that produced a kill order against a live session's only
+  watcher.
 
 ### 4. Verify agent-channel is wired
 
@@ -370,7 +422,7 @@ their call.
 Print:
 
 ```
-PA ready (<your actual model>, <your actual effort - xhigh is the standing default>). <N> SAs in orchestration.
+PA ready (<your actual model>, <your actual effort - high as of 2026-09-06>). <N> SAs in orchestration.
 Override state: <none|paused-on-X|global-pause>.
 ```
 
