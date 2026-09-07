@@ -260,3 +260,77 @@ describe("0.51.0: a MODEL CHANGE is self-healing", () => {
     expect(rows.every((r) => r.model === ACTIVE_EMBED_MODEL)).toBe(true);
   });
 });
+
+describe("an APPENDED note is stale, and only includeStale repairs it", () => {
+  /** Chunk a note, then make its body newer than its chunks - which is what an
+   *  append does. Returns the note id. */
+  async function chunkThenAppend(db: Database) {
+    const id = insertNote(db, "a coordination row that will be appended to");
+    await stubClient().embedIfAvailable(db, id, "a coordination row that will be appended to");
+    const later = new Date(Date.now() + 60_000).toISOString();
+    db.run(`UPDATE notes SET content = ?, updated_at = ? WHERE id = ?`, [
+      "a coordination row that will be appended to\n\n--- appended finding ---",
+      later,
+      id,
+    ]);
+    return id;
+  }
+
+  test("CONTROL: the default predicate does NOT select it - the defect, pinned", async () => {
+    const db = makeDb();
+    await chunkThenAppend(db);
+    // This is the behaviour that let 604 notes on the live corpus keep vectors
+    // describing a body that no longer exists. Pinned deliberately so the
+    // default stays a no-op and the repair stays something a human asks for.
+    const res = await stubClient().backfillChunks(db);
+    expect(res.attempted).toBe(0);
+  });
+
+  test("includeStale DOES select it, and rewrites the chunks to the CURRENT body", async () => {
+    const db = makeDb();
+    const id = await chunkThenAppend(db);
+
+    const vecOf = (noteId: string) =>
+      (
+        db.query(`SELECT vector FROM note_chunks WHERE note_id = ? ORDER BY chunk_index`)
+          .all(noteId) as Array<{ vector: Buffer }>
+      ).map((r) => r.vector.toString("base64"));
+
+    const before = vecOf(id);
+    expect(before.length).toBeGreaterThan(0);
+
+    const res = await stubClient().backfillChunks(db, 8, undefined, { includeStale: true });
+    expect(res.attempted).toBe(1);
+    expect(res.embedded).toBe(1);
+
+    // THE VECTOR, NOT THE TIMESTAMP, IS THE EVIDENCE. My first version asserted
+    // `embedded_at` grew, and it failed: both writes land in the same
+    // millisecond, so the ISO stamps are EQUAL. That assertion was a time proxy
+    // for the thing actually claimed - that the APPENDED body was re-read - and
+    // the stub emits a distinct vector per distinct text, so a changed vector
+    // proves the new content reached the encoder. A `>=` on the stamp would
+    // have passed while proving nothing.
+    const after = vecOf(id);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0]).not.toBe(before[0]);
+    const models = db.query(`SELECT model FROM note_chunks WHERE note_id = ?`).all(id) as Array<{ model: string }>;
+    expect(models.every((r) => r.model === ACTIVE_EMBED_MODEL)).toBe(true);
+  });
+
+  test("NEGATIVE CONTROL: a note whose chunks are current is NOT selected even with includeStale", async () => {
+    const db = makeDb();
+    const id = insertNote(db, "a note nobody has appended to");
+    await stubClient().embedIfAvailable(db, id, "a note nobody has appended to");
+    // Without this the stale clause could select everything and both tests
+    // above would still pass - "it fired" is not "it discriminates".
+    const res = await stubClient().backfillChunks(db, 8, undefined, { includeStale: true });
+    expect(res.attempted).toBe(0);
+  });
+
+  test("includeStale still selects a NEVER-CHUNKED note - it widens, it does not replace", async () => {
+    const db = makeDb();
+    insertNote(db, "never chunked at all");
+    const res = await stubClient().backfillChunks(db, 8, undefined, { includeStale: true });
+    expect(res.attempted).toBe(1);
+  });
+});

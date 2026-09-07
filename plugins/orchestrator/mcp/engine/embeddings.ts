@@ -379,6 +379,7 @@ export class EmbeddingClient {
     db: Database,
     batchSize: number = 8,
     limit?: number,
+    opts: { includeStale?: boolean } = {},
   ): Promise<BackfillResult> {
     // 0.51.0: select notes with no chunks FOR THE ACTIVE MODEL, not merely no
     // chunks at all. A model switch leaves every note fully chunked under the
@@ -386,15 +387,51 @@ export class EmbeddingClient {
     // silently did zero work while reporting a clean run - the same
     // success-shaped no-op class fixed in 0.44.1. Now a model change is
     // self-healing: the same opt-in call migrates the corpus.
-    const rows = db
-      .query(
-        `SELECT n.id, n.content FROM notes n
+    //
+    // 🔴 AND THE SAME MISSING-ONLY DEFECT SURVIVED HERE UNTIL 2026-09-07, ONE
+    // RELEASE AFTER IT WAS DIAGNOSED IN THE FUNCTION DIRECTLY ABOVE.
+    //
+    // `backfill()` selected `WHERE e.note_id IS NULL` - missing rows only - so
+    // "a stale row is present, and was skipped forever; staleness was PERMANENT
+    // once created" (its own 0.44.0 note, insight 44d445bb). It was given
+    // `includeStale` in 0.45.1. `backfillChunks` shipped in 0.51.0 with the
+    // identical missing-only shape and never inherited the fix, so a note that
+    // was chunked once and then APPENDED TO is never re-selected: its passage
+    // vectors keep describing a body that no longer exists, and no maintenance
+    // path in the codebase repairs it.
+    //
+    // That is not a corner case. Rows accrete by append here - a coordination
+    // row grows all day - and measured on the live corpus 2026-09-07: 604 notes
+    // had `updated_at` later than their newest chunk's `embedded_at`.
+    //
+    // OPT-IN FOR THE REASON 0.45.1 MADE THE SIBLING OPT-IN: repairing a backlog
+    // is a deliberate maintenance action, not something a process does to its
+    // user on startup. 604 notes of CPU-bound ONNX inference is a job someone
+    // asks for.
+    //
+    // WHY `EXISTS ... < n.updated_at` RATHER THAN `MAX(embedded_at)`: every
+    // chunk of a note is written in one loop under a single `ts` (see
+    // embedIfAvailable), so any chunk's stamp is the note's stamp and the cheap
+    // form is exact. If that ever stops being true this over-selects, which is
+    // the safe direction - a redundant re-embed costs time, a missed one leaves
+    // the note unfindable.
+    const staleClause = opts.includeStale
+      ? ` OR EXISTS (
+           SELECT 1 FROM note_chunks s
+            WHERE s.note_id = n.id AND s.model = ? AND s.embedded_at < n.updated_at
+         )`
+      : ``;
+    const sql =
+      `SELECT n.id, n.content FROM notes n
          WHERE NOT EXISTS (
            SELECT 1 FROM note_chunks c WHERE c.note_id = n.id AND c.model = ?
-         )
-         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`
-      )
-      .all(ACTIVE_EMBED_MODEL) as Array<{ id: string; content: string }>;
+         )${staleClause}
+         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`;
+    const rows = (
+      opts.includeStale
+        ? db.query(sql).all(ACTIVE_EMBED_MODEL, ACTIVE_EMBED_MODEL)
+        : db.query(sql).all(ACTIVE_EMBED_MODEL)
+    ) as Array<{ id: string; content: string }>;
 
     const result: BackfillResult = {
       embedded: 0,

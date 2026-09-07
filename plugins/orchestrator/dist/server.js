@@ -21059,12 +21059,17 @@ class EmbeddingClient {
     }
     return result;
   }
-  async backfillChunks(db, batchSize = 8, limit) {
-    const rows = db.query(`SELECT n.id, n.content FROM notes n
+  async backfillChunks(db, batchSize = 8, limit, opts = {}) {
+    const staleClause = opts.includeStale ? ` OR EXISTS (
+           SELECT 1 FROM note_chunks s
+            WHERE s.note_id = n.id AND s.model = ? AND s.embedded_at < n.updated_at
+         )` : ``;
+    const sql = `SELECT n.id, n.content FROM notes n
          WHERE NOT EXISTS (
            SELECT 1 FROM note_chunks c WHERE c.note_id = n.id AND c.model = ?
-         )
-         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`).all(ACTIVE_EMBED_MODEL);
+         )${staleClause}
+         ORDER BY length(n.content) DESC${limit ? ` LIMIT ${Math.max(1, Math.floor(limit))}` : ``}`;
+    const rows = opts.includeStale ? db.query(sql).all(ACTIVE_EMBED_MODEL, ACTIVE_EMBED_MODEL) : db.query(sql).all(ACTIVE_EMBED_MODEL);
     const result = {
       embedded: 0,
       failed: 0,
