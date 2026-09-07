@@ -10,6 +10,8 @@ import { handleCheckSimilar } from "./check_similar";
 import { truncate } from "../utils";
 import { appendToNoteContent } from "./update_note_helpers";
 import { cascadeResolution } from "./cascade";
+import { decideTags, formatTagAdvice } from "../engine/tag_vocabulary";
+import { getTagVocabulary } from "../engine/tag_vocabulary_store";
 import { stashPendingNote, takePendingNote, PENDING_NOTE_TTL_MS, findConcurrentCaptures } from "./pending_note";
 
 export interface RememberInput {
@@ -134,6 +136,18 @@ export function bucketLabel(similarity: number): string {
  * in one glance and answer accept_new with confidence - instead of learning to
  * reflexively accept_new, which is what destroys the gate's value.
  */
+/**
+ * WI cbf82684: append the tag-governance line to a result message, or nothing.
+ *
+ * A helper rather than an inline ternary at four call sites, because the four
+ * `Stored ...` messages are the only places this can appear and they must not
+ * drift apart - and because the advice is SILENT on the ordinary write, so the
+ * empty case is the common one and deserves a single definition.
+ */
+export function tagAdviceSuffix(advice: string | null | undefined): string {
+  return advice ? `\n\n${advice}` : "";
+}
+
 export function sharedMatchTerms(
   content: string,
   candidateContent: string,
@@ -320,18 +334,33 @@ async function insertNote(
   globalDb: Database,
   input: RememberInput,
   embeddingClient?: EmbeddingClient | null
-): Promise<{ noteId: string; linksCreated: number; linksConsidered: number; linksCapped: boolean; concurrent: string }> {
+): Promise<{ noteId: string; linksCreated: number; linksConsidered: number; linksCapped: boolean; concurrent: string; tagAdvice: string | null }> {
   const textForKeywords = [input.content, input.context]
     .filter(Boolean)
     .join(" ");
   const keywords = extractKeywords(textForKeywords);
 
   const tagParts: string[] = [input.type];
+  // WI cbf82684: canonicalise spellings against the vocabulary that already
+  // exists, and collect advice about genuinely novel tags for the caller.
+  // Advisory and non-throwing: a null vocabulary means "no advice", never "no
+  // established tags", and a write must never fail over a nicety.
+  let tagAdvice: string | null = null;
   if (input.tags) {
     // c658ce38: normalize at capture so a JSON-array-stringified tags value
     // never gets baked into the stored row.
-    for (const t of parseTagList(input.tags)) {
-      if (!tagParts.includes(t)) tagParts.push(t);
+    const supplied = parseTagList(input.tags);
+    const vocab = getTagVocabulary(db);
+    if (vocab) {
+      const decisions = decideTags(supplied, vocab);
+      tagAdvice = formatTagAdvice(decisions);
+      for (const d of decisions) {
+        if (!tagParts.includes(d.output)) tagParts.push(d.output);
+      }
+    } else {
+      for (const t of supplied) {
+        if (!tagParts.includes(t)) tagParts.push(t);
+      }
     }
   }
   const tagsStr = tagParts.join(",");
@@ -399,6 +428,7 @@ async function insertNote(
 
   return {
     noteId,
+    tagAdvice,
     linksCreated: links.length,
     linksConsidered: linkStats.considered,
     linksCapped: linkStats.capped,
@@ -691,7 +721,7 @@ export async function handleRemember(
     // accept_new: proceed with the normal insert. Resolution is a no-op
     // beyond acknowledging the candidates.
     if (action === "accept_new") {
-      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent, tagAdvice } = await insertNote(db, globalDb, input, embeddingClient);
       // Parity with the normal store path: surface sub-block-threshold
       // near-matches as a non-blocking consolidation advisory. Without this,
       // accepting-new after a gate block would silently drop the
@@ -704,7 +734,7 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`,
+        message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}. (resolution: accept_new)${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}${tagAdviceSuffix(tagAdvice)}`,
       };
     }
 
@@ -775,7 +805,7 @@ export async function handleRemember(
 
     if (action === "supersede_existing") {
       // Create new note, then mark target as superseded by it.
-      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent, tagAdvice } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(
@@ -795,13 +825,13 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}" and superseded target "${targetId}".${reasonSuffix}`,
+        message: `Stored ${input.type} note "${noteId}" and superseded target "${targetId}".${reasonSuffix}${tagAdviceSuffix(tagAdvice)}`,
       };
     }
 
     if (action === "close_existing") {
       // Create new note, then mark target as resolved (work_item also flipped to done).
-      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
+      const { noteId, linksCreated, linksConsidered, linksCapped, concurrent, tagAdvice } = await insertNote(db, globalDb, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(
@@ -823,7 +853,7 @@ export async function handleRemember(
         duplicate: false,
         promoted: false,
         links_created: linksCreated,
-        message: `Stored ${input.type} note "${noteId}" and closed target "${targetId}" as resolved.${reasonSuffix}`,
+        message: `Stored ${input.type} note "${noteId}" and closed target "${targetId}" as resolved.${reasonSuffix}${tagAdviceSuffix(tagAdvice)}`,
       };
     }
 
@@ -839,7 +869,7 @@ export async function handleRemember(
   }
 
   // ── Normal path: no gate, no resolution ────────────────────────────────
-  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent, tagAdvice } = await insertNote(db, globalDb, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -847,7 +877,7 @@ export async function handleRemember(
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`,
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}${tagAdviceSuffix(tagAdvice)}`,
   };
 }
 

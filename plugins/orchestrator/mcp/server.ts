@@ -5,6 +5,9 @@ import { sweepStateDir } from "./engine/state_gc";
 import { execSync, spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Database } from "bun:sqlite";
+import { decideTags, formatTagAdvice } from "./engine/tag_vocabulary";
+import { getTagVocabulary } from "./engine/tag_vocabulary_store";
 import { z } from "zod";
 import {
   NOTE_TYPES,
@@ -2466,11 +2469,11 @@ server.tool(
     const keywords = extractKeywords(textForKeywords);
 
     const tagParts: string[] = ["work_item"];
-    if (tags) {
-      // c658ce38: normalize at capture (JSON-array-string -> clean tags).
-      for (const t of parseTagList(tags)) {
-        if (!tagParts.includes(t)) tagParts.push(t);
-      }
+    // c658ce38: normalize at capture (JSON-array-string -> clean tags).
+    // cbf82684: and canonicalise against the established vocabulary.
+    const governed = governTags(projectDb, tags);
+    for (const t of governed.tags) {
+      if (!tagParts.includes(t)) tagParts.push(t);
     }
 
     const codeRefsJson = stringifyCodeRefs(code_refs);
@@ -2498,7 +2501,7 @@ server.tool(
     return {
       content: [{
         type: "text" as const,
-        text: `Created work_item "${noteId}" [${priority}/${status}]${dueStr}${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`,
+        text: `Created work_item "${noteId}" [${priority}/${status}]${dueStr}${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.${governed.advice ? `\n\n${governed.advice}` : ""}`,
       }],
     };
   }
@@ -2728,11 +2731,16 @@ server.tool(
     if (session_id) registerSessionOnce(session_id);
     const timestamp = now();
 
+    // cbf82684: one tag string governs the parent AND every child here, so
+    // resolve it ONCE. Doing it per-insert would re-read the vocabulary for
+    // each item and, worse, could emit the same advice N times for one call.
+    const governedBreakdown = governTags(projectDb, tags);
+
     let actualParentId = parent_id;
     if (!actualParentId && parent_title) {
       actualParentId = generateId();
       const keywords = extractKeywords(parent_title);
-      const tagParts = ["work_item", ...parseTagList(tags)];
+      const tagParts = ["work_item", ...governedBreakdown.tags];
 
       projectDb.run(
         `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
@@ -2747,7 +2755,7 @@ server.tool(
     for (const item of items) {
       const childId = generateId();
       const keywords = extractKeywords(item.content);
-      const tagParts = ["work_item", ...parseTagList(tags)];
+      const tagParts = ["work_item", ...governedBreakdown.tags];
 
       projectDb.run(
         `INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
@@ -2772,7 +2780,7 @@ server.tool(
     return {
       content: [{
         type: "text" as const,
-        text: `Created ${created.length} work items${actualParentId ? ` under parent "${actualParentId}"` : ""}:\n${created.map(c => `- ${c}`).join("\n")}`,
+        text: `Created ${created.length} work items${actualParentId ? ` under parent "${actualParentId}"` : ""}:\n${created.map(c => `- ${c}`).join("\n")}${governedBreakdown.advice ? `\n\n${governedBreakdown.advice}` : ""}`,
       }],
     };
   }
@@ -3186,6 +3194,34 @@ server.tool(
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }] };
   }
 );
+
+/**
+ * WI cbf82684: canonicalise supplied tags against the vocabulary that already
+ * exists, and collect advice about genuinely novel ones.
+ *
+ * Shared by every work-item write path (create_work_item and both breakdown
+ * inserts) so they cannot drift apart - the `note()` path has its own copy of
+ * this shape inside insertNote because it also has to merge the type tag.
+ *
+ * Advisory and total: a null vocabulary means "no advice available", never
+ * "no established tags exist". The second would turn an unreadable database
+ * into a claim that every tag is novel, which is exactly the kind of confident
+ * wrong answer this feature is meant to reduce.
+ */
+function governTags(
+  db: Database,
+  supplied: string | undefined,
+): { tags: string[]; advice: string | null } {
+  const parsed = parseTagList(supplied);
+  if (parsed.length === 0) return { tags: [], advice: null };
+  const vocab = getTagVocabulary(db);
+  if (!vocab) return { tags: parsed, advice: null };
+  const decisions = decideTags(parsed, vocab);
+  return {
+    tags: decisions.map((d) => d.output),
+    advice: formatTagAdvice(decisions),
+  };
+}
 
 /**
  * WI f7fef3b7: has a client completed the MCP handshake with THIS process?

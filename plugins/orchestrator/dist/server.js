@@ -19573,6 +19573,601 @@ class StdioServerTransport {
   }
 }
 
+// mcp/engine/tag_vocabulary.ts
+function normalizeTagKey(tag) {
+  return tag.toLowerCase().replace(/[-_]/g, "");
+}
+function splitNamespace(tag) {
+  const i = tag.indexOf(":");
+  if (i <= 0 || i === tag.length - 1)
+    return null;
+  const ns = tag.slice(0, i);
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(ns))
+    return null;
+  return { ns, value: tag.slice(i + 1) };
+}
+function buildVocabulary(stats) {
+  const counts = new Map;
+  for (const s of stats) {
+    if (!s.tag)
+      continue;
+    counts.set(s.tag, (counts.get(s.tag) ?? 0) + s.count);
+  }
+  const byKey = new Map;
+  for (const tag of counts.keys()) {
+    const k = normalizeTagKey(tag);
+    const arr = byKey.get(k);
+    if (arr)
+      arr.push(tag);
+    else
+      byKey.set(k, [tag]);
+  }
+  for (const arr of byKey.values()) {
+    arr.sort((a, b) => counts.get(b) - counts.get(a) || a.localeCompare(b));
+  }
+  const nsCounts = new Map;
+  const nsValueCounts = new Map;
+  for (const [tag, c] of counts) {
+    const split = splitNamespace(tag);
+    if (!split)
+      continue;
+    const nsKey = split.ns.toLowerCase();
+    const spellings = nsCounts.get(nsKey) ?? new Map;
+    spellings.set(split.ns, (spellings.get(split.ns) ?? 0) + c);
+    nsCounts.set(nsKey, spellings);
+    const vKey = normalizeTagKey(split.value);
+    const perNs = nsValueCounts.get(nsKey) ?? new Map;
+    const vSpellings = perNs.get(vKey) ?? new Map;
+    vSpellings.set(split.value, (vSpellings.get(split.value) ?? 0) + c);
+    perNs.set(vKey, vSpellings);
+    nsValueCounts.set(nsKey, perNs);
+  }
+  const pickTop = (m) => [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+  const namespaces = new Map;
+  for (const [k, m] of nsCounts)
+    namespaces.set(k, pickTop(m));
+  const namespaceValues = new Map;
+  for (const [nsKey, perNs] of nsValueCounts) {
+    const out = new Map;
+    for (const [vKey, m] of perNs)
+      out.set(vKey, pickTop(m));
+    namespaceValues.set(nsKey, out);
+  }
+  return { counts, byKey, namespaces, namespaceValues };
+}
+var ESTABLISHED_MIN_USES = 10;
+var STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "is",
+  "in",
+  "of",
+  "to",
+  "by",
+  "on",
+  "at",
+  "for",
+  "and",
+  "or",
+  "not",
+  "no",
+  "it",
+  "its",
+  "this",
+  "that",
+  "was",
+  "were",
+  "be",
+  "been",
+  "with",
+  "from",
+  "as",
+  "we",
+  "our"
+]);
+function tokens(tag) {
+  const split = splitNamespace(tag);
+  const body = split ? split.value : tag;
+  return body.toLowerCase().split(/[-_:.\s]+/).filter((t) => t.length >= 3 && !STOPWORDS.has(t));
+}
+function suggestEstablished(tag, vocab, limit = 3, minUses = ESTABLISHED_MIN_USES) {
+  const mine = new Set(tokens(tag));
+  if (mine.size === 0)
+    return [];
+  const mySplit = splitNamespace(tag);
+  const scored = [];
+  for (const [candidate, count] of vocab.counts) {
+    if (count < minUses)
+      continue;
+    if (candidate === tag)
+      continue;
+    const cSplit = splitNamespace(candidate);
+    if (!!mySplit !== !!cSplit)
+      continue;
+    if (mySplit && cSplit && mySplit.ns.toLowerCase() !== cSplit.ns.toLowerCase())
+      continue;
+    const theirs = tokens(candidate);
+    if (theirs.length === 0)
+      continue;
+    let shared = 0;
+    for (const t of new Set(theirs))
+      if (mine.has(t))
+        shared++;
+    if (shared === 0)
+      continue;
+    const score = shared / mine.size + shared / new Set(theirs).size / 100;
+    scored.push({ tag: candidate, count, score });
+  }
+  scored.sort((a, b) => b.score - a.score || b.count - a.count || a.tag.localeCompare(b.tag));
+  return scored.slice(0, limit).map(({ tag: tag2, count }) => ({ tag: tag2, count }));
+}
+function decideTags(inputTags, vocab) {
+  const out = [];
+  const emitted = new Set;
+  for (const raw of inputTags) {
+    const input = raw.trim();
+    if (!input)
+      continue;
+    let output = input;
+    let reason;
+    const group = vocab.byKey.get(normalizeTagKey(input));
+    if (group && group.length > 0 && group[0] !== input) {
+      const dominant = group[0];
+      if ((vocab.counts.get(dominant) ?? 0) > (vocab.counts.get(input) ?? 0)) {
+        output = dominant;
+        reason = `established spelling (${vocab.counts.get(dominant)} uses)`;
+      }
+    }
+    if (output === input) {
+      const split = splitNamespace(input);
+      if (split) {
+        const nsKey = split.ns.toLowerCase();
+        const canonNs = vocab.namespaces.get(nsKey);
+        const canonVal = vocab.namespaceValues.get(nsKey)?.get(normalizeTagKey(split.value));
+        const ns = canonNs ?? split.ns;
+        const val = canonVal ?? split.value;
+        if (ns !== split.ns || val !== split.value) {
+          output = `${ns}:${val}`;
+          reason = canonVal && canonVal !== split.value ? `established value in the \`${ns}:\` namespace` : `established namespace spelling \`${ns}:\``;
+        }
+      }
+    }
+    if (emitted.has(output))
+      continue;
+    emitted.add(output);
+    if (output !== input) {
+      out.push({ input, output, action: "canonicalised", reason });
+      continue;
+    }
+    const known = vocab.counts.get(output) ?? 0;
+    if (known >= ESTABLISHED_MIN_USES) {
+      out.push({ input, output, action: "kept" });
+      continue;
+    }
+    const candidates = suggestEstablished(output, vocab);
+    out.push({
+      input,
+      output,
+      action: candidates.length > 0 ? "novel" : "kept",
+      candidates: candidates.length > 0 ? candidates : undefined
+    });
+  }
+  return out;
+}
+function formatTagAdvice(decisions) {
+  const fixed = decisions.filter((d) => d.action === "canonicalised");
+  const novel = decisions.filter((d) => d.action === "novel" && d.candidates?.length);
+  if (fixed.length === 0 && novel.length === 0)
+    return null;
+  const lines = [];
+  if (fixed.length > 0) {
+    lines.push(`[tags] normalized to the spelling already in use: ` + fixed.map((d) => `\`${d.input}\` -> \`${d.output}\``).join(", ") + `. Stored as shown; nothing was dropped.`);
+  }
+  if (novel.length > 0) {
+    lines.push(`[tags] these are NEW vocabulary. If an established tag already means the ` + `same thing, prefer it - 77% of this corpus's tags are used exactly once, ` + `which is what makes tags unsearchable:`);
+    for (const d of novel) {
+      const alts = d.candidates.map((c) => `\`${c.tag}\` (${c.count})`).join(", ");
+      lines.push(`  \`${d.output}\` - established nearby: ${alts}`);
+    }
+    lines.push(`  Kept as written. A genuinely one-off annotation is fine here; a facet ` + `you will want to filter on later is not.`);
+  }
+  return lines.join(`
+`);
+}
+// node_modules/uuid/dist/esm/native.js
+import { randomUUID } from "crypto";
+var native_default = { randomUUID };
+
+// node_modules/uuid/dist/esm/rng.js
+import { randomFillSync } from "crypto";
+var rnds8Pool = new Uint8Array(256);
+var poolPtr = rnds8Pool.length;
+function rng() {
+  if (poolPtr > rnds8Pool.length - 16) {
+    randomFillSync(rnds8Pool);
+    poolPtr = 0;
+  }
+  return rnds8Pool.slice(poolPtr, poolPtr += 16);
+}
+
+// node_modules/uuid/dist/esm/stringify.js
+var byteToHex = [];
+for (let i = 0;i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
+}
+
+// node_modules/uuid/dist/esm/v4.js
+function v4(options, buf, offset) {
+  if (native_default.randomUUID && !buf && !options) {
+    return native_default.randomUUID();
+  }
+  options = options || {};
+  const rnds = options.random ?? options.rng?.() ?? rng();
+  if (rnds.length < 16) {
+    throw new Error("Random bytes length must be >= 16");
+  }
+  rnds[6] = rnds[6] & 15 | 64;
+  rnds[8] = rnds[8] & 63 | 128;
+  if (buf) {
+    offset = offset || 0;
+    if (offset < 0 || offset + 16 > buf.length) {
+      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+    }
+    for (let i = 0;i < 16; ++i) {
+      buf[offset + i] = rnds[i];
+    }
+    return buf;
+  }
+  return unsafeStringify(rnds);
+}
+var v4_default = v4;
+// mcp/utils.ts
+function generateId() {
+  return v4_default();
+}
+function now() {
+  return new Date().toISOString();
+}
+var STOP_WORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "and",
+  "or",
+  "but",
+  "in",
+  "on",
+  "at",
+  "to",
+  "for",
+  "of",
+  "with",
+  "by",
+  "from",
+  "is",
+  "it",
+  "as",
+  "be",
+  "was",
+  "were",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "shall",
+  "can",
+  "need",
+  "dare",
+  "ought",
+  "used",
+  "not",
+  "no",
+  "nor",
+  "so",
+  "yet",
+  "both",
+  "each",
+  "few",
+  "more",
+  "most",
+  "other",
+  "some",
+  "such",
+  "than",
+  "too",
+  "very",
+  "just",
+  "about",
+  "above",
+  "after",
+  "again",
+  "all",
+  "also",
+  "am",
+  "any",
+  "are",
+  "because",
+  "before",
+  "below",
+  "between",
+  "during",
+  "here",
+  "how",
+  "if",
+  "into",
+  "its",
+  "let",
+  "me",
+  "my",
+  "myself",
+  "now",
+  "off",
+  "once",
+  "only",
+  "our",
+  "out",
+  "over",
+  "own",
+  "same",
+  "she",
+  "he",
+  "her",
+  "him",
+  "his",
+  "hers",
+  "that",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "those",
+  "through",
+  "under",
+  "until",
+  "up",
+  "we",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "whom",
+  "why",
+  "you",
+  "your",
+  "yours",
+  "i"
+]);
+var SYNONYM_GROUPS = [
+  ["backup", "snapshot", "restore", "archive"],
+  ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
+  ["billing", "payment", "subscription", "stripe", "lemon"],
+  ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
+  ["docker", "container", "image", "compose"],
+  ["wsl", "linux", "distro", "ubuntu"],
+  ["frontend", "ui", "component", "react", "tsx"],
+  ["backend", "rust", "tauri", "handler", "command"],
+  ["database", "sqlite", "db", "migration", "schema", "query"],
+  ["player", "user", "session", "uuid"],
+  ["event", "eventbus", "broadcast", "listener", "emit"],
+  ["poller", "polling", "telemetry", "datapack", "rcon"],
+  ["discord", "bot", "webhook", "guild"],
+  ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
+  ["test", "testing", "vitest", "spec", "assertion"],
+  ["map", "tile", "region", "atlas", "chunk"],
+  ["perf", "performance", "latency", "throughput", "instrument"],
+  ["error", "bug", "fix", "issue", "broken"],
+  ["config", "settings", "configuration", "preference"],
+  ["encrypt", "encryption", "aes", "decrypt"],
+  ["hibernate", "hibernation", "compress", "archive"],
+  ["observer", "connect", "disconnect", "reconnect", "visibility"],
+  ["http", "api", "endpoint", "route", "request"],
+  ["store", "zustand", "state", "selector"]
+];
+var synonymLookup = new Map;
+for (const group of SYNONYM_GROUPS) {
+  const groupSet = new Set(group);
+  for (const word of group) {
+    synonymLookup.set(word, groupSet);
+  }
+}
+function extractKeywords(text) {
+  if (!text.trim())
+    return [];
+  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+  const freq = new Map;
+  for (const word of words) {
+    freq.set(word, (freq.get(word) ?? 0) + 1);
+    const synonyms = synonymLookup.get(word);
+    if (synonyms) {
+      for (const syn of synonyms) {
+        if (syn !== word && !freq.has(syn)) {
+          freq.set(syn, 0.5);
+        }
+      }
+    }
+  }
+  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([word]) => word);
+}
+function truncate(text, maxLength = 100) {
+  if (text.length <= maxLength)
+    return text;
+  return text.slice(0, maxLength - 3) + "...";
+}
+function summarizeForBriefing(notes, maxTokens = 200) {
+  const maxChars = maxTokens * 4;
+  const lines = [];
+  let charCount = 0;
+  for (const note of notes) {
+    const tagStr = note.tags ? ` {${note.tags}}` : "";
+    const line = `- **${note.id}** [${note.type}]${tagStr} ${truncate(note.content, 120)}`;
+    if (charCount + line.length > maxChars)
+      break;
+    lines.push(line);
+    charCount += line.length + 1;
+  }
+  return lines.join(`
+`);
+}
+function relativeTime(isoTimestamp) {
+  const then = new Date(isoTimestamp).getTime();
+  const now2 = Date.now();
+  const diffMs = now2 - then;
+  const diffMin = Math.floor(diffMs / 60000);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffMin < 1)
+    return "just now";
+  if (diffMin < 60)
+    return `${diffMin}m ago`;
+  if (diffHr < 24)
+    return `${diffHr}h ago`;
+  if (diffDay < 7)
+    return `${diffDay}d ago`;
+  return `${Math.floor(diffDay / 7)}w ago`;
+}
+function parseCodeRefs(raw) {
+  if (!raw)
+    return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed.length > 0 ? parsed : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+function normalizeCodeRef(path) {
+  let p = path.trim().replace(/\\/g, "/");
+  if (p.startsWith("./"))
+    p = p.slice(2);
+  return p;
+}
+function stringifyCodeRefs(refs) {
+  if (!refs || refs.length === 0)
+    return null;
+  const cleaned = Array.from(new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0)));
+  return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+}
+function codeRefsInput(desc) {
+  return exports_external.preprocess((v) => typeof v === "string" ? [v] : v, exports_external.array(exports_external.string().min(1).max(500)).max(50)).optional().describe(desc);
+}
+function formatAge(iso, now2 = new Date) {
+  const then = new Date(iso);
+  const diffMs = now2.getTime() - then.getTime();
+  if (!Number.isFinite(diffMs))
+    return "unknown";
+  if (diffMs < 0)
+    return "just now";
+  if (diffMs < 60000)
+    return "just now";
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 60)
+    return `${diffMin}m`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24)
+    return `${diffH}h`;
+  const diffD = Math.floor(diffH / 24);
+  if (diffD < 14)
+    return `${diffD}d`;
+  if (diffD < 60)
+    return `${Math.floor(diffD / 7)}w`;
+  return `${diffD}d`;
+}
+function parseTagList(raw) {
+  if (!raw || typeof raw !== "string")
+    return [];
+  const s = raw.trim();
+  if (!s)
+    return [];
+  let tokens2;
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      tokens2 = Array.isArray(arr) ? arr.map((x) => String(x)) : s.split(",");
+    } catch {
+      tokens2 = s.split(",");
+    }
+  } else {
+    tokens2 = s.split(",");
+  }
+  const seen = new Set;
+  const out = [];
+  for (const tok of tokens2) {
+    const clean = tok.replace(/[\[\]"`]/g, "").trim();
+    if (clean && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+function normalizeTagString(raw) {
+  return parseTagList(raw).join(",");
+}
+function mergeTags(existing, additions) {
+  const out = [];
+  const seen = new Set;
+  for (const t of [...parseTagList(existing), ...parseTagList(additions)]) {
+    const key = t.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(t);
+    }
+  }
+  return out.join(",");
+}
+function noteBadge(note) {
+  if (note.type === "work_item") {
+    return `${note.priority ?? "no-priority"}/${note.status ?? "no-status"}`;
+  }
+  return note.confidence ?? "unknown";
+}
+
+// mcp/engine/tag_vocabulary_store.ts
+var CACHE_TTL_MS = 5 * 60000;
+var cached2 = null;
+var cachedAtMs = 0;
+function getTagVocabulary(db, nowMs = Date.now()) {
+  if (cached2 && nowMs - cachedAtMs < CACHE_TTL_MS)
+    return cached2;
+  try {
+    const rows = db.query(`SELECT tags FROM notes WHERE tags IS NOT NULL AND tags != ''`).all();
+    const counts = new Map;
+    for (const r of rows) {
+      for (const t of parseTagList(r.tags)) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    const stats = [...counts.entries()].map(([tag, count]) => ({ tag, count }));
+    cached2 = buildVocabulary(stats);
+    cachedAtMs = nowMs;
+    return cached2;
+  } catch {
+    return null;
+  }
+}
+
 // mcp/types.ts
 var NOTE_TYPES = [
   "decision",
@@ -20153,374 +20748,6 @@ function getProjectDb() {
     projectDb = initDb(getProjectDbPath(), "project");
   }
   return projectDb;
-}
-// node_modules/uuid/dist/esm/native.js
-import { randomUUID } from "crypto";
-var native_default = { randomUUID };
-
-// node_modules/uuid/dist/esm/rng.js
-import { randomFillSync } from "crypto";
-var rnds8Pool = new Uint8Array(256);
-var poolPtr = rnds8Pool.length;
-function rng() {
-  if (poolPtr > rnds8Pool.length - 16) {
-    randomFillSync(rnds8Pool);
-    poolPtr = 0;
-  }
-  return rnds8Pool.slice(poolPtr, poolPtr += 16);
-}
-
-// node_modules/uuid/dist/esm/stringify.js
-var byteToHex = [];
-for (let i = 0;i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-  return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-// node_modules/uuid/dist/esm/v4.js
-function v4(options, buf, offset) {
-  if (native_default.randomUUID && !buf && !options) {
-    return native_default.randomUUID();
-  }
-  options = options || {};
-  const rnds = options.random ?? options.rng?.() ?? rng();
-  if (rnds.length < 16) {
-    throw new Error("Random bytes length must be >= 16");
-  }
-  rnds[6] = rnds[6] & 15 | 64;
-  rnds[8] = rnds[8] & 63 | 128;
-  if (buf) {
-    offset = offset || 0;
-    if (offset < 0 || offset + 16 > buf.length) {
-      throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-    }
-    for (let i = 0;i < 16; ++i) {
-      buf[offset + i] = rnds[i];
-    }
-    return buf;
-  }
-  return unsafeStringify(rnds);
-}
-var v4_default = v4;
-// mcp/utils.ts
-function generateId() {
-  return v4_default();
-}
-function now() {
-  return new Date().toISOString();
-}
-var STOP_WORDS = new Set([
-  "a",
-  "an",
-  "the",
-  "and",
-  "or",
-  "but",
-  "in",
-  "on",
-  "at",
-  "to",
-  "for",
-  "of",
-  "with",
-  "by",
-  "from",
-  "is",
-  "it",
-  "as",
-  "be",
-  "was",
-  "were",
-  "been",
-  "being",
-  "have",
-  "has",
-  "had",
-  "do",
-  "does",
-  "did",
-  "will",
-  "would",
-  "could",
-  "should",
-  "may",
-  "might",
-  "shall",
-  "can",
-  "need",
-  "dare",
-  "ought",
-  "used",
-  "not",
-  "no",
-  "nor",
-  "so",
-  "yet",
-  "both",
-  "each",
-  "few",
-  "more",
-  "most",
-  "other",
-  "some",
-  "such",
-  "than",
-  "too",
-  "very",
-  "just",
-  "about",
-  "above",
-  "after",
-  "again",
-  "all",
-  "also",
-  "am",
-  "any",
-  "are",
-  "because",
-  "before",
-  "below",
-  "between",
-  "during",
-  "here",
-  "how",
-  "if",
-  "into",
-  "its",
-  "let",
-  "me",
-  "my",
-  "myself",
-  "now",
-  "off",
-  "once",
-  "only",
-  "our",
-  "out",
-  "over",
-  "own",
-  "same",
-  "she",
-  "he",
-  "her",
-  "him",
-  "his",
-  "hers",
-  "that",
-  "their",
-  "them",
-  "then",
-  "there",
-  "these",
-  "they",
-  "this",
-  "those",
-  "through",
-  "under",
-  "until",
-  "up",
-  "we",
-  "what",
-  "when",
-  "where",
-  "which",
-  "while",
-  "who",
-  "whom",
-  "why",
-  "you",
-  "your",
-  "yours",
-  "i"
-]);
-var SYNONYM_GROUPS = [
-  ["backup", "snapshot", "restore", "archive"],
-  ["auth", "authentication", "login", "signin", "sign-in", "oidc", "kinde"],
-  ["billing", "payment", "subscription", "stripe", "lemon"],
-  ["deploy", "deployment", "ci", "cd", "pipeline", "release"],
-  ["docker", "container", "image", "compose"],
-  ["wsl", "linux", "distro", "ubuntu"],
-  ["frontend", "ui", "component", "react", "tsx"],
-  ["backend", "rust", "tauri", "handler", "command"],
-  ["database", "sqlite", "db", "migration", "schema", "query"],
-  ["player", "user", "session", "uuid"],
-  ["event", "eventbus", "broadcast", "listener", "emit"],
-  ["poller", "polling", "telemetry", "datapack", "rcon"],
-  ["discord", "bot", "webhook", "guild"],
-  ["cloud", "worker", "cloudflare", "wrangler", "d1", "r2"],
-  ["test", "testing", "vitest", "spec", "assertion"],
-  ["map", "tile", "region", "atlas", "chunk"],
-  ["perf", "performance", "latency", "throughput", "instrument"],
-  ["error", "bug", "fix", "issue", "broken"],
-  ["config", "settings", "configuration", "preference"],
-  ["encrypt", "encryption", "aes", "decrypt"],
-  ["hibernate", "hibernation", "compress", "archive"],
-  ["observer", "connect", "disconnect", "reconnect", "visibility"],
-  ["http", "api", "endpoint", "route", "request"],
-  ["store", "zustand", "state", "selector"]
-];
-var synonymLookup = new Map;
-for (const group of SYNONYM_GROUPS) {
-  const groupSet = new Set(group);
-  for (const word of group) {
-    synonymLookup.set(word, groupSet);
-  }
-}
-function extractKeywords(text) {
-  if (!text.trim())
-    return [];
-  const words = text.toLowerCase().replace(/[^a-z0-9\s_-]/g, " ").split(/\s+/).filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-  const freq = new Map;
-  for (const word of words) {
-    freq.set(word, (freq.get(word) ?? 0) + 1);
-    const synonyms = synonymLookup.get(word);
-    if (synonyms) {
-      for (const syn of synonyms) {
-        if (syn !== word && !freq.has(syn)) {
-          freq.set(syn, 0.5);
-        }
-      }
-    }
-  }
-  return [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20).map(([word]) => word);
-}
-function truncate(text, maxLength = 100) {
-  if (text.length <= maxLength)
-    return text;
-  return text.slice(0, maxLength - 3) + "...";
-}
-function summarizeForBriefing(notes, maxTokens = 200) {
-  const maxChars = maxTokens * 4;
-  const lines = [];
-  let charCount = 0;
-  for (const note of notes) {
-    const tagStr = note.tags ? ` {${note.tags}}` : "";
-    const line = `- **${note.id}** [${note.type}]${tagStr} ${truncate(note.content, 120)}`;
-    if (charCount + line.length > maxChars)
-      break;
-    lines.push(line);
-    charCount += line.length + 1;
-  }
-  return lines.join(`
-`);
-}
-function relativeTime(isoTimestamp) {
-  const then = new Date(isoTimestamp).getTime();
-  const now2 = Date.now();
-  const diffMs = now2 - then;
-  const diffMin = Math.floor(diffMs / 60000);
-  const diffHr = Math.floor(diffMin / 60);
-  const diffDay = Math.floor(diffHr / 24);
-  if (diffMin < 1)
-    return "just now";
-  if (diffMin < 60)
-    return `${diffMin}m ago`;
-  if (diffHr < 24)
-    return `${diffHr}h ago`;
-  if (diffDay < 7)
-    return `${diffDay}d ago`;
-  return `${Math.floor(diffDay / 7)}w ago`;
-}
-function parseCodeRefs(raw) {
-  if (!raw)
-    return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
-      return parsed.length > 0 ? parsed : null;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-function normalizeCodeRef(path) {
-  let p = path.trim().replace(/\\/g, "/");
-  if (p.startsWith("./"))
-    p = p.slice(2);
-  return p;
-}
-function stringifyCodeRefs(refs) {
-  if (!refs || refs.length === 0)
-    return null;
-  const cleaned = Array.from(new Set(refs.map((r) => normalizeCodeRef(r)).filter((r) => r.length > 0)));
-  return cleaned.length > 0 ? JSON.stringify(cleaned) : null;
-}
-function codeRefsInput(desc) {
-  return exports_external.preprocess((v) => typeof v === "string" ? [v] : v, exports_external.array(exports_external.string().min(1).max(500)).max(50)).optional().describe(desc);
-}
-function formatAge(iso, now2 = new Date) {
-  const then = new Date(iso);
-  const diffMs = now2.getTime() - then.getTime();
-  if (!Number.isFinite(diffMs))
-    return "unknown";
-  if (diffMs < 0)
-    return "just now";
-  if (diffMs < 60000)
-    return "just now";
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 60)
-    return `${diffMin}m`;
-  const diffH = Math.floor(diffMin / 60);
-  if (diffH < 24)
-    return `${diffH}h`;
-  const diffD = Math.floor(diffH / 24);
-  if (diffD < 14)
-    return `${diffD}d`;
-  if (diffD < 60)
-    return `${Math.floor(diffD / 7)}w`;
-  return `${diffD}d`;
-}
-function parseTagList(raw) {
-  if (!raw || typeof raw !== "string")
-    return [];
-  const s = raw.trim();
-  if (!s)
-    return [];
-  let tokens;
-  if (s.startsWith("[")) {
-    try {
-      const arr = JSON.parse(s);
-      tokens = Array.isArray(arr) ? arr.map((x) => String(x)) : s.split(",");
-    } catch {
-      tokens = s.split(",");
-    }
-  } else {
-    tokens = s.split(",");
-  }
-  const seen = new Set;
-  const out = [];
-  for (const tok of tokens) {
-    const clean = tok.replace(/[\[\]"`]/g, "").trim();
-    if (clean && !seen.has(clean)) {
-      seen.add(clean);
-      out.push(clean);
-    }
-  }
-  return out;
-}
-function normalizeTagString(raw) {
-  return parseTagList(raw).join(",");
-}
-function mergeTags(existing, additions) {
-  const out = [];
-  const seen = new Set;
-  for (const t of [...parseTagList(existing), ...parseTagList(additions)]) {
-    const key = t.toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(t);
-    }
-  }
-  return out.join(",");
-}
-function noteBadge(note) {
-  if (note.type === "work_item") {
-    return `${note.priority ?? "no-priority"}/${note.status ?? "no-status"}`;
-  }
-  return note.confidence ?? "unknown";
 }
 
 // mcp/engine/deduplicator.ts
@@ -21571,6 +21798,11 @@ function bucketLabel(similarity) {
     return "LIKELY RELATED";
   return "ADJACENT";
 }
+function tagAdviceSuffix(advice) {
+  return advice ? `
+
+${advice}` : "";
+}
 function sharedMatchTerms(content, candidateContent, max = 8) {
   const a = new Set(extractKeywords(content));
   const b = extractKeywords(candidateContent);
@@ -21634,10 +21866,22 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   const textForKeywords = [input.content, input.context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
   const tagParts = [input.type];
+  let tagAdvice = null;
   if (input.tags) {
-    for (const t of parseTagList(input.tags)) {
-      if (!tagParts.includes(t))
-        tagParts.push(t);
+    const supplied = parseTagList(input.tags);
+    const vocab = getTagVocabulary(db);
+    if (vocab) {
+      const decisions = decideTags(supplied, vocab);
+      tagAdvice = formatTagAdvice(decisions);
+      for (const d of decisions) {
+        if (!tagParts.includes(d.output))
+          tagParts.push(d.output);
+      }
+    } else {
+      for (const t of supplied) {
+        if (!tagParts.includes(t))
+          tagParts.push(t);
+      }
     }
   }
   const tagsStr = tagParts.join(",");
@@ -21676,6 +21920,7 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
   }
   return {
     noteId,
+    tagAdvice,
     linksCreated: links.length,
     linksConsidered: linkStats.considered,
     linksCapped: linkStats.capped,
@@ -21837,7 +22082,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     const action = input.resolution.action;
     const targetId = input.resolution.target_id;
     if (action === "accept_new") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2, tagAdvice: tagAdvice2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const advisory2 = formatConsolidationAdvisory(advisoryCandidates);
       return {
         stored: true,
@@ -21845,7 +22090,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}${formatPriorKnowledge(priorKnowledge)}${concurrent2}`
+        message: `Stored ${input.type} note "${noteId2}"${formatLinkSummary(linksCreated2, linksConsidered2, linksCapped2)}. (resolution: accept_new)${advisory2}${formatPriorKnowledge(priorKnowledge)}${concurrent2}${tagAdviceSuffix(tagAdvice2)}`
       };
     }
     if (!targetId) {
@@ -21893,7 +22138,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       };
     }
     if (action === "supersede_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2, tagAdvice: tagAdvice2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       db.transaction(() => {
         db.run(`UPDATE notes SET superseded_by = ?, superseded_at = ?, updated_at = ? WHERE id = ?`, [noteId2, timestamp, timestamp, targetId]);
@@ -21907,11 +22152,11 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}" and superseded target "${targetId}".${reasonSuffix}`
+        message: `Stored ${input.type} note "${noteId2}" and superseded target "${targetId}".${reasonSuffix}${tagAdviceSuffix(tagAdvice2)}`
       };
     }
     if (action === "close_existing") {
-      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2 } = await insertNote(db, globalDb2, input, embeddingClient);
+      const { noteId: noteId2, linksCreated: linksCreated2, linksConsidered: linksConsidered2, linksCapped: linksCapped2, concurrent: concurrent2, tagAdvice: tagAdvice2 } = await insertNote(db, globalDb2, input, embeddingClient);
       const timestamp = now();
       if (targetInDb.type === "work_item") {
         db.run(`UPDATE notes SET resolved = 1, status = 'done', updated_at = ? WHERE id = ?`, [timestamp, targetId]);
@@ -21926,7 +22171,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
         duplicate: false,
         promoted: false,
         links_created: linksCreated2,
-        message: `Stored ${input.type} note "${noteId2}" and closed target "${targetId}" as resolved.${reasonSuffix}`
+        message: `Stored ${input.type} note "${noteId2}" and closed target "${targetId}" as resolved.${reasonSuffix}${tagAdviceSuffix(tagAdvice2)}`
       };
     }
     return {
@@ -21938,7 +22183,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
       message: `Unknown resolution action "${action}".`
     };
   }
-  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent } = await insertNote(db, globalDb2, input, embeddingClient);
+  const { noteId, linksCreated, linksConsidered, linksCapped, concurrent, tagAdvice } = await insertNote(db, globalDb2, input, embeddingClient);
   const advisory = formatConsolidationAdvisory(advisoryCandidates);
   return {
     stored: true,
@@ -21946,7 +22191,7 @@ Your note body is SAVED - do NOT re-send it. Commit with the token alone:
     duplicate: false,
     promoted: false,
     links_created: linksCreated,
-    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}`
+    message: `Stored ${input.type} note "${noteId}"${formatLinkSummary(linksCreated, linksConsidered, linksCapped)}.${advisory}${formatPriorKnowledge(priorKnowledge)}${concurrent}${tagAdviceSuffix(tagAdvice)}`
   };
 }
 function inferDimension(content) {
@@ -23521,12 +23766,12 @@ var BLOCKER_MARKERS = [
   /\bcould not (?:be )?(?:determined|established|resolved)\b/i,
   /\bgave up\b/i
 ];
-function tokens(line) {
+function tokens2(line) {
   return new Set(line.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 3));
 }
 function sameClaim(a, b, threshold = 0.5) {
-  const ta = tokens(a);
-  const tb = tokens(b);
+  const ta = tokens2(a);
+  const tb = tokens2(b);
   if (ta.size === 0 || tb.size === 0)
     return false;
   let shared = 0;
@@ -23774,9 +24019,9 @@ function prep(db, sql) {
   return stmt;
 }
 function getDb(stateDir) {
-  const cached2 = dbCache.get(stateDir);
-  if (cached2)
-    return cached2;
+  const cached3 = dbCache.get(stateDir);
+  if (cached3)
+    return cached3;
   ensureDir(stateDir);
   sweepStaleTmpArtifacts(stateDir);
   const useInMemory = process.env.ORCHESTRATOR_AGENT_CHANNEL_DB_PATH_TEST_ONLY === ":memory:";
@@ -26254,7 +26499,7 @@ ${shownLines.join(`
   }
   return block;
 }
-var STOPWORDS = new Set([
+var STOPWORDS2 = new Set([
   "the",
   "a",
   "an",
@@ -26474,7 +26719,7 @@ var STOPWORDS = new Set([
 function extractMeaningfulKeywords(text) {
   if (!text)
     return new Set;
-  const words = text.toLowerCase().replace(/[^\w\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !STOPWORDS.has(w));
+  const words = text.toLowerCase().replace(/[^\w\s]/g, " ").split(/\s+/).filter((w) => w.length >= 4 && !STOPWORDS2.has(w));
   return new Set(words);
 }
 function intersectKeywords(a, b) {
@@ -28468,17 +28713,17 @@ for ($i = 0; $i -lt 8; $i++) {
 `;
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     const res = spawnSync("powershell.exe", ["-NoProfile", "-EncodedCommand", encoded], { encoding: "utf8" });
-    const tokens2 = ((res.stderr ?? "").toString().match(/(?:cim-empty|cim-throw|chain-end|walk-exhausted):[^\s<]*/g) ?? []).join(" ").slice(0, 200);
+    const tokens3 = ((res.stderr ?? "").toString().match(/(?:cim-empty|cim-throw|chain-end|walk-exhausted):[^\s<]*/g) ?? []).join(" ").slice(0, 200);
     if (res.error) {
       return {
         pid: null,
-        reason: `exec-failed: ${res.error.message}${tokens2 ? ` | ${tokens2}` : ""}`
+        reason: `exec-failed: ${res.error.message}${tokens3 ? ` | ${tokens3}` : ""}`
       };
     }
     const pid2 = parseInt((res.stdout ?? "").toString().trim(), 10);
     if (Number.isFinite(pid2) && pid2 > 0)
       return { pid: pid2, reason: "found" };
-    return { pid: null, reason: tokens2 || "no-claude-in-chain-no-tokens" };
+    return { pid: null, reason: tokens3 || "no-claude-in-chain-no-tokens" };
   }
   let pid = start;
   for (let depth = 0;depth < 8 && pid; depth++) {
@@ -29845,11 +30090,10 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   const textForKeywords = [fullContent, context].filter(Boolean).join(" ");
   const keywords = extractKeywords(textForKeywords);
   const tagParts = ["work_item"];
-  if (tags) {
-    for (const t of parseTagList(tags)) {
-      if (!tagParts.includes(t))
-        tagParts.push(t);
-    }
+  const governed = governTags(projectDb2, tags);
+  for (const t of governed.tags) {
+    if (!tagParts.includes(t))
+      tagParts.push(t);
   }
   const codeRefsJson = stringifyCodeRefs(code_refs);
   projectDb2.run(`INSERT INTO notes (id, type, content, context, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session, code_refs)
@@ -29882,7 +30126,9 @@ server.tool("create_work_item", "Create a trackable work item (task/todo). Work 
   return {
     content: [{
       type: "text",
-      text: `Created work_item "${noteId}" [${priority}/${status}]${dueStr}${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.`
+      text: `Created work_item "${noteId}" [${priority}/${status}]${dueStr}${parent_id ? ` (child of ${parent_id})` : ""}${links.length > 0 ? ` with ${links.length} auto-link(s)` : ""}.${governed.advice ? `
+
+${governed.advice}` : ""}`
     }]
   };
 });
@@ -30034,11 +30280,12 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   if (session_id)
     registerSessionOnce(session_id);
   const timestamp = now();
+  const governedBreakdown = governTags(projectDb2, tags);
   let actualParentId = parent_id;
   if (!actualParentId && parent_title) {
     actualParentId = generateId();
     const keywords = extractKeywords(parent_title);
-    const tagParts = ["work_item", ...parseTagList(tags)];
+    const tagParts = ["work_item", ...governedBreakdown.tags];
     projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       actualParentId,
@@ -30061,7 +30308,7 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
   for (const item of items) {
     const childId = generateId();
     const keywords = extractKeywords(item.content);
-    const tagParts = ["work_item", ...parseTagList(tags)];
+    const tagParts = ["work_item", ...governedBreakdown.tags];
     projectDb2.run(`INSERT INTO notes (id, type, content, keywords, tags, confidence, resolved, status, priority, due_date, created_at, updated_at, source_session)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       childId,
@@ -30090,7 +30337,9 @@ server.tool("breakdown", "Break down a work item or plan into child work items. 
       type: "text",
       text: `Created ${created.length} work items${actualParentId ? ` under parent "${actualParentId}"` : ""}:
 ${created.map((c) => `- ${c}`).join(`
-`)}`
+`)}${governedBreakdown.advice ? `
+
+${governedBreakdown.advice}` : ""}`
     }]
   };
 });
@@ -30355,6 +30604,19 @@ ${result.additionalContext}` : nudge;
   const envelope = buildHookEnvelope(args.event, result);
   return { content: [{ type: "text", text: JSON.stringify(envelope) }] };
 });
+function governTags(db, supplied) {
+  const parsed = parseTagList(supplied);
+  if (parsed.length === 0)
+    return { tags: [], advice: null };
+  const vocab = getTagVocabulary(db);
+  if (!vocab)
+    return { tags: parsed, advice: null };
+  const decisions = decideTags(parsed, vocab);
+  return {
+    tags: decisions.map((d) => d.output),
+    advice: formatTagAdvice(decisions)
+  };
+}
 var clientHandshakeComplete = false;
 var lastMismatchNudgeMs = null;
 var lastScanGapNudgeMs = null;
