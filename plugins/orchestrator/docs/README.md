@@ -12,6 +12,12 @@ Durable. Version-controlled. Meant to be readable without the running plugin.
 
 ## Contents
 
+- [Codex delivery status](./plans/2026-09-08-codex-delivery.md) - Implemented standalone package, native acceptance evidence, installation and remaining release boundaries.
+
+- [Codex standalone implementation plan](./plans/2026-09-08-codex-standalone.md) - Accepted shared-engine design for independent sessions, preserving Claude Code behavior and repo marketplace delivery.
+
+- [Discord on Codex gap analysis](./plans/2026-09-08-discord-codex-gap-analysis.md) - Full HELP conversation parity target, inspected community bridge shortlist, preferred foundation, and delivery plan preserving Claude. Analysis and isolated tests only; no live bot or installation changes.
+
 - [agent-getting-started.md](./agent-getting-started.md) - For AI agents (Claude Code sessions) that just had the orchestrator plugin installed. Discovers the plugin via concrete tool calls, explains single-agent vs PA+SA topology, addressing rules, permission relay opt-in, common pitfalls.
 
 - [DESIGN-PRINCIPLES.md](./DESIGN-PRINCIPLES.md) - The three-dimension design-intent test (always-up-to-date / more-accurate-over-time / faster-to-traverse), R1-R5 architectural roots, load-bearing constraints, and the deterministic-vs-judgment dividing line that separates plumbing from agent decisions.

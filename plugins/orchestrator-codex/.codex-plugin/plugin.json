@@ -1,0 +1,23 @@
+{
+  "name": "orchestrator-codex",
+  "version": "0.70.0+codex.20260908174911",
+  "description": "Persistent project knowledge, work tracking and continuity for independent Codex tasks.",
+  "author": {
+    "name": "SpawnBox-dev"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Orchestrator for Codex",
+    "shortDescription": "Project memory and continuity for independent tasks.",
+    "longDescription": "Shared project knowledge, work tracking, user preferences, lifecycle context and checkpoint recovery for independent Codex tasks.",
+    "developerName": "SpawnBox-dev",
+    "category": "Productivity",
+    "capabilities": [
+      "skills",
+      "MCP",
+      "hooks"
+    ],
+    "defaultPrompt": "Brief me on this project's knowledge and current work."
+  }
+}

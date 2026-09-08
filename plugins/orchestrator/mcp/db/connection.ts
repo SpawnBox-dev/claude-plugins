@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { applyMigrations } from "./schema";
+import { RUNTIME, knowledgeRoot } from "../runtime/profile";
 
 let globalDb: Database | null = null;
 let projectDb: Database | null = null;
@@ -13,11 +14,12 @@ let projectDb: Database | null = null;
  * Migrates from legacy ~/.orchestrator/global.db if it exists.
  */
 export function getGlobalDbPath(): string {
+  if (process.env.ORCHESTRATOR_GLOBAL_DB) return process.env.ORCHESTRATOR_GLOBAL_DB;
   const newPath = join(homedir(), ".claude", "orchestrator", "global.db");
   const legacyPath = join(homedir(), ".orchestrator", "global.db");
 
   // Migrate from legacy location if new doesn't exist but old does
-  if (!existsSync(newPath) && existsSync(legacyPath)) {
+  if (!RUNTIME.standalone && !existsSync(newPath) && existsSync(legacyPath)) {
     const newDir = dirname(newPath);
     if (!existsSync(newDir)) {
       mkdirSync(newDir, { recursive: true });
@@ -44,6 +46,7 @@ export function getGlobalDbPath(): string {
  * any DB stored there. We MUST use an env var to find the real project root.
  */
 export function getProjectDbPath(): string {
+  if (RUNTIME.standalone) return join(knowledgeRoot(), ".orchestrator", "project.db");
   const root =
     process.env.ORCHESTRATOR_PROJECT_ROOT ||
     process.env.CLAUDE_PROJECT_DIR ||
@@ -68,7 +71,18 @@ function initDb(path: string, dbType: "project" | "global"): Database {
   }
 
   const db = new Database(path);
-  db.run("PRAGMA journal_mode = WAL");
+  // Startup hooks and MCP discovery can open a fresh project concurrently.
+  db.run("PRAGMA busy_timeout = 5000");
+  // SQLite can return BUSY immediately during a concurrent rollback->WAL
+  // transition even with busy_timeout. Retry only this startup transition.
+  const walDeadline = Date.now() + 5000;
+  for (;;) {
+    try { db.run("PRAGMA journal_mode = WAL"); break; }
+    catch (error) {
+      if ((error as { code?: string }).code !== "SQLITE_BUSY" || Date.now() >= walDeadline) { db.close(); throw error; }
+      Bun.sleepSync(25);
+    }
+  }
   db.run("PRAGMA foreign_keys = ON");
   // WAL allows concurrent readers but writers still serialize. Without a
   // busy timeout, a concurrent writer throws SQLITE_BUSY immediately instead

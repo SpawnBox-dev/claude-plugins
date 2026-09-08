@@ -1,3 +1,4 @@
+import { RUNTIME, workingRoot } from "../runtime/profile";
 import type { Database } from "bun:sqlite";
 import type { NoteSummary } from "../types";
 import { existsSync } from "node:fs";
@@ -246,7 +247,7 @@ export function handleReflect(
   // are settled, not worth re-checking.
   let codeRefsChecked = 0;
   let codeRefsBroken = 0;
-  const projectRoot =
+  const projectRoot = RUNTIME.standalone ? workingRoot() :
     process.env.CLAUDE_PROJECT_DIR ||
     process.env.ORCHESTRATOR_PROJECT_ROOT ||
     null;

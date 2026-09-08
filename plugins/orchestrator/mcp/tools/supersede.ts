@@ -1,3 +1,4 @@
+import { RUNTIME, workingRoot } from "../runtime/profile";
 import type { Database } from "bun:sqlite";
 import type { NoteType } from "../types";
 import { GLOBAL_TYPES } from "../types";
@@ -529,7 +530,7 @@ export async function handleSupersede(
     const memFiles = oldRowForClaim
       ? findMemoryFilesCarryingClaim(
           oldRowForClaim.content,
-          process.env.ORCHESTRATOR_PROJECT_ROOT ||
+          RUNTIME.standalone ? workingRoot() : process.env.ORCHESTRATOR_PROJECT_ROOT ||
             process.env.CLAUDE_PROJECT_DIR ||
             process.cwd()
         )

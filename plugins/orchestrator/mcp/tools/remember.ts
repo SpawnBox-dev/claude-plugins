@@ -1,3 +1,4 @@
+import { RUNTIME } from "../runtime/profile";
 import type { Database } from "bun:sqlite";
 import type { NoteType, Dimension } from "../types";
 import { GLOBAL_TYPES, DIMENSIONS, NOTE_TYPES } from "../types";
@@ -509,7 +510,7 @@ export async function handleRemember(
       duplicate: false,
       promoted: false,
       links_created: 0,
-      message: `Note content is ${input.content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (orchestrator design principle: decision 3b962e67). Split into multiple smaller notes linked via supersedes/related_to, or capture the bulk into a doc/file and reference it from a compact note with code_refs. If the content genuinely cannot be smaller, this is the kind of thing the PA should synthesize on demand from underlying notes - not a stored digest.`,
+      message: `Note content is ${input.content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (orchestrator design principle: decision 3b962e67). Split into multiple smaller notes linked via supersedes/related_to, or capture the bulk into a doc/file and reference it from a compact note with code_refs. ${RUNTIME.standalone ? "Synthesize larger summaries from underlying records when needed." : "If the content genuinely cannot be smaller, this is the kind of thing the PA should synthesize on demand from underlying notes - not a stored digest."}`,
     };
   }
 

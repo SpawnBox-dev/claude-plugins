@@ -2360,7 +2360,7 @@ function handlePostToolUse(ctx: HookCtx, args: HookEventArgs): HookEventResponse
   return { additionalContext: parts.join("\n\n") };
 }
 
-function composeWorkItemDriftNudge(
+export function composeWorkItemDriftNudge(
   db: Database,
   sessionId: string,
   args: HookEventArgs

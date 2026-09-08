@@ -1,0 +1,20 @@
+{
+  "name": "spawnbox-dev-codex-plugins",
+  "interface": {
+    "displayName": "Spawnbox Dev Codex Plugins"
+  },
+  "plugins": [
+    {
+      "name": "orchestrator-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/orchestrator-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

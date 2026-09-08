@@ -36,6 +36,8 @@ function recordAutoRetroRun(projectDb: Database): void {
 }
 
 export interface OrientInput {
+  /** Host isolation: no automatic fleet maintenance or unrelated recovery. */
+  standalone?: boolean;
   event: "startup" | "resume" | "clear" | "compact";
   sections?: BriefingSection[];
   /** Session ID for cross-session discovery injection. When provided, the
@@ -50,18 +52,18 @@ export interface OrientResult {
   formatted: string;
 }
 
-function fetchLatestCheckpoint(db: Database): Note | null {
+function fetchLatestCheckpoint(db: Database, sessionId?: string, scoped = false): Note | null {
   try {
     const row = db
       .query(
         `SELECT id, type, content, keywords, confidence, created_at, updated_at,
                 source AS source_conversation, source_session, superseded_by, superseded_at, code_refs
          FROM notes
-         WHERE type = 'checkpoint'
+         WHERE type = 'checkpoint' ${scoped ? "AND source_session = ?" : ""}
          ORDER BY created_at DESC
          LIMIT 1`
       )
-      .get() as any | null;
+      .get(...(scoped ? [sessionId ?? ""] : [])) as any | null;
 
     if (!row) return null;
 
@@ -444,7 +446,7 @@ export function handleOrient(
   // the user's mental model and prevents double-decay hazards where the next
   // startup re-runs the broken pass on already-decayed notes.
   let autoRetroSummary: string | null = null;
-  if (input.event === "startup") {
+  if (input.event === "startup" && !input.standalone) {
     let noteCount = 0;
     try {
       const row = projectDb.query("SELECT COUNT(*) AS c FROM notes").get() as { c: number } | null;
@@ -490,7 +492,7 @@ export function handleOrient(
     !input.sections || input.sections.length === 0 || input.sections.includes(section);
 
   // Always fetch checkpoint - it provides continuity across sessions
-  const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb) : null;
+  const checkpoint = include("checkpoint") ? fetchLatestCheckpoint(projectDb, input.session_id, input.standalone) : null;
   const globalPatterns = include("cross_project") ? fetchGlobalPatterns(globalDb) : [];
 
   // Cross-session updates: read BEFORE we update the last_briefing_at cursor
@@ -501,7 +503,7 @@ export function handleOrient(
   // visible, and any note with created_at > readAt is NOT missed because
   // the cursor hasn't moved past it.
   const readAt = new Date().toISOString();
-  if (include("cross_session") && sessionTracker && input.session_id) {
+  if (!input.standalone && include("cross_session") && sessionTracker && input.session_id) {
     try {
       briefing.cross_session = sessionTracker.getCrossSessionUpdates(
         input.session_id,

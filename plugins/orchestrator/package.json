@@ -1,10 +1,14 @@
 {
   "name": "orchestrator",
-  "version": "0.69.18",
+  "version": "0.70.0",
   "description": "A persistent product co-pilot that learns your project and you",
   "type": "module",
   "scripts": {
     "build": "bun build mcp/server.ts --outdir dist --target bun",
+    "build:codex": "bun run scripts/build-codex.ts",
+    "check:codex": "bun run scripts/build-codex.ts --check",
+    "test:codex": "bun test tests/runtime && bun run scripts/codex-protocol-smoke.ts",
+    "test:codex-native": "bun run scripts/codex-native-smoke.ts",
     "dev": "bun run mcp/server.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
@@ -16,6 +20,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/node": "^22.0.0",
     "@types/uuid": "^10.0.0",
     "typescript": "^5.9.3"
   }

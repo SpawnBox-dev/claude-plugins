@@ -12,6 +12,6 @@
     "sourceMap": true,
     "types": ["bun-types"]
   },
-  "include": ["mcp/**/*.ts", "tests/**/*.ts"],
+  "include": ["mcp/**/*.ts", "tests/**/*.ts", "codex/**/*.ts", "scripts/build-codex.ts", "scripts/codex-*.ts", "scripts/kb-read.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,9 +1,11 @@
+import { RUNTIME, currentCodexSession, resolveCodexAttribution, withCodexRequest, knowledgeRoot, workingRoot, STANDALONE_INSTRUCTIONS, STANDALONE_DESCRIPTIONS } from "./runtime/profile";
+import { codexSidecarCompatible } from "./runtime/codex-sidecar";
 import { resolve, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, statSync, mkdirSync } from "node:fs";
 import { appendLifecycleLine, emitLifecycleLine } from "./engine/lifecycle_log";
 import { sweepStateDir } from "./engine/state_gc";
 import { execSync, spawnSync } from "node:child_process";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Database } from "bun:sqlite";
 import { decideTags, formatTagAdvice } from "./engine/tag_vocabulary";
@@ -18,7 +20,7 @@ import {
   DIMENSIONS,
 } from "./types";
 import type { WorkItemStatus, Dimension, NoteType } from "./types";
-import { getProjectDb, getGlobalDb } from "./db/connection";
+import { getProjectDb, getGlobalDb, getProjectDbPath, getGlobalDbPath, closeAll } from "./db/connection";
 import { handleRemember } from "./tools/remember";
 import { handleSupersede } from "./tools/supersede";
 import { handleRecall } from "./tools/recall";
@@ -298,6 +300,7 @@ function findClaudeAncestorPid(): number | null {
 }
 
 function getFallbackSessionId(): string | undefined {
+  if (RUNTIME.standalone) return currentCodexSession();
   if (cachedFallbackSessionId) return cachedFallbackSessionId;
 
   // 0.69.0 (WI fda1a7f2) - THE ROOT CAUSE OF THE BINDING RACE.
@@ -458,6 +461,7 @@ function getFallbackSessionId(): string | undefined {
  * that as "cannot verify", not as "identity is fine", and say so out loud.
  */
 function readAuthoritativeSessionId(): string | undefined {
+  if (RUNTIME.standalone) return currentCodexSession();
   const envId =
     process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
   if (envId && /^[a-zA-Z0-9_-]+$/.test(envId)) return envId;
@@ -486,6 +490,7 @@ function readAuthoritativeSessionId(): string | undefined {
 }
 
 function resolveSessionId(explicit?: string): string | undefined {
+  if (RUNTIME.standalone) return resolveCodexAttribution(explicit);
   // 0.69.0 (WI fda1a7f2): IDENTITY IS NOT ATTRIBUTION. This used to cache the
   // caller-supplied id as the server's own identity. That is the split-brain:
   // agents pass session_id by hand and PA legitimately writes on peers' behalf
@@ -742,6 +747,7 @@ function orphansOf(all: SidecarProc[], livePort: number | null): SidecarProc[] {
 }
 
 async function reapOrphanSidecars(livePort: number | null): Promise<void> {
+  if (RUNTIME.standalone) return;
   if (!REAP_ORPHANS) return;
   try {
     for (const r of orphansOf(await listSidecars(), livePort)) {
@@ -765,6 +771,10 @@ async function reapOrphanSidecars(livePort: number | null): Promise<void> {
 }
 
 async function startSidecar(): Promise<EmbeddingClient | null> {
+  if (process.env.ORCHESTRATOR_EMBEDDINGS === "off") {
+    sidecarError = "Disabled by ORCHESTRATOR_EMBEDDINGS=off";
+    return null;
+  }
   // Use CLAUDE_PLUGIN_ROOT (set by Claude Code for plugins) or fall back to import.meta.dir
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || resolve(import.meta.dir, "..");
   const sidecarPath = resolve(pluginRoot, "sidecar/embed_server.py");
@@ -821,6 +831,11 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       // Waiting is cheap and bounded; spawning is ~2 GB and permanent until
       // something reaps it.
       if (await client.isAvailable(ADOPT_PROBE_MS)) {
+        if (RUNTIME.standalone) {
+          if (await codexSidecarCompatible(client)) return client;
+          sidecarError = "Existing sidecar has incompatible or unverifiable weights; keeping keyword retrieval available";
+          return null;
+        }
         // 0.47.1: HEALTHY IS NOT ENOUGH - it must serve the RIGHT MODEL.
         //
         // Across a model change the old sidecar is still alive and still
@@ -885,6 +900,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   } catch {
     // Lock machinery unavailable - fall through and spawn, preserving old
     // behaviour rather than leaving the session with no embeddings at all.
+    if (RUNTIME.standalone) { sidecarError = "Cannot acquire the shared embedding startup lock"; return null; }
     holdsLock = true;
   }
 
@@ -897,6 +913,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
         if (!isNaN(p) && p > 0) {
           const c = new EmbeddingClient(`http://127.0.0.1:${p}`);
           if (await c.isAvailable()) {
+            if (RUNTIME.standalone && !(await codexSidecarCompatible(c))) continue;
             console.error(`[embed] Adopted sidecar on port ${p} spawned by a peer (waited ${i + 1}s)`);
             return c;
           }
@@ -906,6 +923,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       }
     }
     console.error(`[embed] Waited 60s for a peer's sidecar and saw none; spawning our own.`);
+    if (RUNTIME.standalone) { sidecarError = "Timed out waiting for the shared embedding sidecar; retry install_embeddings later"; return null; }
   }
 
   // No reusable sidecar found - clean the stale port file (if any) and spawn fresh.
@@ -1013,9 +1031,9 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
 // Default-off: existing single-agent and multi-agent users without PA
 // are unaffected.
 const PERMISSION_RELAY_ENABLED =
-  process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
+  !RUNTIME.standalone && process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
 
-const experimentalCapabilities: Record<string, object> = {
+const experimentalCapabilities: Record<string, object> = RUNTIME.standalone ? {} : {
   // Real-time channel notifications. Used by the agent-channel
   // subsystem (mcp/engine/agent_channel.ts) to deliver inline
   // <channel ...>content</channel> events for cross-session chat.
@@ -1036,7 +1054,7 @@ const server = new McpServer(
       tools: {},
       experimental: experimentalCapabilities,
     },
-    instructions: [
+    instructions: RUNTIME.standalone ? STANDALONE_INSTRUCTIONS : [
       "Cross-session events arrive as <channel source=\"plugin:orchestrator:core\" from_id8=\"...\" from_role=\"...\" event_type=\"...\" ...>content</channel> tags injected inline, like prompts you would have typed. (The source attribute is set automatically by Claude Code from the MCP server's plugin-qualified key.)",
       "",
       "Address other sessions in your terminal output using @PA / @PrimeAgent (the prime), @SA-<id8> (a specific subordinate), comma-separated lists @SA-<id8>,@SA-<id8>, or @all (every active session except yourself). The conversational form \"PA, ...\" or \"PrimeAgent, ...\" also addresses PA.",
@@ -1063,7 +1081,28 @@ const server = new McpServer(
 );
 
 // ── briefing ────────────────────────────────────────────────────────────
-server.tool(
+function registerTool<Shape extends z.ZodRawShape>(
+  name: string, description: string, shape: Shape, callback: ToolCallback<Shape>,
+) {
+  if (!RUNTIME.standalone) return server.tool(name, description, shape, callback);
+  if (name === "_hook_event") return; // Codex command hooks have their own lifecycle adapter.
+  const reads = new Set(["briefing", "system_status", "lookup", "plan", "check_similar", "list_work_items", "list_open_threads", "install_embeddings"]);
+  const wrapped = ((args: any, extra: any) => withCodexRequest(extra._meta, async () => {
+    if (!reads.has(name) && !(name === "user_profile" && args.action === "view") && !currentCodexSession()) {
+      return { isError: true, content: [{ type: "text", text: "Codex task identity is unavailable. This mutation was not applied. Check system_status and the bridge/session configuration." }] };
+    }
+    if (args.session_id) resolveCodexAttribution(args.session_id);
+    return (callback as any)(args, extra);
+  })) as ToolCallback<Shape>;
+  const standaloneShape = Object.fromEntries(Object.entries(shape).filter(([key]) => !["session_id", "warm_context", "hot_path_status", "keep_clean"].includes(key))) as Shape;
+  if (name === "update_session_task") {
+    (standaloneShape as z.ZodRawShape).task = z.string().min(1).max(2000, "Task text is limited to 2000 characters. Put longer context in save_progress and cite related record IDs.");
+    (standaloneShape as z.ZodRawShape).refs = z.array(z.string()).max(20).optional().describe("Related work-item or note IDs (full UUID or unambiguous prefix).");
+  }
+  return server.tool(name, STANDALONE_DESCRIPTIONS[name] || description, standaloneShape, wrapped);
+}
+
+registerTool(
   "briefing",
   "Get up to speed on the current project. Returns open threads, recent decisions, work items, user profile, neglected areas, your last checkpoint, and cross-session activity (what other sessions have discovered since your last briefing). Use at session start, after context compaction, or whenever you feel you're missing context. Pass `session_id` to enable cross-session discovery injection - strongly recommended. Pass `sections` to reduce context cost. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` for a compressed rendering (per-item content trimmed from 120 to 60 chars, recovery checkpoint and auto-retro bodies trimmed to 240 chars). Default `\"full\"` (current rendering).",
   {
@@ -1090,6 +1129,7 @@ server.tool(
         event: event ?? "startup",
         sections: sections ?? undefined,
         session_id,
+        standalone: RUNTIME.standalone,
       },
       sessionTracker
     );
@@ -1116,6 +1156,10 @@ server.tool(
     // rather than threaded through composer.ts to keep the change surgical.
     if (output_mode === "summary") {
       text = compactBriefingText(text);
+    }
+
+    if (RUNTIME.standalone) {
+      return { content: [{ type: "text" as const, text }] };
     }
 
     // Append system status when embeddings need attention
@@ -1267,13 +1311,27 @@ function compactBriefingText(text: string): string {
 }
 
 // ── system_status ────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "system_status",
   "Check the health of the orchestrator system: embedding sidecar, note counts, embedding coverage, session tracking.",
   {},
   async () => {
     const projectDb = getProjectDb();
     const globalDb = getGlobalDb();
+
+    if (RUNTIME.standalone) {
+      const diagnostics = {
+        host: RUNTIME.host, mode: RUNTIME.mode, version: PLUGIN_VERSION,
+        session_id: currentCodexSession() ?? null,
+        knowledge_root: knowledgeRoot(), working_root: workingRoot(),
+        project_db: getProjectDbPath(), global_db: getGlobalDbPath(),
+        project_notes: projectDb.query("SELECT COUNT(*) AS count FROM notes").get(),
+        embeddings: { status: sidecarStatus, error: sidecarError, model: ACTIVE_EMBED_MODEL, dimensions: ACTIVE_EMBED_DIM },
+        automatic_retro: false,
+        hooks: projectDb.query("SELECT key, value FROM plugin_state WHERE key LIKE 'codex_hook_%' ORDER BY updated_at DESC LIMIT 20").all(),
+      };
+      return { content: [{ type: "text" as const, text: JSON.stringify(diagnostics, null, 2) }] };
+    }
 
     // Note counts
     const projectNotes = (projectDb.query("SELECT COUNT(*) as cnt FROM notes").get() as any).cnt;
@@ -1565,7 +1623,7 @@ server.tool(
 );
 
 // ── install_embeddings ──────────────────────────────────────────────────
-server.tool(
+registerTool(
   "install_embeddings",
   "Check and install dependencies needed for semantic search embeddings. Detects Python and uv availability, installs uv via pip if Python is available, and verifies the embedding sidecar can start.",
   {
@@ -1711,7 +1769,7 @@ server.tool(
 );
 
 // ── note ────────────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "note",
   "Capture knowledge not already known. Use when something new is learned, decided, or observed - AND no existing note covers it. If a lookup just showed you a related note that's now stale/wrong/incomplete, prefer update_note, supersede_note, or close_thread on that note instead of creating a new one. Maintenance verbs are equal-priority to this one - the orchestrator is a living knowledge base, not an append-only log. Don't batch captures; write immediately so future sessions benefit. Pass session_id so sibling sessions can see what you've created. When the knowledge is about specific code (an architecture insight, a gotcha, a pattern), add `code_refs: ['mcp/server.ts']` so the note is discoverable later via `lookup({code_ref: 'mcp/server.ts'})`. Breadcrumbs only - file or module paths, not line numbers or symbol names (code indexers handle those). Near-duplicate gate: for types decision/convention/anti_pattern, note() will BLOCK the write if embedding similarity is at/above the type's bar (0.75 decision/convention, 0.85 anti_pattern) against an existing note, and will return candidates. **Your body is stashed server-side** - re-call with `pending_id` (returned in the block message) plus a `resolution` of accept_new / update_existing / supersede_existing / close_existing. Do NOT re-send `content`. Each candidate also lists `overlapping terms (indicative, not the match basis)` - shared vocabulary shown as EVIDENCE. The block itself is decided by embedding similarity, not by those terms, so treat them as a hint and judge the CLAIMS: heavy shared jargon plus genuinely different claims is the signature of a false positive, and accept_new is correct there.",
   {
@@ -1770,7 +1828,7 @@ server.tool(
 );
 
 // ── lookup ──────────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "lookup",
   "Search what the team already knows about this code/decision/area. Use this **alongside** your normal investigation (reading source, checking docs, web research) when you wonder 'has this been decided before?', when you encounter unfamiliar code, or when you want to check for existing conventions or anti-patterns. The orchestrator is additive (decision 3b962e67): it surfaces team-level history and cross-session context you'd otherwise miss, NOT a substitute for reading the actual code or current docs. Searches both project and cross-project knowledge using full-text search with BM25 ranking. Use `code_ref: 'path/to/file.ts'` to filter to notes that reference this exact file or module path in their code_refs - answers 'what was learned/decided about X?' queries to layer onto your own reading of X. **Type-only enumeration** (0.30.20+): pass `{type: \"user_pattern\"}` (or any note type) without `query`/`id` to list the most-recent N notes of that type - useful for PA bootstrap loading user-patterns / decisions / anti-patterns into context. Combine `type` with `tag` or `code_ref` to narrow further. **Tag-only enumeration**: pass `{tag: \"some-tag\"}` without `query`/`id`/`type` to list notes whose tags contain that substring (signal-ranked). Combine with `type` and/or `code_ref` to narrow. **id8 prefix** (0.30.21+): `id` accepts both the full 36-char UUID and the 8-char hex prefix surfaced in hook hints, agent-channel events, and stop nudges. Ambiguous prefixes return an error listing the candidates. **`output_mode`** (0.30.22+): pass `output_mode: \"summary\"` to get a compact one-line-per-result rendering (id8 + type + truncated content) - useful when you're enumerating to find a candidate ID without needing full content. Default is `\"full\"` (current rich rendering with content, code_refs, maintain hints, etc.). **Pagination** (0.30.28+): pass `offset: N` with the same `limit` to fetch the next page. Response message indicates the next offset when more results exist - use this to traverse large enumerations or wide searches without overflowing.",
   {
@@ -1980,7 +2038,7 @@ server.tool(
       }
     }
     if (text.length > 15000) {
-      text += "\n\n---\nLarge result set (" + Math.round(text.length / 1000) + "K chars). Consider narrowing your query (more specific keywords, `code_ref` filter, type filter) instead of reading all of this directly. If a PrimeAgent is active in this project, addressing `PA, can you triage this lookup?` in your terminal output also lets PA do the curation.";
+      text += "\n\n---\nLarge result set (" + Math.round(text.length / 1000) + "K chars). Consider narrowing your query (more specific keywords, `code_ref` filter, type filter) instead of reading all of this directly." + (RUNTIME.standalone ? "" : " If a PrimeAgent is active in this project, addressing `PA, can you triage this lookup?` in your terminal output also lets PA do the curation.");
     }
 
     return {
@@ -1990,7 +2048,7 @@ server.tool(
 );
 
 // ── plan ─────────────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "plan",
   "Gather domain-specific context to layer onto your own planning. Returns relevant conventions, anti-patterns, quality gates, architecture notes, and recent decisions so you don't contradict past work or re-learn solved problems. Use alongside (not instead of) your normal investigation when facing multi-step work or entering an unfamiliar domain - the orchestrator surfaces team-level history; the current source remains ground truth (decision 3b962e67).",
   {
@@ -2009,7 +2067,7 @@ server.tool(
 );
 
 // ── save_progress ───────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "save_progress",
   "Save your current progress so the next session can pick up seamlessly. Captures what you accomplished, what's still in flight, open questions, and suggested next steps. Use when finishing a task, completing a milestone, switching work streams, or before the session ends. Pass session_id so the checkpoint is attributed to you for cross-session awareness.",
   {
@@ -2084,7 +2142,7 @@ server.tool(
 );
 
 // ── close_thread ────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "close_thread",
   "Declare a tracked open_thread, commitment, or work_item settled. Cascades through the graph: unblocks blocked items, auto-completes parent work when all children are done, auto-resolves superseded notes. Closing threads while context is fresh is as important as opening them - prevents future sessions from re-litigating. Equal-priority to note(). Pass session_id so the resolution decision (when a resolution string is provided) carries attribution.",
   {
@@ -2166,7 +2224,7 @@ server.tool(
 );
 
 // ── update_note ─────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "update_note",
   "Keep a note current. Use liberally whenever your read of reality has refined what this note should say - new information, a correction, a clarification. Treat as equal-priority to note(). For quick additions that preserve existing content, prefer append_content. For full rewrites, use content - the prior state is automatically snapshotted to revision history (see lookup include_history). Pass `code_refs: [paths]` to replace the note's breadcrumb array when the note points at specific files; pass `[]` to clear. Breadcrumbs are file or module paths only - not line numbers or symbols.",
   {
@@ -2354,7 +2412,7 @@ server.tool(
 );
 
 // ── delete_note ─────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "delete_note",
   "Remove a note permanently. Use only when a note is genuinely wrong or harmful - prefer supersede_note (preserves history) or close_thread (marks resolved) for knowledge that was right-at-the-time or is now complete. **Links to/from this note are CASCADE-removed, permanently.** If the note has ANY links this tool REFUSES by default and tells you the count plus the safer path; pass `confirm_cascade: true` only after reading that. For a duplicate or superseded note that has inbound links, the right move is a REDIRECT STUB - update_note it to point at the survivor, then close_thread - which keeps the ID resolvable and every edge intact. Equal-priority to note() - curation is as important as capture.",
   {
@@ -2444,7 +2502,7 @@ server.tool(
 );
 
 // ── supersede_note ────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "supersede_note",
   "Replace an old note with a new one, preserving history. The old note is archived (still retrievable by ID, but hidden from default lookup); the new note surfaces on lookup. Use when a decision was right at the time but is now wrong, or when knowledge has evolved. Treat as equally important to note() - maintaining coherence matters as much as capturing new facts. When creating the replacement inline (new_content + new_type), pass `code_refs: [paths]` so the replacement carries breadcrumbs forward. Ignored when `new_id` points at an existing note (it keeps its own refs).",
   {
@@ -2472,7 +2530,7 @@ server.tool(
 );
 
 // ── user_profile ────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "user_profile",
   "View or update the structured user profile. Shows all learned observations about the user grouped by dimension (preferences, communication style, decision patterns, strengths, blind spots, intent). Use to understand the user better or to explicitly record a user trait.",
   {
@@ -2546,7 +2604,7 @@ server.tool(
 );
 
 // ── create_work_item ────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "create_work_item",
   "Create a trackable work item (task/todo). Work items persist across sessions and appear in the briefing. Use for concrete tasks that need to be done - not strategic questions (use open_thread for those). Supports priority, status, due dates, and parent relationships for breaking down larger work. Pass session_id so sibling sessions can see this item on their next briefing. When the work is scoped to specific files, add `code_refs: [paths]` so the item is discoverable via `lookup({code_ref: 'path'})` when an agent next touches that code.",
   {
@@ -2618,7 +2676,7 @@ server.tool(
 );
 
 // ── update_work_item ────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "update_work_item",
   "Update a work item's status, priority, due date, content, tags, context, or confidence. Triggers cascade logic: completing an item unblocks dependents and may auto-complete parent items. Use to track progress through tasks. Pass `code_refs: [paths]` to replace the breadcrumb array (file or module paths, not symbols); pass `[]` to clear.",
   {
@@ -2820,7 +2878,7 @@ server.tool(
 );
 
 // ── breakdown ───────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "breakdown",
   "Break down a work item or plan into child work items. Creates multiple work_items linked to a parent via part_of relationships. Use when you have a complex task that needs to be split into concrete steps. Pass session_id so parent and children carry cross-session attribution.",
   {
@@ -2897,7 +2955,7 @@ server.tool(
 );
 
 // ── check_similar ────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "check_similar",
   "Check if a proposed action is similar to existing decisions, conventions, or anti-patterns. Use alongside (not instead of) your normal investigation when planning a non-trivial change - catches team-level prior art that your own code reading might not surface.",
   {
@@ -2938,7 +2996,7 @@ server.tool(
 );
 
 // ── retro ───────────────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "retro",
   "Run maintenance on the knowledge base and analyze what's working. Decays confidence on stale notes, merges duplicates, identifies orphans, queues notes for revalidation, computes autonomy scores, and analyzes user model trajectories. Use after a debugging session, when an approach failed, or periodically to keep knowledge fresh.",
   {
@@ -2967,7 +3025,7 @@ server.tool(
 );
 
 // ── list_work_items ──────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "list_work_items",
   "List ALL work items, optionally filtered by status and/or priority. Unlike lookup, this does not use keyword search - it returns everything matching the filters. Use when you need a complete inventory of tracked work.",
   {
@@ -3035,7 +3093,7 @@ server.tool(
 );
 
 // ── list_open_threads ────────────────────────────────────────────────────
-server.tool(
+registerTool(
   "list_open_threads",
   "List ALL open threads (unresolved questions, investigations, tracked issues). Unlike lookup, returns everything without keyword search.",
   {
@@ -3094,7 +3152,7 @@ server.tool(
 
 // ── R6: Cross-session messaging tools ───────────────────────────────────
 
-server.tool(
+registerTool(
   "update_session_task",
   "Broadcast what you're currently working on. Sibling sessions see this in their next briefing's Cross-Session Activity AND in agent-channel notifications (the from_task metadata field). Call when you start a major task so other sessions know what you're touching. LENGTH: task is capped at 2000 characters and is REJECTED (not truncated) above it - write it as a broadcast line, not a checkpoint. Prioritise what a peer needs to avoid colliding with you, and CITE work items and notes by id rather than restating them: a cited id stays true after the record changes, while a copied summary rots and costs you the space that collision detail needed. Long-form history belongs in save_progress or a note. PA-coherence (optional): also self-declare warm_context (subsystems/files you're deep in - sharpens the auto-derived floor), hot_path_status ('driving' | 'holding-for-<X>' | 'idle-available' | 'parked' - only 'idle-available' is repurposable), and keep_clean (true = 'do not steer me, keeping context clean for delicate work'). These feed PA's repurposing-candidate query.",
   {
@@ -3195,7 +3253,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "_hook_event",
   "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.",
   {
@@ -3819,7 +3877,7 @@ function startAgentChannel(): void {
 // that crashes the MCP would be worse than none).
 const mcpStartMs = Date.now();
 const MCP_LIFECYCLE_LOG = join(
-  process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"),
+  RUNTIME.standalone ? (process.env.CODEX_HOME || join(homedir(), ".codex")) : (process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")),
   "orchestrator",
   "mcp-lifecycle.log",
 );
@@ -3901,6 +3959,10 @@ function shutdownOnce(trigger: string): void {
   if (shutdownLogged) return;
   shutdownLogged = true;
   logShutdownTrigger(trigger);
+  if (RUNTIME.standalone) {
+    closeAll();
+    process.exit(0);
+  }
   // 0.69.0 (WI ca509bb7): drop our client claim so a later server does not see
   // a stale file and decline to reap us. The pid+creation-time check makes a
   // leftover claim harmless anyway, but the normal path should leave no litter.
@@ -4322,7 +4384,7 @@ foreach ($s in $siblings) {
   }
 }
 
-const initialParentClaudePid = findClaudeAncestorPid();
+const initialParentClaudePid = RUNTIME.standalone ? null : findClaudeAncestorPid();
 // 0.30.38: also capture parent claude.exe's creation time so the watchdog
 // can defend against PID reuse. Without this, when the user closes one
 // Claude Code window and opens another, Windows may reassign the freed
@@ -4443,7 +4505,7 @@ if (initialParentClaudePid) {
       );
     }
   }, 30 * 1000).unref();
-} else {
+} else if (!RUNTIME.standalone) {
   // 0.69.0 (WI fda1a7f2) - "CANNOT VERIFY" IS NOT "ORPHAN". THIS NO LONGER EXITS.
   //
   // It used to call shutdownOnce("no-claude-ancestor-at-startup"). On
@@ -4476,6 +4538,17 @@ if (initialParentClaudePid) {
 
 // ── Start server ────────────────────────────────────────────────────────
 async function main() {
+  if (RUNTIME.standalone) {
+    sessionTracker = new SessionTracker(getProjectDb(), () => []);
+    emitLifecycle(`[orchestrator] host=codex mode=standalone version=${PLUGIN_VERSION} pid=${process.pid}\n`);
+    await server.connect(new StdioServerTransport());
+    void startSidecar().then(client => {
+      embeddingClient = client;
+      sidecarStatus = client ? "ready" : "unavailable";
+      if (client) void client.backfill(getProjectDb()).catch(err => console.error("[embed] Backfill failed:", err));
+    }).catch(err => { sidecarStatus = "error"; sidecarError = String(err); });
+    return;
+  }
   // Startup version banner. Persisted durably (stderr + lifecycle file) so it
   // pairs with the eventual shutdown/crash line: "started at T1, last alive at
   // T2, no shutdown line" = killed between T2 and T2+5min. Also makes "is the

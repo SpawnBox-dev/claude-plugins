@@ -580,8 +580,13 @@ export function applyMigrations(
   for (const migration of migrations) {
     if (applied.has(migration.version)) continue;
 
-    db.run("BEGIN");
+    db.run("BEGIN IMMEDIATE");
     try {
+      // Another host may have applied this migration since our initial read.
+      if (db.query("SELECT 1 FROM migrations WHERE version = ?").get(migration.version)) {
+        db.run("COMMIT");
+        continue;
+      }
       // Use customApply if available (for idempotent/conditional migrations)
       if (migration.customApply) {
         migration.customApply(db);

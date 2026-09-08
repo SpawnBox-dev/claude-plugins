@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "orchestrator": {
+      "command": "bun",
+      "args": [
+        "-e",
+        "await import(require('node:url').pathToFileURL(require('node:path').join(process.env.CODEX_HOME || require('node:path').join(require('node:os').homedir(), '.codex'), 'plugins/cache/spawnbox-dev-codex-plugins/orchestrator-codex/0.70.0+codex.20260908174911/dist/server.js')).href)"
+      ],
+      "env": {
+        "ORCHESTRATOR_HOST": "codex",
+        "ORCHESTRATOR_MODE": "standalone"
+      },
+      "env_vars": [
+        "CODEX_HOME",
+        "ORCHESTRATOR_PROJECT_ROOT",
+        "ORCHESTRATOR_WORKTREE_ROOT",
+        "ORCHESTRATOR_GLOBAL_DB",
+        "ORCHESTRATOR_EMBEDDINGS"
+      ]
+    }
+  }
+}
