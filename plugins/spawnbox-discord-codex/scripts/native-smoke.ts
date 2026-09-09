@@ -44,6 +44,7 @@ const config: HelpConfig = {
   codexHome: home,
   orchestratorRoot: resolve(root, "../orchestrator-codex"),
   maxConcurrency: 1,
+  memoryEmbeddings: false,
   catchupPageLimit: 2,
 };
 config.model = process.env.HELP_TEST_MODEL || "gpt-6-astra";

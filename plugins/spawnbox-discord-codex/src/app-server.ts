@@ -90,12 +90,7 @@ export class AppServer extends EventEmitter {
         );
         this.emit("attention", { method: message.method });
       } else if (message.method) {
-        if (message.method === "turn/completed") {
-          this.completed.set(message.params.turn.id, message.params.turn);
-          if (this.completed.size > 1000)
-            this.completed.delete(this.completed.keys().next().value!);
-        }
-        this.emit(message.method, message.params);
+        this.notification(message.method, message.params);
       }
     });
     await this.request("initialize", {
@@ -103,6 +98,17 @@ export class AppServer extends EventEmitter {
       capabilities: { experimentalApi: true, requestAttestation: false },
     });
     this.child.stdin.write(JSON.stringify({ method: "initialized" }) + "\n");
+  }
+  private notification(method: string, params: any) {
+    if (method === "turn/completed") {
+      this.completed.set(params.turn.id, params.turn);
+      if (this.completed.size > 1000)
+        this.completed.delete(this.completed.keys().next().value!);
+    }
+    // Native `error` is a turn notification, not EventEmitter's fatal `error`
+    // event. Keep retry notifications informational; turn/completed determines
+    // when a turn has actually stopped and can safely be retried or blocked.
+    this.emit(method === "error" ? "turn/error" : method, params);
   }
   private fail(error: Error) {
     for (const pending of this.pending.values()) {

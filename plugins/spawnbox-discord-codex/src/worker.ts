@@ -20,6 +20,7 @@ export function workerConfig(
   endpoint: string,
   token: string,
   bun: string,
+  memoryEmbeddings = true,
 ) {
   const memoryTools = [
     "system_status",
@@ -32,6 +33,8 @@ export function workerConfig(
     "update_work_item",
     "list_work_items",
   ];
+  if (!memoryEmbeddings)
+    memoryTools.splice(memoryTools.indexOf("check_similar"), 1);
   const toolPolicy = (names: string[]) => ({
     enabled_tools: names,
     tools: Object.fromEntries(
@@ -73,7 +76,7 @@ export function workerConfig(
           ORCHESTRATOR_PROJECT_ROOT: project,
           ORCHESTRATOR_WORKTREE_ROOT: project,
           ORCHESTRATOR_GLOBAL_DB: join(project, ".orchestrator", "global.db"),
-          ORCHESTRATOR_EMBEDDINGS: "off",
+          ORCHESTRATOR_EMBEDDINGS: memoryEmbeddings ? "on" : "off",
         },
       },
     },
@@ -135,6 +138,7 @@ export class Worker {
           this.endpoint,
           this.token,
           process.execPath,
+          this.config.memoryEmbeddings !== false,
         ),
         ...this.hostOverrides,
       };
@@ -144,7 +148,11 @@ export class Worker {
         approvalPolicy: "never",
         sandbox: "read-only",
         config,
-        developerInstructions: workerInstructions,
+        developerInstructions:
+          workerInstructions +
+          (this.config.memoryEmbeddings === false
+            ? "\nSemantic similarity is disabled in this worker. Use lookup for keyword retrieval; check_similar is unavailable. This configured limitation alone does not require needs_operator."
+            : ""),
       };
       threadId = this.store.thread(job.conversation);
       const thread = threadId
@@ -165,10 +173,13 @@ export class Worker {
       const turn = await this.server.request("turn/start", { threadId, input });
       turnId = turn.turn.id;
       const result = await this.server.waitTurn(turnId!);
-      if (result.status !== "completed")
+      if (result.status !== "completed") {
+        if (result.error?.codexErrorInfo === "usageLimitExceeded")
+          throw new NeedsOperator(`Codex usage limit: ${result.error.message}`);
         throw new Error(
           `Codex turn ${result.status}: ${JSON.stringify(result.error)}`,
         );
+      }
       const outcome = this.outcome(job.event.id);
       if (!outcome)
         throw new Error(

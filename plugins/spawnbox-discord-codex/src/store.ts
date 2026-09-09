@@ -82,6 +82,17 @@ export class Store {
       )
       .run(channel, user);
   }
+  dmChannels(allowedUsers: string[]): string[] {
+    const allowed = new Set(allowedUsers);
+    return (
+      this.db.query("SELECT channel_id,user_id FROM dm_recipients").all() as {
+        channel_id: string;
+        user_id: string;
+      }[]
+    )
+      .filter((row) => allowed.has(row.user_id))
+      .map((row) => row.channel_id);
+  }
   dmUser(channel: string): string | undefined {
     return (
       this.db

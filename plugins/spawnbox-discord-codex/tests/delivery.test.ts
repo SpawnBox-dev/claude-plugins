@@ -6,7 +6,7 @@ import { Store } from "../src/store";
 import { Outbox, UncertainDelivery } from "../src/outbox";
 import { admit, assertDestination } from "../src/policy";
 import { guard } from "../src/guard";
-import { childEnvironment } from "../src/app-server";
+import { AppServer, childEnvironment } from "../src/app-server";
 import { configSchema } from "../src/config";
 import { validateOperation } from "../src/mcp";
 import type { Inbound, HelpConfig } from "../src/types";
@@ -16,7 +16,7 @@ import { accessFile } from "../src/policy";
 import { Operations } from "../src/operations";
 import { catchupChannel } from "../src/service";
 import { readResource } from "../src/resources";
-import { Worker } from "../src/worker";
+import { Worker, workerConfig } from "../src/worker";
 import { PermissionFlagsBits } from "discord.js";
 
 export const config: HelpConfig = {
@@ -81,6 +81,8 @@ test("durable dedup, lease recovery, DM mapping and same-room serialization surv
   store.close();
   store = new Store(path);
   expect(store.dmUser(first.channelId)).toBe(first.userId);
+  expect(store.dmChannels([first.userId])).toEqual([first.channelId]);
+  expect(store.dmChannels([])).toEqual([]);
   store.recover(Date.now() + 61000);
   const recovered = store.claim()!;
   expect(recovered.event.id).toBe(first.id);
@@ -585,4 +587,105 @@ test("support-room template explicitly grants visibility and conversation access
     expect(allowed).not.toContain(PermissionFlagsBits.ManageRoles);
   }
   store.close();
+});
+
+test("native error notifications do not crash the listener or finish a retrying turn", async () => {
+  const server = new AppServer("unused", "unused", "unused");
+  let finished = false;
+  const result = server.waitTurn("turn", 1000).then((value) => {
+    finished = true;
+    return value;
+  });
+  expect(() =>
+    (server as any).notification("error", {
+      turnId: "turn",
+      willRetry: true,
+      error: { message: "Transient connection failure" },
+    }),
+  ).not.toThrow();
+  await Promise.resolve();
+  expect(finished).toBe(false);
+  expect(() =>
+    (server as any).notification("error", {
+      turnId: "turn",
+      willRetry: false,
+      error: { codexErrorInfo: "usageLimitExceeded" },
+    }),
+  ).not.toThrow();
+  (server as any).notification("turn/completed", {
+    turn: {
+      id: "turn",
+      status: "failed",
+      error: {
+        codexErrorInfo: "usageLimitExceeded",
+        message: "Usage reset required",
+      },
+    },
+  });
+  expect((await result).error.codexErrorInfo).toBe("usageLimitExceeded");
+  expect((await server.waitTurn("turn")).status).toBe("failed");
+});
+
+test("usage exhaustion blocks the event without a supervisor crash or automatic replay", async () => {
+  const state = mkdtempSync(join(tmpdir(), "help-usage-test-"));
+  const store = new Store(join(state, "help.db"));
+  store.receive(event(), "public");
+  const job = store.claim()!;
+  const failure = {
+    status: "failed",
+    error: { codexErrorInfo: "usageLimitExceeded", message: "Wait for reset" },
+  };
+  const server = {
+    request: async (method: string) =>
+      method === "turn/start"
+        ? { turn: { id: "turn" } }
+        : { thread: { id: "thread" } },
+    waitTurn: async () => failure,
+  };
+  const worker = new Worker(
+    store,
+    server as any,
+    config,
+    state,
+    "http://127.0.0.1",
+    "fixture",
+    () => undefined,
+  );
+  await (worker as any).run(job);
+  expect(store.status().attention).toHaveLength(1);
+  expect(store.claim(Date.now() + 999999)).toBeUndefined();
+  expect(
+    (
+      store.db
+        .query("SELECT error FROM inbox WHERE id=?")
+        .get(job.event.id) as any
+    ).error,
+  ).toContain("Codex usage limit");
+  store.close();
+});
+
+test("worker memory capabilities match its embedding configuration", () => {
+  const enabled = workerConfig(
+    "home",
+    "private-room",
+    "orch",
+    "http://127.0.0.1",
+    "fixture",
+    "bun",
+  ).mcp_servers.orchestrator;
+  expect(enabled.env.ORCHESTRATOR_EMBEDDINGS).toBe("on");
+  expect(enabled.enabled_tools).toContain("check_similar");
+  const disabled = workerConfig(
+    "home",
+    "private-room",
+    "orch",
+    "http://127.0.0.1",
+    "fixture",
+    "bun",
+    false,
+  ).mcp_servers.orchestrator;
+  expect(disabled.env.ORCHESTRATOR_EMBEDDINGS).toBe("off");
+  expect(disabled.enabled_tools).not.toContain("check_similar");
+  expect(disabled.enabled_tools).toContain("lookup");
+  expect(enabled.env.ORCHESTRATOR_PROJECT_ROOT).toBe("private-room");
 });

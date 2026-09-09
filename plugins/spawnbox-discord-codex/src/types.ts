@@ -51,5 +51,6 @@ export type HelpConfig = {
   codexHome: string;
   orchestratorRoot: string;
   maxConcurrency: number;
+  memoryEmbeddings?: boolean;
   catchupPageLimit: number;
 };

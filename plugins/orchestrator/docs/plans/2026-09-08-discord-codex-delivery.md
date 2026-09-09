@@ -13,7 +13,7 @@ HELP skills, read-only diagnostics, lifecycle memory and a local supervisor.
 
 Qualification so far:
 
-- 17 Bun tests and 99 assertions cover delivery/retry, deduplication, room ordering,
+- 20 Bun tests and 115 assertions cover delivery/retry, deduplication, room ordering,
   access boundaries, real upstream chunking and DM restart behavior, historical
   pagination, source/skill-read restrictions, private support permissions and
   visible operator-blocked outcomes.
@@ -78,7 +78,7 @@ At the end of this round: 11 journal events marked handled, including that recor
 failed first forum attempt and its successful follow-up; no pending/running events,
 uncertain deliveries or service errors. Do not interpret the handled count alone
 as 11 successful behavioral checks. The supervisor is left running in private
-rehearsal scope. Installed development version is `0.1.0+codex.20260909011253`.
+rehearsal scope. Current installed development version is `0.1.0+codex.20260909102425`.
 
 An additional explicit local REST fixture passed private support-room creation,
 permission overwrite checks and reuse, then removed its empty test room/category.
@@ -88,8 +88,7 @@ legacy numeric bot permission mask missing ViewChannel and ReadMessageHistory.
 Named permissions now grant the intended conversation capabilities without
 unrelated webhook/access administration. A regression test covers the template.
 
-Remaining live gates: disjoint DM ownership and cold restart, a real
-participant-shared diagnostic package and member timeouts. The D1 release query,
+Remaining live gates: a real participant-shared diagnostic package and member timeouts. The D1 release query,
 archive fixtures and disposable deletion check cover part of these workflows;
 full live acceptance is not claimed. The supervisor does not register Windows logon startup.
 Publishing the branch to the shared marketplace and changing production channel/DM
@@ -99,3 +98,37 @@ Known intentional operator boundaries: helper approval/rejection and role change
 bans/kicks, arbitrary access changes, cross-audience publication, code edits,
 deployment and binary diagnostic database analysis. Conversation memory is isolated;
 the full private fleet KB is not automatically injected into public rooms.
+
+## Owner DM acceptance and recovery fixes — 2026-09-09
+
+Jarid explicitly approved a temporary handover of only user `1471274334474600710`
+in HELP DM `1496232181578600469`, followed by restoration. Test messages were sent
+through his signed-in Discord browser session. Claude's other three DM recipients
+and all guild routing stayed unchanged. A local snapshot and bounded rollback
+watchdog protected the temporary handover across interruption.
+
+The initial event `1547063681957761086` hit account usage exhaustion. A native
+`error` notification had been forwarded as EventEmitter's fatal `error`, crashing
+the listener. The watchdog restored Claude routing during the interruption.
+The fix routes it as `turn/error` and waits for actual `turn/completed`. Usage
+exhaustion now blocks the event for explicit retry without restarting the service.
+
+After usage became available, the same event delivered reply
+`1547188779666898984`, "DM received: juniper". An ancillary similarity call exposed
+the mismatch between advertised memory tools and disabled embeddings. Production
+workers now use the existing shared local embedding sidecar with conversation-
+isolated databases; `memoryEmbeddings=false` explicitly disables the similarity
+tool and explains keyword retrieval. The first delivered event was acknowledged
+locally after verifying its receipt, so it was not resent.
+
+The listener was fully stopped before browser message `1547189851886198834` was
+sent. On restart it recovered that offline event, resumed native task
+`01a083e3-941b-7440-8560-e96af0b8f1b1` and delivered reply
+`1547190110049669180`, recalling "juniper". The native tool trace independently
+confirms `check_similar` found two saved checkpoints (97.4% and 88.3%).
+
+Both events finished handled, with one recorded reply each and no uncertain
+deliveries. Claude's four-entry DM allowlist was restored in its original order;
+the entire parsed access file matched the snapshot. Codex DM admission returned
+to empty. Remembered but no-longer-admitted DMs are now excluded from catch-up
+reads and reference fetches. Private guild rehearsal can continue independently.

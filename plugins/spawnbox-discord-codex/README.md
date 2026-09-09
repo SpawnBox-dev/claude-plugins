@@ -52,7 +52,10 @@ native task and its admitted event. Public workers cannot fetch staff/private
 history or select an arbitrary reply destination.
 
 Orchestrator project and global memory are isolated per conversation. Shared
-domain policies remain project-owned and are read through a bounded broker. This
+embedding inference uses the existing local sidecar; note retrieval still reads
+only the conversation's databases. `memoryEmbeddings` defaults to true. Setting it
+to false keeps keyword retrieval and removes the unsupported similarity tool.
+Shared domain policies remain project-owned and are read through a bounded broker. This
 includes a contained reader for installed skill instructions, so the restricted
 worker can actually load the workflows listed in its native skill catalog. This
 preserves room boundaries but does not automatically import the entire existing
@@ -99,8 +102,13 @@ The source project must retain its reviewed Wrangler installation for diagnostic
 
 ## Recovery and upgrades
 
-Use status to inspect blocked events, uncertain sends and catch-up errors. Check
-Discord before resolving an uncertain delivery. Supply the actual accepted ID:
+Use status to inspect blocked events, uncertain sends and catch-up errors.
+Codex usage-limit failures stay blocked for review instead of crashing the
+listener or being replayed by the supervisor. After usage becomes available,
+explicitly retry the retained event. Removing a DM recipient also removes that
+DM from catch-up reads, while retaining its local continuity records.
+
+Check Discord before resolving an uncertain delivery. Supply the actual accepted ID:
 
 ```powershell
 bun dist/cli.js reconcile --state <state> --operation <operation> --part 0 --message-id <verified-discord-id>
@@ -142,8 +150,10 @@ The current private rehearsal has passed real model wake/reply, human follow-up,
 offline-arrival recovery in the same native task, embeds, text/image attachments,
 generated files, reactions, forum creation, tags and archival. A separate real REST
 fixture verifies private support-room permissions/reuse and evidence preservation
-before deleting a disposable bot message. Live DM ownership, diagnostic package
-contents and member timeouts still need scoped acceptance; production routing has
-not changed.
+before deleting a disposable bot message. A temporary owner-DM handover also passed:
+an offline message was recovered in the same native task, the remembered marker was
+recalled, similarity search worked, and Claude routing was restored afterward.
+Real diagnostic package contents and member timeouts still need scoped acceptance;
+production routing remains on Claude.
 The supervisor currently runs locally and does not register automatic Windows
 logon startup. Stopping this host stops its listener until restarted.

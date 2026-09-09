@@ -93,6 +93,7 @@ export async function startService(
   const receive = async (message: Message) => {
     if (!identityVerified) return;
     const event = envelope(message);
+    if (event.isDM && !config.dmAllowUsers.includes(event.userId)) return;
     let mentioned = message.mentions.users.has(bridge.client.user!.id);
     if (!mentioned && message.reference?.messageId) {
       const original = await message.fetchReference().catch(() => undefined);
@@ -211,11 +212,7 @@ export async function startService(
         ...active.threads
           .filter((t) => !!config.channels[t.parentId || ""])
           .map((t) => t.id),
-        ...(
-          store.db.query("SELECT channel_id FROM dm_recipients").all() as {
-            channel_id: string;
-          }[]
-        ).map((row) => row.channel_id),
+        ...store.dmChannels(config.dmAllowUsers),
       ]);
       // Archived forum posts also contain conversations missed while offline.
       for (const id of Object.keys(config.channels)) {
