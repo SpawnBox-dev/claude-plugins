@@ -3,6 +3,9 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 const source = resolve(import.meta.dir, "..");
+// Bun's emitted module labels depend on cwd. Keep rebuilds reproducible when
+// invoked from either the marketplace root or the package directory.
+process.chdir(source);
 const artifact = resolve(source, "..", "orchestrator-codex");
 const check = process.argv.includes("--check");
 const target = check ? mkdtempSync(join(tmpdir(), "orchestrator-package-check-")) : artifact;

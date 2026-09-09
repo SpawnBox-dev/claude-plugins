@@ -1,6 +1,6 @@
 # Codex standalone delivery — 2026-09-08
 
-The shared-engine standalone port is implemented on `codex/orchestrator-discord`. Release metadata is prepared as 0.70.0. Locally installed development artifact: `0.70.0+codex.20260908174911`, marketplace `spawnbox-dev-codex-plugins`. Claude's installed package and launchers have not been replaced. This branch has not been published to the remote marketplace.
+The shared-engine standalone port is implemented on `codex/orchestrator-discord`. Release metadata is prepared as 0.70.0. Development artifact: `0.70.0+codex.20260909010315`, marketplace `spawnbox-dev-codex-plugins`. Claude's installed package and launchers have not been replaced. This branch has not been published to the remote marketplace.
 
 The Codex package exposes 20 knowledge, work, preference and maintenance tools, 12 skills and seven command hooks. It skips the Claude channels, permission relay, transcript identity, fleet cleanup and process reaping paths. Checkpoints use native request identity and only recover the current task's records. Shared source changes preserve the default Claude profile; database startup additionally handles concurrent WAL initialization and rechecks migrations under a write lock.
 
@@ -22,8 +22,8 @@ The Codex package exposes 20 knowledge, work, preference and maintenance tools, 
 
 Native `.codex-plugin` MCP arguments in 0.153.3 do not expand `PLUGIN_ROOT` or `CLAUDE_PLUGIN_ROOT`, although hooks do. The generated startup expression resolves the exact installed cache version and preserves the project cwd. It is tied to this marketplace name; catalog renaming must regenerate that path. Tests cover the actual installed Windows loader.
 
-Automatic retro remains disabled in Codex; explicit `retro` is available. Automatic shell-write discovery, Claude-specific failure/task-completed hooks and native subagent lifecycle parity are not claimed. File-based edits and manual capture cover independent operation. Git-backed marketplace publication, pinned remote rollback and a separate Desktop UI acceptance run remain release follow-ups; CLI/app-server acceptance is complete. Current running tasks must start a fresh task to load newly installed skills and MCP tools.
+Automatic retro remains disabled in Codex; explicit `retro` is available. Automatic shell-write discovery, Claude-specific failure/task-completed hooks and native subagent lifecycle parity are not claimed. File-based edits and manual capture cover independent operation. Git-backed marketplace publication and pinned remote rollback remain release follow-ups. CLI/app-server acceptance is complete, and the initiating Desktop task subsequently loaded the installed tools and skills after interruption/reload. Live system_status, briefing, lookup, note and task updates work against the existing project KB. A fresh task is a recovery option when a running task has not picked up an installation; it is not universally required.
 
 For use, configuration, update and rollback instructions, see [the package guide](../../codex/README.md). Rollback should preserve shared knowledge rather than restore a whole database over legitimate concurrent work.
 
-The next delivery is the Discord HELP bridge, following the [accepted parity plan](./2026-09-08-discord-codex-gap-analysis.md). A tools-only Discord package is not its completion criterion. Live messages and production bot cutover have not been performed.
+The adjacent Discord HELP bridge follows the [accepted parity plan](./2026-09-08-discord-codex-gap-analysis.md). Its private live rehearsal and remaining production acceptance checks are recorded in [the delivery log](./2026-09-08-discord-codex-delivery.md). Production bot cutover has not been performed.

@@ -1,0 +1,19 @@
+{
+  "name": "spawnbox-discord-codex",
+  "version": "0.1.0+codex.20260909011253",
+  "description": "SpawnBox.help Discord skills and durable Codex conversation bridge, based on codex-discord-mcp.",
+  "author": {
+    "name": "SpawnBox"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "SpawnBox Discord HELP",
+    "shortDescription": "Run the SpawnBox.help conversation agent with Codex.",
+    "longDescription": "HELP skills, a scoped MCP client and a separately supervised Discord Gateway service with persistent conversations and delivery receipts. Requires local setup; installing does not start a bot.",
+    "developerName": "SpawnBox",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me set up or inspect the SpawnBox.help Codex bridge."
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-codex",
-  "version": "0.70.0+codex.20260908174911",
+  "version": "0.70.0+codex.20260909010315",
   "type": "module",
   "engines": {
     "bun": ">=1.3.0"

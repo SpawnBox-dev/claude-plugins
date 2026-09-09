@@ -1,0 +1,26 @@
+{
+  "name": "spawnbox-discord-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests",
+    "typecheck": "tsc --noEmit",
+    "build": "bun scripts/build.ts",
+    "start": "bun src/cli.ts start",
+    "status": "bun src/cli.ts status",
+    "test:native": "bun scripts/native-smoke.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "discord.js": "14.25.1",
+    "cross-spawn": "7.0.6",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "@types/node": "22.19.15",
+    "@types/cross-spawn": "6.0.6",
+    "typescript": "5.9.3"
+  }
+}
