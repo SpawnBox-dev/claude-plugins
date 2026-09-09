@@ -18,16 +18,10 @@ var memoryTools = [
   "user_profile",
   "plan",
   "breakdown",
-  "retro"
+  "retro",
+  "delete_note"
 ];
-var projectKnowledgeTools = [
-  "system_status",
-  "lookup",
-  "check_similar",
-  "list_work_items",
-  "list_open_threads",
-  "user_profile"
-];
+var projectKnowledgeTools = [...memoryTools];
 
 // src/guard.ts
 var allowed = new Set([

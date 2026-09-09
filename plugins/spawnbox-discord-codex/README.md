@@ -52,15 +52,19 @@ receive only a random loopback credential. Every operation is bound to an active
 native task and its admitted event. Public workers cannot fetch staff/private
 history or select an arbitrary reply destination.
 
-Orchestrator project and global conversation memory are isolated per room. Its
-18 tools support retrieval, notes, revisions, work items, planning and checkpoints;
-package installation and permanent note deletion remain operator work. With
-`projectKnowledge=true`, a separate `project_knowledge` MCP exposes six read-only
-tools against the existing project KB and shared global knowledge. This restores
-historical engagement and product context without allowing a Discord participant
-to rewrite the shared KB. Read access includes internal information: audience
-discipline is a model obligation, not a claim that the legacy KB has record-level
-audience enforcement. New conversation findings are available for operator review.
+Orchestrator conversation memory and lifecycle checkpoints remain isolated per
+room. With `projectKnowledge=true`, `project_knowledge` also exposes the same 19
+knowledge tools against the existing project KB and shared global knowledge:
+retrieval, creation, revisions, superseding, resolution, deletion, user preferences,
+work items, planning, breakdown and explicit maintenance. Embedding installation
+remains available to the local operator's ordinary Orchestrator plugin.
+Workers write reusable evidence and work directly to the shared project record,
+with source IDs, dates, audience and uncertainty; private conversation details
+stay local. Participant reports do not become verified facts or operator policy.
+Updates preserve provenance and deletion retains Orchestrator's link-cascade guard.
+Shared access includes internal information: audience discipline and justified
+curation are model obligations, not record-level authorization enforced by the
+legacy KB. Shared access never grants permission to publish private information.
 
 Shared embedding inference uses the existing local sidecar. `memoryEmbeddings`
 defaults to true; setting it false removes similarity tools from both servers.
@@ -153,7 +157,8 @@ Set `CODEX_EXECUTABLE` to the native executable for Windows subprocess tests.
 `scripts/native-smoke.ts` uses a deterministic loopback Responses fixture with
 the real Codex host, hooks, MCP and queue. It exercises inbound wake, persistent
 task resume after a full process/DB reopen, explicit reply, deliberate silence,
-orchestrator checkpoint and a denied native patch. It runs no inference and sends
+orchestrator checkpoint, shared KB CRUD with revision history and native task
+attribution, and a denied native patch. It runs no inference and sends
 no Discord messages. `scripts/installed-smoke.ts` qualifies the actual installed
 plugin loader and passive disconnected behavior.
 
@@ -169,7 +174,9 @@ fixture verifies private support-room permissions/reuse and evidence preservatio
 before deleting a disposable bot message. A temporary owner-DM handover also passed:
 an offline message was recovered in the same native task, the remembered marker was
 recalled, similarity search worked, and Claude routing was restored afterward.
-Real diagnostic package contents and member timeouts still need scoped acceptance;
-production routing remains on Claude.
-The supervisor currently runs locally and does not register automatic Windows
-logon startup. Stopping this host stops its listener until restarted.
+Production ownership was subsequently authorized and moved to Codex on 2026-09-09.
+The installed host has a hidden supervisor and a Windows logon task; installation
+alone does not register that task. The production owner-DM test verified persona
+bootstrap, shared KB retrieval and persistent local memory. Claude's configuration
+remains intact. Real diagnostic package contents and member timeouts still need
+scoped acceptance; automatic cross-harness ownership remains outstanding.

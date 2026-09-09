@@ -1,6 +1,6 @@
 {
   "name": "spawnbox-discord-codex",
-  "version": "0.1.0+codex.20260909160806",
+  "version": "0.1.0+codex.20260909222852",
   "description": "SpawnBox.help Discord skills and durable Codex conversation bridge, based on codex-discord-mcp.",
   "author": {
     "name": "SpawnBox"

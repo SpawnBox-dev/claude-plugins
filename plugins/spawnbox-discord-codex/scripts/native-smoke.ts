@@ -10,6 +10,7 @@ import {
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { strict as assert } from "node:assert";
+import { Database } from "bun:sqlite";
 import { Store } from "../src/store";
 import { Worker } from "../src/worker";
 import { AppServer } from "../src/app-server";
@@ -80,6 +81,12 @@ const endpoint = Bun.serve({
   },
 });
 let count = 0;
+let sharedNoteId = "";
+function sharedFixtureNote() {
+  const db = new Database(join(fixture, ".orchestrator", "project.db"), { readonly: true });
+  try { return db.query("SELECT id,content,source_session FROM notes WHERE content LIKE 'HELP_SHARED_CRUD%'").get() as any; }
+  finally { db.close(); }
+}
 const search = (n: number, query: string) => ({
   type: "tool_search_call",
   id: `tool-${n}`,
@@ -149,6 +156,29 @@ const model = Bun.serve({
     else if (n === 17) item = search(n, "project_knowledge system_status");
     else if (n === 18)
       item = call(n, "mcp__project_knowledge", "system_status", {});
+    else if (n === 19) item = search(n, "project_knowledge note");
+    else if (n === 20)
+      item = call(n, "mcp__project_knowledge", "note", {
+        type: "insight", scope: "project", content: "HELP_SHARED_CRUD initial fixture evidence",
+        context: "Synthetic native test; no Discord participant or production evidence",
+      });
+    else if (n === 21) {
+      const saved = sharedFixtureNote();
+      assert(saved, "Shared note was not persisted");
+      sharedNoteId = saved.id;
+      assert(saved.source_session?.startsWith("codex-"), "Shared mutation lost native attribution");
+      item = search(n, "project_knowledge lookup");
+    } else if (n === 22 || n === 25 || n === 28)
+      item = call(n, "mcp__project_knowledge", "lookup", { id: sharedNoteId, include_history: true });
+    else if (n === 23) item = search(n, "project_knowledge update_note");
+    else if (n === 24)
+      item = call(n, "mcp__project_knowledge", "update_note", { id: sharedNoteId, content: "HELP_SHARED_CRUD corrected fixture evidence" });
+    else if (n === 26) {
+      assert.equal(sharedFixtureNote()?.content, "HELP_SHARED_CRUD corrected fixture evidence");
+      assert(JSON.stringify(body).includes("initial fixture evidence"), "Revision history was not available");
+      item = search(n, "project_knowledge delete_note");
+    } else if (n === 27)
+      item = call(n, "mcp__project_knowledge", "delete_note", { id: sharedNoteId, reason: "Remove synthetic CRUD acceptance note" });
     else
       item = {
         type: "message",
@@ -275,7 +305,8 @@ try {
   );
   worker.start();
   await waitHandled("1500000000000000002");
-  assert.equal(count, 20);
+  assert.equal(count, 30);
+  assert.equal(sharedFixtureNote(), null, "Synthetic note was not deleted");
   assert(
     (await Bun.file(join(fixture, "request-16.json")).text()).includes(
       "Apply these",
@@ -316,6 +347,7 @@ try {
       explicitReplyOnly: true,
       noReply: true,
       nativePatchBlocked: true,
+      sharedKnowledgeCRUD: true,
       responses: count,
     }),
   );

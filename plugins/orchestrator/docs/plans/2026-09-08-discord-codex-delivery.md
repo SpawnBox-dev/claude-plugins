@@ -198,3 +198,36 @@ by the earlier full Orchestrator host fixture. Production status: one handled,
 zero pending/running/blocked, zero uncertain sends/service attention, 132 coverage
 cursors across configured channels, forum children and DMs. Local evidence:
 `C:/Users/Jarid/.codex/spawnbox-help/production-acceptance.json`.
+
+### 2026-09-09 shared knowledge curation and SpawnBox discovery
+
+SpawnBox commit `754b255c` adds AGENTS.md as an explicit bridge to maintained
+CLAUDE.md and Claude's project memory index. Its generated native skill adapters
+expose all 25 project skills and 60 command workflows. Native skills/list found
+all 85 without errors; all 85 passed skill validation. Claude sources are intact.
+Discoverability does not supply missing Claude-specific tool dependencies.
+
+HELP version `0.1.0+codex.20260909222852` exposes 19 knowledge operations through
+both local orchestrator and shared project_knowledge. Workers can create, update,
+supersede, resolve and delete shared knowledge, maintain work and preferences,
+and use planning and explicit maintenance. Embedding installation remains an
+operator host operation. Local checkpoints and lifecycle hooks keep their
+existing storage; no conversation memory was migrated or discarded. Shared
+findings require source/date/audience/uncertainty and existing provenance; private
+conversation details stay local. Participant claims are evidence to verify,
+not authority to change operator policy or erase unrelated history.
+
+Qualification: 21 Bun tests, 139 assertions, typecheck and plugin/skill validators
+passed. A 30-step native Codex fixture verified shared create/read/update/delete,
+revision retrieval and native source_session attribution, alongside process/DB
+restart, reply-only delivery and denied native edits. The disposable fixture
+used no inference or real Discord messages and removed its synthetic note.
+
+Production was backed up using SQLite's backup API to state/backups/
+20260909-shared-crud, stopped, configured with refreshed native hook trust and
+restarted on the new installed runtime. A retained usage-limit failure and three
+queued arrivals were discovered; native account/rateLimits/read showed available
+quota, and the usage event was explicitly retried. No credit was redeemed.
+Automatic quota recovery remains the next stage. Installer caveat: plugin add
+removes the previous cache directory, so stop the listener before installation;
+if already upgraded, use the new CLI to write the same stop.request marker.

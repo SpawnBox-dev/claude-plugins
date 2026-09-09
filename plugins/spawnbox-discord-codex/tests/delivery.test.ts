@@ -690,17 +690,21 @@ test("worker memory capabilities match its embedding configuration", () => {
   expect(enabled.env.ORCHESTRATOR_PROJECT_ROOT).toBe("private-room");
 });
 
-test("shared project knowledge is read-only while room memory retains maintenance tools", () => {
+test("shared knowledge supports full curation while keeping local checkpoint storage", () => {
   const servers = workerConfig("home", "private-room", "orch", "http://127.0.0.1", "fixture", "bun", true, "shared-project").mcp_servers;
   expect(servers.project_knowledge!.env.ORCHESTRATOR_PROJECT_ROOT).toBe("shared-project");
   expect(servers.orchestrator.env.ORCHESTRATOR_PROJECT_ROOT).toBe("private-room");
   expect(servers.orchestrator.enabled_tools).toContain("update_note");
   expect(guard({tool_name: "mcp__orchestrator__update_note"})).toEqual({});
   expect(guard({tool_name: "mcp__project_knowledge__lookup"})).toEqual({});
-  for (const tool of ["note", "update_note", "delete_note", "install_embeddings", "save_progress"]) {
-    expect(servers.project_knowledge!.enabled_tools).not.toContain(tool);
-    expect(guard({tool_name: `mcp__project_knowledge__${tool}`}).hookSpecificOutput?.permissionDecision).toBe("deny");
+  for (const tool of ["note", "update_note", "delete_note", "save_progress", "supersede_note", "close_thread", "update_work_item"]) {
+    expect(servers.project_knowledge!.enabled_tools).toContain(tool);
+    expect(guard({tool_name: `mcp__project_knowledge__${tool}`})).toEqual({});
   }
+  expect(servers.project_knowledge!.enabled_tools).toHaveLength(19);
+  expect(guard({tool_name: "mcp__project_knowledge__install_embeddings"}).hookSpecificOutput?.permissionDecision).toBe("deny");
+  expect(guard({tool_name: "mcp__project_knowledge__agent_channel"}).hookSpecificOutput?.permissionDecision).toBe("deny");
   const offline = workerConfig("home", "room", "orch", "http://127.0.0.1", "fixture", "bun", false, "shared").mcp_servers;
   expect(offline.project_knowledge!.enabled_tools).not.toContain("check_similar");
+  expect(offline.project_knowledge!.enabled_tools).not.toContain("install_embeddings");
 });
