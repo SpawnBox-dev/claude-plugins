@@ -52,5 +52,6 @@ export type HelpConfig = {
   orchestratorRoot: string;
   maxConcurrency: number;
   memoryEmbeddings?: boolean;
+  projectKnowledge?: boolean;
   catchupPageLimit: number;
 };

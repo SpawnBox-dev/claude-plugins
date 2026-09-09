@@ -1,4 +1,34 @@
 // @bun
+// src/memory-policy.ts
+var memoryTools = [
+  "system_status",
+  "briefing",
+  "lookup",
+  "note",
+  "save_progress",
+  "check_similar",
+  "create_work_item",
+  "update_work_item",
+  "list_work_items",
+  "update_note",
+  "supersede_note",
+  "close_thread",
+  "list_open_threads",
+  "update_session_task",
+  "user_profile",
+  "plan",
+  "breakdown",
+  "retro"
+];
+var projectKnowledgeTools = [
+  "system_status",
+  "lookup",
+  "check_similar",
+  "list_work_items",
+  "list_open_threads",
+  "user_profile"
+];
+
 // src/guard.ts
 var allowed = new Set([
   "mcp__spawnbox_discord__context",
@@ -27,7 +57,9 @@ var allowed = new Set([
   "mcp__orchestrator__check_similar",
   "mcp__orchestrator__create_work_item",
   "mcp__orchestrator__update_work_item",
-  "mcp__orchestrator__list_work_items"
+  "mcp__orchestrator__list_work_items",
+  ...memoryTools.map((name) => `mcp__orchestrator__${name}`),
+  ...projectKnowledgeTools.map((name) => `mcp__project_knowledge__${name}`)
 ]);
 function guard(input) {
   const name = input?.tool_name;

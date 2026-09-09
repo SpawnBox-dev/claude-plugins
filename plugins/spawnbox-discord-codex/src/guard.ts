@@ -1,5 +1,6 @@
 // Installed ONLY in the dedicated HELP Codex home. No effect on ordinary Codex
 // or Claude tasks. Tool names are provided by the host, never Discord content.
+import { memoryTools, projectKnowledgeTools } from "./memory-policy";
 const allowed = new Set([
   "mcp__spawnbox_discord__context",
   "mcp__spawnbox_discord__reply",
@@ -28,6 +29,8 @@ const allowed = new Set([
   "mcp__orchestrator__create_work_item",
   "mcp__orchestrator__update_work_item",
   "mcp__orchestrator__list_work_items",
+  ...memoryTools.map(name => `mcp__orchestrator__${name}`),
+  ...projectKnowledgeTools.map(name => `mcp__project_knowledge__${name}`),
 ]);
 export function guard(input: any) {
   const name = input?.tool_name;

@@ -3,6 +3,8 @@ import { resolve, relative, isAbsolute, join } from "node:path";
 import type { HelpConfig, Job } from "./types";
 
 const policyFiles: Record<string, string> = {
+  bootstrap: ".claude/commands/discord-bootstrap.md",
+  reference: ".claude/discord.md",
   engagement: ".claude/discord-engagement.md",
   channels: ".claude/discord-channels-bootstrap.md",
   help: ".claude/commands/discord-help.md",

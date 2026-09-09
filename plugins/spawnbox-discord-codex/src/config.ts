@@ -35,6 +35,7 @@ export const configSchema = z
     orchestratorRoot: z.string().min(1),
     maxConcurrency: z.number().int().min(1).max(8).default(2),
     memoryEmbeddings: z.boolean().default(true),
+    projectKnowledge: z.boolean().default(false),
     catchupPageLimit: z.number().int().min(1).max(1000).default(50),
   })
   .strict();

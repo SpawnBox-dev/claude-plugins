@@ -132,3 +132,69 @@ deliveries. Claude's four-entry DM allowlist was restored in its original order;
 the entire parsed access file matched the snapshot. Codex DM admission returned
 to empty. Remembered but no-longer-admitted DMs are now excluded from catch-up
 reads and reference fetches. Private guild rehearsal can continue independently.
+
+## Production activation and bootstrap correction - 2026-09-09
+
+Jarid subsequently explicitly authorized Codex as the production HELP bot while
+Claude is unused until Friday evening. This supersedes the earlier temporary-test
+scope and pending-cutover gate; it does not schedule an automatic Friday switch.
+
+The root Codex task verified 11,156 persistent project notes and recorded delivery
+of all seven lifecycle hooks before configuration changes. Semantic embeddings
+were unavailable after the Windows restart; `install_embeddings(action="install")`
+restarted the existing local dependency and live status returned ready, 768 dims.
+No reset credit was consumed. The usage window refreshed normally during work.
+
+The audit found two real worker gaps: bootstrap was only discoverable rather than
+explicitly invoked, and isolated conversation memory lacked the existing project
+KB. The worker now invokes bootstrap on start/resume/context recovery, reads the
+canonical persona and operating references, and exposes fuller local memory
+maintenance. Optional `projectKnowledge=true` provides six read-only shared-KB
+tools while 18 local tools maintain room-specific state. Startup verifies all
+seven trusted lifecycle hooks plus the deny guard. Legacy KB entries have no
+universal audience ACL: internal read access is not publication permission, and
+the worker instructions explicitly preserve person, audience and diagnostic
+privacy. Shared knowledge is read-only at the tool/guard boundary.
+
+Installed version: `0.1.0+codex.20260909160806`. Validation: 21 Bun tests, 131
+assertions, typecheck, plugin/skill validators, diff check; the native fixture now
+passes 20 steps, including actual bootstrap reads and shared-KB status through
+the real host, without model inference. Prior live transport acceptance remains
+documented above.
+
+Production state is `C:/Users/Jarid/.codex/spawnbox-help`. A fresh read-only import
+matched all 27 channel policies, one diagnostic webhook and four DM recipients.
+Claude's access.json is byte-for-byte unchanged (SHA256
+`35B92EAC66C1A203897D1E451BC57CD591A567B1D1D8DA8BC1EFA652FD828D3C`).
+All four DM channel mappings were persisted without sending a message. The private
+rehearsal was stopped before production startup. Production uses the installed
+Orchestrator, shared project knowledge and its own authenticated Codex home.
+
+Local start.ps1/stop.ps1/status.ps1 and runtime.json control the exact installed
+runtime. The scheduled task `SpawnBox HELP - Codex` starts the hidden supervisor
+after Jarid logs into Windows, including on battery. It does not run before login.
+An explicit stop.request prevents restart. The start launcher refuses a detected
+Claude official Discord server; it cannot stop a Claude listener started later.
+Both configs remain ready, but simultaneous listeners are not coordinated.
+
+Remaining parity work is concrete: whole-guild historical engagement/commitment
+sweeps and D1 diagnostic backstop, in-app diagnostic response publishing,
+automatic cross-harness ownership, and shared-KB promotion of worker findings.
+Participant-shared diagnostic and timeout operations also retain their documented
+live-acceptance gaps. Usage-limit events remain visible and blocked until an
+operator retries them; no automatic reset credit is spent.
+
+Production live acceptance completed at 16:14Z: owner-DM event
+`1547278585557946428` delivered exactly one recorded reply
+`1547278921815564309`, native task `01a086f1-63e0-7e91-838c-4d1d9e1cbd9c`.
+The actual model trace read discord-bootstrap, engagement/persona and operating
+references, person/channel notes and discord-help; searched the shared KB and
+read record `72db4e71`; ran local similarity, note and save_progress; then replied
+as the owner's chief of staff. It explicitly left historical decisions alone.
+SQLite independently confirms persistent checkpoints and native SessionStart,
+UserPromptSubmit, 26 PreToolUse/26 PostToolUse, and Stop hook executions. The
+remaining two lifecycle events require compaction/session end and were covered
+by the earlier full Orchestrator host fixture. Production status: one handled,
+zero pending/running/blocked, zero uncertain sends/service attention, 132 coverage
+cursors across configured channels, forum children and DMs. Local evidence:
+`C:/Users/Jarid/.codex/spawnbox-help/production-acceptance.json`.

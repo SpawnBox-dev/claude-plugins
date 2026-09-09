@@ -45,6 +45,7 @@ const config: HelpConfig = {
   orchestratorRoot: resolve(root, "../orchestrator-codex"),
   maxConcurrency: 1,
   memoryEmbeddings: false,
+  projectKnowledge: true,
   catchupPageLimit: 2,
 };
 config.model = process.env.HELP_TEST_MODEL || "gpt-6-astra";
@@ -141,6 +142,13 @@ const model = Bun.serve({
         kind: "skill",
         name: "discord-help",
       });
+    else if (n === 16)
+      item = call(n, "mcp__spawnbox_discord", "read_resource", {
+        kind: "skill", name: "discord-bootstrap",
+      });
+    else if (n === 17) item = search(n, "project_knowledge system_status");
+    else if (n === 18)
+      item = call(n, "mcp__project_knowledge", "system_status", {});
     else
       item = {
         type: "message",
@@ -267,13 +275,15 @@ try {
   );
   worker.start();
   await waitHandled("1500000000000000002");
-  assert.equal(count, 17);
+  assert.equal(count, 20);
   assert(
     (await Bun.file(join(fixture, "request-16.json")).text()).includes(
       "Apply these",
     ),
     "Installed skill contents did not reach the native model",
   );
+  assert((await Bun.file(join(fixture, "request-17.json")).text()).includes("canonical persona policy"), "Bootstrap instructions did not reach native model");
+  assert((await Bun.file(join(fixture, "request-19.json")).text()).includes("knowledge_root"), "Shared KB status did not reach native model");
   assert.equal(
     (store.db.query("SELECT thread_id FROM conversations").get() as any)
       .thread_id,

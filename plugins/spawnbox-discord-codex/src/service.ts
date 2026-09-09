@@ -175,6 +175,11 @@ export async function startService(
       throw new Error(
         "Dedicated HELP guard must be installed and explicitly trusted before service startup",
       );
+    const memoryHooks = hookInventory.data
+      .flatMap((entry: any) => entry.hooks)
+      .filter((hook: any) => hook.command?.includes("memory-hook.js"));
+    if (memoryHooks.length !== 7 || memoryHooks.some((hook: any) => hook.trustStatus !== "trusted"))
+      throw new Error("All seven Orchestrator lifecycle hooks must be installed and trusted before HELP startup");
     worker = new Worker(
       store,
       app,

@@ -43,7 +43,8 @@ PreToolUse deny guard. Shell, Code Mode, computer use, other integrations and
 multi-agent tools are disabled. Only enumerated broker and conversation-memory
 tools are preauthorized in this dedicated profile. These settings do not change
 the operator's ordinary Codex profile. Native hook errors are not treated as an
-allow decision; startup requires the reviewed guard to be trusted.
+allow decision; startup requires the reviewed guard and all seven memory hooks
+to be trusted.
 
 The bot token and Cloudflare credentials stay in the service. Child environments
 are built from an allowlist; the Codex worker receives neither token. MCP clients
@@ -51,15 +52,26 @@ receive only a random loopback credential. Every operation is bound to an active
 native task and its admitted event. Public workers cannot fetch staff/private
 history or select an arbitrary reply destination.
 
-Orchestrator project and global memory are isolated per conversation. Shared
-embedding inference uses the existing local sidecar; note retrieval still reads
-only the conversation's databases. `memoryEmbeddings` defaults to true. Setting it
-to false keeps keyword retrieval and removes the unsupported similarity tool.
+Orchestrator project and global conversation memory are isolated per room. Its
+18 tools support retrieval, notes, revisions, work items, planning and checkpoints;
+package installation and permanent note deletion remain operator work. With
+`projectKnowledge=true`, a separate `project_knowledge` MCP exposes six read-only
+tools against the existing project KB and shared global knowledge. This restores
+historical engagement and product context without allowing a Discord participant
+to rewrite the shared KB. Read access includes internal information: audience
+discipline is a model obligation, not a claim that the legacy KB has record-level
+audience enforcement. New conversation findings are available for operator review.
+
+Shared embedding inference uses the existing local sidecar. `memoryEmbeddings`
+defaults to true; setting it false removes similarity tools from both servers.
 Shared domain policies remain project-owned and are read through a bounded broker. This
 includes a contained reader for installed skill instructions, so the restricted
 worker can actually load the workflows listed in its native skill catalog. This
-preserves room boundaries but does not automatically import the entire existing
-fleet KB into every Discord task. Binary diagnostic database investigation,
+loads `discord-bootstrap` on startup/resume/context recovery, including the
+existing engagement/persona reference, Discord operating reference and scoped
+person/channel notes. It does not claim the old whole-guild bootstrap sweeps or
+diagnostic backstop were executed by loading one conversation's skill.
+Binary diagnostic database investigation,
 cross-audience publication, helper role decisions, bans/kicks, broad access
 changes and deployment remain explicit local operator work.
 
@@ -74,8 +86,12 @@ The source project must retain its reviewed Wrangler installation for diagnostic
 2. Create a dedicated state directory and `config.json` matching `src/config.ts`.
    `scripts/import-help-config.ts` can read the existing HELP allowlist and verify
    the actual bot/guild metadata without modifying Claude. Review audience mapping
-   before production use. Test routing must be disjoint from Claude's responding
-   rooms.
+   before production use. Both harness configurations can remain installed and
+   identical, but only one listener should answer a given room at a time. The
+   current state-directory lease coordinates Codex processes sharing that state;
+   Claude's official plugin does not participate in it. Test routing must be
+   disjoint while a Claude listener is active. Automatic cross-harness failover
+   requires a shared owner/receipt protocol and is not implemented here.
 3. Configure the dedicated worker using the installed package:
 
    ```powershell

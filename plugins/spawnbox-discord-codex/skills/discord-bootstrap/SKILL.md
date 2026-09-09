@@ -3,10 +3,44 @@ name: discord-bootstrap
 description: Establish SpawnBox.help context, review catch-up coverage and resume Discord engagement after startup or interruption.
 ---
 
-Use discord-help's native tool and authority rules. Call context, read engagement
-and channels policy, then scoped person/channel notes. The service owns the
-Gateway, deduplication, catch-up cursors and conversation mapping. Installation
-alone does not start the listener. Never create a second bot or polling cron.
+Run before outward actions on a new or resumed conversation and after context
+recovery. Bootstrap is idempotent and does not itself send a readiness message.
+
+1. Call context for trusted sender, audience and receipts. Read `engagement` and
+   `reference` with read_resource(kind="policy"), then this participant's
+   user-note and this room's channel-note. Page with `next`. The engagement
+   reference is the canonical persona policy: support/community/triage in public,
+   chief of staff in the owner's DM and appropriate staff surfaces, and the
+   helper or family register where the verified person and audience warrant it.
+   Interpret its Claude role descriptions as SpawnBox.help roles on Codex.
+   Read access to internal knowledge is never permission to publish it.
+2. Use orchestrator.briefing with event="resume", sections=["checkpoint"],
+   output_mode="summary"; retrieve this conversation's engagement and open work.
+   If project_knowledge is available, search the existing project KB for the
+   current channel/user and relevant technical issue. Read full matching records,
+   verify their dates and source conversation, and distinguish active obligations
+   from resolved history. Shared KB tools are read-only; update conversation-local
+   engagement notes with update_note/append_content and retain shared record IDs.
+3. Read discord-help and the workflow skill needed for this event. Read shared
+   policy `bootstrap` when dealing with offline recovery, moderation, telemetry
+   or engagement obligations. Native skills override its historical Claude-only
+   launchers, PA/subagent calls, marker files and cron commands. The dated order
+   retiring polling takes precedence over the old instructions to arm crons.
+4. Fetch paginated current-room history, including embeds and attachments, before
+   repeating advice or answering old arrivals. Resume a live help engagement;
+   remain quiet for casual chatter, a human's complete answer, resolved history
+   and stale nudge candidates. Do not cold-contact diagnostic uploaders.
+5. Save the current task, engagement state, facts, commitments and what's owed
+   next in local Orchestrator memory, then checkpoint meaningful progress. Record
+   a specific capability/coverage gap with needs_operator when it prevents work.
+
+The service owns Gateway startup, deduplication, coverage cursors, missed-message
+delivery and conversation mapping. Installation alone does not start a listener.
+Do not start another Gateway, create polling crons, edit Claude markers or infer
+that this conversation bootstrap performed a whole-guild historical sweep.
+Cross-engagement commitments and global diagnostic backstops require operator
+review until the corresponding service operations exist. Do not report those
+checks complete from an empty conversation memory.
 
 Read history in pages including embeds and attachments. Identify unresolved
 requests, advice already given and human participation before deciding to reply.

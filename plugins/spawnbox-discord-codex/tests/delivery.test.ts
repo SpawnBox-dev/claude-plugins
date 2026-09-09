@@ -689,3 +689,18 @@ test("worker memory capabilities match its embedding configuration", () => {
   expect(disabled.enabled_tools).toContain("lookup");
   expect(enabled.env.ORCHESTRATOR_PROJECT_ROOT).toBe("private-room");
 });
+
+test("shared project knowledge is read-only while room memory retains maintenance tools", () => {
+  const servers = workerConfig("home", "private-room", "orch", "http://127.0.0.1", "fixture", "bun", true, "shared-project").mcp_servers;
+  expect(servers.project_knowledge!.env.ORCHESTRATOR_PROJECT_ROOT).toBe("shared-project");
+  expect(servers.orchestrator.env.ORCHESTRATOR_PROJECT_ROOT).toBe("private-room");
+  expect(servers.orchestrator.enabled_tools).toContain("update_note");
+  expect(guard({tool_name: "mcp__orchestrator__update_note"})).toEqual({});
+  expect(guard({tool_name: "mcp__project_knowledge__lookup"})).toEqual({});
+  for (const tool of ["note", "update_note", "delete_note", "install_embeddings", "save_progress"]) {
+    expect(servers.project_knowledge!.enabled_tools).not.toContain(tool);
+    expect(guard({tool_name: `mcp__project_knowledge__${tool}`}).hookSpecificOutput?.permissionDecision).toBe("deny");
+  }
+  const offline = workerConfig("home", "room", "orch", "http://127.0.0.1", "fixture", "bun", false, "shared").mcp_servers;
+  expect(offline.project_knowledge!.enabled_tools).not.toContain("check_similar");
+});
