@@ -423,7 +423,7 @@ async function insertNote(
   }
 
   // Write to user_model if this is a user_pattern note
-  if (input.type === "user_pattern") {
+  if (input.type === "user_pattern" && (!RUNTIME.standalone || db === globalDb)) {
     writeUserModel(globalDb, input.content, input.context, input.dimension);
   }
 
@@ -515,8 +515,8 @@ export async function handleRemember(
   }
 
   // Determine which DB to use
-  const useGlobal =
-    input.scope === "global" || GLOBAL_TYPES.includes(input.type);
+  const useGlobal = input.scope === "global" ||
+    (GLOBAL_TYPES.includes(input.type) && !(RUNTIME.standalone && input.scope === "project"));
   const db = useGlobal ? globalDb : projectDb;
 
   // ── Jaccard dedup (unchanged) ──────────────────────────────────────────

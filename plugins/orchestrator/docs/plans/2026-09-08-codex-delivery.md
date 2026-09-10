@@ -26,4 +26,25 @@ Automatic retro remains disabled in Codex; explicit `retro` is available. Automa
 
 For use, configuration, update and rollback instructions, see [the package guide](../../codex/README.md). Rollback should preserve shared knowledge rather than restore a whole database over legitimate concurrent work.
 
-The adjacent Discord HELP bridge follows the [accepted parity plan](./2026-09-08-discord-codex-gap-analysis.md). Its private live rehearsal and remaining production acceptance checks are recorded in [the delivery log](./2026-09-08-discord-codex-delivery.md). Production bot cutover has not been performed.
+The adjacent Discord HELP bridge follows the [accepted parity plan](./2026-09-08-discord-codex-gap-analysis.md). Production cutover and remaining parity work are recorded in [the delivery log](./2026-09-08-discord-codex-delivery.md).
+
+## September 10 scope correction
+
+Codex artifact `0.70.0+codex.20260910132931` honors explicit project scope for
+tool capabilities and user patterns, including inline replacements. Project user
+patterns no longer modify the global user model. Planning retrieves current
+project capabilities alongside global ones. Omitted scope retains the established
+type defaults, and Claude's existing routing remains unchanged.
+
+The full suite passes 1,560 tests and 3,692 assertions; typecheck, generated-package
+validation and the real MCP protocol fixture pass. The protocol fixture covers
+both scopes, replacement, planning consumption and absence of global side effects.
+Native Codex again verifies all seven hooks, checkpoint isolation, compaction and
+resume. Security review identified the original bug and verified the correction.
+
+The installed package and production HELP dependency were updated after a graceful
+stop and SQLite backup. HELP now retains its Orchestrator dependency under its own
+versioned dependencies directory, so future plugin cache replacement cannot delete
+the live dependency. Gateway readiness was verified after restart. The available
+production traces contain shared KB retrieval but no shared note writes affected
+by this scope bug; fixture CRUD evidence is distinct from actual production use.

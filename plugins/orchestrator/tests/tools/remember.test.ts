@@ -77,6 +77,15 @@ describe("remember tool", () => {
     expect(projectNote).toBeNull();
   });
 
+  test("Claude retains legacy global-type routing even with an explicit project hint", async () => {
+    const result = await handleRemember(projectDb, globalDb, {
+      type: "user_pattern", scope: "project", content: "Legacy Claude preference routing remains global",
+    });
+    expect(globalDb.query("SELECT id FROM notes WHERE id=?").get(result.note_id!)).not.toBeNull();
+    expect(projectDb.query("SELECT id FROM notes WHERE id=?").get(result.note_id!)).toBeNull();
+    expect((globalDb.query("SELECT count(*) AS n FROM user_model").get() as any).n).toBe(1);
+  });
+
   test("detects duplicates and promotes confidence", async () => {
     const first = await handleRemember(projectDb, globalDb, {
       content: "Always use TypeScript strict mode",

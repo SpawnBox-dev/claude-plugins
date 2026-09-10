@@ -6994,7 +6994,7 @@ var STANDALONE_INSTRUCTIONS = [
 ].join(`
 `);
 var STANDALONE_DESCRIPTIONS = {
-  note: "Capture a new finding, decision, convention, gotcha or question. First check existing knowledge; update or supersede an existing record when appropriate. Add repository-relative code_refs for code-specific knowledge. If the near-duplicate gate blocks a write, use its pending_id and resolution (accept_new, update_existing, supersede_existing or close_existing), without resending content. Judge the underlying claims against the returned evidence.",
+  note: "Capture a new finding, decision, convention, gotcha or question. First check existing knowledge; update or supersede an existing record when appropriate. Add repository-relative code_refs for code-specific knowledge. Explicit scope=project applies to every note type and does not update the global user model. If scope is omitted, user_pattern and tool_capability retain their global defaults. If the near-duplicate gate blocks a write, use its pending_id and resolution (accept_new, update_existing, supersede_existing or close_existing), without resending content. Judge the underlying claims against the returned evidence.",
   lookup: "Retrieve project and global knowledge alongside current source and documentation. Search by query, exact code_ref, type or tag, or read a full ID/unambiguous ID prefix. Use include_history for revisions, depth/link_limit for graph context, output_mode=summary for compact results, and limit/offset to page large sets.",
   create_work_item: "Create persistent, trackable work with priority, status, due date and optional parent. Add repository-relative code_refs when scoped to code. Use open_thread notes for unresolved questions.",
   briefing: "Read current project knowledge, work, preferences, curation candidates and this Codex task's checkpoint. Use at startup, resume or after compaction. Optional sections and summary output reduce context cost.",
@@ -22487,7 +22487,7 @@ async function insertNote(db, globalDb2, input, embeddingClient) {
       console.error(`[embed] Failed to embed note ${noteId}:`, err);
     }
   }
-  if (input.type === "user_pattern") {
+  if (input.type === "user_pattern" && (!RUNTIME.standalone || db === globalDb2)) {
     writeUserModel(globalDb2, input.content, input.context, input.dimension);
   }
   return {
@@ -22542,7 +22542,7 @@ async function handleRemember(projectDb2, globalDb2, input, embeddingClient) {
       message: `Note content is ${input.content.length} chars - exceeds hard limit of ${NOTE_CONTENT_HARD_CHARS}. Primitives should stay primitive (orchestrator design principle: decision 3b962e67). Split into multiple smaller notes linked via supersedes/related_to, or capture the bulk into a doc/file and reference it from a compact note with code_refs. ${RUNTIME.standalone ? "Synthesize larger summaries from underlying records when needed." : "If the content genuinely cannot be smaller, this is the kind of thing the PA should synthesize on demand from underlying notes - not a stored digest."}`
     };
   }
-  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type);
+  const useGlobal = input.scope === "global" || GLOBAL_TYPES.includes(input.type) && !(RUNTIME.standalone && input.scope === "project");
   const db = useGlobal ? globalDb2 : projectDb2;
   const duplicates = DEDUP_EXEMPT_TYPES.includes(input.type) ? [] : findDuplicates(db, input.type, input.content);
   if (duplicates.length > 0) {
@@ -23025,8 +23025,8 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
     newId = newInSameDb.id;
   }
   if (!newId && input.new_content && input.new_type) {
-    const newGoesGlobal = GLOBAL_TYPES.includes(input.new_type);
     const oldIsGlobal = db === globalDb2;
+    const newGoesGlobal = RUNTIME.standalone ? oldIsGlobal : GLOBAL_TYPES.includes(input.new_type);
     if (newGoesGlobal !== oldIsGlobal) {
       return {
         superseded: false,
@@ -23039,6 +23039,7 @@ async function handleSupersede(projectDb2, globalDb2, input, embeddingClient) {
     const created = await handleRemember(projectDb2, globalDb2, {
       content: input.new_content,
       type: input.new_type,
+      ...RUNTIME.standalone ? { scope: oldIsGlobal ? "global" : "project" } : {},
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
       session_id: input.session_id,
       code_refs: input.code_refs,
@@ -23698,10 +23699,11 @@ function composeBriefing(projectDb2, globalDb2, sections) {
 }
 function composeContextPackage(projectDb2, globalDb2, domain) {
   const pattern = `%${domain}%`;
-  function queryByType(db, type, limit = 5) {
+  function queryByType(db, type, limit = 5, currentOnly = false) {
     return db.query(`SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
+         ${currentOnly ? "AND superseded_by IS NULL" : ""}
          ORDER BY
            CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
            updated_at DESC
@@ -23716,7 +23718,7 @@ function composeContextPackage(projectDb2, globalDb2, domain) {
   const architecture = queryByType(projectDb2, "architecture");
   const constraints = queryByType(projectDb2, "dependency");
   const recentDecisions = queryByType(projectDb2, "decision");
-  const toolCapabilities = queryByType(globalDb2, "tool_capability");
+  const toolCapabilities = RUNTIME.standalone ? [...queryByType(projectDb2, "tool_capability", 5, true), ...queryByType(globalDb2, "tool_capability", 5, true)] : queryByType(globalDb2, "tool_capability");
   return {
     conventions,
     tool_capabilities: toolCapabilities,

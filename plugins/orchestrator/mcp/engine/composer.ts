@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { RUNTIME } from "../runtime/profile";
 import type { Briefing, BriefingSection, ContextPackage, CurationCandidate, NoteSummary, UserProfileEntry } from "../types";
 import { truncate, parseCodeRefs, parseTagList, normalizeTagString } from "../utils";
 
@@ -627,13 +628,15 @@ export function composeContextPackage(
   function queryByType(
     db: Database,
     type: string,
-    limit = 5
+    limit = 5,
+    currentOnly = false
   ): NoteSummary[] {
     return db
       .query(
         `SELECT id, type, content, confidence, created_at, updated_at, source_session, superseded_by, keywords, tags, due_date, code_refs
          FROM notes
          WHERE type = ? AND (tags LIKE ? OR keywords LIKE ? OR content LIKE ?)
+         ${currentOnly ? "AND superseded_by IS NULL" : ""}
          ORDER BY
            CASE confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
            updated_at DESC
@@ -654,8 +657,11 @@ export function composeContextPackage(
   const constraints = queryByType(projectDb, "dependency");
   const recentDecisions = queryByType(projectDb, "decision");
 
-  // Tool capabilities come from global DB only
-  const toolCapabilities = queryByType(globalDb, "tool_capability");
+  // Standalone Codex honors explicit project scope for every note type. Keep
+  // those capabilities useful to plan(), while retaining Claude's legacy reader.
+  const toolCapabilities = RUNTIME.standalone
+    ? [...queryByType(projectDb, "tool_capability", 5, true), ...queryByType(globalDb, "tool_capability", 5, true)]
+    : queryByType(globalDb, "tool_capability");
 
   return {
     conventions,

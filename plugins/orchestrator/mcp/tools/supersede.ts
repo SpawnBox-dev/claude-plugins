@@ -389,8 +389,8 @@ export async function handleSupersede(
   }
 
   if (!newId && input.new_content && input.new_type) {
-    const newGoesGlobal = GLOBAL_TYPES.includes(input.new_type);
     const oldIsGlobal = db === globalDb;
+    const newGoesGlobal = RUNTIME.standalone ? oldIsGlobal : GLOBAL_TYPES.includes(input.new_type);
     if (newGoesGlobal !== oldIsGlobal) {
       return {
         superseded: false,
@@ -430,6 +430,7 @@ export async function handleSupersede(
     const created = await handleRemember(projectDb, globalDb, {
       content: input.new_content,
       type: input.new_type,
+      ...(RUNTIME.standalone ? { scope: oldIsGlobal ? "global" as const : "project" as const } : {}),
       context: input.reason ? `Supersedes ${input.old_id}: ${input.reason}` : `Supersedes ${input.old_id}`,
       session_id: input.session_id,
       code_refs: input.code_refs,

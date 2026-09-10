@@ -21,6 +21,13 @@ The tools support note capture, lookup by search/ID/code reference, revisions, s
 
 By default, knowledge lives in the current project's `.orchestrator/project.db`. Global knowledge and preferences share `~/.claude/orchestrator/global.db`. Existing Claude data is not moved. `ORCHESTRATOR_GLOBAL_DB` selects another global store.
 
+Explicit `scope=project` is honored for every note type in Codex, including
+tool_capability and user_pattern, and does not write the global user model.
+When scope is omitted those two types retain their legacy global defaults.
+Inline supersedes retain the original note's scope, and plan includes current
+project capabilities alongside global ones. Claude's existing type routing is
+unchanged. Use explicit project scope for project-specific evidence.
+
 For an isolated checkout that should use another project's corpus, create `.orchestrator/codex.json` in that checkout:
 
 ```json
