@@ -39,6 +39,16 @@ operations for release versions, metadata, inventory, paged logs and screenshots
 Screenshots are separate from the archive. Treat missing collectors as missing
 measurements and use a positive control before interpreting an empty result.
 
+In staff context or the owner's DM, use `diagnostic(action="metric", metric=...)`
+to inspect supported infrastructure/error/event-volume alerts. `at` optionally
+selects a UTC endpoint within seven days. Read the returned interval, exact query,
+rules, incident lifecycle rows and gaps. These are retrospective aggregates, not
+archived evaluations: five-minute buckets are not rolling one-hour evaluations,
+and current rules may differ from historical rules. The alert producer currently
+uses unweighted counts; sampling-weighted estimates are provided separately.
+Neither a missing recovery post nor a high aggregate proves continuous outage,
+cause or user impact. Read the corresponding source before diagnosing the writer.
+
 Use `send_file` for generated text/data attachments and `create_forum_post` for
 public bug or feature filing. Do not reflexively reply to
 every social message, old catch-up event or another helper's complete answer.

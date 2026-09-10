@@ -45320,7 +45320,7 @@ var require_dist11 = __commonJS((exports, module) => {
 
 // src/cli.ts
 import {
-  readFileSync as readFileSync7,
+  readFileSync as readFileSync8,
   existsSync as existsSync4,
   mkdirSync as mkdirSync8,
   writeFileSync as writeFileSync7,
@@ -45328,7 +45328,7 @@ import {
   closeSync
 } from "fs";
 import { spawn as spawn2 } from "child_process";
-import { resolve as resolve4, join as join11 } from "path";
+import { resolve as resolve4, join as join12 } from "path";
 import { homedir as homedir3 } from "os";
 
 // src/config.ts
@@ -49622,7 +49622,7 @@ class Store {
 // src/service.ts
 import { randomUUID as randomUUID3, randomBytes as randomBytes2, timingSafeEqual } from "crypto";
 import { mkdirSync as mkdirSync6, writeFileSync as writeFileSync5 } from "fs";
-import { join as join9 } from "path";
+import { join as join10 } from "path";
 import { once } from "events";
 
 // vendor/codex-discord-mcp/src/discord.ts
@@ -50518,7 +50518,7 @@ class AppServer extends EventEmitter2 {
 
 // src/worker.ts
 import { mkdirSync as mkdirSync3 } from "fs";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 import { createHash as createHash3 } from "crypto";
 
 // src/outbox.ts
@@ -55066,6 +55066,68 @@ var McpZodTypeKind;
   McpZodTypeKind2["Completable"] = "McpCompletable";
 })(McpZodTypeKind || (McpZodTypeKind = {}));
 
+// src/metrics.ts
+import { readFileSync as readFileSync4 } from "fs";
+import { join as join5 } from "path";
+var infraPredicate = "index1 = 'infrastructure' AND ((blob1 = 'daemon_service_state_change' AND blob8 IN ('error', 'warning')) OR (blob1 = 'daemon_incident' AND blob6 != 'port_mapping'))";
+var metricNames = ["infra_failure_count_1h", "error_count_1h", "error_count_24h", "event_volume_1h"];
+function metricQueries(metric, at, now = Date.now()) {
+  if (!metricNames.includes(metric))
+    throw new Error("Unsupported aggregate metric");
+  if (at && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(at))
+    throw new Error("Metric time must be a UTC ISO timestamp");
+  const end = Math.floor((at ? Date.parse(at) : now) / 1000);
+  if (!Number.isFinite(end) || end * 1000 > now + 60000 || end * 1000 < now - 7 * 86400000)
+    throw new Error("Metric time must be within the past seven days");
+  if (at && new Date(Date.parse(at)).toISOString() !== (at.includes(".") ? at : at.replace("Z", ".000Z")))
+    throw new Error("Metric time is not a valid calendar date");
+  const hours = metric === "error_count_24h" ? 24 : 1;
+  const start = end - hours * 3600;
+  const predicate = metric === "infra_failure_count_1h" ? infraPredicate : metric.startsWith("error_") ? "index1 = 'error'" : "1 = 1";
+  const where = `${predicate} AND timestamp > toDateTime(${start}) AND timestamp <= toDateTime(${end})`;
+  return {
+    metric,
+    start: new Date(start * 1000).toISOString(),
+    end: new Date(end * 1000).toISOString(),
+    aggregate: `SELECT COUNT() AS sampled_rows, SUM(_sample_interval) AS estimated_events FROM spawnbox_telemetry WHERE ${where}`,
+    buckets: `SELECT toStartOfInterval(timestamp, INTERVAL '5' MINUTE) AS bucket, COUNT() AS sampled_rows, SUM(_sample_interval) AS estimated_events FROM spawnbox_telemetry WHERE ${where} GROUP BY bucket ORDER BY bucket ASC LIMIT 300`,
+    rules: `SELECT id,metric,threshold,comparison,enabled,cooldown_minutes FROM telemetry_alert_rules WHERE metric='${metric}' ORDER BY id LIMIT 100`,
+    incidents: `SELECT id,group_key,service,severity,state,first_fired_at,last_fired_at,resolved_at,last_notified_at FROM alert_incidents WHERE service='${metric === "error_count_1h" ? "app-errors" : metric}' AND datetime(first_fired_at) <= datetime('${new Date(end * 1000).toISOString()}') AND (resolved_at IS NULL OR datetime(resolved_at) >= datetime('${new Date(start * 1000).toISOString()}')) ORDER BY first_fired_at DESC LIMIT 100`
+  };
+}
+function verifyInfraPredicate(projectRoot) {
+  const source = readFileSync4(join5(projectRoot, "worker/src/services/event-filters.ts"), "utf8");
+  const value = source.match(/export const INFRA_FAILURE_WHERE\s*=\s*"([^"\r\n]+)"\s*;/)?.[1];
+  if (value !== infraPredicate)
+    throw new Error("Project infrastructure metric predicate changed; update the reviewed HELP query before using it");
+}
+async function queryMetricAE(sql, fetcher = fetch) {
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID, token = process.env.CLOUDFLARE_API_TOKEN;
+  if (!account || !/^[a-f0-9]{32}$/.test(account) || !token)
+    throw new Error("Operator Cloudflare account/token is unavailable for aggregate reads");
+  const response = await fetcher(`https://api.cloudflare.com/client/v4/accounts/${account}/analytics_engine/sql`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "text/plain" },
+    body: sql,
+    redirect: "error",
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok)
+    throw new Error(`Analytics Engine query failed (HTTP ${response.status}); no metric value inferred`);
+  const body = await response.text();
+  if (body.length > 1024 * 1024)
+    throw new Error("Analytics Engine response exceeds the bounded metric reader");
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw new Error("Analytics Engine returned non-JSON; verify token scope and service response");
+  }
+  if (parsed.success === false || Array.isArray(parsed.errors) && parsed.errors.length || !Array.isArray(parsed.data))
+    throw new Error("Analytics Engine result has no valid data array; no metric value inferred");
+  return parsed.data;
+}
+
 // src/mcp.ts
 var id2 = exports_external.string().regex(/^\d{15,22}$/);
 var toolSchemas = {
@@ -55129,8 +55191,11 @@ var toolSchemas = {
       "metadata",
       "inventory",
       "read_member",
-      "screenshot"
+      "screenshot",
+      "metric"
     ]),
+    metric: exports_external.enum(metricNames).optional(),
+    at: exports_external.string().datetime().optional().describe("Optional historical UTC metric window endpoint, within seven days"),
     packageId: exports_external.string().regex(/^diag-(?:[a-f0-9]{8}-[a-f0-9]{3}|\d{10})$/).optional(),
     member: exports_external.string().max(300).optional(),
     offset: exports_external.number().int().min(0).max(32 * 1024 * 1024).optional(),
@@ -55209,8 +55274,8 @@ function quotaAvailability(result, now = Date.now()) {
 import { createHash as createHash2 } from "crypto";
 
 // src/resources.ts
-import { readFileSync as readFileSync4, realpathSync as realpathSync2, statSync as statSync2, existsSync as existsSync2 } from "fs";
-import { resolve, relative, isAbsolute, join as join5 } from "path";
+import { readFileSync as readFileSync5, realpathSync as realpathSync2, statSync as statSync2, existsSync as existsSync2 } from "fs";
+import { resolve, relative, isAbsolute, join as join6 } from "path";
 var policyFiles = {
   bootstrap: ".claude/commands/discord-bootstrap.md",
   reference: ".claude/discord.md",
@@ -55234,8 +55299,8 @@ function readResource(config2, job, kind, name, offset = 0) {
   if (kind === "skill") {
     if (!/^[a-z0-9-]{1,64}$/.test(name))
       throw new Error("Invalid skill name");
-    resourceRoot = join5(config2.codexHome, "skills");
-    file = join5(resourceRoot, name, "SKILL.md");
+    resourceRoot = join6(config2.codexHome, "skills");
+    file = join6(resourceRoot, name, "SKILL.md");
   } else if (kind === "policy") {
     if (!policyFiles[name])
       throw new Error("Unknown policy resource");
@@ -55252,19 +55317,19 @@ function readResource(config2, job, kind, name, offset = 0) {
   } else if (kind === "user-note" || kind === "channel-note") {
     const directory = kind === "user-note" ? ".claude/discord-user-notes" : ".claude/discord-channel-notes";
     const key = kind === "user-note" ? job.event.userId : job.event.channelId;
-    const mapFile = join5(config2.projectRoot, directory, "_map.json");
-    const map2 = existsSync2(mapFile) ? JSON.parse(readFileSync4(mapFile, "utf8")) : {};
+    const mapFile = join6(config2.projectRoot, directory, "_map.json");
+    const map2 = existsSync2(mapFile) ? JSON.parse(readFileSync5(mapFile, "utf8")) : {};
     const mapped = map2[key];
-    const filename = existsSync2(join5(config2.projectRoot, directory, `${key}.md`)) ? `${key}.md` : typeof mapped === "string" ? mapped : mapped?.file;
+    const filename = existsSync2(join6(config2.projectRoot, directory, `${key}.md`)) ? `${key}.md` : typeof mapped === "string" ? mapped : mapped?.file;
     if (!filename)
       return { text: "No existing scoped note", total: 0 };
-    file = contained(join5(config2.projectRoot, directory), resolve(config2.projectRoot, directory, filename));
+    file = contained(join6(config2.projectRoot, directory), resolve(config2.projectRoot, directory, filename));
   } else
     throw new Error("Unknown resource kind");
   file = contained(resourceRoot, file);
   if (statSync2(file).size > 1024 * 1024)
     throw new Error("Resource exceeds 1 MiB; request a narrower artifact");
-  const text = readFileSync4(file, "utf8");
+  const text = readFileSync5(file, "utf8");
   return {
     text: text.slice(offset, offset + 24000),
     total: text.length,
@@ -55338,7 +55403,7 @@ function workerConfig(home, project, orchestratorRoot, endpoint, token, bun, mem
       ...projectKnowledgeRoot ? {
         project_knowledge: {
           command: bun,
-          args: [join6(orchestratorRoot, "dist", "server.js")],
+          args: [join7(orchestratorRoot, "dist", "server.js")],
           ...toolPolicy(projectKnowledgeTools.filter((name) => memoryEmbeddings || !["check_similar", "install_embeddings"].includes(name))),
           env: {
             ORCHESTRATOR_HOST: "codex",
@@ -55351,7 +55416,7 @@ function workerConfig(home, project, orchestratorRoot, endpoint, token, bun, mem
       } : {},
       spawnbox_discord: {
         command: bun,
-        args: [join6(home, "runtime", "mcp.js")],
+        args: [join7(home, "runtime", "mcp.js")],
         ...toolPolicy(Object.keys(toolSchemas)),
         env: {
           SPAWNBOX_HELP_ENDPOINT: endpoint,
@@ -55360,14 +55425,14 @@ function workerConfig(home, project, orchestratorRoot, endpoint, token, bun, mem
       },
       orchestrator: {
         command: bun,
-        args: [join6(orchestratorRoot, "dist", "server.js")],
+        args: [join7(orchestratorRoot, "dist", "server.js")],
         ...toolPolicy(memoryTools2),
         env: {
           ORCHESTRATOR_HOST: "codex",
           ORCHESTRATOR_MODE: "standalone",
           ORCHESTRATOR_PROJECT_ROOT: project,
           ORCHESTRATOR_WORKTREE_ROOT: project,
-          ORCHESTRATOR_GLOBAL_DB: join6(project, ".orchestrator", "global.db"),
+          ORCHESTRATOR_GLOBAL_DB: join7(project, ".orchestrator", "global.db"),
           ORCHESTRATOR_EMBEDDINGS: memoryEmbeddings ? "on" : "off"
         }
       }
@@ -55470,8 +55535,8 @@ class Worker {
         return;
       }
       const slug = createHash3("sha256").update(job.conversation).digest("hex").slice(0, 24);
-      const cwd = join6(this.state, "conversations", slug);
-      mkdirSync3(join6(cwd, ".orchestrator"), { recursive: true });
+      const cwd = join7(this.state, "conversations", slug);
+      mkdirSync3(join7(cwd, ".orchestrator"), { recursive: true });
       const config2 = {
         ...workerConfig(this.config.codexHome, cwd, this.config.orchestratorRoot, this.endpoint, this.token, process.execPath, this.config.memoryEmbeddings !== false, this.config.projectKnowledge ? this.config.projectRoot : undefined),
         ...this.hostOverrides
@@ -55551,7 +55616,7 @@ ${reuse ? bootstrapReusable : bootstrapRequired}`,
 var import_discord4 = __toESM(require_src(), 1);
 import { createHash as createHash4 } from "crypto";
 import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync4 } from "fs";
-import { join as join8 } from "path";
+import { join as join9 } from "path";
 
 // src/policy.ts
 var import_discord2 = __toESM(require_src(), 1);
@@ -55634,8 +55699,8 @@ function canRead(config2, event, audience, channel, parent) {
 // src/diagnostics.ts
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { readFileSync as readFileSync5, mkdirSync as mkdirSync4, statSync as statSync3 } from "fs";
-import { join as join7, resolve as resolve2 } from "path";
+import { readFileSync as readFileSync6, mkdirSync as mkdirSync4, statSync as statSync3 } from "fs";
+import { join as join8, resolve as resolve2 } from "path";
 var exec = promisify(execFile);
 
 class Diagnostics {
@@ -55654,10 +55719,10 @@ class Diagnostics {
       if (process.env[key])
         env[key] = process.env[key];
     const result = await exec("node", [
-      join7(this.config.projectRoot, "worker/node_modules/wrangler/bin/wrangler.js"),
+      join8(this.config.projectRoot, "worker/node_modules/wrangler/bin/wrangler.js"),
       ...args
     ], {
-      cwd: join7(this.config.projectRoot, "worker"),
+      cwd: join8(this.config.projectRoot, "worker"),
       env,
       windowsHide: true,
       timeout: 120000,
@@ -55680,6 +55745,40 @@ class Diagnostics {
     return value.flatMap((result) => result.results || []);
   }
   async read(job, args) {
+    if (args.action === "metric") {
+      const audience2 = this.store.audience(job.conversation);
+      if (audience2 !== "staff" && !(job.event.isDM && this.config.ownerIds.includes(job.event.userId)))
+        throw new Error("Aggregate operational metrics require staff context or an owner's DM");
+      const queries = metricQueries(args.metric, args.at);
+      if (queries.metric === "infra_failure_count_1h")
+        verifyInfraPredicate(this.config.projectRoot);
+      const results = await Promise.allSettled([
+        queryMetricAE(queries.aggregate),
+        queryMetricAE(queries.buckets),
+        this.query(queries.rules),
+        this.query(queries.incidents)
+      ]);
+      const names = ["aggregate", "fiveMinuteBuckets", "rules", "incidents"];
+      const evidence = {}, gaps = {};
+      results.forEach((result2, index) => {
+        if (result2.status === "fulfilled") {
+          if (index === 0 && (result2.value.length !== 1 || result2.value[0].sampled_rows == null || !Number.isFinite(Number(result2.value[0].sampled_rows))))
+            gaps.aggregate = "Aggregate response did not contain one valid count; no metric value inferred";
+          else
+            evidence[names[index]] = result2.value;
+        } else
+          gaps[names[index]] = String(result2.reason).slice(0, 1000);
+      });
+      return {
+        metric: queries.metric,
+        window: { startExclusive: queries.start, endInclusive: queries.end },
+        queriedAt: new Date().toISOString(),
+        evidence,
+        gaps,
+        queries,
+        interpretation: "Retrospective Analytics Engine aggregates, not archived evaluator samples. Current source alert rules compare unweighted COUNT() (sampled_rows); estimated_events applies sampling weights. Buckets are disjoint five-minute bins, not separate rolling metric evaluations. Incident rows are current lifecycle records overlapping this window; no continuous outage, cause, user impact or historical rule configuration is proved by these values alone. No identifiers, credentials, webhook URLs or acknowledger identities are selected."
+      };
+    }
     if (args.action === "versions")
       return {
         versions: await this.query("SELECT version, channel, pub_date FROM update_manifests ORDER BY pub_date DESC LIMIT 10")
@@ -55705,12 +55804,12 @@ class Diagnostics {
     const prefix = meta.r2_prefix;
     if (typeof prefix !== "string" || !prefix.includes(id3) || prefix.includes("..") || !/^[a-zA-Z0-9_./-]+\/$/.test(prefix))
       throw new Error("Unexpected diagnostic storage prefix");
-    const dir = join7(this.state, "diagnostics", id3);
+    const dir = join8(this.state, "diagnostics", id3);
     mkdirSync4(dir, { recursive: true });
     if (args.action === "screenshot") {
       if (!Number.isInteger(args.index) || args.index < 0 || args.index >= screenshots)
         throw new Error("Screenshot index is outside package inventory");
-      const path = join7(dir, `screenshot_${args.index}.png`);
+      const path = join8(dir, `screenshot_${args.index}.png`);
       await this.wrangler([
         "r2",
         "object",
@@ -55725,7 +55824,7 @@ class Diagnostics {
         throw new Error("Screenshot missing or exceeds 10 MiB");
       return {
         image: {
-          data: readFileSync5(path).toString("base64"),
+          data: readFileSync6(path).toString("base64"),
           mimeType: "image/png"
         },
         index: args.index
@@ -55734,7 +55833,7 @@ class Diagnostics {
     const paths = [];
     let size = 0;
     for (let i = 0;i < chunks; i++) {
-      const path = join7(dir, `part_${i}.zst`);
+      const path = join8(dir, `part_${i}.zst`);
       await this.wrangler([
         "r2",
         "object",
@@ -55950,9 +56049,9 @@ class Operations {
     if (tool === "send_file") {
       const op = `${job.event.id}:file:${args.key}`;
       this.store.reserve(op, args);
-      const dir = join8(this.state, "inbox", "generated", job.event.id, args.key);
+      const dir = join9(this.state, "inbox", "generated", job.event.id, args.key);
       mkdirSync5(dir, { recursive: true });
-      const file = join8(dir, args.name);
+      const file = join9(dir, args.name);
       writeFileSync4(file, args.content);
       const ids = await this.bridge.sendMessage({
         chatId: channel,
@@ -56045,7 +56144,7 @@ class Operations {
         requireMention: false,
         allowUsers: []
       };
-      writeFileSync4(join8(this.state, "access.json"), JSON.stringify(accessFile(this.config), null, 2));
+      writeFileSync4(join9(this.state, "access.json"), JSON.stringify(accessFile(this.config), null, 2));
       return {
         channelId: id3,
         url: `https://discord.com/channels/${this.config.guildId}/${id3}`,
@@ -56109,9 +56208,9 @@ class Operations {
       }
       const bytes = Buffer.concat(chunks);
       const hash = createHash4("sha256").update(bytes).digest("hex");
-      const dir = join8(this.state, "attachments", job.event.id);
+      const dir = join9(this.state, "attachments", job.event.id);
       mkdirSync5(dir, { recursive: true });
-      const path = join8(dir, `${attachment.id}.bin`);
+      const path = join9(dir, `${attachment.id}.bin`);
       writeFileSync4(path, bytes);
       const type = attachment.contentType || "application/octet-stream";
       return {
@@ -56244,7 +56343,7 @@ async function catchupChannel(bridge, store, channelId, receive, maxPages) {
 }
 async function startService(config2, state, token) {
   mkdirSync6(state, { recursive: true });
-  const store = new Store(join9(state, "help.db"));
+  const store = new Store(join10(state, "help.db"));
   const owner = randomUUID3();
   if (!store.lock("gateway", owner))
     throw new Error("A HELP service already owns this state directory");
@@ -56260,7 +56359,7 @@ async function startService(config2, state, token) {
       requireMention: false,
       allowUsers: []
     };
-  writeFileSync5(join9(state, "access.json"), JSON.stringify(accessFile(config2), null, 2));
+  writeFileSync5(join10(state, "access.json"), JSON.stringify(accessFile(config2), null, 2));
   const clientToken = randomBytes2(32).toString("hex");
   let bridge;
   let worker;
@@ -56432,22 +56531,22 @@ import {
   writeFileSync as writeFileSync6,
   existsSync as existsSync3
 } from "fs";
-import { join as join10, resolve as resolve3 } from "path";
+import { join as join11, resolve as resolve3 } from "path";
 async function setupWorker(config2, pluginRoot, authHome) {
   const home = resolve3(config2.codexHome);
-  if (existsSync3(join10(home, "config.toml")) && !existsSync3(join10(home, "spawnbox-help-home.json")))
+  if (existsSync3(join11(home, "config.toml")) && !existsSync3(join11(home, "spawnbox-help-home.json")))
     throw new Error("Refusing to configure an existing non-HELP Codex home");
-  mkdirSync7(join10(home, "runtime"), { recursive: true });
+  mkdirSync7(join11(home, "runtime"), { recursive: true });
   for (const file of ["mcp.js", "help-guard.js", "memory-hook.js"])
-    copyFileSync(join10(pluginRoot, "dist", file), join10(home, "runtime", file));
-  mkdirSync7(join10(home, "skills"), { recursive: true });
-  cpSync(join10(pluginRoot, "skills"), join10(home, "skills"), { recursive: true });
-  cpSync(join10(config2.orchestratorRoot, "skills"), join10(home, "skills"), {
+    copyFileSync(join11(pluginRoot, "dist", file), join11(home, "runtime", file));
+  mkdirSync7(join11(home, "skills"), { recursive: true });
+  cpSync(join11(pluginRoot, "skills"), join11(home, "skills"), { recursive: true });
+  cpSync(join11(config2.orchestratorRoot, "skills"), join11(home, "skills"), {
     recursive: true
   });
-  if (authHome && !existsSync3(join10(home, "auth.json")))
-    copyFileSync(join10(authHome, "auth.json"), join10(home, "auth.json"));
-  const command = (name) => `bun "${join10(home, "runtime", name).replaceAll("\\", "/")}"`;
+  if (authHome && !existsSync3(join11(home, "auth.json")))
+    copyFileSync(join11(authHome, "auth.json"), join11(home, "auth.json"));
+  const command = (name) => `bun "${join11(home, "runtime", name).replaceAll("\\", "/")}"`;
   const hooks = {};
   for (const event of [
     "SessionStart",
@@ -56475,7 +56574,7 @@ async function setupWorker(config2, pluginRoot, authHome) {
   await app.start();
   try {
     const existing = await app.request("config/read", { includeLayers: false });
-    if (existing.config?.hooks && !existsSync3(join10(home, "spawnbox-help-home.json")))
+    if (existing.config?.hooks && !existsSync3(join11(home, "spawnbox-help-home.json")))
       throw new Error("Refusing to replace hooks in a non-HELP Codex home");
     await app.request("config/batchWrite", {
       edits: [
@@ -56505,7 +56604,7 @@ async function setupWorker(config2, pluginRoot, authHome) {
       ],
       reloadUserConfig: true
     });
-    writeFileSync6(join10(home, "spawnbox-help-home.json"), JSON.stringify({
+    writeFileSync6(join11(home, "spawnbox-help-home.json"), JSON.stringify({
       version: 1,
       source: pluginRoot,
       hookHashes: definitions.map((h) => h.currentHash)
@@ -56521,10 +56620,10 @@ var option = (name) => {
   const index = args.indexOf(`--${name}`);
   return index < 0 ? undefined : args[index + 1];
 };
-var state = resolve4(option("state") || join11(homedir3(), ".codex", "spawnbox-help"));
-var configPath = resolve4(option("config") || join11(state, "config.json"));
+var state = resolve4(option("state") || join12(homedir3(), ".codex", "spawnbox-help"));
+var configPath = resolve4(option("config") || join12(state, "config.json"));
 if (command === "retry" || command === "reconcile") {
-  const store = new Store(join11(state, "help.db"));
+  const store = new Store(join12(state, "help.db"));
   try {
     if (command === "retry") {
       const id3 = option("event");
@@ -56568,21 +56667,21 @@ if (command === "retry" || command === "reconcile") {
   }
 } else if (command === "stop") {
   mkdirSync8(state, { recursive: true });
-  writeFileSync7(join11(state, "stop.request"), new Date().toISOString());
+  writeFileSync7(join12(state, "stop.request"), new Date().toISOString());
   console.log("Graceful stop requested. The service closes Discord and Codex before releasing its lock.");
 } else if (command === "supervise") {
   mkdirSync8(state, { recursive: true });
-  if (existsSync4(join11(state, "stop.request")))
+  if (existsSync4(join12(state, "stop.request")))
     throw new Error("A stop request exists. Remove it locally before explicitly restarting supervision.");
   let failures = 0;
-  while (!existsSync4(join11(state, "stop.request"))) {
-    const log = openSync(join11(state, "service.log"), "a");
+  while (!existsSync4(join12(state, "stop.request"))) {
+    const log = openSync(join12(state, "service.log"), "a");
     const started = Date.now();
     const child = spawn2(process.execPath, [process.argv[1], "start", ...args], {
       windowsHide: true,
       stdio: ["ignore", log, log]
     });
-    writeFileSync7(join11(state, "supervisor.json"), JSON.stringify({
+    writeFileSync7(join12(state, "supervisor.json"), JSON.stringify({
       supervisorPid: process.pid,
       childPid: child.pid,
       started
@@ -56592,23 +56691,23 @@ if (command === "retry" || command === "reconcile") {
       child.once("error", () => resolve5());
     });
     closeSync(log);
-    if (existsSync4(join11(state, "stop.request")))
+    if (existsSync4(join12(state, "stop.request")))
       break;
     failures = Date.now() - started > 300000 ? 0 : failures + 1;
     await Bun.sleep(Math.min(60000, 1000 * 2 ** Math.min(failures, 6)));
   }
 } else if (command === "reviews") {
-  const store = new Store(join11(state, "help.db"));
+  const store = new Store(join12(state, "help.db"));
   try {
     console.log(JSON.stringify(store.reviews(), null, 2));
   } finally {
     store.close();
   }
 } else if (command === "status") {
-  if (!existsSync4(join11(state, "help.db")))
+  if (!existsSync4(join12(state, "help.db")))
     console.log(JSON.stringify({ configured: existsSync4(configPath), started: false }));
   else {
-    const store = new Store(join11(state, "help.db"));
+    const store = new Store(join12(state, "help.db"));
     try {
       console.log(JSON.stringify(store.status(), null, 2));
     } finally {
@@ -56617,7 +56716,7 @@ if (command === "retry" || command === "reconcile") {
   }
 } else if (command === "setup") {
   const config2 = loadConfig(configPath);
-  const root = resolve4(option("plugin-root") || join11(import.meta.dir, ".."));
+  const root = resolve4(option("plugin-root") || join12(import.meta.dir, ".."));
   await setupWorker(config2, root, option("auth-home"));
   console.log("Dedicated Codex HELP worker configured; no Discord connection started.");
 } else if (command === "start") {
@@ -56625,7 +56724,7 @@ if (command === "retry" || command === "reconcile") {
   let token = process.env.DISCORD_HELP_BOT_TOKEN;
   const secretsPath = option("help-settings");
   if (secretsPath) {
-    const selected = JSON.parse(readFileSync7(resolve4(secretsPath), "utf8")).env || {};
+    const selected = JSON.parse(readFileSync8(resolve4(secretsPath), "utf8")).env || {};
     token = token || selected.DISCORD_HELP_BOT_TOKEN;
     for (const key of ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"])
       if (!process.env[key] && typeof selected[key] === "string")
@@ -56644,7 +56743,7 @@ if (command === "retry" || command === "reconcile") {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   const poll = setInterval(() => {
-    if (existsSync4(join11(state, "stop.request")))
+    if (existsSync4(join12(state, "stop.request")))
       stop();
   }, 1000);
   service.closed.then(() => {

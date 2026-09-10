@@ -284,6 +284,24 @@ an old queue database. The Orchestrator dependency still requires coordinated
 setup when its own installed cache version changes.
 # September 10 durable follow-up reviews
 
+Follow-on artifact `0.1.0+codex.20260910193517` adds bounded infrastructure/error/
+event-volume metric reads in staff context or the owner's DM. Historical windows
+use UTC endpoints within seven days, exact reviewed SQL and current D1 rule/
+incident projections. Failures are explicit gaps; no customer identifiers,
+webhook URLs or acknowledger identities are selected. Infrastructure predicate
+drift against maintained project source is rejected. No arbitrary query tool was
+added and credentials remain in the service.
+
+40 TypeScript tests (278 assertions), typecheck, plugin/skill validation and the
+51-step native fixture pass. Live read-only qualification queried both reported
+September 10 alert windows and the current window. D1 records the relevant
+incident resolved at 12:00:37Z and last notified at 12:05:39Z; historical aggregates
+are distinguished from archived evaluator values and cannot establish outage or
+customer impact alone. Evidence is in shared note `2738c70d`. The service was
+backed up, upgraded and restarted, and the formerly blocked event was retried
+through the supported recovery CLI. Its eventual live model outcome is a separate
+acceptance check.
+
 Artifact `0.1.0+codex.20260910192805` adds bounded one-shot reviews tied to an
 admitted source conversation. Host-owned job metadata stays separate from Discord
 payloads; retries deduplicate by conversation/key. Reviews have separate queues

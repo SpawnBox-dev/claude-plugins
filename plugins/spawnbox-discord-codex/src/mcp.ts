@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { metricNames } from "./metrics";
 
 const id = z.string().regex(/^\d{15,22}$/);
 export const toolSchemas = {
@@ -76,7 +77,10 @@ export const toolSchemas = {
       "inventory",
       "read_member",
       "screenshot",
+      "metric",
     ]),
+    metric: z.enum(metricNames).optional(),
+    at: z.string().datetime().optional().describe("Optional historical UTC metric window endpoint, within seven days"),
     packageId: z
       .string()
       .regex(/^diag-(?:[a-f0-9]{8}-[a-f0-9]{3}|\d{10})$/)
@@ -145,7 +149,7 @@ const descriptions: Record<keyof typeof toolSchemas, string> = {
   member_info:
     "Read verified Discord member IDs and roles; usernames do not establish authority.",
   diagnostic:
-    "Read deployed release versions or a diagnostic package shared in this private conversation. Fixed remote SELECT/get commands only; no arbitrary shell or SQL. Inventory includes logs; screenshots are fetched separately.",
+    "Read release versions, a diagnostic package shared in this private conversation, or action=metric with a named aggregate (staff/owner DM only). Metric returns bounded Analytics Engine evidence and current D1 rules/incidents, optionally at a historical UTC endpoint. Fixed read-only queries; no arbitrary shell or SQL. Missing results are explicit gaps.",
   forum_action:
     "Archive current forum thread or merge valid tags without discarding other tags. Helper approval decisions require the local operator.",
   moderate:

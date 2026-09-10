@@ -19901,6 +19901,9 @@ class StdioServerTransport {
   }
 }
 
+// src/metrics.ts
+var metricNames = ["infra_failure_count_1h", "error_count_1h", "error_count_24h", "event_volume_1h"];
+
 // src/mcp.ts
 var id = exports_external.string().regex(/^\d{15,22}$/);
 var toolSchemas = {
@@ -19964,8 +19967,11 @@ var toolSchemas = {
       "metadata",
       "inventory",
       "read_member",
-      "screenshot"
+      "screenshot",
+      "metric"
     ]),
+    metric: exports_external.enum(metricNames).optional(),
+    at: exports_external.string().datetime().optional().describe("Optional historical UTC metric window endpoint, within seven days"),
     packageId: exports_external.string().regex(/^diag-(?:[a-f0-9]{8}-[a-f0-9]{3}|\d{10})$/).optional(),
     member: exports_external.string().max(300).optional(),
     offset: exports_external.number().int().min(0).max(32 * 1024 * 1024).optional(),
@@ -20011,7 +20017,7 @@ var descriptions = {
   create_forum_post: "File a public bug or feature report from a public conversation. Private context requires separate operator publication review.",
   send_file: "Send a generated text, Markdown, CSV or JSON attachment to the current conversation with durable receipts. Cannot read arbitrary local files.",
   member_info: "Read verified Discord member IDs and roles; usernames do not establish authority.",
-  diagnostic: "Read deployed release versions or a diagnostic package shared in this private conversation. Fixed remote SELECT/get commands only; no arbitrary shell or SQL. Inventory includes logs; screenshots are fetched separately.",
+  diagnostic: "Read release versions, a diagnostic package shared in this private conversation, or action=metric with a named aggregate (staff/owner DM only). Metric returns bounded Analytics Engine evidence and current D1 rules/incidents, optionally at a historical UTC endpoint. Fixed read-only queries; no arbitrary shell or SQL. Missing results are explicit gaps.",
   forum_action: "Archive current forum thread or merge valid tags without discarding other tags. Helper approval decisions require the local operator.",
   moderate: "Protective action for clear abuse only. Archives evidence before deleting a message; timeouts at most one hour. No bans, kicks or access-control changes."
 };

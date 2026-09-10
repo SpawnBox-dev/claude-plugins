@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { childEnvironment } from "./app-server";
 import type { HelpConfig, Job } from "./types";
 import type { Store } from "./store";
+import { metricQueries, queryMetricAE, verifyInfraPredicate } from "./metrics";
 const exec = promisify(execFile);
 export class Diagnostics {
   constructor(
@@ -56,6 +57,29 @@ export class Diagnostics {
     return value.flatMap((result) => result.results || []);
   }
   async read(job: Job, args: any): Promise<unknown> {
+    if (args.action === "metric") {
+      const audience = this.store.audience(job.conversation);
+      if (audience !== "staff" && !(job.event.isDM && this.config.ownerIds.includes(job.event.userId)))
+        throw new Error("Aggregate operational metrics require staff context or an owner's DM");
+      const queries = metricQueries(args.metric, args.at);
+      if (queries.metric === "infra_failure_count_1h") verifyInfraPredicate(this.config.projectRoot);
+      const results = await Promise.allSettled([
+        queryMetricAE(queries.aggregate), queryMetricAE(queries.buckets), this.query(queries.rules), this.query(queries.incidents),
+      ]);
+      const names = ["aggregate", "fiveMinuteBuckets", "rules", "incidents"];
+      const evidence: Record<string, unknown> = {}, gaps: Record<string, string> = {};
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          if (index === 0 && (result.value.length !== 1 || result.value[0].sampled_rows == null ||
+            !Number.isFinite(Number(result.value[0].sampled_rows)))) gaps.aggregate = "Aggregate response did not contain one valid count; no metric value inferred";
+          else evidence[names[index]] = result.value;
+        }
+        else gaps[names[index]] = String(result.reason).slice(0, 1000);
+      });
+      return { metric: queries.metric, window: { startExclusive: queries.start, endInclusive: queries.end },
+        queriedAt: new Date().toISOString(), evidence, gaps, queries,
+        interpretation: "Retrospective Analytics Engine aggregates, not archived evaluator samples. Current source alert rules compare unweighted COUNT() (sampled_rows); estimated_events applies sampling weights. Buckets are disjoint five-minute bins, not separate rolling metric evaluations. Incident rows are current lifecycle records overlapping this window; no continuous outage, cause, user impact or historical rule configuration is proved by these values alone. No identifiers, credentials, webhook URLs or acknowledger identities are selected." };
+    }
     if (args.action === "versions")
       return {
         versions: await this.query(

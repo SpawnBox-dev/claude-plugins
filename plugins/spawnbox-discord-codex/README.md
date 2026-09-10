@@ -165,6 +165,18 @@ ownership, without modifying Worker commands or the application bot.
 
 ## Qualification
 
+`diagnostic(action="metric")` provides bounded read-only infrastructure, error
+and event-volume aggregates in staff context or an owner's DM. The optional UTC
+endpoint selects a window within seven days. It returns exact queries, sampled
+row counts, sampling-weighted estimates, five-minute buckets and safe projections
+of current D1 rules/incident history. These are retrospective aggregates, not
+archived evaluator samples. Partial query failures remain explicit gaps. The
+infrastructure predicate is checked against maintained project source before use;
+no arbitrary SQL, identifiers, webhook credentials or acknowledgement identities
+are exposed. Cloudflare credentials stay in the service process.
+
+Date handling follows the [Analytics Engine date/time reference](https://developers.cloudflare.com/analytics/analytics-engine/sql-reference/date-time-functions/).
+
 Optional `followupReviews: true` enables bounded one-shot reviews scheduled by an
 admitted conversation. A stable key deduplicates retries; due times are one minute
 to 30 days ahead, with at most five outstanding reviews per conversation. Jobs,
