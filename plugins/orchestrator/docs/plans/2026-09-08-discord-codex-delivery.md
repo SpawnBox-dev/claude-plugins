@@ -231,3 +231,27 @@ quota, and the usage event was explicitly retried. No credit was redeemed.
 Automatic quota recovery remains the next stage. Installer caveat: plugin add
 removes the previous cache directory, so stop the listener before installation;
 if already upgraded, use the new CLI to write the same stop.request marker.
+
+### 2026-09-10 durable quota recovery
+
+Version `0.1.0+codex.20260910032540` pauses queued work on native
+usageLimitExceeded, persists that pause across process restarts and checks the
+native account endpoint after a cooldown. It resumes only on reported quota
+availability. Checks use no inference or reset credits; unknown account data
+keeps the queue paused. Repeated exhaustion backs off, up to an hour, without
+spending ordinary delivery-failure attempts. Unknown Discord sends remain blocked
+for reconciliation. Concurrent failures cannot be cleared by a stale quota read.
+
+24 tests with 158 assertions and typecheck passed, including restart persistence,
+unknown quota, delayed checks, concurrent pauses and uncertain delivery. The
+30-step native restart/CRUD/guard fixture still passed. Production was stopped
+before plugin installation, backed up through SQLite to
+state/backups/20260910-quota-recovery, set up and restarted. A second legacy
+usage-blocked event was explicitly retried after native quota read showed 3%
+used; six follow-ups were retained. Future quota failures use the new recovery.
+The live worker has not yet crossed a subsequent real exhaustion/reset cycle.
+
+HELP state schema is now 2. Old packages reject it; rollback must use a compatible
+runtime or a forward fix, never overwrite newer queue data with an old backup.
+Remaining work includes efficient bootstrap refresh, historical sweeps and durable
+follow-ups, diagnostics response/backstop, shared harness ownership and acceptance.

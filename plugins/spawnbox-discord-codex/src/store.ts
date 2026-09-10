@@ -6,7 +6,7 @@ export class Store {
   readonly db: Database;
   constructor(path: string) {
     this.db = new Database(path, { create: true });
-    if ((this.db.query("PRAGMA user_version").get() as any).user_version > 1) {
+    if ((this.db.query("PRAGMA user_version").get() as any).user_version > 2) {
       this.db.close();
       throw new Error("HELP state schema is newer than this runtime");
     }
@@ -26,7 +26,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS deliveries (operation TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS locks (name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
-      PRAGMA user_version=1;`);
+      CREATE TABLE IF NOT EXISTS quota_pause (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL,
+        next_check INTEGER NOT NULL, failures INTEGER NOT NULL, reason TEXT NOT NULL);
+      PRAGMA user_version=2;`);
   }
   close() {
     this.db.close();
@@ -110,6 +112,7 @@ export class Store {
   claim(now = Date.now()): Job | undefined {
     return this.transaction(() => {
       this.recover(now);
+      if (this.quotaPause()) return;
       const row = this.db
         .query(
           `SELECT * FROM inbox i WHERE state='pending' AND available <= ?
@@ -148,6 +151,32 @@ export class Store {
       )
       .run(outcome, job.event.id, job.lease);
     if (!result.changes) throw new Error("Lost inbox lease");
+    this.db.query("UPDATE quota_pause SET failures=0 WHERE paused=0").run();
+  }
+  quotaPause(): { next_check: number; failures: number; reason: string } | undefined {
+    return (this.db.query("SELECT next_check,failures,reason FROM quota_pause WHERE id=1 AND paused=1").get() as any) || undefined;
+  }
+  deferQuota(job: Job, error: unknown, now = Date.now()) {
+    this.transaction(() => {
+      const previous = this.db.query("SELECT failures FROM quota_pause WHERE id=1").get() as any;
+      const failures = (previous?.failures ?? 0) + 1;
+      const next = now + Math.min(3600000, 60000 * 2 ** Math.min(failures - 1, 6));
+      this.db.query(`INSERT INTO quota_pause VALUES(1,1,?,?,?) ON CONFLICT(id) DO UPDATE SET
+        paused=1,next_check=MAX(quota_pause.next_check,excluded.next_check),failures=excluded.failures,reason=excluded.reason`)
+        .run(next, failures, String(error).slice(0, 2000));
+      const uncertain = this.db.query("SELECT 1 FROM outbox WHERE event_id=? AND state='sending'").get(job.event.id);
+      this.db.query(`UPDATE inbox SET state=?,available=0,attempts=MAX(0,attempts-1),error=?,lease=NULL,lease_until=NULL
+        WHERE id=? AND lease=? AND state='running'`)
+        .run(uncertain ? "blocked" : "pending", String(error).slice(0, 2000), job.event.id, job.lease);
+      this.audit("quota_paused", { event: job.event.id, nextCheck: next, uncertain: Boolean(uncertain) });
+    });
+  }
+  scheduleQuotaCheck(next: number, reason: string, failures: number) {
+    this.db.query("UPDATE quota_pause SET next_check=?,reason=? WHERE id=1 AND paused=1 AND failures=?").run(next, reason.slice(0,2000), failures);
+  }
+  resumeQuota(failures: number) {
+    const changed = this.db.query("UPDATE quota_pause SET paused=0,next_check=0 WHERE id=1 AND paused=1 AND failures=?").run(failures).changes;
+    if (changed) this.audit("quota_resumed", "Native account availability verified; no credit redeemed");
   }
   fail(job: Job, error: unknown, uncertain = false) {
     const blocked = uncertain || job.attempts >= 5;
@@ -288,6 +317,7 @@ export class Store {
   }
   status() {
     return {
+      quota: this.quotaPause() ?? null,
       inbox: this.db
         .query("SELECT state,count(*) AS count FROM inbox GROUP BY state")
         .all(),

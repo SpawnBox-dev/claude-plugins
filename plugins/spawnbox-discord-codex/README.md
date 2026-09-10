@@ -123,9 +123,14 @@ The source project must retain its reviewed Wrangler installation for diagnostic
 ## Recovery and upgrades
 
 Use status to inspect blocked events, uncertain sends and catch-up errors.
-Codex usage-limit failures stay blocked for review instead of crashing the
-listener or being replayed by the supervisor. After usage becomes available,
-explicitly retry the retained event. Removing a DM recipient also removes that
+Codex usage-limit failures pause the queue durably. After a bounded cooldown the
+worker checks `account/rateLimits/read`, without model inference, and resumes when
+native account data reports available quota. Unknown or failed checks retain the
+pause and retry the read in five minutes. Repeated exhaustion increases cooldown
+up to an hour; quota failures do not spend the five ordinary failure attempts.
+Neither reset credits nor purchases are used. Status shows the pause and next
+check. Uncertain deliveries still require reconciliation and stay blocked even
+after quota recovers. Removing a DM recipient also removes that
 DM from catch-up reads, while retaining its local continuity records.
 
 Check Discord before resolving an uncertain delivery. Supply the actual accepted ID:
@@ -144,6 +149,10 @@ Stop the service before updating. Back up its SQLite DB through SQLite's backup
 API, retain state outside plugin caches, install the new plugin version, and rerun
 setup to refresh the dedicated runtime and reviewed hook hashes. Roll back the
 package and runtime together; never restore a whole shared KB over newer work.
+Quota recovery uses HELP state schema 2. Older packages reject that schema, so
+use a compatible runtime or a forward fix rather than restoring an old database
+and losing arrivals. Legacy usage events already blocked by schema-1 runtimes
+need one explicit retry; subsequent quota failures use automatic recovery.
 Newer unsupported state schemas are rejected. A production cutover must have one
 responding owner per room; rollback stops Codex and restores the prior Claude
 ownership, without modifying Worker commands or the application bot.

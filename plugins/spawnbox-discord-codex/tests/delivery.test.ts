@@ -17,6 +17,7 @@ import { Operations } from "../src/operations";
 import { catchupChannel } from "../src/service";
 import { readResource } from "../src/resources";
 import { Worker, workerConfig } from "../src/worker";
+import { quotaAvailability } from "../src/quota";
 import { PermissionFlagsBits } from "discord.js";
 
 export const config: HelpConfig = {
@@ -626,7 +627,7 @@ test("native error notifications do not crash the listener or finish a retrying 
   expect((await server.waitTurn("turn")).status).toBe("failed");
 });
 
-test("usage exhaustion blocks the event without a supervisor crash or automatic replay", async () => {
+test("usage exhaustion durably pauses work without consuming failure attempts", async () => {
   const state = mkdtempSync(join(tmpdir(), "help-usage-test-"));
   const store = new Store(join(state, "help.db"));
   store.receive(event(), "public");
@@ -652,7 +653,8 @@ test("usage exhaustion blocks the event without a supervisor crash or automatic 
     () => undefined,
   );
   await (worker as any).run(job);
-  expect(store.status().attention).toHaveLength(1);
+  expect(store.status().attention).toHaveLength(0);
+  expect(store.status().quota?.failures).toBe(1);
   expect(store.claim(Date.now() + 999999)).toBeUndefined();
   expect(
     (
@@ -661,6 +663,66 @@ test("usage exhaustion blocks the event without a supervisor crash or automatic 
         .get(job.event.id) as any
     ).error,
   ).toContain("Codex usage limit");
+  store.close();
+  const reopened = new Store(join(state, "help.db"));
+  expect(reopened.claim(Date.now()+9999999)).toBeUndefined();
+  reopened.resumeQuota(1);
+  expect(reopened.claim()!.attempts).toBe(1);
+  reopened.close();
+});
+
+test("quota parsing uses native windows, preserves unknowns and does not consume credits", () => {
+  const bucket = (primary: any, secondary: any = {usedPercent:20}) => ({rateLimitsByLimitId:{codex:{primary,secondary}}});
+  expect(quotaAvailability(bucket({usedPercent:99})).available).toBe(true);
+  expect(quotaAvailability(bucket({usedPercent:0}, {usedPercent:100,resetsAt:10000}),1000).nextCheck).toBe(301000);
+  expect(quotaAvailability(bucket({usedPercent:100,resetsAt:100}),1000).nextCheck).toBe(101000);
+  expect(quotaAvailability(bucket({usedPercent:null})).available).toBe(false);
+  expect(quotaAvailability({}).available).toBe(false);
+  expect(quotaAvailability({rateLimits:{primary:{usedPercent:0},spendControlReached:true}}).available).toBe(false);
+});
+
+test("quota recovery preserves uncertainty and a concurrent newer pause", () => {
+  const store = new Store(":memory:");
+  store.receive(event(), "public");
+  const first = store.claim()!;
+  store.receive({...event(),id:"1500000000000000999",channelId:"1500000000000000888"},"public");
+  const second = store.claim()!;
+  store.prepare("uncertain",0,first.event.id,first.event.channelId,{text:"possible delivery"});
+  store.sending("uncertain",0);
+  store.deferQuota(first,"quota",1000);
+  store.deferQuota(second,"quota again",2000);
+  store.resumeQuota(1);
+  expect(store.quotaPause()?.failures).toBe(2);
+  store.scheduleQuotaCheck(0,"stale",1);
+  expect(store.quotaPause()?.next_check).toBe(122000);
+  store.resumeQuota(2);
+  expect(store.status().attention).toHaveLength(1);
+  expect(store.status().uncertain).toHaveLength(1);
+  expect(store.claim()?.event.id).toBe(second.event.id);
+  store.close();
+});
+
+test("quota checks are read-only and only resume on verified availability", async () => {
+  const store = new Store(":memory:");
+  store.receive(event(),"public");
+  store.deferQuota(store.claim()!,"quota",0);
+  let available = false;
+  const calls: string[] = [];
+  const server = {request:async(method:string)=>{
+    calls.push(method);
+    return {rateLimits:{primary:{usedPercent:available?10:100}}};
+  }};
+  const worker = new Worker(store,server as any,config,"state","endpoint","token",()=>undefined);
+  await (worker as any).checkQuota();
+  expect(store.quotaPause()).toBeDefined();
+  await (worker as any).checkQuota();
+  expect(calls).toHaveLength(1);
+  store.scheduleQuotaCheck(0,"test elapsed",1);
+  available=true;
+  await (worker as any).checkQuota();
+  expect(store.quotaPause()).toBeUndefined();
+  expect(calls).toEqual(["account/rateLimits/read","account/rateLimits/read"]);
+  expect(store.claim()?.event.id).toBe(event().id);
   store.close();
 });
 
