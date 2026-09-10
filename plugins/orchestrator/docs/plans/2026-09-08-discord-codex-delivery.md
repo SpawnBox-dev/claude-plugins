@@ -300,7 +300,12 @@ are distinguished from archived evaluator values and cannot establish outage or
 customer impact alone. Evidence is in shared note `2738c70d`. The service was
 backed up, upgraded and restarted, and the formerly blocked event was retried
 through the supported recovery CLI. Its eventual live model outcome is a separate
-acceptance check.
+acceptance check. That live check subsequently passed: the worker called the new
+metric operation twice successfully (no query gaps), read the recovery message
+and resolved D1 incident, amended its earlier capability-gap note, and completed
+event `1547534762267123774` with deliberate silence for resolved history. The queue
+advanced to subsequent arrivals. At verification there were 13 handled events,
+one running and six pending, with no blocked events or uncertain deliveries.
 
 Artifact `0.1.0+codex.20260910192805` adds bounded one-shot reviews tied to an
 admitted source conversation. Host-owned job metadata stays separate from Discord

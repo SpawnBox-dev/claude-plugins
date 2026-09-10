@@ -1,6 +1,8 @@
 # HELP global recovery and durable follow-up jobs
 
-Status: implementation specification, not deployed. Continues the user-approved
+Status: stages 1-2 deployed as commit 7663640; stages 3-5 remain to implement.
+The scoped metric reader 1197995 also supplies live operational evidence.
+Continues the user-approved
 operational-parity work item dbfca67d. Preserve the existing Claude implementation,
 live admitted conversations, shared knowledge CRUD and quota recovery.
 
@@ -62,8 +64,9 @@ that denied operation into an unrestricted mutating HTTP tool.
   audience. Incomplete scans report gaps and retain their previous watermarks.
 - Native Codex sees the true origin, scoped tools and policy. Fixtures use no
   inference, real messages, real diagnostic responses or production KB mutations.
-- Independent code and security review before enabling broader read access. Apply
-  important verified findings; incomplete reviews are not passing reviews.
+- Inspect the change and run targeted boundary/recovery tests before enabling
+  broader read access. The user requested ordinary coding/testing instead of the
+  code-carefully procedure on September 10; separate reviewers are optional.
 
 ## Acceptance and rollout
 
