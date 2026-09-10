@@ -26,6 +26,10 @@ var projectKnowledgeTools = [...memoryTools];
 // src/guard.ts
 var allowed = new Set([
   "mcp__spawnbox_discord__context",
+  "mcp__spawnbox_discord__schedule_review",
+  "mcp__spawnbox_discord__list_reviews",
+  "mcp__spawnbox_discord__cancel_review",
+  "mcp__spawnbox_discord__review_report",
   "mcp__spawnbox_discord__reply",
   "mcp__spawnbox_discord__react",
   "mcp__spawnbox_discord__edit_message",

@@ -118,6 +118,10 @@ if (command === "retry" || command === "reconcile") {
     failures = Date.now() - started > 300000 ? 0 : failures + 1;
     await Bun.sleep(Math.min(60000, 1000 * 2 ** Math.min(failures, 6)));
   }
+} else if (command === "reviews") {
+  const store = new Store(join(state, "help.db"));
+  try { console.log(JSON.stringify(store.reviews(), null, 2)); }
+  finally { store.close(); }
 } else if (command === "status") {
   if (!existsSync(join(state, "help.db")))
     console.log(

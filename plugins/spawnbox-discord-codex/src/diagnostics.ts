@@ -75,7 +75,7 @@ export class Diagnostics {
       );
     const shared = this.store.db
       .query("SELECT 1 FROM inbox WHERE conversation=? AND payload LIKE ?")
-      .get(job.conversation, `%${id}%`);
+      .get(job.review?.sourceConversation ?? job.conversation, `%${id}%`);
     if (!shared)
       throw new Error("Diagnostic ID was not shared in this conversation");
     const rows = await this.query(

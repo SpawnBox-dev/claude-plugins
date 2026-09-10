@@ -19905,6 +19905,20 @@ class StdioServerTransport {
 var id = exports_external.string().regex(/^\d{15,22}$/);
 var toolSchemas = {
   context: {},
+  schedule_review: {
+    key: exports_external.string().regex(/^[a-zA-Z0-9_-]{1,60}$/),
+    due: exports_external.number().int().describe("UTC Unix milliseconds, one minute to 30 days ahead"),
+    reason: exports_external.string().min(1).max(1000),
+    workItem: exports_external.string().uuid().optional()
+  },
+  list_reviews: {},
+  cancel_review: { key: exports_external.string().regex(/^[a-zA-Z0-9_-]{1,60}$/) },
+  review_report: {
+    disposition: exports_external.enum(["outstanding", "resolved", "discharged", "unknown"]),
+    summary: exports_external.string().min(1).max(4000),
+    evidence: exports_external.array(id).max(100),
+    draft: exports_external.string().min(1).max(16000).optional()
+  },
   reply: {
     key: exports_external.string().regex(/^[a-zA-Z0-9_-]{1,60}$/).describe("Stable semantic key for this response; reuse on retry"),
     text: exports_external.string().min(1).max(16000),
@@ -19978,6 +19992,10 @@ var toolSchemas = {
   }
 };
 var descriptions = {
+  schedule_review: "Schedule one local review of this conversation's obligation. Stable key deduplicates retries. No message will be sent; reviews cannot schedule more reviews. At most five outstanding reviews per conversation.",
+  list_reviews: "List this conversation's scheduled reviews, outcomes and local reports.",
+  cancel_review: "Cancel a pending or blocked review belonging to this source conversation. Running and completed reviews cannot be cancelled.",
+  review_report: "Complete a service-created review with a private operator report and optional draft for its source conversation. Fetch fresh history first. Evidence IDs must have been read in this turn. Does not send or approve a message.",
   context: "Read trusted current Discord sender, audience, event and delivery receipt. Call first on every event.",
   reply: "Explicitly send text to the current conversation with durable receipts. No public output is sent automatically. Reuse the same key and content when retrying.",
   no_reply: "Intentionally remain silent and record why. Completes this event without a public message.",

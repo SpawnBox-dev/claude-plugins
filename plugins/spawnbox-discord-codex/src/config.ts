@@ -36,6 +36,7 @@ export const configSchema = z
     maxConcurrency: z.number().int().min(1).max(8).default(2),
     memoryEmbeddings: z.boolean().default(true),
     projectKnowledge: z.boolean().default(false),
+    followupReviews: z.boolean().default(false),
     catchupPageLimit: z.number().int().min(1).max(1000).default(50),
   })
   .strict();

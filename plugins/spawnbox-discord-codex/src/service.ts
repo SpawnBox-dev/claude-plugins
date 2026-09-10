@@ -188,6 +188,8 @@ export async function startService(
       `http://127.0.0.1:${http.port}`,
       clientToken,
       (id) => operations.outcome(id),
+      {},
+      (job) => operations.validateReview(job),
     );
     app.on("disconnected", (error) => {
       if (!stopping) {

@@ -6,7 +6,7 @@ export class Store {
   readonly db: Database;
   constructor(path: string) {
     this.db = new Database(path, { create: true });
-    if ((this.db.query("PRAGMA user_version").get() as any).user_version > 2) {
+    if ((this.db.query("PRAGMA user_version").get() as any).user_version > 3) {
       this.db.close();
       throw new Error("HELP state schema is newer than this runtime");
     }
@@ -28,7 +28,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS locks (name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS quota_pause (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL,
         next_check INTEGER NOT NULL, failures INTEGER NOT NULL, reason TEXT NOT NULL);
-      PRAGMA user_version=2;`);
+      CREATE TABLE IF NOT EXISTS review_jobs (event_id TEXT PRIMARY KEY, source_event TEXT NOT NULL,
+        source_conversation TEXT NOT NULL, key TEXT NOT NULL, due INTEGER NOT NULL, reason TEXT NOT NULL,
+        work_item TEXT, UNIQUE(source_conversation,key));
+      CREATE TABLE IF NOT EXISTS review_reports (event_id TEXT PRIMARY KEY, report TEXT NOT NULL, created INTEGER NOT NULL);
+      PRAGMA user_version=3;`);
   }
   close() {
     this.db.close();
@@ -84,6 +88,63 @@ export class Store {
       )
       .run(channel, user);
   }
+  private review(id: string): Job["review"] {
+    const row = this.db.query("SELECT * FROM review_jobs WHERE event_id=?").get(id) as any;
+    return row ? { sourceEvent: row.source_event, sourceConversation: row.source_conversation,
+      key: row.key, due: row.due, reason: row.reason, workItem: row.work_item ?? undefined } : undefined;
+  }
+  sourceEvent(id: string): Inbound | undefined {
+    const row = this.db.query("SELECT payload FROM inbox WHERE id=?").get(id) as any;
+    return row ? JSON.parse(row.payload) : undefined;
+  }
+  scheduleReview(job: Job, request: { key: string; due: number; reason: string; workItem?: string }, now = Date.now()) {
+    return this.transaction(() => {
+      if (job.review || this.review(job.event.id)) throw new Error("Reviews cannot schedule reviews");
+      const active = this.db.query("SELECT * FROM inbox WHERE id=? AND lease=? AND state='running'").get(job.event.id, job.lease) as any;
+      if (!active || active.conversation !== job.conversation) throw new Error("An active source conversation is required");
+      const prior = this.db.query("SELECT * FROM review_jobs WHERE source_conversation=? AND key=?").get(job.conversation, request.key) as any;
+      if (prior) {
+        if (prior.due !== request.due || prior.reason !== request.reason || prior.work_item !== (request.workItem ?? null))
+          throw new Error("Review key reused with different content; cancel it and choose a new key");
+        return { eventId: prior.event_id, reused: true };
+      }
+      if (!Number.isSafeInteger(request.due) || request.due < now + 60000 || request.due > now + 30 * 86400000)
+        throw new Error("Review must be between one minute and 30 days in the future");
+      const pending = this.db.query(`SELECT count(*) AS count FROM review_jobs r JOIN inbox i ON i.id=r.event_id
+        WHERE r.source_conversation=? AND i.state IN ('pending','running','blocked')`).get(job.conversation) as any;
+      if (pending.count >= 5) throw new Error("At most five outstanding reviews per conversation");
+      const id = `review-${randomUUID()}`;
+      const conversation = `review:${id}`;
+      const source: Inbound = JSON.parse(active.payload);
+      // The review contains routing metadata, but no fabricated incoming message.
+      const event: Inbound = { ...source, id, content: "", attachments: [], embeds: [], replyTo: undefined,
+        timestamp: new Date(now).toISOString() };
+      this.db.query("INSERT INTO conversations(id,audience) VALUES (?,?)").run(conversation, this.audience(job.conversation));
+      this.db.query("INSERT INTO inbox(id,conversation,payload,received,available) VALUES (?,?,?,?,?)")
+        .run(id, conversation, JSON.stringify(event), now, request.due);
+      this.db.query("INSERT INTO review_jobs VALUES (?,?,?,?,?,?,?)")
+        .run(id, source.id, job.conversation, request.key, request.due, request.reason, request.workItem ?? null);
+      this.audit("review_scheduled", { event: id, source: source.id, due: request.due });
+      return { eventId: id, reused: false };
+    });
+  }
+  reviews(conversation?: string) {
+    return this.db.query(`SELECT r.*,i.state,i.error,p.report FROM review_jobs r JOIN inbox i ON i.id=r.event_id
+      LEFT JOIN review_reports p ON p.event_id=r.event_id ${conversation ? "WHERE r.source_conversation=?" : ""}
+      ORDER BY r.due DESC LIMIT 100`).all(...(conversation ? [conversation] : []));
+  }
+  cancelReview(conversation: string, key: string) {
+    return this.transaction(() => {
+      const row = this.db.query(`SELECT i.id,i.state FROM review_jobs r JOIN inbox i ON i.id=r.event_id
+        WHERE r.source_conversation=? AND r.key=?`).get(conversation, key) as any;
+      if (!row) throw new Error("No review with this key belongs to the conversation");
+      if (row.state === "running") throw new Error("Review is running; wait for its result before cancelling");
+      if (row.state === "handled") throw new Error("Review has already completed");
+      this.db.query("UPDATE inbox SET state='cancelled',outcome='cancelled by source conversation' WHERE id=?").run(row.id);
+      this.audit("review_cancelled", { event: row.id, conversation });
+      return { cancelled: true };
+    });
+  }
   dmChannels(allowedUsers: string[]): string[] {
     const allowed = new Set(allowedUsers);
     return (
@@ -109,19 +170,20 @@ export class Store {
       )
       .run(now);
   }
-  claim(now = Date.now()): Job | undefined {
+  claim(now = Date.now(), includeReviews = true): Job | undefined {
     return this.transaction(() => {
       this.recover(now);
       if (this.quotaPause()) return;
       const row = this.db
         .query(
           `SELECT * FROM inbox i WHERE state='pending' AND available <= ?
+        AND (? OR NOT EXISTS (SELECT 1 FROM review_jobs r WHERE r.event_id=i.id))
         AND NOT EXISTS (SELECT 1 FROM inbox other WHERE other.conversation=i.conversation AND other.state='running')
         AND NOT EXISTS (SELECT 1 FROM inbox older WHERE older.conversation=i.conversation AND older.state IN ('pending','blocked') AND
           (older.received < i.received OR (older.received=i.received AND older.id < i.id)))
         ORDER BY received,id LIMIT 1`,
         )
-        .get(now) as any;
+        .get(now, includeReviews ? 1 : 0) as any;
       if (!row) return;
       const lease = randomUUID();
       this.db
@@ -134,6 +196,7 @@ export class Store {
         conversation: row.conversation,
         attempts: row.attempts + 1,
         lease,
+        review: this.review(row.id),
       };
     });
   }
@@ -229,6 +292,7 @@ export class Store {
         conversation: row.conversation,
         attempts: row.attempts,
         lease: row.lease,
+        review: this.review(row.id),
       }
     );
   }

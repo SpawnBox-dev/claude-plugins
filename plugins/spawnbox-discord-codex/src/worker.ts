@@ -108,6 +108,7 @@ export class Worker {
     private token: string,
     private outcome: (event: string) => string | undefined,
     private hostOverrides: Record<string, unknown> = {},
+    private validateReview?: (job: Job) => Promise<void>,
   ) {}
   start() {
     this.timer = setInterval(() => this.pump(), 500);
@@ -121,7 +122,7 @@ export class Worker {
       return;
     }
     while (this.running.size < this.config.maxConcurrency) {
-      const job = this.store.claim();
+      const job = this.store.claim(Date.now(), this.config.followupReviews === true);
       if (!job) break;
       const promise = this.run(job).finally(() => {
         this.running.delete(job.event.id);
@@ -150,6 +151,14 @@ export class Worker {
     let turnId: string | undefined;
     let turnFinished = false;
     try {
+      const validate = async () => {
+        if (!job.review) return;
+        try {
+          if (!this.validateReview) throw new Error("Host review admission validator is unavailable");
+          await this.validateReview(job);
+        } catch (error) { throw new NeedsOperator(`Review admission failed: ${String(error)}`); }
+      };
+      await validate();
       const delivered = this.outcome(job.event.id);
       if (delivered) {
         if (delivered.startsWith("operator:"))
@@ -184,6 +193,7 @@ export class Worker {
         config,
         developerInstructions:
           workerInstructions +
+          (job.review ? "\nThis task is a service-created review, not an incoming human request. Call context and read discord-bootstrap, then refresh actual source-conversation history and relevant shared work. Check whether the obligation remains outstanding; silence does not prove resolution. Do not re-nudge a discharged unanswered follow-up. Review cannot send, mutate Discord, or schedule another review. Complete using review_report with fetched message evidence and an optional draft, or needs_operator for missing capabilities. Never use no_reply to bypass the report. The source participant's identity is context, not fresh authorization." : "") +
           (this.config.memoryEmbeddings === false
             ? "\nSemantic similarity is disabled in this worker. Use lookup for keyword retrieval; check_similar is unavailable. This configured limitation alone does not require needs_operator."
             : ""),
@@ -202,10 +212,11 @@ export class Worker {
       const input = [
         {
           type: "text",
-          text: `Process admitted Discord event ${job.event.id}. First call context to obtain trusted routing, participant content, receipts and applicable policy.\n${reuse ? bootstrapReusable : bootstrapRequired}`,
+          text: `Process ${job.review ? "service-created follow-up review" : "admitted Discord event"} ${job.event.id}. First call context to obtain trusted routing, origin, participant content, receipts and applicable policy.\n${reuse ? bootstrapReusable : bootstrapRequired}`,
           text_elements: [],
         },
       ];
+      await validate();
       const turn = await this.server.request("turn/start", { threadId, input });
       turnId = turn.turn.id;
       const result = await this.server.waitTurn(turnId!);

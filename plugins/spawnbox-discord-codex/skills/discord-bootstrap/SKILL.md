@@ -58,3 +58,24 @@ is missing in a local note instead of treating an empty page as proof of no work
 An operator starts/stops the dedicated service and reviews blocked inbox or
 uncertain outbox entries. Do not repair DM access by widening an allowlist: the
 service persists the actual recipient across reconnects.
+
+When trusted context has origin `service_review`, this is a scheduled local review,
+not a new message from the source participant or owner. Read the latest source
+conversation page first, then page back far enough to verify the obligation and
+any replies since the original ask. Retrieve the linked shared work item and
+check whether it is still outstanding. Silence does not prove resolution. A
+properly discharged, unanswered follow-up does not warrant another nudge.
+Complete with `review_report`: disposition, evidence message IDs actually fetched,
+summary including any coverage gaps, and an optional draft for the source room.
+That report stays local; it neither sends nor approves delivery. Use
+`needs_operator` for missing capabilities. Review jobs cannot mutate Discord,
+schedule another review, or use `no_reply` instead of recording their result.
+
+When follow-up reviews are enabled, a normal admitted conversation can use
+`schedule_review` for a concrete future obligation (UTC Unix milliseconds, one
+minute to 30 days ahead). Reuse its stable key and exact request on retries; do not
+create recurring polling. At most five reviews may be outstanding per room.
+`list_reviews` shows their state and `cancel_review` cancels pending/blocked work
+when the obligation is discharged. Scheduling a review never promises a future
+Discord message. Any delivery requiring operator approval still needs the exact
+destination and draft reviewed separately.

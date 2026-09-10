@@ -6,6 +6,20 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 const id = z.string().regex(/^\d{15,22}$/);
 export const toolSchemas = {
   context: {},
+  schedule_review: {
+    key: z.string().regex(/^[a-zA-Z0-9_-]{1,60}$/),
+    due: z.number().int().describe("UTC Unix milliseconds, one minute to 30 days ahead"),
+    reason: z.string().min(1).max(1000),
+    workItem: z.string().uuid().optional(),
+  },
+  list_reviews: {},
+  cancel_review: { key: z.string().regex(/^[a-zA-Z0-9_-]{1,60}$/) },
+  review_report: {
+    disposition: z.enum(["outstanding", "resolved", "discharged", "unknown"]),
+    summary: z.string().min(1).max(4000),
+    evidence: z.array(id).max(100),
+    draft: z.string().min(1).max(16000).optional(),
+  },
   reply: {
     key: z
       .string()
@@ -97,6 +111,10 @@ export const toolSchemas = {
   },
 };
 const descriptions: Record<keyof typeof toolSchemas, string> = {
+  schedule_review: "Schedule one local review of this conversation's obligation. Stable key deduplicates retries. No message will be sent; reviews cannot schedule more reviews. At most five outstanding reviews per conversation.",
+  list_reviews: "List this conversation's scheduled reviews, outcomes and local reports.",
+  cancel_review: "Cancel a pending or blocked review belonging to this source conversation. Running and completed reviews cannot be cancelled.",
+  review_report: "Complete a service-created review with a private operator report and optional draft for its source conversation. Fetch fresh history first. Evidence IDs must have been read in this turn. Does not send or approve a message.",
   context:
     "Read trusted current Discord sender, audience, event and delivery receipt. Call first on every event.",
   reply:

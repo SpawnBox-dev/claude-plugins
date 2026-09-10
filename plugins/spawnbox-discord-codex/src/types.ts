@@ -25,6 +25,8 @@ export type Job = {
   conversation: string;
   attempts: number;
   lease: string;
+  // Populated only from the host-owned review_jobs table, never event payloads.
+  review?: { sourceEvent: string; sourceConversation: string; key: string; due: number; reason: string; workItem?: string };
 };
 export type ChannelPolicy = {
   audience: Audience;
@@ -53,5 +55,6 @@ export type HelpConfig = {
   maxConcurrency: number;
   memoryEmbeddings?: boolean;
   projectKnowledge?: boolean;
+  followupReviews?: boolean;
   catchupPageLimit: number;
 };

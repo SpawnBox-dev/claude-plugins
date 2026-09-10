@@ -282,3 +282,34 @@ Future upgrades must stage the release, run setup against it and update runtime.
 while stopped. A rollback uses the compatible retained package plus setup, never
 an old queue database. The Orchestrator dependency still requires coordinated
 setup when its own installed cache version changes.
+# September 10 durable follow-up reviews
+
+Artifact `0.1.0+codex.20260910192805` adds bounded one-shot reviews tied to an
+admitted source conversation. Host-owned job metadata stays separate from Discord
+payloads; retries deduplicate by conversation/key. Reviews have separate queues
+and native Codex tasks, retain cancellation/quota state across restart, and cannot
+send, mutate Discord or schedule more reviews. They produce local evidence reports
+and optional drafts after reading fresh source history. The full global bootstrap
+sweeps and approved follow-up delivery remain separate unfinished work.
+
+All 36 TypeScript tests (246 assertions), two diagnostic-reader tests and typecheck
+pass. The 51-step native fixture verifies scheduling through MCP, execution in a
+new review task with true service origin, a refused reply, evidence consumption
+and local report persistence, alongside existing wake/restart/CRUD coverage.
+Plugin and skill validation pass. Review findings were corrected: private package
+provenance follows the trusted source conversation; disabling reviews leaves them
+pending without inference; revoked admission is checked before native task/turn
+startup; lost leases cannot overwrite newer reports. Tests exercise each case.
+
+This stage uses HELP schema 3. Back up before migration and retain a compatible
+runtime; schema-2 packages reject the new schema. `followupReviews` is an explicit
+feature flag. No future Discord delivery is authorized merely by scheduling a
+review. These are automated fixture results, not evidence of live scheduled model
+behavior. The user requested ordinary implementation/testing rather than the full
+code-carefully workflow for subsequent work.
+
+Installed and enabled in production after a graceful stop and SQLite backup at
+`backups/20260910-durable-reviews`. The runtime is retained outside the plugin
+cache. Gateway readiness is verified; queued arrivals were preserved, with no
+uncertain deliveries or service failures. The existing metric-query capability
+block remains separate from this release.

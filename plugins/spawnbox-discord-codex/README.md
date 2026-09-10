@@ -155,7 +155,7 @@ Stop the service before updating. Back up its SQLite DB through SQLite's backup
 API, retain state outside plugin caches, install the new plugin version, and rerun
 setup to refresh the dedicated runtime and reviewed hook hashes. Roll back the
 package and runtime together; never restore a whole shared KB over newer work.
-Quota recovery uses HELP state schema 2. Older packages reject that schema, so
+Quota recovery and durable reviews use HELP state schema 3. Older packages reject that schema, so
 use a compatible runtime or a forward fix rather than restoring an old database
 and losing arrivals. Legacy usage events already blocked by schema-1 runtimes
 need one explicit retry; subsequent quota failures use automatic recovery.
@@ -164,6 +164,20 @@ responding owner per room; rollback stops Codex and restores the prior Claude
 ownership, without modifying Worker commands or the application bot.
 
 ## Qualification
+
+Optional `followupReviews: true` enables bounded one-shot reviews scheduled by an
+admitted conversation. A stable key deduplicates retries; due times are one minute
+to 30 days ahead, with at most five outstanding reviews per conversation. Jobs,
+cancellation and quota deferral survive restarts. Each review gets its own queue
+and Codex task, so blocked reviews cannot hold up incoming human messages.
+
+Reviews recheck the live destination, participant admission and audience. They
+read fresh history, inspect the obligation and leave a local structured report
+with evidence and an optional draft. They cannot send messages, change Discord
+state or schedule more reviews. Scheduling does not authorize later delivery.
+Inspect reports with `bun dist/cli.js reviews --state <state>`; conversations use
+`list_reviews` and `cancel_review`. This does not yet perform global bootstrap
+sweeps, diagnostic backstops or approved follow-up delivery.
 
 Run `npm ci --ignore-scripts`, `npm run typecheck`, `bun test tests`,
 `python -m unittest discover -s tests -p test_diag_reader.py`, and `bun run build`.

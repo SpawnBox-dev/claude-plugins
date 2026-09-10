@@ -53,6 +53,7 @@ const config: HelpConfig = {
   maxConcurrency: 1,
   memoryEmbeddings: false,
   projectKnowledge: true,
+  followupReviews: true,
   catchupPageLimit: 2,
 };
 config.model = process.env.HELP_TEST_MODEL || "gpt-6-astra";
@@ -60,6 +61,12 @@ await setupWorker(config, root);
 let store = new Store(join(state, "help.db"));
 const sent: string[] = [];
 const bridge: any = {
+  fetchAllowedChannel: async () => ({ id: "1471275386355847302", guildId: config.guildId, type: 0,
+    isThread: () => false, messages: { fetch: async () => new Map([["1500000000000000004", {
+      id: "1500000000000000004", channelId: "1471275386355847302", guildId: config.guildId,
+      author: { id: config.ownerIds[0], username: "fixture" }, content: "Check this later",
+      createdAt: new Date(), channel: { type: 0, isThread: () => false }, attachments: new Map(), embeds: [],
+    }]]) } }),
   sendMessage: async (params: any) => [
     await params.deliverPart(0, { content: params.text }, async () => {
       sent.push(params.text);
@@ -120,8 +127,8 @@ const model = Bun.serve({
       JSON.stringify(body, null, 2),
     );
     let item: any;
-    if (n === 0 || n === 8 || n === 30) item = search(n, "spawnbox_discord context");
-    else if (n === 1 || n === 9 || n === 31)
+    if ([0, 8, 30, 34, 40].includes(n)) item = search(n, "spawnbox_discord context");
+    else if ([1, 9, 31, 35, 41].includes(n))
       item = call(n, "mcp__spawnbox_discord", "context", {});
     else if (n === 2) item = search(n, "spawnbox_discord reply");
     else if (n === 3)
@@ -145,17 +152,17 @@ const model = Bun.serve({
         next_steps: ["Wait for inbound event"],
       });
     else if (n === 10) item = search(n, "spawnbox_discord no_reply");
-    else if (n === 11 || n === 32)
+    else if (n === 11 || n === 32 || n === 38)
       item = call(n, "mcp__spawnbox_discord", "no_reply", {
         reason: "Conversation already answered; follow-up acknowledged locally",
       });
-    else if (n === 14) item = search(n, "spawnbox_discord read_resource");
+    else if (n === 14 || n === 42) item = search(n, "spawnbox_discord read_resource");
     else if (n === 15)
       item = call(n, "mcp__spawnbox_discord", "read_resource", {
         kind: "skill",
         name: "discord-help",
       });
-    else if (n === 16)
+    else if (n === 16 || n === 43)
       item = call(n, "mcp__spawnbox_discord", "read_resource", {
         kind: "skill", name: "discord-bootstrap",
       });
@@ -185,6 +192,19 @@ const model = Bun.serve({
       item = search(n, "project_knowledge delete_note");
     } else if (n === 27)
       item = call(n, "mcp__project_knowledge", "delete_note", { id: sharedNoteId, reason: "Remove synthetic CRUD acceptance note" });
+    else if (n === 36) item = search(n, "spawnbox_discord schedule_review");
+    else if (n === 37) item = call(n, "mcp__spawnbox_discord", "schedule_review", {
+      key: "verify-fixture", due: Date.now() + 120000, reason: "Verify fixture obligation after due time",
+    });
+    else if (n === 44) item = search(n, "spawnbox_discord fetch_messages");
+    else if (n === 45) item = call(n, "mcp__spawnbox_discord", "fetch_messages", {});
+    else if (n === 46) item = search(n, "spawnbox_discord reply");
+    else if (n === 47) item = call(n, "mcp__spawnbox_discord", "reply", { key: "forbidden-review", text: "MUST NOT SEND" });
+    else if (n === 48) item = search(n, "spawnbox_discord review_report");
+    else if (n === 49) item = call(n, "mcp__spawnbox_discord", "review_report", {
+      disposition: "outstanding", summary: "Synthetic obligation remains outstanding",
+      evidence: ["1500000000000000004"], draft: "Synthetic local draft, never send",
+    });
     else
       item = {
         type: "message",
@@ -249,6 +269,7 @@ try {
     "fixture",
     (id) => operations.outcome(id),
     overrides,
+    (job) => operations.validateReview(job),
   );
   const event: Inbound = {
     id: "1500000000000000001",
@@ -304,6 +325,7 @@ try {
     "fixture",
     (id) => operations.outcome(id),
     overrides,
+    (job) => operations.validateReview(job),
   );
   store.receive(
     { ...event, id: "1500000000000000002", content: "Thanks" },
@@ -316,6 +338,20 @@ try {
   store.receive({...event,id:"1500000000000000003",content:"One more uninterrupted follow-up"},"public");
   await waitHandled("1500000000000000003");
   assert.equal(count,34);
+  store.receive({...event,id:"1500000000000000004",content:"Check this later"},"public");
+  await waitHandled("1500000000000000004");
+  assert.equal(count,40);
+  const scheduled = store.reviews()[0] as any;
+  assert(scheduled?.event_id.startsWith("review-"), "Native schedule did not create a trusted review");
+  // Move only this disposable fixture's available time forward, without sleeping
+  // or changing real service state. Durable wall-clock bounds have unit coverage.
+  store.db.query("UPDATE inbox SET available=0 WHERE id=?").run(scheduled.event_id);
+  worker.pump();
+  await waitHandled(scheduled.event_id);
+  assert.equal(count,51);
+  assert((await Bun.file(join(fixture,"request-42.json")).text()).includes("service_review"), "Native review origin was missing");
+  assert((await Bun.file(join(fixture,"request-48.json")).text()).includes("Reviews cannot send"), "Native review could send");
+  assert.equal(JSON.parse((store.reviews()[0] as any).report).disposition,"outstanding");
   assert((await Bun.file(join(fixture,"request-30.json")).text()).includes(bootstrapReusable), "Uninterrupted native follow-up repeated full bootstrap");
   assert(
     (await Bun.file(join(fixture, "request-16.json")).text()).includes(
@@ -359,6 +395,8 @@ try {
       nativePatchBlocked: true,
       sharedKnowledgeCRUD: true,
       bootstrapReuse: true,
+      durableReview: true,
+      reviewCannotSend: true,
       responses: count,
     }),
   );
