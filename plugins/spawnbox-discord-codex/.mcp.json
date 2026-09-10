@@ -4,7 +4,7 @@
       "command": "bun",
       "args": [
         "-e",
-        "const p=require('node:path');const h=process.env.CODEX_HOME||p.join(require('node:os').homedir(),'.codex');import(require('node:url').pathToFileURL(p.join(h,'plugins/cache/spawnbox-dev-codex-plugins/spawnbox-discord-codex/0.1.0+codex.20260910032540/dist/mcp.js')).href).then(m=>m.startMcp())"
+        "const p=require('node:path');const h=process.env.CODEX_HOME||p.join(require('node:os').homedir(),'.codex');import(require('node:url').pathToFileURL(p.join(h,'plugins/cache/spawnbox-dev-codex-plugins/spawnbox-discord-codex/0.1.0+codex.20260910033257/dist/mcp.js')).href).then(m=>m.startMcp())"
       ],
       "env_vars": [
         "CODEX_HOME",

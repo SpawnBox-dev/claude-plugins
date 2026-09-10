@@ -71,10 +71,16 @@ defaults to true; setting it false removes similarity tools from both servers.
 Shared domain policies remain project-owned and are read through a bounded broker. This
 includes a contained reader for installed skill instructions, so the restricted
 worker can actually load the workflows listed in its native skill catalog. This
-loads `discord-bootstrap` on startup/resume/context recovery, including the
+loads `discord-bootstrap` on startup/recovery, including the
 existing engagement/persona reference, Discord operating reference and scoped
 person/channel notes. It does not claim the old whole-guild bootstrap sweeps or
 diagnostic backstop were executed by loading one conversation's skill.
+Uninterrupted follow-ups can reuse that loaded context. A host-side content hash
+covers every page of approved policies, installed HELP skills and scoped notes,
+plus participant identity. A change, failed read or worker restart forces refresh;
+the native compaction hook also requests fresh bootstrap. Fresh event context and
+relevant history remain required. The hash detects changes; it does not attest
+that a model obeyed every instruction, which still needs behavioral acceptance.
 Binary diagnostic database investigation,
 cross-audience publication, helper role decisions, bans/kicks, broad access
 changes and deployment remain explicit local operator work.

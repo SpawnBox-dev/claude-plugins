@@ -18,6 +18,7 @@ import { catchupChannel } from "../src/service";
 import { readResource } from "../src/resources";
 import { Worker, workerConfig } from "../src/worker";
 import { quotaAvailability } from "../src/quota";
+import { bootstrapRevision, bootstrapRequired, bootstrapReusable, helpRecoveryContext } from "../src/bootstrap";
 import { PermissionFlagsBits } from "discord.js";
 
 export const config: HelpConfig = {
@@ -723,6 +724,68 @@ test("quota checks are read-only and only resume on verified availability", asyn
   expect(store.quotaPause()).toBeUndefined();
   expect(calls).toEqual(["account/rateLimits/read","account/rateLimits/read"]);
   expect(store.claim()?.event.id).toBe(event().id);
+  store.close();
+});
+
+function bootstrapFixture() {
+  const root = mkdtempSync(join(tmpdir(), "help-bootstrap-"));
+  mkdirSync(join(root,".claude","commands"),{recursive:true});
+  for (const name of ["discord-bootstrap", "discord-help", "discord-triage", "discord-review-helper-application", "discord-post-roadmap", "diag-report-investigation"])
+    writeFileSync(join(root,".claude","commands",name+".md"),name);
+  for (const name of ["discord", "discord-engagement", "discord-channels-bootstrap"])
+    writeFileSync(join(root,".claude",name+".md"),name);
+  for (const name of ["discord-bootstrap", "discord-help", "discord-triage", "discord-review-helper-application", "discord-post-roadmap"]) {
+    mkdirSync(join(root,"skills",name),{recursive:true});
+    writeFileSync(join(root,"skills",name,"SKILL.md"),name);
+  }
+  return {...config,projectRoot:root,codexHome:root};
+}
+
+test("bootstrap reuse requires complete unchanged resources and preserves recovery context", () => {
+  const local = bootstrapFixture();
+  const job = {event:event(),conversation:"fixture",attempts:1,lease:"fixture"};
+  const original = bootstrapRevision(local,job);
+  expect(original).toBeDefined();
+  expect(bootstrapRevision(local,job)).toBe(original);
+  expect(bootstrapRevision(local,{...job,event:{...job.event,userId:"1500000000000000888"}})).not.toBe(original);
+  writeFileSync(join(local.projectRoot,".claude","discord.md"),"x".repeat(24001)+"first");
+  const paged = bootstrapRevision(local,job);
+  writeFileSync(join(local.projectRoot,".claude","discord.md"),"x".repeat(24001)+"second");
+  expect(bootstrapRevision(local,job)).not.toBe(paged);
+  expect(bootstrapRevision(config,job)).toBeUndefined();
+  const recovery = helpRecoveryContext({hook_event_name:"SessionStart",source:"compact"},{hookSpecificOutput:{additionalContext:"saved checkpoint"}});
+  expect(recovery.hookSpecificOutput.additionalContext).toContain("saved checkpoint");
+  expect(recovery.hookSpecificOutput.additionalContext).toContain("Read discord-bootstrap");
+  expect(helpRecoveryContext({hook_event_name:"PreToolUse"},{})).toEqual({});
+});
+
+test("worker reuses bootstrap only within a successful uninterrupted conversation", async () => {
+  const local = bootstrapFixture();
+  const store = new Store(":memory:");
+  const completed = new Set<string>();
+  const prompts: string[] = [];
+  let current = "";
+  const server = {
+    request:async(method:string,params:any)=> {
+      if (method === "turn/start") {prompts.push(params.input[0].text);return {turn:{id:"turn"}};}
+      return {thread:{id:"thread"}};
+    },
+    waitTurn:async()=>{completed.add(current);return {status:"completed"};},
+  };
+  const makeWorker = () => new Worker(store,server as any,local,local.projectRoot,"endpoint","token",id=>completed.has(id)?"no_reply":undefined);
+  let worker=makeWorker();
+  for(let n=0;n<4;n++) {
+    if(n===2) writeFileSync(join(local.projectRoot,".claude","discord.md"),"policy changed");
+    if(n===3) worker=makeWorker();
+    current="150000000000000001"+n;
+    store.receive(event(current),"public");
+    await (worker as any).run(store.claim()!);
+  }
+  expect(prompts[0]).toContain(bootstrapRequired);
+  expect(prompts[1]).toContain(bootstrapReusable);
+  expect(prompts[2]).toContain(bootstrapRequired);
+  expect(prompts[3]).toContain(bootstrapRequired);
+  expect(store.status().inbox).toEqual([{state:"handled",count:4}]);
   store.close();
 });
 

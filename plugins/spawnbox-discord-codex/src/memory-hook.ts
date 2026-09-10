@@ -1,6 +1,7 @@
 // Reuses the native orchestrator lifecycle engine, with conversation-local global
 // memory as well as project memory. No private room reads the shared fleet DB.
 import { join } from "node:path";
+import { helpRecoveryContext } from "./bootstrap";
 export {};
 const input = JSON.parse(await Bun.stdin.text());
 process.env.ORCHESTRATOR_HOST = "codex";
@@ -21,7 +22,7 @@ try {
     "../../orchestrator/mcp/runtime/codex-hooks"
   );
   try {
-    console.log(JSON.stringify(handleCodexHook(getProjectDb(), input)));
+    console.log(JSON.stringify(helpRecoveryContext(input, handleCodexHook(getProjectDb(), input))));
   } finally {
     closeAll();
   }

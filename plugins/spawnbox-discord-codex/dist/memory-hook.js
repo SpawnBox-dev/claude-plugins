@@ -2057,6 +2057,21 @@ var init_codex_hooks = __esm(() => {
 
 // src/memory-hook.ts
 import { join as join5 } from "path";
+
+// src/bootstrap.ts
+function helpRecoveryContext(input, result) {
+  if (input.hook_event_name !== "SessionStart" || input.source !== "compact")
+    return result;
+  const output = result.hookSpecificOutput ?? {};
+  return { ...result, hookSpecificOutput: {
+    ...output,
+    hookEventName: "SessionStart",
+    additionalContext: `${output.additionalContext ?? ""}
+[HELP] Context was compacted. Read discord-bootstrap using read_resource(kind="skill", name="discord-bootstrap") and refresh persona/policy and the conversation checkpoint before outward actions.`
+  } };
+}
+
+// src/memory-hook.ts
 var input = JSON.parse(await Bun.stdin.text());
 process.env.ORCHESTRATOR_HOST = "codex";
 process.env.ORCHESTRATOR_MODE = "standalone";
@@ -2068,7 +2083,7 @@ try {
   const { getProjectDb: getProjectDb2, closeAll: closeAll2 } = await Promise.resolve().then(() => (init_connection(), exports_connection));
   const { handleCodexHook: handleCodexHook2 } = await Promise.resolve().then(() => (init_codex_hooks(), exports_codex_hooks));
   try {
-    console.log(JSON.stringify(handleCodexHook2(getProjectDb2(), input)));
+    console.log(JSON.stringify(helpRecoveryContext(input, handleCodexHook2(getProjectDb2(), input))));
   } finally {
     closeAll2();
   }

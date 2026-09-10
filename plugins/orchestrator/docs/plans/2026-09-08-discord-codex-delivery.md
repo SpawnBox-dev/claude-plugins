@@ -255,3 +255,30 @@ HELP state schema is now 2. Old packages reject it; rollback must use a compatib
 runtime or a forward fix, never overwrite newer queue data with an old backup.
 Remaining work includes efficient bootstrap refresh, historical sweeps and durable
 follow-ups, diagnostics response/backstop, shared harness ownership and acceptance.
+
+### 2026-09-10 bootstrap reuse and retained service releases
+
+Version `0.1.0+codex.20260910033257` distinguishes uninterrupted follow-ups from
+startup/recovery. The service hashes all pages of approved policies, HELP skills
+and scoped notes, including participant identity, before each event. Successful
+same-worker follow-ups can reuse unchanged context. Changed or unreadable
+resources, a different participant or worker restart require fresh bootstrap.
+The native SessionStart compact hook also requests bootstrap and preserves the
+Orchestrator checkpoint context. Every event still requires fresh routing/context
+and relevant history; hash equality does not attest model obedience.
+
+26 tests with 171 assertions, typecheck and plugin/skill validation passed. The
+native fixture now has 34 steps, including a third uninterrupted event proving
+that the reuse directive reaches Codex, plus shared CRUD and process restart.
+Before upgrade production had handled all nine retained events, with no pending,
+running, blocked or uncertain work. The service was stopped, backed up through
+SQLite to state/backups/20260910-bootstrap-reuse, installed and restarted.
+
+The host now retains selected runtime artifacts (dist, skills, scripts, src and
+.codex-plugin) under state/releases/<version>; runtime.json points at that release,
+not the disposable plugin cache. Both 032540 and 033257 releases are retained and
+understand schema 2. Ordinary plugin discovery still uses the installed cache.
+Future upgrades must stage the release, run setup against it and update runtime.json
+while stopped. A rollback uses the compatible retained package plus setup, never
+an old queue database. The Orchestrator dependency still requires coordinated
+setup when its own installed cache version changes.

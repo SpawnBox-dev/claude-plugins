@@ -17,6 +17,7 @@ import { AppServer } from "../src/app-server";
 import { Operations } from "../src/operations";
 import { setupWorker } from "../src/setup";
 import { validateOperation } from "../src/mcp";
+import { bootstrapReusable } from "../src/bootstrap";
 import type { HelpConfig, Inbound } from "../src/types";
 
 const root = resolve(import.meta.dir, "..");
@@ -25,6 +26,11 @@ const state = join(fixture, "state"),
   home = join(fixture, "home");
 mkdirSync(state);
 mkdirSync(home);
+mkdirSync(join(fixture,".claude","commands"),{recursive:true});
+for (const name of ["discord-bootstrap", "discord-help", "discord-triage", "discord-review-helper-application", "discord-post-roadmap", "diag-report-investigation"])
+  writeFileSync(join(fixture,".claude","commands",name+".md"),"Synthetic native fixture policy: "+name);
+for (const name of ["discord", "discord-engagement", "discord-channels-bootstrap"])
+  writeFileSync(join(fixture,".claude",name+".md"),"Synthetic native fixture policy: "+name);
 const config: HelpConfig = {
   schemaVersion: 1,
   projectRoot: fixture,
@@ -114,8 +120,8 @@ const model = Bun.serve({
       JSON.stringify(body, null, 2),
     );
     let item: any;
-    if (n === 0 || n === 8) item = search(n, "spawnbox_discord context");
-    else if (n === 1 || n === 9)
+    if (n === 0 || n === 8 || n === 30) item = search(n, "spawnbox_discord context");
+    else if (n === 1 || n === 9 || n === 31)
       item = call(n, "mcp__spawnbox_discord", "context", {});
     else if (n === 2) item = search(n, "spawnbox_discord reply");
     else if (n === 3)
@@ -139,7 +145,7 @@ const model = Bun.serve({
         next_steps: ["Wait for inbound event"],
       });
     else if (n === 10) item = search(n, "spawnbox_discord no_reply");
-    else if (n === 11)
+    else if (n === 11 || n === 32)
       item = call(n, "mcp__spawnbox_discord", "no_reply", {
         reason: "Conversation already answered; follow-up acknowledged locally",
       });
@@ -307,6 +313,10 @@ try {
   await waitHandled("1500000000000000002");
   assert.equal(count, 30);
   assert.equal(sharedFixtureNote(), null, "Synthetic note was not deleted");
+  store.receive({...event,id:"1500000000000000003",content:"One more uninterrupted follow-up"},"public");
+  await waitHandled("1500000000000000003");
+  assert.equal(count,34);
+  assert((await Bun.file(join(fixture,"request-30.json")).text()).includes(bootstrapReusable), "Uninterrupted native follow-up repeated full bootstrap");
   assert(
     (await Bun.file(join(fixture, "request-16.json")).text()).includes(
       "Apply these",
@@ -348,6 +358,7 @@ try {
       noReply: true,
       nativePatchBlocked: true,
       sharedKnowledgeCRUD: true,
+      bootstrapReuse: true,
       responses: count,
     }),
   );

@@ -3,8 +3,12 @@ name: discord-bootstrap
 description: Establish SpawnBox.help context, review catch-up coverage and resume Discord engagement after startup or interruption.
 ---
 
-Run before outward actions on a new or resumed conversation and after context
-recovery. Bootstrap is idempotent and does not itself send a readiness message.
+Run before outward actions when trusted event instructions require startup or
+recovery bootstrap, and after context compaction or loss. An uninterrupted
+follow-up may reuse loaded context when the host verifies unchanged resources
+and participant. A thread/resume call alone is not an interruption. Fresh context
+and relevant history are still required for every event. Bootstrap is idempotent
+and does not itself send a readiness message.
 
 1. Call context for trusted sender, audience and receipts. Read `engagement` and
    `reference` with read_resource(kind="policy"), then this participant's
