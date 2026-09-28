@@ -19,7 +19,7 @@
 
 import { openSync, readSync, closeSync, existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
-import { parseAddressing } from "./addressing";
+import { parseAddressing, type AddressingResult } from "./addressing";
 import { readLatestRename } from "./session_rename";
 import { lastCleanShutdownMs, readLifecycleTail, restartExplainsSilence } from "./restart_witness";
 import {
@@ -3284,7 +3284,7 @@ export class AgentChannel {
     // Self-event suppression: an instance never re-fires its own session's events
     if (sender.session_id === this.selfSession.session_id) return;
 
-    const fullAddr = parseAddressing(ev.content, sender, sessions);
+    const fullAddr = routedAddressing(ev.content, sender, sessions);
 
     // Per-paragraph routing (0.30.22, work_item b4c37849):
     //
@@ -3653,4 +3653,49 @@ function filterParagraphsForReceiver(
   }
 
   return kept.length > 0 ? kept.join("\n\n") : null;
+}
+
+/**
+ * The post's addressing, read the way filterParagraphsForReceiver ROUTES it
+ * (WI 95f76dca): an envelope counts by its opener only, a fenced code block
+ * counts not at all, and prose counts paragraph by paragraph.
+ *
+ * processEvent used to call parseAddressing on the whole text. Delivery was
+ * still right, because the per-unit filter decides it, but everything else
+ * this value drives was not. Measured 2026-09-28 18:39:51Z: one `@@@ @PA`
+ * envelope quoting "`@SA-89c514ba,@PA,@all`" in its body gave PA an
+ * addressed_to of all seven sessions, and made all six SA watchers log
+ * `paragraph_filtered` - a false delivery-loss alarm in the instrument built
+ * to catch real ones. The header labels (WI 2292ba6c) read the same flags.
+ *
+ * Override commands stay on the whole-text parse: they are not audience.
+ */
+function routedAddressing(
+  content: string,
+  sender: SessionEntry,
+  sessions: SessionEntry[],
+): AddressingResult {
+  const whole = parseAddressing(content, sender, sessions);
+  const targets = new Set<string>();
+  let paAddressed = false;
+  let allAddressed = false;
+  let hadSyntax = false;
+  const unresolved: string[] = [];
+  for (const unit of splitContentUnits(content)) {
+    if (unit.isCode) continue;
+    const a = parseAddressing(unit.envelopeAddr ?? unit.text, sender, sessions);
+    for (const t of a.targets) targets.add(t);
+    paAddressed ||= a.pa_addressed;
+    allAddressed ||= a.all_addressed;
+    hadSyntax ||= a.had_address_syntax;
+    unresolved.push(...a.unresolved_addresses);
+  }
+  return {
+    targets: Array.from(targets),
+    pa_addressed: paAddressed,
+    had_address_syntax: hadSyntax,
+    all_addressed: allAddressed,
+    override_command: whole.override_command,
+    unresolved_addresses: Array.from(new Set(unresolved)),
+  };
 }

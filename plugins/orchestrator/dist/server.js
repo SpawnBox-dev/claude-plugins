@@ -28744,7 +28744,7 @@ class AgentChannel {
     }
     if (sender.session_id === this.selfSession.session_id)
       return;
-    const fullAddr = parseAddressing(ev.content, sender, sessions);
+    const fullAddr = routedAddressing(ev.content, sender, sessions);
     let emitContent;
     let emitTargets;
     if (this.selfSession.role === "prime") {
@@ -28930,6 +28930,33 @@ function filterParagraphsForReceiver(content, receiverId, sender, sessions) {
   return kept.length > 0 ? kept.join(`
 
 `) : null;
+}
+function routedAddressing(content, sender, sessions) {
+  const whole = parseAddressing(content, sender, sessions);
+  const targets = new Set;
+  let paAddressed = false;
+  let allAddressed = false;
+  let hadSyntax = false;
+  const unresolved = [];
+  for (const unit of splitContentUnits(content)) {
+    if (unit.isCode)
+      continue;
+    const a = parseAddressing(unit.envelopeAddr ?? unit.text, sender, sessions);
+    for (const t of a.targets)
+      targets.add(t);
+    paAddressed ||= a.pa_addressed;
+    allAddressed ||= a.all_addressed;
+    hadSyntax ||= a.had_address_syntax;
+    unresolved.push(...a.unresolved_addresses);
+  }
+  return {
+    targets: Array.from(targets),
+    pa_addressed: paAddressed,
+    had_address_syntax: hadSyntax,
+    all_addressed: allAddressed,
+    override_command: whole.override_command,
+    unresolved_addresses: Array.from(new Set(unresolved))
+  };
 }
 
 // mcp/engine/permission_relay.ts
