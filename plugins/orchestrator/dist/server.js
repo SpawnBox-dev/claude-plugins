@@ -27125,6 +27125,19 @@ function looksRoutableAssistantText(raw) {
   }
   return typeof blocks === "string" && blocks.trim() !== "";
 }
+function syntheticTurnKind(raw) {
+  if (!raw || typeof raw !== "object")
+    return null;
+  if (raw.isCompactSummary === true)
+    return "compaction_summary";
+  if (raw.origin?.kind === "task-notification")
+    return "task_notification";
+  if (raw.promptSource === "system")
+    return "system_prompt";
+  if (raw.isMeta === true)
+    return "meta";
+  return null;
+}
 function filterEvent(raw) {
   if (!raw || typeof raw !== "object" || !("type" in raw))
     return null;
@@ -27139,6 +27152,8 @@ function filterEvent(raw) {
     if (/^\s*<channel\b/.test(text))
       return null;
     if (/^\s*\u2190\s*core:/i.test(text))
+      return null;
+    if (syntheticTurnKind(raw) !== null)
       return null;
     return { event_type: "user_input", content: text };
   }

@@ -111,6 +111,49 @@ export function looksRoutableAssistantText(raw: any): boolean {
   return typeof blocks === "string" && blocks.trim() !== "";
 }
 
+/**
+ * Is this `type:"user"` record a turn the HARNESS wrote rather than a person?
+ * Returns what kind it is, or null for a record a human authored. (WI cb376ece)
+ *
+ * WHY. Claude Code records several machine-made turns as top-level `user`
+ * records with a string body - the same shape as something Jarid typed - so
+ * the branch below forwarded every one as `user_input`. Two harms, both seen
+ * on 2026-09-28:
+ *   - A compaction summary (emit muku4py5-fl-8nu, 05:56:52Z) was @-ROUTED to
+ *     the lanes it happened to mention, reading as a live PA directive that
+ *     predated the ruling it described.
+ *   - A background-task notification (emit mukue0oz-krt-ti5, 06:04:06Z)
+ *     reached PA as if a person had typed "HOLD ON (build 1 procs...)" into
+ *     VIDEO's terminal.
+ *
+ * MEASURED, not guessed. Census of every forwarded user record in 10 fleet
+ * transcripts, 2026-09-27..28: 1,633 forwarded. 131 were human
+ * (`origin.kind:"human"`) and 4 were unmarked slash commands (`/clear`,
+ * `/mcp`). The other 1,498 were 645 task notifications, 352 Stop-hook feedback
+ * turns, 303 compaction summaries and 198 scheduled (cron) prompts, every one
+ * carrying a record-level marker below that no human record carried.
+ *
+ * WHY A DENYLIST OF MARKERS, NOT AN ALLOWLIST OF `origin.kind:"human"`. The
+ * two errors are not symmetric. Forwarding a machine turn is noise a lane can
+ * decline; dropping a real message from Jarid is a broken signal nobody sees
+ * (KB 27f1613d). Records with no provenance at all (older transcripts, bare
+ * slash commands like `/clear`) therefore keep routing as before.
+ *
+ * WHY NOT `turnOrigin`. It describes the TURN, not the record: 5 of the 303
+ * compaction summaries carry `turnOrigin:"human"` because a person started the
+ * turn that got compacted. `isCompactSummary` was present on all 303.
+ */
+export function syntheticTurnKind(raw: any): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  if (raw.isCompactSummary === true) return "compaction_summary";
+  if (raw.origin?.kind === "task-notification") return "task_notification";
+  if (raw.promptSource === "system") return "system_prompt";
+  // Stop-hook feedback and other hook-injected turns: isMeta with no other
+  // marker. A human-typed record never carries it (census above).
+  if (raw.isMeta === true) return "meta";
+  return null;
+}
+
 export function filterEvent(raw: any): FilteredEvent | null {
   if (!raw || typeof raw !== "object" || !("type" in raw)) return null;
 
@@ -146,6 +189,8 @@ export function filterEvent(raw: any): FilteredEvent | null {
     // genuine user input themselves, so dropping these is safe.
     if (/^\s*<channel\b/.test(text)) return null;
     if (/^\s*←\s*core:/i.test(text)) return null;
+
+    if (syntheticTurnKind(raw) !== null) return null;
 
     return { event_type: "user_input", content: text };
   }
