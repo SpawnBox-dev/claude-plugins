@@ -23850,6 +23850,33 @@ function handlePrepare(projectDb2, globalDb2, input) {
   return { package: pkg, autonomy: autonomyResult.score, formatted };
 }
 
+// mcp/tools/update_work_item_guard.ts
+var WORK_ITEM_MUTABLE_FIELDS = [
+  "status",
+  "priority",
+  "due_date",
+  "content",
+  "append_content",
+  "tags",
+  "add_tags",
+  "context",
+  "confidence",
+  "code_refs",
+  "blocked_by"
+];
+var NAMES = WORK_ITEM_MUTABLE_FIELDS.join(", ");
+function noFieldsToUpdate(args) {
+  if (WORK_ITEM_MUTABLE_FIELDS.some((f) => args[f] !== undefined))
+    return null;
+  return `No fields to update - nothing was written. Check the parameter names: ${NAMES}. A misspelled name (for example \`append\` for \`append_content\`) is dropped before this tool sees it, so it cannot be named here.`;
+}
+function nothingWritten(changes, skipped) {
+  if (changes.length > 0)
+    return null;
+  const why = skipped.length > 0 ? ` ${skipped.join("; ")}.` : "";
+  return `Nothing was written.${why} Check the parameter names and values: ${NAMES}.`;
+}
+
 // mcp/engine/stalled_claim.ts
 var BLOCKER_MARKERS = [
   /\bneeds?\s+(?:the\s+)?(?:human|user|jarid|his|her|their)\b/i,
@@ -30620,6 +30647,10 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   code_refs: codeRefsInput("Replace code_refs breadcrumbs. [] clears; omit to leave unchanged."),
   blocked_by: exports_external.string().optional().describe("ID of the note blocking this work item (creates blocks link)")
 }, async ({ id, status, priority, due_date, content, append_content, tags, add_tags, context, confidence, code_refs, blocked_by }) => {
+  const noFields = noFieldsToUpdate({ status, priority, due_date, content, append_content, tags, add_tags, context, confidence, code_refs, blocked_by });
+  if (noFields) {
+    return { content: [{ type: "text", text: noFields }], isError: true };
+  }
   const projectDb2 = getProjectDb();
   const resolved = resolveNoteId(projectDb2, id);
   if (resolved.ambiguous) {
@@ -30649,6 +30680,7 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
   const setFragments = [];
   const bindValues = [];
   const changes = [];
+  const skipped = [];
   if (status) {
     setFragments.push("status = ?");
     bindValues.push(status);
@@ -30717,12 +30749,19 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
     changes.push(codeRefsJson ? `code_refs: updated` : `code_refs: cleared`);
   }
   if (blocked_by) {
-    const blocker = projectDb2.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);
-    if (blocker) {
+    const blocker = resolveNoteId(projectDb2, blocked_by);
+    if (blocker.id) {
       projectDb2.run(`INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
-           VALUES (?, ?, ?, 'blocks', 'strong', ?)`, [generateId(), blocked_by, id, timestamp]);
-      changes.push(`blocked by: ${blocked_by}`);
+           VALUES (?, ?, ?, 'blocks', 'strong', ?)`, [generateId(), blocker.id, id, timestamp]);
+      changes.push(`blocked by: ${blocker.id}`);
+    } else if (blocker.ambiguous) {
+      skipped.push(`blocked_by "${blocked_by}" is ambiguous (${blocker.ambiguous.join(", ")}) - no link made`);
+    } else {
+      skipped.push(`blocked_by: no note "${blocked_by}" - no link made`);
     }
+  }
+  if (content === "") {
+    skipped.push(`content "" is ignored so a description is never blanked`);
   }
   if (status === "done") {
     const cascadeResults = cascadeResolution(projectDb2, id, timestamp);
@@ -30730,10 +30769,15 @@ server.tool("update_work_item", "Update a work item's status, priority, due date
       changes.push("Cascade: " + cascadeResults.join(", "));
     }
   }
+  const none = nothingWritten(changes, skipped);
+  if (none) {
+    return { content: [{ type: "text", text: none }], isError: true };
+  }
+  const skippedNote = skipped.length > 0 ? ` NOT written: ${skipped.join("; ")}.` : "";
   return {
     content: [{
       type: "text",
-      text: `Updated work_item "${id}": ${changes.join("; ")}.`
+      text: `Updated work_item "${id}": ${changes.join("; ")}.${skippedNote}`
     }]
   };
 });

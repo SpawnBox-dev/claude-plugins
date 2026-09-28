@@ -27,6 +27,7 @@ import { handlePrepare } from "./tools/prepare";
 import { handleReflect } from "./tools/reflect";
 import { handleCheckSimilar } from "./tools/check_similar";
 import { appendToNoteContent, snapshotRevision, refreshNoteEmbedding } from "./tools/update_note_helpers";
+import { noFieldsToUpdate, nothingWritten } from "./tools/update_work_item_guard";
 import { resolveNoteId } from "./tools/id_resolver";
 import { supersededSuffix } from "./tools/recall";
 import { findRestatedBlockers, formatStalledClaimAdvisory } from "./engine/stalled_claim";
@@ -2708,6 +2709,14 @@ server.tool(
     blocked_by: z.string().optional().describe("ID of the note blocking this work item (creates blocks link)"),
   },
   async ({ id, status, priority, due_date, content, append_content, tags, add_tags, context, confidence, code_refs, blocked_by }) => {
+    // deac5d30: an unknown key (`append`) is stripped by the SDK before this
+    // runs, so a call can arrive carrying only `id`. Refuse it rather than
+    // reply `Updated work_item "<id>": .` for a write that never happened.
+    const noFields = noFieldsToUpdate({ status, priority, due_date, content, append_content, tags, add_tags, context, confidence, code_refs, blocked_by });
+    if (noFields) {
+      return { content: [{ type: "text" as const, text: noFields }], isError: true };
+    }
+
     const projectDb = getProjectDb();
 
     // Resolve id8 prefix -> full UUID. The orchestrator surfaces note IDs as
@@ -2756,6 +2765,8 @@ server.tool(
     const setFragments: string[] = [];
     const bindValues: (string | number | null)[] = [];
     const changes: string[] = [];
+    // Recognised fields that turned out to write nothing, said back to the caller.
+    const skipped: string[] = [];
 
     if (status) {
       setFragments.push("status = ?");
@@ -2864,15 +2875,25 @@ server.tool(
     }
 
     if (blocked_by) {
-      const blocker = projectDb.query(`SELECT id FROM notes WHERE id = ?`).get(blocked_by);
-      if (blocker) {
+      // deac5d30: resolve an id8 prefix the same way `id` is. Pre-fix an exact
+      // match was required, so the 8-char ids the fleet passes linked nothing
+      // and said nothing.
+      const blocker = resolveNoteId(projectDb, blocked_by);
+      if (blocker.id) {
         projectDb.run(
           `INSERT OR IGNORE INTO links (id, from_note_id, to_note_id, relationship, strength, created_at)
            VALUES (?, ?, ?, 'blocks', 'strong', ?)`,
-          [generateId(), blocked_by, id, timestamp]
+          [generateId(), blocker.id, id, timestamp]
         );
-        changes.push(`blocked by: ${blocked_by}`);
+        changes.push(`blocked by: ${blocker.id}`);
+      } else if (blocker.ambiguous) {
+        skipped.push(`blocked_by "${blocked_by}" is ambiguous (${blocker.ambiguous.join(", ")}) - no link made`);
+      } else {
+        skipped.push(`blocked_by: no note "${blocked_by}" - no link made`);
       }
+    }
+    if (content === "") {
+      skipped.push(`content "" is ignored so a description is never blanked`);
     }
 
     if (status === "done") {
@@ -2882,10 +2903,16 @@ server.tool(
       }
     }
 
+    const none = nothingWritten(changes, skipped);
+    if (none) {
+      return { content: [{ type: "text" as const, text: none }], isError: true };
+    }
+
+    const skippedNote = skipped.length > 0 ? ` NOT written: ${skipped.join("; ")}.` : "";
     return {
       content: [{
         type: "text" as const,
-        text: `Updated work_item "${id}": ${changes.join("; ")}.`,
+        text: `Updated work_item "${id}": ${changes.join("; ")}.${skippedNote}`,
       }],
     };
   }
