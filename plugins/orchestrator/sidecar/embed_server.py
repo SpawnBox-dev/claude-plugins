@@ -146,6 +146,29 @@ def _build_feed(encodings: list) -> dict:
 # its speed. Raising this constant re-raises the ceiling proportionally.
 MAX_BATCH = 32
 
+# 🔴 CHUNKING BOUNDED THE PEAK; THIS RETURNS THE ARENA AFTER EVERY RUN.
+#
+# With MAX_BATCH alone a sidecar still kept whatever one backfill-sized batch
+# of long passages needed. Measured 2026-09-28 on the live sidecar: 2,092 MB
+# working set / 3,170 MB private, held for hours. ONNX Runtime can scan the CPU
+# arena at the end of each Run() and free what is unused
+# ("memory.enable_memory_arena_shrinkage", which requires the arena to stay
+# ENABLED - do not also disable it). Measured the same day on a throwaway
+# sidecar (ORT 1.30.0, Windows, bge-base, 225 passages of ~1,800 chars):
+#
+#   after the backfill call      no shrink          shrink
+#   working set                    2,463 MB          566 MB
+#   private commit                 3,358 MB        1,040 MB
+#   after 100 small calls + idle   2,464 MB          516 MB (974 private)
+#   backfill time                     85.9 s          85.7 s
+#   small call, median                58.1 ms         55.2 ms
+#
+# Vectors were bit-identical (max delta 0.0; a planted 1e-3 change read
+# 1e-3). The transient peak is not reduced much (3,416 -> 3,166 MB private),
+# so MAX_BATCH still does that job.
+_RUN_OPTIONS = ort.RunOptions()
+_RUN_OPTIONS.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")
+
 
 def _embed(texts: list[str]) -> list[list[float]]:
     """Embed in bounded chunks so one large call cannot raise the floor."""
@@ -166,7 +189,7 @@ def _embed_batch(texts: list[str]) -> list[list[float]]:
 
     feed = _build_feed(encodings)
     # output shape: (batch, seq_len, dim)
-    token_embeddings = _session.run([_output_name], feed)[0]
+    token_embeddings = _session.run([_output_name], feed, _RUN_OPTIONS)[0]
 
     # mean pooling with attention mask
     mask = np.array([e.attention_mask for e in encodings], dtype=np.float32)
@@ -237,6 +260,25 @@ def _rss_mb() -> tuple[float, float]:
         return (None, None)
 
 
+def release_port_file(port_path: Path, port: int) -> bool:
+    """Delete the port file on exit - but ONLY while it still names us.
+
+    The port file is shared by every sidecar on the box, and a newer one
+    overwrites it. An older sidecar that exits cleanly used to delete it
+    anyway, removing the LIVE sidecar's pointer: the next MCP to start then
+    found no port file and spawned a duplicate (~2 GB) instead of adopting.
+    Returns True only if the file was deleted."""
+    try:
+        if port_path.read_text().strip() != str(port):
+            log.info("Port file %s names another sidecar; leaving it", port_path)
+            return False
+        port_path.unlink(missing_ok=True)
+        log.info("Deleted port file %s", port_path)
+        return True
+    except OSError:
+        return False
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Handles /health and /embed requests."""
 
@@ -276,6 +318,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "rss_mb": rss,
                 "peak_rss_mb": peak,
                 "max_batch": MAX_BATCH,
+                # Present only on a sidecar that shrinks its arena, so a
+                # reader can tell the fixed code is the one running.
+                "arena_shrink": True,
             })
         else:
             self._send_json(404, {"error": "not found"})
@@ -327,15 +372,7 @@ def main() -> None:
     port_path.write_text(str(actual_port))
     log.info("Wrote port %d to %s", actual_port, port_path)
 
-    # Clean up port file on exit
-    def _cleanup():
-        try:
-            port_path.unlink(missing_ok=True)
-            log.info("Deleted port file %s", port_path)
-        except OSError:
-            pass
-
-    atexit.register(_cleanup)
+    atexit.register(release_port_file, port_path, actual_port)
 
     log.info("Listening on 127.0.0.1:%d", actual_port)
     try:
