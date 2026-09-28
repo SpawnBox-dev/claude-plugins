@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { readFileSync, statSync } from "node:fs";
 import { chunkText } from "./chunking";
 
 /**
@@ -98,11 +99,132 @@ export interface BackfillResult {
  * All methods gracefully degrade: they return null/false/0 when the
  * sidecar is unavailable - they never throw.
  */
+/**
+ * How often a client retries a port-file candidate that failed verification.
+ * A freshly spawned sidecar is busy with its startup backfill and may not answer
+ * /health for a while; the client keeps its current binding meanwhile.
+ */
+const FOLLOW_RETRY_MS = 15_000;
+
+/** A port file's mtime, or null if it cannot be read (missing, mid-rename). */
+function mtimeOf(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 export class EmbeddingClient {
   private baseUrl: string;
 
-  constructor(baseUrl: string) {
+  /**
+   * 🔴 THE PORT FILE ONLY DECIDES ROUTING IF CLIENTS READ IT MORE THAN ONCE.
+   *
+   * Until 0.69.21 a client bound its URL at MCP startup and never looked again.
+   * So when a second sidecar took the port file, every session started before
+   * that moment kept talking to the first one - while `system_status` and the
+   * opt-in reaper, which classify by the port file, called the first one an
+   * orphan. Measured 2026-09-28: the port file had named 60710 since 01:32Z,
+   * and five orchestrator MCPs started before that (PA's among them) were
+   * still bound to 59307. With the reaper switched on, the next spawn-lock
+   * holder would have killed the sidecar five sessions used, and they would
+   * have fallen back to keyword search without a word.
+   *
+   * With `portFile` set, the client re-reads the file whenever its mtime
+   * changes and moves to the sidecar it names - but ONLY after that sidecar
+   * passes the same checks the adopt path applies (ready, the right model,
+   * the right vector width). A candidate that fails keeps the current binding,
+   * because a vector from the wrong model tagged as ACTIVE_EMBED_MODEL is the
+   * corruption those checks exist to stop. A missing file names nothing, so it
+   * never unbinds a working client.
+   *
+   * Clients on older plugin versions still bind once, so the port file is not
+   * authoritative fleet-wide until every live MCP runs this code. The reaper
+   * must stay off until then.
+   */
+  private readonly portFile: string | null;
+  private portFileMtimeMs: number | null = null;
+  private lastFollowFailAt = 0;
+  private following: Promise<boolean> | null = null;
+
+  constructor(baseUrl: string, opts: { portFile?: string } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.portFile = opts.portFile ?? null;
+    if (this.portFile) this.portFileMtimeMs = mtimeOf(this.portFile);
+  }
+
+  /**
+   * Move to the sidecar the port file names, if it changed and that sidecar
+   * checks out. Returns true only when the binding actually moved.
+   *
+   * `force` re-reads the file even if its mtime is unchanged - used after a
+   * request failed, in case our sidecar died and the file names a live one.
+   * It does not bypass the retry throttle, so a failing candidate costs at
+   * most one probe per FOLLOW_RETRY_MS rather than one per request.
+   */
+  private follow(force = false): Promise<boolean> {
+    if (!this.portFile) return Promise.resolve(false);
+    if (this.following) return this.following;
+    const mtime = mtimeOf(this.portFile);
+    if (mtime === null) return Promise.resolve(false);
+    if (!force && mtime === this.portFileMtimeMs) return Promise.resolve(false);
+    if (Date.now() - this.lastFollowFailAt < FOLLOW_RETRY_MS) return Promise.resolve(false);
+
+    this.following = (async () => {
+      try {
+        const port = parseInt(readFileSync(this.portFile!, "utf8").trim(), 10);
+        // Empty or partial (the sidecar's write is not atomic): leave the mtime
+        // unrecorded so the next call reads it again.
+        if (isNaN(port) || port <= 0) return false;
+        const candidate = `http://127.0.0.1:${port}`;
+        if (candidate === this.baseUrl) {
+          this.portFileMtimeMs = mtime;
+          return false;
+        }
+        if (!(await EmbeddingClient.verifies(candidate))) {
+          this.lastFollowFailAt = Date.now();
+          return false;
+        }
+        console.error(`[embed] Port file now names ${candidate}; moving from ${this.baseUrl}`);
+        this.baseUrl = candidate;
+        this.portFileMtimeMs = mtime;
+        return true;
+      } catch {
+        this.lastFollowFailAt = Date.now();
+        return false;
+      } finally {
+        this.following = null;
+      }
+    })();
+    return this.following;
+  }
+
+  /**
+   * The adopt path's checks, applied to a sidecar we are about to move to:
+   * ready, serving ACTIVE_EMBED_MODEL_REPO if it reports a model, and producing
+   * ACTIVE_EMBED_DIM-wide vectors (the check an older sidecar with a hardcoded
+   * model name cannot pass by lying).
+   */
+  private static async verifies(url: string): Promise<boolean> {
+    try {
+      const h = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+      if (!h.ok) return false;
+      const body = (await h.json()) as { status?: string; model?: string };
+      if (body.status !== "ready") return false;
+      if (body.model !== undefined && body.model !== ACTIVE_EMBED_MODEL_REPO) return false;
+      const e = await fetch(`${url}/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texts: ["model check"] }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!e.ok) return false;
+      const v = (await e.json()) as { vectors?: number[][] };
+      return v.vectors?.[0]?.length === ACTIVE_EMBED_DIM;
+    } catch {
+      return false;
+    }
   }
 
   /** The sidecar this client is bound to. Diagnostics only. */
@@ -130,6 +252,7 @@ export class EmbeddingClient {
    * conclude "dead" costs seconds. Concluding it wrongly costs gigabytes.
    */
   async isAvailable(timeoutMs = 2000): Promise<boolean> {
+    await this.follow();
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -168,6 +291,7 @@ export class EmbeddingClient {
     peak_rss_mb?: number | null;
     max_batch?: number;
   } | null> {
+    await this.follow();
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 2000);
@@ -182,9 +306,19 @@ export class EmbeddingClient {
 
   /**
    * Embed an array of texts via the sidecar.
-   * POST /embed, 30s timeout, returns null on any error.
+   * POST /embed, returns null on any error.
+   *
+   * On a failure it re-reads the port file once: if our sidecar died and the
+   * file names a live one that verifies, the call is retried there.
    */
   async embed(texts: string[]): Promise<Float32Array[] | null> {
+    await this.follow();
+    const first = await this.embedOnce(texts);
+    if (first !== null) return first;
+    return (await this.follow(true)) ? this.embedOnce(texts) : null;
+  }
+
+  private async embedOnce(texts: string[]): Promise<Float32Array[] | null> {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);

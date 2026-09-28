@@ -6519,7 +6519,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // mcp/server.ts
 import { resolve, join as join11 } from "path";
-import { existsSync as existsSync11, readFileSync as readFileSync7, writeFileSync as writeFileSync3, statSync as statSync9, mkdirSync as mkdirSync4 } from "fs";
+import { existsSync as existsSync11, readFileSync as readFileSync8, writeFileSync as writeFileSync3, statSync as statSync10, mkdirSync as mkdirSync4 } from "fs";
 
 // mcp/engine/lifecycle_log.ts
 import { existsSync, mkdirSync, statSync, appendFileSync, writeFileSync } from "fs";
@@ -20889,6 +20889,9 @@ function maximalMarginalRelevance(items, topK, lambda = 0.7) {
   return selected;
 }
 
+// mcp/engine/embeddings.ts
+import { readFileSync, statSync as statSync3 } from "fs";
+
 // mcp/engine/chunking.ts
 var CHUNK_TARGET_CHARS = 1500;
 var CHUNK_OVERLAP_CHARS = 200;
@@ -20942,16 +20945,95 @@ var ACTIVE_EMBED_MODEL = "bge-base-en-v1.5";
 var ACTIVE_EMBED_MODEL_REPO = "BAAI/bge-base-en-v1.5";
 var ACTIVE_EMBED_DIM = 768;
 var QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: ";
+var FOLLOW_RETRY_MS = 15000;
+function mtimeOf(path) {
+  try {
+    return statSync3(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
 
 class EmbeddingClient {
   baseUrl;
-  constructor(baseUrl) {
+  portFile;
+  portFileMtimeMs = null;
+  lastFollowFailAt = 0;
+  following = null;
+  constructor(baseUrl, opts = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.portFile = opts.portFile ?? null;
+    if (this.portFile)
+      this.portFileMtimeMs = mtimeOf(this.portFile);
+  }
+  follow(force = false) {
+    if (!this.portFile)
+      return Promise.resolve(false);
+    if (this.following)
+      return this.following;
+    const mtime = mtimeOf(this.portFile);
+    if (mtime === null)
+      return Promise.resolve(false);
+    if (!force && mtime === this.portFileMtimeMs)
+      return Promise.resolve(false);
+    if (Date.now() - this.lastFollowFailAt < FOLLOW_RETRY_MS)
+      return Promise.resolve(false);
+    this.following = (async () => {
+      try {
+        const port = parseInt(readFileSync(this.portFile, "utf8").trim(), 10);
+        if (isNaN(port) || port <= 0)
+          return false;
+        const candidate = `http://127.0.0.1:${port}`;
+        if (candidate === this.baseUrl) {
+          this.portFileMtimeMs = mtime;
+          return false;
+        }
+        if (!await EmbeddingClient.verifies(candidate)) {
+          this.lastFollowFailAt = Date.now();
+          return false;
+        }
+        console.error(`[embed] Port file now names ${candidate}; moving from ${this.baseUrl}`);
+        this.baseUrl = candidate;
+        this.portFileMtimeMs = mtime;
+        return true;
+      } catch {
+        this.lastFollowFailAt = Date.now();
+        return false;
+      } finally {
+        this.following = null;
+      }
+    })();
+    return this.following;
+  }
+  static async verifies(url) {
+    try {
+      const h = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+      if (!h.ok)
+        return false;
+      const body = await h.json();
+      if (body.status !== "ready")
+        return false;
+      if (body.model !== undefined && body.model !== ACTIVE_EMBED_MODEL_REPO)
+        return false;
+      const e = await fetch(`${url}/embed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ texts: ["model check"] }),
+        signal: AbortSignal.timeout(1e4)
+      });
+      if (!e.ok)
+        return false;
+      const v = await e.json();
+      return v.vectors?.[0]?.length === ACTIVE_EMBED_DIM;
+    } catch {
+      return false;
+    }
   }
   get url() {
     return this.baseUrl;
   }
   async isAvailable(timeoutMs = 2000) {
+    await this.follow();
     try {
       const controller = new AbortController;
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -20968,6 +21050,7 @@ class EmbeddingClient {
     }
   }
   async health() {
+    await this.follow();
     try {
       const controller = new AbortController;
       const timeout = setTimeout(() => controller.abort(), 2000);
@@ -20981,6 +21064,13 @@ class EmbeddingClient {
     }
   }
   async embed(texts) {
+    await this.follow();
+    const first = await this.embedOnce(texts);
+    if (first !== null)
+      return first;
+    return await this.follow(true) ? this.embedOnce(texts) : null;
+  }
+  async embedOnce(texts) {
     try {
       const controller = new AbortController;
       const timeout = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
@@ -22266,7 +22356,7 @@ function writeUserModel(globalDb2, content, context, explicitDimension) {
 }
 
 // mcp/tools/supersede.ts
-import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync } from "fs";
+import { existsSync as existsSync3, readdirSync as readdirSync2, readFileSync as readFileSync2 } from "fs";
 import { join as join3 } from "path";
 import { homedir as homedir2 } from "os";
 
@@ -22303,7 +22393,7 @@ function findMemoryFilesCarryingClaim(content, projectDir, max = 4) {
         continue;
       let text;
       try {
-        text = readFileSync(join3(memDir, file), "utf-8").toLowerCase();
+        text = readFileSync2(join3(memDir, file), "utf-8").toLowerCase();
       } catch {
         continue;
       }
@@ -23829,7 +23919,7 @@ This was already blocked last checkpoint and is blocked again in the same words.
 }
 
 // mcp/engine/client_claim.ts
-import { existsSync as existsSync5, readFileSync as readFileSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "fs";
+import { existsSync as existsSync5, readFileSync as readFileSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "fs";
 import { join as join4 } from "path";
 function claimPath(stateDir, pid) {
   return join4(stateDir, `mcp-client-${pid}.claim`);
@@ -23849,7 +23939,7 @@ function readClientClaim(stateDir, pid) {
     const p = claimPath(stateDir, pid);
     if (!existsSync5(p))
       return null;
-    const raw = JSON.parse(readFileSync2(p, "utf8"));
+    const raw = JSON.parse(readFileSync3(p, "utf8"));
     if (typeof raw?.pid !== "number")
       return null;
     return raw;
@@ -23971,12 +24061,12 @@ import { join as join6 } from "path";
 
 // mcp/engine/agent_channel_state.ts
 import {
-  readFileSync as readFileSync3,
+  readFileSync as readFileSync4,
   existsSync as existsSync6,
   mkdirSync as mkdirSync3,
   unlinkSync as unlinkSync3,
   readdirSync as readdirSync3,
-  statSync as statSync3
+  statSync as statSync4
 } from "fs";
 import { join as join5 } from "path";
 import { Database as Database2 } from "bun:sqlite";
@@ -24005,7 +24095,7 @@ function sweepStaleTmpArtifacts(stateDir) {
       continue;
     const full = join5(stateDir, name);
     try {
-      if (now3 - statSync3(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
+      if (now3 - statSync4(full).mtimeMs < TMP_SWEEP_MIN_AGE_MS)
         continue;
       unlinkSync3(full);
     } catch {}
@@ -24172,7 +24262,7 @@ function migrateSessionsLegacy(stateDir, db) {
     return;
   let legacy = [];
   try {
-    const data = JSON.parse(readFileSync3(legacyPath, "utf8"));
+    const data = JSON.parse(readFileSync4(legacyPath, "utf8"));
     legacy = Array.isArray(data) ? data : data?.sessions ?? [];
   } catch {
     try {
@@ -24323,7 +24413,7 @@ function migrateOverrideStateLegacy(stateDir, db) {
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync3(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync4(legacyPath, "utf8"));
   } catch {
     try {
       unlinkSync3(legacyPath);
@@ -24378,7 +24468,7 @@ function migrateOffsetsLegacy(stateDir, db, receiverId8) {
     return;
   let legacy = null;
   try {
-    legacy = JSON.parse(readFileSync3(legacyPath, "utf8"));
+    legacy = JSON.parse(readFileSync4(legacyPath, "utf8"));
   } catch {
     try {
       unlinkSync3(legacyPath);
@@ -24446,7 +24536,7 @@ function migrateSystemEventsLegacy(stateDir, db) {
     return;
   let lines = [];
   try {
-    lines = readFileSync3(legacyPath, "utf8").split(`
+    lines = readFileSync4(legacyPath, "utf8").split(`
 `).filter((l) => l.trim());
   } catch {
     try {
@@ -24844,7 +24934,7 @@ function handleUpdateSessionTask(tracker, args) {
 }
 
 // mcp/tools/hook_event.ts
-import { statSync as statSync4, readFileSync as readFileSync4 } from "fs";
+import { statSync as statSync5, readFileSync as readFileSync5 } from "fs";
 import { join as join7 } from "path";
 import { homedir as homedir3 } from "os";
 function sanitizeSessionId(sid) {
@@ -25117,9 +25207,9 @@ function readOwnTurnFinalText(sessionId) {
     const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
     const projectHash = projectDir.replace(/[\\/:]/g, "-").replace(/^-+/, "");
     const path2 = join7(homedir3(), ".claude", "projects", projectHash, `${sessionId}.jsonl`);
-    const size = statSync4(path2).size;
+    const size = statSync5(path2).size;
     const start = Math.max(0, size - OWN_TAIL_BYTES);
-    const buf = readFileSync4(path2, "utf8").slice(start > 0 ? start : 0);
+    const buf = readFileSync5(path2, "utf8").slice(start > 0 ? start : 0);
     let last = "";
     for (const line of buf.split(`
 `)) {
@@ -26382,7 +26472,7 @@ function wardenLedgerPath() {
 function wardenLedgerLiveness(ledgerPath) {
   let st;
   try {
-    st = statSync4(ledgerPath);
+    st = statSync5(ledgerPath);
   } catch {
     return { status: "absent" };
   }
@@ -26393,7 +26483,7 @@ function wardenLedgerLiveness(ledgerPath) {
   let ts;
   let loop;
   try {
-    const head = readFileSync4(ledgerPath).subarray(0, 8192).toString("utf8");
+    const head = readFileSync5(ledgerPath).subarray(0, 8192).toString("utf8");
     const mi = head.match(/instance=([^\s|]+)/i);
     const mt = head.match(/\bts=([^\s|]+)/i);
     if (mi)
@@ -26909,7 +26999,7 @@ function composeCodeRefsHint(db, sessionId, filePath) {
 }
 
 // mcp/engine/agent_channel.ts
-import { openSync as openSync3, readSync as readSync3, closeSync as closeSync3, existsSync as existsSync10, statSync as statSync8, readdirSync as readdirSync4 } from "fs";
+import { openSync as openSync3, readSync as readSync3, closeSync as closeSync3, existsSync as existsSync10, statSync as statSync9, readdirSync as readdirSync4 } from "fs";
 import { join as join10 } from "path";
 
 // mcp/engine/addressing.ts
@@ -26972,7 +27062,7 @@ function parseAddressing(content, sender, sessions) {
 }
 
 // mcp/engine/session_rename.ts
-import { statSync as statSync5, readFileSync as readFileSync5 } from "fs";
+import { statSync as statSync6, readFileSync as readFileSync6 } from "fs";
 var RENAME_RE = /The user named this session "([^"]*)"\. This may indicate the session's focus or intent\./g;
 function isInsideChannelEnvelope(content, index) {
   const before = content.slice(0, index);
@@ -27009,18 +27099,18 @@ function parseLatestRename(transcriptText) {
 }
 function readLatestRename(transcriptPath, knownSize) {
   try {
-    const size = statSync5(transcriptPath).size;
+    const size = statSync6(transcriptPath).size;
     if (knownSize !== undefined && size === knownSize) {
       return { name: null, size };
     }
-    return { name: parseLatestRename(readFileSync5(transcriptPath, "utf8")), size };
+    return { name: parseLatestRename(readFileSync6(transcriptPath, "utf8")), size };
   } catch {
     return { name: null, size: knownSize ?? -1 };
   }
 }
 
 // mcp/engine/restart_witness.ts
-import { openSync, readSync, closeSync, existsSync as existsSync8, statSync as statSync6 } from "fs";
+import { openSync, readSync, closeSync, existsSync as existsSync8, statSync as statSync7 } from "fs";
 import { join as join8 } from "path";
 import { homedir as homedir4 } from "os";
 var RESTART_WINDOW_MS = 4 * 60 * 1000;
@@ -27058,7 +27148,7 @@ function readLifecycleTail(bytes = 64 * 1024, path2 = lifecycleLogPath()) {
   try {
     if (!existsSync8(path2))
       return "";
-    const size = statSync6(path2).size;
+    const size = statSync7(path2).size;
     const start = Math.max(0, size - bytes);
     const len = size - start;
     if (len <= 0)
@@ -27217,8 +27307,8 @@ ${decisionSummary}` : decisionSummary
 // mcp/engine/agent_channel_emitlog.ts
 import {
   appendFileSync as appendFileSync2,
-  readFileSync as readFileSync6,
-  statSync as statSync7,
+  readFileSync as readFileSync7,
+  statSync as statSync8,
   renameSync,
   existsSync as existsSync9,
   unlinkSync as unlinkSync4,
@@ -27247,7 +27337,7 @@ function readSeenWindow(transcriptPath, maxBytes = 4 * 1024 * 1024) {
   let raw;
   let truncated = false;
   try {
-    const size = statSync7(transcriptPath).size;
+    const size = statSync8(transcriptPath).size;
     if (size > maxBytes) {
       const fd = openSync2(transcriptPath, "r");
       try {
@@ -27259,7 +27349,7 @@ function readSeenWindow(transcriptPath, maxBytes = 4 * 1024 * 1024) {
         closeSync2(fd);
       }
     } else {
-      raw = readFileSync6(transcriptPath, "utf8");
+      raw = readFileSync7(transcriptPath, "utf8");
     }
   } catch {
     return { ids: [], since: null, measured: false };
@@ -27303,7 +27393,7 @@ function formatLossReport(r) {
 function readEmitLog(stateDir, path2 = emitLogPath(stateDir)) {
   let raw;
   try {
-    raw = readFileSync6(path2, "utf8");
+    raw = readFileSync7(path2, "utf8");
   } catch {
     return [];
   }
@@ -27368,7 +27458,7 @@ function appendEmitLog(stateDir, rec) {
   try {
     const path2 = emitLogPath(stateDir);
     try {
-      if (statSync7(path2).size > MAX_BYTES) {
+      if (statSync8(path2).size > MAX_BYTES) {
         const prev = path2 + ".1";
         if (existsSync9(prev))
           unlinkSync4(prev);
@@ -28024,7 +28114,7 @@ class AgentChannel {
   }
   peerTranscriptSize(sid) {
     try {
-      return statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).size;
+      return statSync9(join10(this.projectsHashDir, `${sid}.jsonl`)).size;
     } catch {
       return null;
     }
@@ -28033,7 +28123,7 @@ class AgentChannel {
     let fd;
     try {
       const path2 = join10(this.projectsHashDir, `${tid}.jsonl`);
-      const length = Math.min(statSync8(path2).size, 16384);
+      const length = Math.min(statSync9(path2).size, 16384);
       if (length <= 0)
         return null;
       fd = openSync3(path2, "r");
@@ -28062,7 +28152,7 @@ class AgentChannel {
   }
   transcriptMtimeIso(tid) {
     try {
-      return new Date(statSync8(join10(this.projectsHashDir, `${tid}.jsonl`)).mtimeMs).toISOString();
+      return new Date(statSync9(join10(this.projectsHashDir, `${tid}.jsonl`)).mtimeMs).toISOString();
     } catch {
       return null;
     }
@@ -28134,7 +28224,7 @@ class AgentChannel {
     let fd;
     try {
       const path2 = join10(this.projectsHashDir, `${sid}.jsonl`);
-      const size = statSync8(path2).size;
+      const size = statSync9(path2).size;
       const start = Math.max(0, size - INGRESS_TAIL_BYTES);
       const length = size - start;
       if (length <= 0)
@@ -28156,7 +28246,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync8(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync9(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -28178,7 +28268,7 @@ class AgentChannel {
             let transcriptMtime = null;
             let transcriptSize = null;
             try {
-              const st = statSync8(join10(this.projectsHashDir, `${transcriptId}.jsonl`));
+              const st = statSync9(join10(this.projectsHashDir, `${transcriptId}.jsonl`));
               transcriptMtime = new Date(st.mtimeMs).toISOString();
               transcriptSize = st.size;
             } catch {}
@@ -28215,7 +28305,7 @@ class AgentChannel {
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync8(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync9(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -28457,7 +28547,7 @@ class AgentChannel {
   processFile(file, sessions, identity, overrideState, offsets) {
     let stat;
     try {
-      stat = statSync8(file);
+      stat = statSync9(file);
     } catch {
       return false;
     }
@@ -28985,7 +29075,7 @@ function totalRssMb(procs) {
 var PLUGIN_VERSION = (() => {
   try {
     const pkgPath = join11(import.meta.dir, "..", "package.json");
-    return JSON.parse(readFileSync7(pkgPath, "utf8")).version;
+    return JSON.parse(readFileSync8(pkgPath, "utf8")).version;
   } catch {
     return "0.0.0-unknown";
   }
@@ -29029,7 +29119,7 @@ for ($i = 0; $i -lt 8; $i++) {
     let name = "";
     let ppid = 0;
     try {
-      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync8(`/proc/${pid}/stat`, "utf8");
       const rparen = stat.lastIndexOf(")");
       if (rparen < 0)
         return { pid: null, reason: `stat-malformed:${pid}` };
@@ -29081,7 +29171,7 @@ function getFallbackSessionId() {
     const perPidFile = join11(stateDir, `active-session-${claudePid}`);
     try {
       if (existsSync11(perPidFile)) {
-        const raw = readFileSync7(perPidFile, "utf8").trim();
+        const raw = readFileSync8(perPidFile, "utf8").trim();
         if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
           cachedFallbackSessionId = raw;
           process.stderr.write(`[orchestrator] resolved session_id from per-PID file ` + `(claude_pid=${claudePid}): ${raw.slice(0, 8)}...
@@ -29099,7 +29189,7 @@ function getFallbackSessionId() {
   const file = join11(stateDir, "active-session");
   try {
     if (existsSync11(file)) {
-      const raw = readFileSync7(file, "utf8").trim();
+      const raw = readFileSync8(file, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) {
         cachedFallbackSessionId = raw;
         if (claudePid) {
@@ -29131,7 +29221,7 @@ function readAuthoritativeSessionId() {
   const perPidFile = join11(projectDir, ".orchestrator-state", `active-session-${claudePid}`);
   try {
     if (existsSync11(perPidFile)) {
-      const raw = readFileSync7(perPidFile, "utf8").trim();
+      const raw = readFileSync8(perPidFile, "utf8").trim();
       if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
         return raw;
     }
@@ -29151,7 +29241,7 @@ function readLiveTranscriptId() {
   const perPidFile = join11(projectDir, ".orchestrator-state", `active-session-${liveTranscriptPid}`);
   let mtimeMs;
   try {
-    mtimeMs = statSync9(perPidFile).mtimeMs;
+    mtimeMs = statSync10(perPidFile).mtimeMs;
   } catch {
     return;
   }
@@ -29160,7 +29250,7 @@ function readLiveTranscriptId() {
   }
   let id;
   try {
-    const raw = readFileSync7(perPidFile, "utf8").trim();
+    const raw = readFileSync8(perPidFile, "utf8").trim();
     if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
       id = raw;
   } catch {
@@ -29301,7 +29391,7 @@ async function startSidecar() {
     const content = await Bun.file(portFile).text();
     const existingPort = parseInt(content.trim(), 10);
     if (!isNaN(existingPort) && existingPort > 0) {
-      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
+      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`, { portFile });
       if (await client.isAvailable(ADOPT_PROBE_MS)) {
         const dim = (await client.embed(["model check"]))?.[0]?.length ?? 0;
         if (dim === ACTIVE_EMBED_DIM) {
@@ -29329,7 +29419,7 @@ async function startSidecar() {
       closeSync4(openSync4(lockFile, "wx"));
       holdsLock = true;
     } catch {
-      const age = Date.now() - (statSync9(lockFile).mtimeMs || 0);
+      const age = Date.now() - (statSync10(lockFile).mtimeMs || 0);
       if (age > LOCK_STALE_MS) {
         try {
           const { unlinkSync: unlinkSync5 } = await import("fs");
@@ -29350,7 +29440,7 @@ async function startSidecar() {
       try {
         const p = parseInt((await Bun.file(portFile).text()).trim(), 10);
         if (!isNaN(p) && p > 0) {
-          const c = new EmbeddingClient(`http://127.0.0.1:${p}`);
+          const c = new EmbeddingClient(`http://127.0.0.1:${p}`, { portFile });
           if (await c.isAvailable()) {
             console.error(`[embed] Adopted sidecar on port ${p} spawned by a peer (waited ${i + 1}s)`);
             return c;
@@ -29417,7 +29507,7 @@ async function startSidecar() {
   sidecarProcess = result.proc;
   await reapOrphanSidecars(result.port);
   releaseSpawnLock();
-  return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
+  return new EmbeddingClient(`http://127.0.0.1:${result.port}`, { portFile });
 }
 var PERMISSION_RELAY_ENABLED = process.env.ORCHESTRATOR_PA_PERMISSION_RELAY === "1";
 var experimentalCapabilities = {
@@ -29588,7 +29678,7 @@ server.tool("system_status", "Check the health of the orchestrator system: embed
   try {
     const self = process.argv[1];
     if (self) {
-      bundleStamp = ` - bundle ${statSync9(self).mtime.toISOString()}`;
+      bundleStamp = ` - bundle ${statSync10(self).mtime.toISOString()}`;
     }
   } catch {}
   lines.push(`- **Version**: orchestrator MCP server **${PLUGIN_VERSION}** (pid ${process.pid})${bundleStamp}`);
@@ -31194,7 +31284,7 @@ function checkInstallMismatch() {
   let installed = [];
   try {
     const registryPath = join11(process.env.CLAUDE_CONFIG_DIR || join11(homedir5(), ".claude"), "plugins", "installed_plugins.json");
-    installed = extractInstalledPaths(JSON.parse(readFileSync7(registryPath, "utf8")), "orchestrator", caseFold);
+    installed = extractInstalledPaths(JSON.parse(readFileSync8(registryPath, "utf8")), "orchestrator", caseFold);
   } catch {}
   return decideInstallMismatch(runningRoot, installed);
 }
@@ -31291,7 +31381,7 @@ function checkParentClaudeExe(pid, expectedCreationTime) {
       }
       let stat;
       try {
-        stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+        stat = readFileSync8(`/proc/${pid}/stat`, "utf8");
       } catch {
         return "undetermined";
       }

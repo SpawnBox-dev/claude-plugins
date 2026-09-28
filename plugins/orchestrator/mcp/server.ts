@@ -717,6 +717,15 @@ const ADOPT_PROBE_MS = 30_000;
  *
  * Do not read the block above as settled. It is a good argument from figures
  * that no longer describe this system.
+ *
+ * 🔴 AND THE REAPER'S OWN PREMISE WAS FALSE UNTIL 0.69.21. "A process listening
+ * on a port the port file does not name cannot be reached by any session" held
+ * only if clients re-read the port file, and they did not: each bound its URL
+ * once at startup. Measured 2026-09-28: five MCPs started before the port file
+ * moved were still using the sidecar it no longer named. Clients now follow the
+ * file (EmbeddingClient, `portFile`), but an MCP on an older version still
+ * binds once - so turning this on is safe only when every live MCP on the box
+ * runs 0.69.21 or later.
  */
 
 // Classification lives in engine/sidecar_orphans.ts so it can be EXECUTED by a
@@ -868,7 +877,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
     const content = await Bun.file(portFile).text();
     const existingPort = parseInt(content.trim(), 10);
     if (!isNaN(existingPort) && existingPort > 0) {
-      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`);
+      const client = new EmbeddingClient(`http://127.0.0.1:${existingPort}`, { portFile });
       // 🔴 THIS PROBE DECIDES ADOPT-OR-SPAWN, SO ITS TIMEOUT IS A MEMORY BUDGET.
       //
       // A sidecar mid-backfill is alive and correct but does not answer /health
@@ -958,7 +967,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
       try {
         const p = parseInt((await Bun.file(portFile).text()).trim(), 10);
         if (!isNaN(p) && p > 0) {
-          const c = new EmbeddingClient(`http://127.0.0.1:${p}`);
+          const c = new EmbeddingClient(`http://127.0.0.1:${p}`, { portFile });
           if (await c.isAvailable()) {
             console.error(`[embed] Adopted sidecar on port ${p} spawned by a peer (waited ${i + 1}s)`);
             return c;
@@ -1066,7 +1075,7 @@ async function startSidecar(): Promise<EmbeddingClient | null> {
   // Release only AFTER the port file is published, so a waiter that sees the
   // lock gone is guaranteed to find a port rather than racing us to spawn.
   releaseSpawnLock();
-  return new EmbeddingClient(`http://127.0.0.1:${result.port}`);
+  return new EmbeddingClient(`http://127.0.0.1:${result.port}`, { portFile });
 }
 
 // 0.30.17+: opt-in PA-gated tool permission routing. When this env var is
