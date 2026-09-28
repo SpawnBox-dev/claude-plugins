@@ -1,164 +1,151 @@
 import { describe, test, expect } from "bun:test";
-import { formatClientTransportAlert } from "../../mcp/engine/agent_channel";
+import {
+  formatClientTransportAlert,
+  formatUnroutedTranscriptAlert,
+} from "../../mcp/engine/agent_channel";
 
 // ===========================================================================
-// 0.69.3 - THE ALERT WORDING, FINALLY PINNED (f7bc27b8).
+// client_transport_suspect wording, pinned.
 //
-// This item was filed 2026-08-27 proposing the emitter change. Four days and
-// roughly eight re-derivations later the text was still byte-identical, and
-// when it was finally rewritten it shipped with NO TEST - because it was
-// built inline in the tick loop, so the one part of the alert every reader
-// acts on was the only part nothing could assert. Hoisting it into
-// formatClientTransportAlert is what makes these assertions possible.
+// 0.69.3 (f7bc27b8) hoisted the text out of the tick loop so it could be
+// asserted, and pinned an ORDER: two "free checks" before the /mcp remedy,
+// plus an inline base rate. 2026-09-28 (WI cb376ece, Jarid ruling KB
+// 27f1613d) REVERSES that design, and these tests pin the reversal.
 //
-// WHAT THE OLD TEXT GOT WRONG WAS A CLAIM, NOT A PHRASING. It asserted "its
-// transcript has not been written to since" as a FACT ABOUT THE SUBJECT,
-// while the detector only ever holds ONE QUEUED MESSAGE WITH NO DELIVERY
-// RECORD. Different propositions. The strong form is what sent readers
-// reaching for /mcp against a detector that was ~0-for-31 that day.
+// WHY. On 2026-09-27 two lanes ran /clear. Messages TO them kept arriving;
+// their POSTS went to a transcript no row owned and were dropped for ~23
+// hours. This alert fired about them all night and was TRUE. PA and three
+// lanes dismissed it about nine times using check 1 ("from_task reacts to
+// newer content, so the lane RECEIVED, refuted at zero cost") - which proves
+// inbound delivery only. The text handed readers the dismissal. The ruling: a
+// broken signal reaches the USER, and no agent reasons it away.
 //
-// AND IT SHIPPED ONLY ITS MOST EXPENSIVE CHECK. "Address it first" spends a
-// peer's turn; the two free checks existed only in the KB. A reader with no
-// prior exposure ran the costly one because it was the only one offered - on
-// a parked fleet that pulled three sessions back onto a settled non-event
-// against an explicit instruction not to.
-//
-// SO THE ORDERING TEST BELOW IS THE LOAD-BEARING ONE. Every other assertion
-// checks that a phrase is PRESENT; that one checks the text cannot be
-// reordered back into the shape that caused the harm. A phrase can be present
-// and still be last, which is exactly how the old text failed.
+// So the load-bearing assertions are now NEGATIVE: the refutation wording and
+// the base rate must never return, and the text must say in words that
+// from_task cannot refute it.
 // ===========================================================================
 
 const SPECIMEN = {
-  name: "SA-EYES-2026-08-30",
-  id8: "dfde96db",
-  anchor: "2026-08-31T03:23:44.000Z",
-  waitMin: 1033,
+  name: "SA-VIDEO-WORKFLOW-2026-09-23",
+  id8: "efd22df3",
+  anchor: "2026-09-27T02:02:20.000Z",
+  waitMin: 1411,
+  transcriptId: "efd22df3-626e-4256-a001-72e097885ea8",
+  transcriptMtime: "2026-09-27T01:52:23.000Z",
+  transcriptSize: 212396585,
+  heartbeatAgeSec: 12,
+  now: "2026-09-28T01:33:00.000Z",
 };
 
 const text = () => formatClientTransportAlert(SPECIMEN);
 
-describe("0.69.3: client_transport_suspect wording", () => {
-  describe("it must not overclaim - known vs inferred", () => {
-    test("states what is KNOWN and what is merely INFERRED, separately", () => {
-      expect(text()).toContain("WHAT IS KNOWN vs WHAT IS INFERRED");
-      expect(text()).toContain("Inferred");
-    });
-
-    test("says outright that the inference does not follow from the evidence", () => {
-      expect(text()).toContain("does not follow from the first");
-    });
-
-    test("does NOT reassert the old fact-about-the-subject claim", () => {
-      // The exact sentence this item exists to remove. If it ever returns,
-      // this test is the only thing standing between it and the fleet.
-      expect(text()).not.toContain("its transcript has not been written to since");
-      expect(text()).not.toContain("Silence after a send means it cannot RECEIVE");
-    });
-
-    test("check 1 keys on CONTENT-DEPENDENT RESPONSE, not on mere freshness", () => {
-      // WI f7bc27b8, 2026-09-01 02:44Z. The first prescribed check used to say a
-      // fresh from_task proved the subject "received and wrote" - the very
-      // known-vs-inferred slippage this alert was rewritten to remove,
-      // reintroduced inside its own remedy. A fresh from_task proves the subject
-      // executed update_session_task; the alert's proposition is about DELIVERY.
-      //
-      // The correction is not a downgrade: acting on content that originated
-      // elsewhere DOES prove reception. So the check keeps full strength and
-      // gains a description of what to look for.
-      const t = text();
-      expect(t).toContain("REACTS TO content that originated after");
-      expect(t).toMatch(/quotes a ruling, adopts a correction, names an item it was handed/);
-      expect(t).toContain("MERE FRESHNESS PROVES ONLY THAT IT RAN");
-      expect(t).toContain("tool-execution, not message-reception");
-    });
-
-    test("REJECTS the superseded 'received and wrote' wording", () => {
-      // The negative arm. Every other assertion here checks a phrase is PRESENT,
-      // and a wrong sentence can be absent from that list while sitting happily
-      // in the text - which is exactly how this defect survived a pinning test
-      // that already asserted check 1 was present and correctly ordered.
-      // A test that pins wording pins wording; it is not a check on whether the
-      // wording is TRUE. This one arm is what makes the correction durable.
-      expect(text()).not.toContain("demonstrably received and wrote");
-    });
+describe("client_transport_suspect: a user escalation, not advice", () => {
+  test("opens as a USER ESCALATION addressed to PA", () => {
+    const t = text();
+    expect(t.startsWith("[client_transport_suspect] USER ESCALATION")).toBe(true);
+    expect(t).toContain("PA: relay this to Jarid in this turn");
+    expect(t).toContain("Do not rule it false yourself");
   });
 
-  describe("the denominator travels with the verdict", () => {
-    test("the anchor is printed, not just the elapsed figure", () => {
-      expect(text()).toContain(SPECIMEN.anchor);
-    });
-
-    test("the elapsed figure is present too - both, not either", () => {
-      expect(text()).toContain(String(SPECIMEN.waitMin));
-    });
-
-    test("the anchor appears with the baseline it was measured against", () => {
-      expect(text()).toContain(`size baseline taken at ${SPECIMEN.anchor}`);
-    });
+  test("the zero-cost refutation and the base rate are GONE", () => {
+    const t = text();
+    expect(t).not.toContain("refuted");
+    expect(t).not.toContain("at zero cost");
+    expect(t).not.toContain("BASE RATE");
+    expect(t).not.toContain("TWO FREE CHECKS");
+    expect(t).not.toContain("ONLY IF BOTH ARE INCONCLUSIVE");
+    expect(t).not.toContain("far more often than right");
   });
 
-  describe("the base rate is inline, because a reader will not go look it up", () => {
-    test("carries the base rate and the note ids", () => {
-      expect(text()).toContain("BASE RATE");
-      expect(text()).toContain("cb376ece");
-      expect(text()).toContain("99c00385");
-    });
-
-    test("keeps 18747ab0's guard: a zero tally does not make THIS one false", () => {
-      // Without this the base rate becomes permission to ignore the alert,
-      // which is a different failure and a worse one.
-      expect(text()).toContain("does not make THIS");
-    });
+  test("says outright that from_task and quoted rulings prove only INBOUND", () => {
+    const t = text();
+    expect(t).toContain("DO NOT RULE THIS FALSE FROM from_task");
+    expect(t).toContain("INBOUND");
+    expect(t).toContain("OUTBOUND");
   });
 
-  describe("ORDERING: the free checks must precede the one that spends a peer", () => {
-    test("both free checks appear BEFORE the /mcp remedy", () => {
-      const t = text();
-      const fromTask = t.indexOf("from_task");
-      const ownContext = t.indexOf("the context you already have");
-      const mcp = t.indexOf("/mcp");
-      expect(fromTask).toBeGreaterThan(-1);
-      expect(ownContext).toBeGreaterThan(-1);
-      expect(mcp).toBeGreaterThan(-1);
-      expect(fromTask).toBeLessThan(mcp);
-      expect(ownContext).toBeLessThan(mcp);
-    });
+  test("still never reasserts the pre-0.69.3 fact-about-the-subject sentence", () => {
+    expect(text()).not.toContain("its transcript has not been written to since");
+  });
+});
 
-    test("the remedy is explicitly conditional, not the headline instruction", () => {
-      expect(text()).toContain("ONLY IF BOTH ARE INCONCLUSIVE");
-    });
-
-    test("the free checks are labelled as free, so their cost is legible", () => {
-      expect(text()).toContain("BEFORE YOU SPEND ANYONE'S TURN");
-      expect(text()).toContain("at zero cost");
-    });
+describe("the alert carries its own evidence", () => {
+  test("names the routed transcript file", () => {
+    expect(text()).toContain(`${SPECIMEN.transcriptId}.jsonl`);
   });
 
-  describe("the two contaminated instruments are named", () => {
-    test("VANTAGE: a non-PA negative is inconclusive, with the wording to use", () => {
-      const t = text();
-      expect(t).toContain("if you are not PA");
-      expect(t).toContain("INCONCLUSIVE");
-      expect(t).toContain('"I did not receive one"');
-      expect(t).toContain('never "they have not posted"');
-    });
-
-    test("declared silence must not be read as confirmation", () => {
-      // A lane under orders to stay quiet would otherwise have its obedience
-      // scored as evidence of a transport fault.
-      expect(text()).toContain("do not read contractual silence as confirmation");
-    });
+  test("prints the transcript's last write next to the anchor", () => {
+    const t = text();
+    expect(t).toContain(SPECIMEN.transcriptMtime);
+    expect(t).toContain(SPECIMEN.anchor);
+    expect(t).toContain(String(SPECIMEN.waitMin));
   });
 
-  describe("identity and the closing caveat survive", () => {
-    test("names the subject and its id8", () => {
-      expect(text()).toContain(SPECIMEN.name);
-      expect(text()).toContain(SPECIMEN.id8);
+  test("a last write at or before the anchor is called out as a stopped transcript", () => {
+    expect(text()).toContain("AT OR BEFORE the anchor");
+  });
+
+  test("a last write AFTER the anchor is not called stopped", () => {
+    const t = formatClientTransportAlert({
+      ...SPECIMEN,
+      transcriptMtime: "2026-09-28T01:30:00.000Z",
+    });
+    expect(t).not.toContain("AT OR BEFORE the anchor");
+    expect(t).toContain("after the anchor");
+  });
+
+  test("an unreadable transcript says so instead of guessing", () => {
+    const t = formatClientTransportAlert({ ...SPECIMEN, transcriptMtime: null });
+    expect(t).toContain("COULD NOT BE READ");
+  });
+
+  test("the heartbeat age is shown, since a fresh heartbeat is half the evidence", () => {
+    expect(text()).toContain("last heartbeat 12s ago");
+  });
+});
+
+describe("the one deciding check and the remedy", () => {
+  test("names the transcript listing as the deciding check", () => {
+    expect(text()).toContain("THE DECIDING CHECK: ls -lt");
+  });
+
+  test("the remedy is a user action, with proof of routing afterwards", () => {
+    const t = text();
+    expect(t).toContain("REMEDY (Jarid's action): /mcp");
+    expect(t).toContain("unique token");
+  });
+
+  test("names the subject and says it cannot see the message", () => {
+    const t = text();
+    expect(t).toContain(SPECIMEN.name);
+    expect(t).toContain(SPECIMEN.id8);
+    expect(t).toContain("cannot see this message");
+  });
+});
+
+describe("unrouted_transcript wording", () => {
+  const u = () =>
+    formatUnroutedTranscriptAlert({
+      laneName: "SA-155-FRONTEND-2026-09-25",
+      laneId8: "ed13ca91",
+      laneTranscriptId: "ed13ca91-7629-4c72-a8ed-fda99d4a9887",
+      unroutedTranscriptId: "89c514ba-0a89-47bb-839b-9da54181e2f4",
+      unroutedMtime: "2026-09-28T01:30:00.000Z",
+      laneTranscriptMtime: "2026-09-27T01:46:24.000Z",
+      droppedLines: 412,
+      firstDroppedAt: "2026-09-27T01:48:13.000Z",
     });
 
-    test("still says the subject cannot see the message", () => {
-      expect(text()).toContain("cannot see this message");
-    });
+  test("is a user escalation naming the lane and both files", () => {
+    const t = u();
+    expect(t).toContain("USER ESCALATION");
+    expect(t).toContain("SA-155-FRONTEND-2026-09-25 (ed13ca91)");
+    expect(t).toContain("89c514ba-0a89-47bb-839b-9da54181e2f4.jsonl");
+    expect(t).toContain("ed13ca91-7629-4c72-a8ed-fda99d4a9887.jsonl");
+    expect(t).toContain("412 routable line(s) dropped");
+  });
+
+  test("pre-empts the dismissal that happened on 2026-09-27", () => {
+    expect(u()).toContain("They prove nothing about its posts");
   });
 });

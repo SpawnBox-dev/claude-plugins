@@ -372,6 +372,18 @@ describe("hook_event dispatcher", () => {
       expect(stop.reason).toBeUndefined();
     });
 
+    test("WI cb376ece: a SUBAGENT's PreCompact does not stamp the parent's marker", () => {
+      const { db, tracker } = freshSetup();
+      handleHookEvent(
+        { db, tracker },
+        { event: "PreCompact", session_id: "CMPsub", agent_id: "a0c5ead8e79e88f21" }
+      );
+      const marker = db
+        .query(`SELECT value FROM plugin_state WHERE key = 'compacting_CMPsub'`)
+        .get();
+      expect(marker).toBeNull();
+    });
+
     test("R7.7: Stop block is restored on the NEXT real (non-compact) stop", () => {
       // After PreCompact suppresses one Stop, the marker is consumed - the
       // next genuine Stop (post-compact, after user finishes) blocks normally.
@@ -1188,6 +1200,32 @@ describe("hook_event dispatcher", () => {
       const env = buildHookEnvelope("SessionStart", r);
       expect(env.systemMessage).toBeDefined();
       expect(env.hookSpecificOutput).toBeUndefined();
+    });
+
+    // WI cb376ece: PA's context-warden compacted at 2026-09-27T22:26:25.897Z;
+    // its hook carried PA's session_id and every lane got a false
+    // pa_compact_recovery. A subagent's compaction must not run this handler.
+    test("handler: a SUBAGENT's compaction is a no-op (no digest, no fleet advisory)", () => {
+      const { db, tracker } = freshSetup();
+      tracker.registerSession("SCsub");
+      tracker.updateCurrentTask("SCsub", "the parent's task");
+      const r = handleHookEvent(
+        { db, tracker },
+        { event: "SessionStart", session_id: "SCsub", agent_id: "a0c5ead8e79e88f21" }
+      );
+      expect(r).toEqual({});
+    });
+
+    test("handler: main thread still runs when agent_id is empty or an unsubstituted template", () => {
+      for (const agent_id of [undefined, "", "${agent_id}"]) {
+        const { db, tracker } = freshSetup();
+        tracker.registerSession("SCmain");
+        const r = handleHookEvent(
+          { db, tracker },
+          { event: "SessionStart", session_id: "SCmain", agent_id }
+        );
+        expect(r.systemMessage).toBeDefined();
+      }
     });
 
     test("handler: no checkpoint and no task → still a sane non-empty systemMessage (no crash)", () => {

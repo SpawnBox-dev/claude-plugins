@@ -133,6 +133,19 @@ export interface SessionEntry {
   /** WI e0f426c2: opaque token identifying the PROCESS that owns this
    *  registration, so a departing instance cannot delete its successor's row. */
   instance?: string | null;
+  /**
+   * WI cb376ece (2026-09-28): the transcript this session is WRITING NOW, when
+   * it differs from `session_id`. Absent = the transcript is `<session_id>.jsonl`.
+   *
+   * `session_id` is the ADDRESS (the row, `@SA-<id8>`) and is fixed for the MCP
+   * process's life. The transcript is not: `/clear` (and an in-process
+   * `/resume`) start a NEW `<id>.jsonl` under a new id while the MCP server,
+   * and so its address, stays up. Before this column every watcher derived the
+   * transcript from the address, so a lane that ran `/clear` kept RECEIVING
+   * (delivery goes to its MCP) while its POSTS went to a file no row owned and
+   * were dropped as unknown_sender - two lanes for ~23 hours on 2026-09-27.
+   */
+  transcript_id?: string | null;
 }
 
 export interface OverrideState {
@@ -399,6 +412,9 @@ function getDb(stateDir: string): Database {
     // new MCP for the same session_id BEFORE stopping the old one, so the old
     // one's shutdown would otherwise delete the row its replacement just wrote.
     instance: "TEXT",
+    // WI cb376ece: the transcript a session writes when it is not
+    // `<session_id>.jsonl` (after /clear). See SessionEntry.transcript_id.
+    transcript_id: "TEXT",
   });
   dbCache.set(stateDir, db);
   return db;
@@ -444,6 +460,7 @@ interface SessionRow {
   keep_clean: number | null;
   client_unreachable_since: string | null;
   instance: string | null;
+  transcript_id: string | null;
 }
 
 function rowToEntry(r: SessionRow): SessionEntry {
@@ -486,6 +503,7 @@ function rowToEntry(r: SessionRow): SessionEntry {
   if (r.keep_clean !== null) entry.keep_clean = r.keep_clean !== 0;
   if (r.client_unreachable_since !== null) entry.client_unreachable_since = r.client_unreachable_since;
   if (r.instance !== null) entry.instance = r.instance;
+  if (r.transcript_id !== null) entry.transcript_id = r.transcript_id;
   return entry;
 }
 
@@ -583,7 +601,7 @@ export function readSessions(stateDir: string): SessionEntry[] {
     `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, refs, liveness_state, liveness_ts,
             liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
-            instance
+            instance, transcript_id
      FROM sessions`,
   ).all() as SessionRow[];
   return rows.map(rowToEntry);
@@ -603,8 +621,9 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
   prep(
     db,
     `INSERT INTO sessions
-       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance,
+        transcript_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
        id8 = excluded.id8,
        role = excluded.role,
@@ -651,7 +670,13 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
        -- it, while an empty heartbeat can no longer erase one set out-of-band.
        current_task = COALESCE(excluded.current_task, sessions.current_task),
        kind = excluded.kind,
-       instance = excluded.instance`,
+       instance = excluded.instance,
+       -- WI cb376ece: a plain overwrite, NOT COALESCE. Only the row's own
+       -- process writes this, and it must be able to CLEAR it (a /resume back
+       -- to the original transcript). A stale alias would point peers' egress
+       -- and ingress checks at a file that has stopped growing. The owner
+       -- re-writes it on every heartbeat, so any clobber heals within 30s.
+       transcript_id = excluded.transcript_id`,
   ).run(
     entry.session_id,
     entry.id8,
@@ -662,6 +687,7 @@ export function writeSession(stateDir: string, entry: SessionEntry): void {
     entry.current_task ?? null,
     entry.kind ?? null,
     entry.instance ?? null,
+    entry.transcript_id ?? null,
   );
 }
 

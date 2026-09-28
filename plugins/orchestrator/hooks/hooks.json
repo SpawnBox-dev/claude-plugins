@@ -19,7 +19,8 @@
             "tool": "_hook_event",
             "input": {
               "event": "SessionStart",
-              "session_id": "${session_id}"
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}"
             }
           }
         ]
@@ -120,7 +121,8 @@
             "tool": "_hook_event",
             "input": {
               "event": "PreCompact",
-              "session_id": "${session_id}"
+              "session_id": "${session_id}",
+              "agent_id": "${agent_id}"
             }
           }
         ]

@@ -203,6 +203,11 @@ If PA addresses you directly (a verify-on-demand request, "resync me",
 
 Keep the ledger structured so PA can scan it in seconds:
 
+- **Routing health, on the TOP line, every pass** - `ROUTING OK` or
+  `ROUTING BROKEN: <lane> (<id8>) - <evidence>`. See "Routing-health watch"
+  below. A broken lane goes on the top line even when nothing else changed,
+  because PA relays it to the user in the same turn (Jarid ruling, KB
+  27f1613d).
 - **Newest delta first** - a short "what changed since my last pass"
   section at the TOP (with the time window + message count). A compacted PA
   reads this first; it is the fastest path back to current reality.
@@ -293,7 +298,8 @@ just idle" gate.
   events but its heartbeat + outbound die silently, so the registry reaps it
   (false `session_departed`) while it is ALIVE; it cannot self-detect
   (anti_pattern 6ef0c61f). Discriminator: registry-absent/stale BUT transcript
-  (`~/.claude/projects/<hash>/<session_id>.jsonl`) mtime FRESH / still GROWING =
+  (`~/.claude/projects/<hash>/<transcript_id or session_id>.jsonl` - the row's
+  `transcript_id` when it has one, see below) mtime FRESH / still GROWING =
   egress-dead, not gone. **Fix: restart that window - NOT `/mcp`.** Both restore
   the transport, but a `/mcp` reconnect ABANDONS the old MCP server instead of
   terminating it (`stop()` never runs), so it leaves a second watcher polling the
@@ -312,6 +318,40 @@ just idle" gate.
   open menu/prompt - Enter/Escape first, since a parked loop needs no reconnect
   at all. If it is still dead after that, **restart the window** for the reason
   above; reach for `/mcp` only if a restart is not available.
+
+## Routing-health watch (every pass, top line of the ledger)
+
+**What broke on 2026-09-27 (WI cb376ece).** Two lanes ran `/clear`. That starts
+a NEW transcript under a new id without restarting MCP servers. Messages TO
+those lanes kept arriving, so their task lines and their replies to rulings
+looked healthy. Their POSTS went to the new file, which no roster row owned,
+and were dropped for ~23 hours. Every agent that saw the transport alert about
+them, PA included, ruled it false on "the lane quotes recent rulings" - which
+proves only INBOUND. Jarid's ruling (KB 27f1613d): a broken signal reaches the
+USER; no agent reasons it away.
+
+Once the transcript-following fix (WI cb376ece) is installed, a lane's server follows its own `/clear` and writes
+the new file on its row as `transcript_id`, keeping its address. You are the
+backstop for a lane on an older plugin, and for the follow failing.
+
+**Each pass, per roster row** (read the copy of `agent_channel.db` as above,
+selecting `transcript_id` too):
+
+1. The ROUTED transcript is `<transcript_id>.jsonl` if set, else
+   `<session_id>.jsonl`. Note its mtime.
+2. `ls -lt ~/.claude/projects/<hash>/*.jsonl` and look for a NEWER top-level
+   transcript that belongs to no row but whose first lines
+   (`custom-title` / `agent-name` records) carry that lane's name.
+3. **BROKEN** when (2) finds one that is growing while the routed file from (1)
+   is not. Write `ROUTING BROKEN: <name> (<id8>) - routed <file> last written
+   <mtime>; its live transcript is <file> last written <mtime>` on the ledger's
+   top line, and tell PA in the same pass. The fix is Jarid's: `/mcp` in that
+   lane's terminal (on an old plugin this re-registers it under the new id8 -
+   say so, peers must learn the address).
+4. Otherwise `ROUTING OK`.
+
+Do not downgrade a BROKEN verdict because the lane's `current_task` is fresh or
+quotes recent rulings. That is the exact reading that hid the 09-27 break.
 
 ## Verify-on-demand (a core duty, not a favor)
 

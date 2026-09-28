@@ -485,6 +485,69 @@ function readAuthoritativeSessionId(): string | undefined {
   return undefined;
 }
 
+/**
+ * WI cb376ece: the id of the transcript this session's harness is writing NOW.
+ *
+ * NOT the same question as readAuthoritativeSessionId. That one answers "which
+ * ROW is mine" and must stay pinned to the id this process was spawned with -
+ * it prefers CLAUDE_CODE_SESSION_ID, which is fixed for the process's life. But
+ * `/clear` (and an in-process `/resume`) start a new transcript under a new id
+ * WITHOUT restarting MCP servers, so that env var goes stale for the TRANSCRIPT
+ * while staying right for the ADDRESS. The SessionStart hook rewrites the
+ * per-claude-PID file on every source (startup/clear/resume/compact), so that
+ * file is where the live transcript id is.
+ *
+ * Called every agent-channel tick (1.5s), so it must be cheap: the PID is
+ * resolved once, and the file is re-read only when its mtime changes. No
+ * PowerShell on this path.
+ *
+ * STALENESS GUARD, instead of a creation-time check (which costs a PowerShell
+ * spawn): only this claude's own hook writes `active-session-<its pid>`, so a
+ * write AFTER this MCP started is ours. An older file is trusted only when it
+ * agrees with the env id - otherwise it may be a leftover from a dead claude
+ * that had the same PID, and adopting it would point our row at a stranger's
+ * transcript.
+ */
+let liveTranscriptPid: number | null | undefined;
+let liveTranscriptCache: { mtimeMs: number; id: string | undefined } | null = null;
+function readLiveTranscriptId(): string | undefined {
+  if (liveTranscriptPid === undefined) {
+    const envPid = Number.parseInt(process.env.CLAUDE_PID ?? "", 10);
+    liveTranscriptPid =
+      Number.isFinite(envPid) && envPid > 0 ? envPid : findClaudeAncestorPid();
+  }
+  if (!liveTranscriptPid) return undefined;
+  const projectDir =
+    process.env.ORCHESTRATOR_PROJECT_ROOT ||
+    process.env.CLAUDE_PROJECT_DIR ||
+    process.cwd();
+  const perPidFile = join(
+    projectDir,
+    ".orchestrator-state",
+    `active-session-${liveTranscriptPid}`,
+  );
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(perPidFile).mtimeMs;
+  } catch {
+    return undefined;
+  }
+  if (liveTranscriptCache && liveTranscriptCache.mtimeMs === mtimeMs) {
+    return liveTranscriptCache.id;
+  }
+  let id: string | undefined;
+  try {
+    const raw = readFileSync(perPidFile, "utf8").trim();
+    if (raw && /^[a-zA-Z0-9_-]+$/.test(raw)) id = raw;
+  } catch {
+    id = undefined;
+  }
+  const envId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
+  if (id && mtimeMs < PROCESS_START_MS && id !== envId) id = undefined;
+  liveTranscriptCache = { mtimeMs, id };
+  return id;
+}
+
 function resolveSessionId(explicit?: string): string | undefined {
   // 0.69.0 (WI fda1a7f2): IDENTITY IS NOT ATTRIBUTION. This used to cache the
   // caller-supplied id as the server's own identity. That is the split-brain:
@@ -3149,7 +3212,13 @@ server.tool(
     keep_clean: z.boolean().optional(),
   },
   async (args) => {
-    const sid = resolveSessionId(args.session_id);
+    const resolved = resolveSessionId(args.session_id);
+    // WI cb376ece: after /clear the hook hands the agent its NEW transcript id,
+    // and keying the write on it updated a registry row peers never read - the
+    // tool said "Current task updated" while the roster kept the old line
+    // (memory feedback_continued_session_task_line_needs_no_session_id). Map
+    // a transcript id back to the ADDRESS its row is registered under.
+    const sid = resolved && agentChannel ? agentChannel.canonicalSessionId(resolved) : resolved;
     if (!sid || !sessionTracker) {
       return {
         content: [
@@ -3191,7 +3260,12 @@ server.tool(
         keep_clean: args.keep_clean,
       });
     }
-    return { content: [{ type: "text" as const, text }] };
+    const note =
+      resolved && sid !== resolved
+        ? ` (written to your roster address ${sid.slice(0, 8)}; ${resolved.slice(0, 8)} ` +
+          `is the transcript you are writing since /clear or /resume)`
+        : "";
+    return { content: [{ type: "text" as const, text: text + note }] };
   }
 );
 
@@ -3570,6 +3644,9 @@ function startAgentChannel(): void {
       // the channel is constructed before the handshake can land, so passing
       // the boolean itself would freeze it at `false` forever.
       () => clientHandshakeComplete,
+      // WI cb376ece: follow /clear and /resume onto the new transcript while
+      // keeping this session's address. Read fresh each tick.
+      readLiveTranscriptId,
     );
     agentChannel.start();
     process.stderr.write(

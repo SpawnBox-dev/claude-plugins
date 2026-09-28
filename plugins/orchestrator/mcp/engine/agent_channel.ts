@@ -79,7 +79,12 @@ export interface ChannelNotification {
       | "ingress_suspect"
       // WI d4873dfc: server alive, client unreachable - invisible to every
       // other alert because they all key on the heartbeat, which stays fresh.
-      | "client_transport_suspect";
+      | "client_transport_suspect"
+      // WI cb376ece: a lane's posts are landing in a transcript no row owns.
+      | "unrouted_transcript";
+    /** WI cb376ece / KB 27f1613d: "true" on a plumbing alarm that PA must
+     *  relay to the user in the same turn. Agents do not rule these false. */
+    escalate_to_user?: boolean;
     tool_name?: string;
     pa_addressed?: boolean;
     addressed_to?: string[];
@@ -282,10 +287,19 @@ export function deliveryObservedSince(
  * only one offered. On a parked fleet that pulled three sessions back onto a
  * settled non-event against an explicit instruction not to.
  *
- * SO THE ORDER IS LOAD-BEARING, not stylistic: free checks first, the
- * peer-spending remedy last, the anchor printed as the denominator of its own
- * verdict, and the base rate stated inline so a reader can calibrate without
- * a lookup they will not perform. The ordering is pinned by test.
+ * 2026-09-28 (WI cb376ece, Jarid ruling KB 27f1613d): THE FREE CHECKS ARE GONE.
+ * Check 1 ("from_task reacts to newer content, so the lane RECEIVED") proves
+ * INBOUND delivery only. On 2026-09-27 two lanes had run /clear: messages TO
+ * them still arrived, but their POSTS went to a transcript no row owned and
+ * were dropped for ~23 hours. This alert fired about them all night and was
+ * TRUE; PA and three lanes dismissed it about nine times with check 1, and the
+ * text invited exactly that ("the delivery claim is refuted from inside this
+ * message at zero cost"). A stated base rate did the same work from the other
+ * side. The ruling: a broken signal reaches the USER, and no agent reasons it
+ * away. So the alert is now a USER ESCALATION that PA relays, it carries its
+ * own measurement (the routed transcript's last write next to the anchor), it
+ * names the one check that decides it, and it says in words that from_task
+ * cannot refute it.
  *
  * Exported for tests.
  */
@@ -294,48 +308,100 @@ export function formatClientTransportAlert(opts: {
   id8: string;
   anchor: string;
   waitMin: number;
+  /** The transcript this subject is routed through (its declared live file). */
+  transcriptId?: string;
+  /** ISO mtime of that transcript measured at fire time; null = unreadable. */
+  transcriptMtime?: string | null;
+  transcriptSize?: number | null;
+  heartbeatAgeSec?: number | null;
+  /** Fire time, ISO. */
+  now?: string;
 }): string {
   const { name, id8, anchor, waitMin } = opts;
+  const tid = opts.transcriptId ?? "<unknown>";
+  const now = opts.now ?? new Date().toISOString();
+  let lastWrite: string;
+  if (opts.transcriptMtime) {
+    const ageMin = Math.round((Date.parse(now) - Date.parse(opts.transcriptMtime)) / 60_000);
+    const stoppedBeforeAnchor = Date.parse(opts.transcriptMtime) <= Date.parse(anchor);
+    lastWrite =
+      `last written ${opts.transcriptMtime} (${ageMin} min ago), ` +
+      `${opts.transcriptSize ?? "?"} bytes - ` +
+      (stoppedBeforeAnchor
+        ? `AT OR BEFORE the anchor: this transcript stopped growing while the session's server runs.`
+        : `after the anchor, but not grown past the size baseline this server took at the emit.`);
+  } else {
+    lastWrite = `COULD NOT BE READ at fire time (absent or locked).`;
+  }
+  const hb =
+    opts.heartbeatAgeSec === null || opts.heartbeatAgeSec === undefined
+      ? "heartbeating"
+      : `heartbeating (last heartbeat ${opts.heartbeatAgeSec}s ago)`;
   return (
-    `[client_transport_suspect] ${name} (${id8}) - its MCP server is ` +
-    `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` +
-    `(${waitMin} min ago) has no delivery record: the transcript has not grown ` +
-    `since that emit.\n` +
-    `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` +
-    `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` +
-    `client-side transport drop. The second does not follow from the first, and ` +
-    `this detector has been wrong about it far more often than right.\n` +
-    `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` +
-    `99c00385 for a documented benign cause. A tally of zero does not make THIS ` +
-    `one false; it means check before you act.\n` +
-    `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:\n` +
-    // 2026-09-01 02:44Z correction (WI f7bc27b8). The shipped wording said a
-    // fresh from_task proved the subject "received and wrote" - which is the
-    // exact known-vs-inferred slippage this alert was rewritten to remove,
-    // reintroduced inside its own remedy, in the sentence ordered FIRST and
-    // pinned by a test. A fresh from_task proves the subject executed
-    // update_session_task; the alert's proposition is about DELIVERY of one
-    // message, and tool-execution is not message-reception.
-    //
-    // The fix is not to weaken the check - a valid reception proof exists in the
-    // same field. CONTENT-DEPENDENT RESPONSE: writing proves the subject ran;
-    // acting on content that ORIGINATED ELSEWHERE proves it received. That keeps
-    // the free check first AND tells the reader what to look for.
-    `   1. Read this envelope's own from_task field. If it REACTS TO content that ` +
-    `originated after ${anchor} - quotes a ruling, adopts a correction, names an ` +
-    `item it was handed - the subject RECEIVED, and the delivery claim is refuted ` +
-    `from inside this message at zero cost. MERE FRESHNESS PROVES ONLY THAT IT ` +
-    `RAN: a fresh from_task means the subject executed update_session_task, which ` +
-    `is tool-execution, not message-reception.\n` +
-    `   2. Look for any channel message from the subject dated after ${anchor} in ` +
-    `the context you already have.\n` +
-    `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` +
-    `subordinate receives all channel traffic. Report "I did not receive one", ` +
-    `never "they have not posted".\n` +
-    `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` +
-    `that a lane which has declared it will stay silent will not answer if you ` +
-    `address it - do not read contractual silence as confirmation.\n` +
-    `  Note the subject cannot see this message.`
+    `[client_transport_suspect] USER ESCALATION - PA: relay this to Jarid in this ` +
+    `turn, with the evidence below. Do not rule it false yourself.\n` +
+    `${name} (${id8}): its MCP server is ${hb}, but a message its own server ` +
+    `queued for it at ${anchor} (${waitMin} min ago) has no delivery record: the ` +
+    `transcript it is routed through has not grown past its size baseline since that emit.\n` +
+    `  EVIDENCE, measured at ${now}:\n` +
+    `    routed transcript: ${tid}.jsonl\n` +
+    `    ${lastWrite}\n` +
+    `  WHAT IT MEANS: messages to this lane may not be reaching it, OR its posts may ` +
+    `not be reaching anyone. From here the two look the same, and either is broken.\n` +
+    `  DO NOT RULE THIS FALSE FROM from_task, OR BECAUSE THE LANE QUOTES A RECENT ` +
+    `RULING. Those prove only that messages reached the lane (INBOUND). They say ` +
+    `nothing about whether its posts are routed (OUTBOUND). On 2026-09-27 that reading ` +
+    `dismissed a TRUE alert about nine times while two lanes' posts were lost for ` +
+    `~23 hours.\n` +
+    `  THE DECIDING CHECK: ls -lt ~/.claude/projects/<hash>/*.jsonl - if a NEWER ` +
+    `transcript is growing for this lane (its first lines carry the lane's name), ` +
+    `the lane moved to a new file (after /clear) and the one above is not its own ` +
+    `any more.\n` +
+    `  REMEDY (Jarid's action): /mcp in that lane's terminal. Then have the lane ` +
+    `post a unique token and confirm PA receives it through the channel.\n` +
+    `  The subject cannot see this message.`
+  );
+}
+
+/**
+ * PURE: the body of an `unrouted_transcript` escalation (WI cb376ece).
+ *
+ * The receiver-side view of the 2026-09-27 break, and the one that would have
+ * named it at once: a transcript is writing posts, no row owns it, and its own
+ * header says it is a lane that IS on the roster. That is a lane whose posts
+ * are being dropped. It needs no cooperation from the broken lane, so it also
+ * catches a peer still running a plugin that cannot follow its own /clear.
+ *
+ * Exported for tests.
+ */
+export function formatUnroutedTranscriptAlert(opts: {
+  laneName: string;
+  laneId8: string;
+  laneTranscriptId: string;
+  unroutedTranscriptId: string;
+  unroutedMtime: string | null;
+  laneTranscriptMtime: string | null;
+  droppedLines: number;
+  firstDroppedAt: string;
+}): string {
+  return (
+    `[unrouted_transcript] USER ESCALATION - PA: relay this to Jarid in this turn. ` +
+    `${opts.laneName} (${opts.laneId8}) is posting, and its posts are NOT reaching ` +
+    `anyone.\n` +
+    `  EVIDENCE: transcript ${opts.unroutedTranscriptId}.jsonl names itself ` +
+    `"${opts.laneName}" in its first lines, belongs to no roster row, and has had ` +
+    `${opts.droppedLines} routable line(s) dropped since ${opts.firstDroppedAt} ` +
+    `(last written ${opts.unroutedMtime ?? "unknown"}). The roster row for that ` +
+    `lane routes ${opts.laneTranscriptId}.jsonl (last written ` +
+    `${opts.laneTranscriptMtime ?? "unknown"}).\n` +
+    `  WHAT IT MEANS: the lane ran /clear (or /resume) and started a new transcript, ` +
+    `and its MCP server did not follow it. Messages TO the lane still arrive, so its ` +
+    `task line and its replies to rulings will look healthy. They prove nothing about ` +
+    `its posts.\n` +
+    `  REMEDY (Jarid's action): /mcp in that lane's terminal. On a plugin older than ` +
+    `the transcript-following fix, the reconnect re-registers the lane under id8 ` +
+    `${opts.unroutedTranscriptId.slice(0, 8)}, so tell its peers the new address. ` +
+    `Until then, read ${opts.unroutedTranscriptId}.jsonl directly for anything it posts.`
   );
 }
 
@@ -927,7 +993,147 @@ export class AgentChannel {
      * checkSuperseded for why the alternative was catastrophic.
      */
     private hasClientHandshake?: () => boolean,
+    /**
+     * WI cb376ece. The id of the transcript this session's harness is writing
+     * NOW, read fresh on every call (server.ts: the per-claude-PID file the
+     * SessionStart hook rewrites on /clear and /resume). Undefined disables
+     * following, which is the pre-fix behaviour: the transcript is assumed to
+     * be `<session_id>.jsonl` for the process's whole life.
+     */
+    private resolveLiveTranscriptId?: () => string | undefined,
   ) {}
+
+  /** WI cb376ece: log the refused-foreign-transcript case once, not per tick. */
+  private foreignTranscriptLogged = false;
+
+  /** WI cb376ece: peer session_id -> the transcript it declares it is writing,
+   *  refreshed from the registry every tick. Absent = `<session_id>.jsonl`. */
+  private transcriptBySession = new Map<string, string>();
+
+  /** WI cb376ece: transcripts that produced routable lines no session owns,
+   *  since this process started. Feeds detectUnroutedTranscripts. */
+  private unroutedSeen = new Map<
+    string,
+    { count: number; firstAt: string; lastAt: string; emittedAt?: number }
+  >();
+
+  /** The transcript THIS session is writing now (WI cb376ece). */
+  private liveTranscriptId(): string {
+    return this.selfSession.transcript_id ?? this.selfSession.session_id;
+  }
+
+  /** The transcript a session writes, by its ADDRESS (WI cb376ece). Every
+   *  "stat/read this session's transcript" goes through here - deriving the
+   *  file from the address is the bug. */
+  private transcriptFor(sid: string): string {
+    if (sid === this.selfSession.session_id) return this.liveTranscriptId();
+    return this.transcriptBySession.get(sid) ?? sid;
+  }
+
+  /**
+   * WI cb376ece: map a session id a CALLER supplied to the address its row is
+   * registered under. After `/clear` the hook hands the agent the NEW
+   * transcript id, and tools keyed on that id updated a row peers never read
+   * (update_session_task returned "Current task updated" while the roster kept
+   * the old line - memory feedback_continued_session_task_line_needs_no_session_id).
+   * Unknown ids pass through unchanged.
+   */
+  canonicalSessionId(id: string): string {
+    if (id === this.selfSession.session_id) return id;
+    if (id === this.liveTranscriptId()) return this.selfSession.session_id;
+    for (const [sid, tid] of this.transcriptBySession) {
+      if (tid === id) return sid;
+    }
+    return id;
+  }
+
+  /**
+   * WI cb376ece: follow this session onto a new transcript without a
+   * reconnect, keeping its address.
+   *
+   * WHAT HAPPENED WITHOUT THIS (2026-09-27). `/clear` started a new transcript
+   * under a new id; the MCP server kept running with the id it was spawned
+   * with. Delivery TO the lane kept working (it goes to this process). Its
+   * POSTS did not: every watcher derived the sender's transcript from the
+   * address, so the new file belonged to no row, and each line was consumed as
+   * unknown_sender and dropped - for ~23 hours, on two lanes, while their task
+   * lines stayed fresh. `/mcp` fixed it only by re-registering under the new
+   * id, which changed the lane's address and made every peer learn it.
+   *
+   * Here the address stays, and the row declares the file. The hook rewrites
+   * the per-PID file at every SessionStart (clear/resume/compact), and the
+   * resolver reads it fresh, so this lands within one tick of the `/clear` -
+   * before the new transcript exists, since Claude Code creates it at the
+   * first prompt. The row is written IMMEDIATELY rather than on the next 30s
+   * heartbeat, because a peer that meets the new file before the alias exists
+   * drops its opening lines.
+   */
+  private followLiveTranscript(): void {
+    if (!this.resolveLiveTranscriptId) return;
+    let live: string | undefined;
+    try {
+      live = this.resolveLiveTranscriptId();
+    } catch {
+      return;
+    }
+    if (!live) return;
+    const next = live === this.selfSession.session_id ? null : live;
+    const prev = this.selfSession.transcript_id ?? null;
+    if (next === prev) return;
+    // Never claim another registered session's own transcript. The per-PID
+    // file is ours by construction, but server.ts's legacy self-heal can write
+    // a SIBLING's id into it when env and per-PID both fail at boot - and an
+    // alias onto a live peer's file would make our self-checks measure THEIR
+    // writes and read their /rename.
+    if (next !== null) {
+      try {
+        if (readSessions(this.projectStateDir).some((s) => s.session_id === next)) {
+          if (!this.foreignTranscriptLogged) {
+            this.foreignTranscriptLogged = true;
+            process.stderr.write(
+              `agent-channel: NOT following transcript ${next.slice(0, 8)} - it is ` +
+                `another registered session's address (WI cb376ece)\n`,
+            );
+          }
+          return;
+        }
+      } catch {
+        return; // cannot check, so do not move
+      }
+    }
+
+    this.selfSession = { ...this.selfSession, transcript_id: next };
+    // The rename scan's size cache belongs to the old file.
+    this.lastRenameScanSize = undefined;
+    // An owed delivery is now owed to the NEW file. Its baseline is zero: the
+    // file is usually not created yet, and an absent transcript is zero bytes
+    // (the 0.69.3 `?? 0` rule). Keeping the old file's baseline would demand
+    // the new file outgrow the old one before anything counted as delivered.
+    if (this.pendingEmitAt !== null) this.selfSizeAtEmit = 0;
+
+    const was = prev ?? this.selfSession.session_id;
+    const now = next ?? this.selfSession.session_id;
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "transcript_followed",
+      receiver_id8: this.selfSession.id8,
+      detail:
+        `now writing ${now}.jsonl (was ${was}.jsonl); address ` +
+        `${this.selfSession.id8} unchanged`,
+    });
+    process.stderr.write(
+      `agent-channel: transcript followed ${was.slice(0, 8)} -> ${now.slice(0, 8)} ` +
+        `(address ${this.selfSession.id8} unchanged, WI cb376ece)\n`,
+    );
+    try {
+      writeSession(this.projectStateDir, {
+        ...this.selfSession,
+        last_heartbeat_at: new Date().toISOString(),
+      });
+    } catch {
+      // The next heartbeat carries it; never let this take the tick down.
+    }
+  }
 
   /** One-shot latch so an inert reconcile logs once, not every 30s. */
   private reconcileInertLogged = false;
@@ -1075,7 +1281,9 @@ export class AgentChannel {
       // failure also lands on 0 and clears early; that is the SAFE direction -
       // a missed drop is recoverable noise, an immortal false positive trains
       // the whole fleet to ignore the one alert nothing else can see.
-      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id) ?? 0;
+      // WI cb376ece: the transcript the harness writes NOW, not the one named
+      // after our address - they differ after a /clear.
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.liveTranscriptId()) ?? 0;
     }
     this.rawEmit(ev);
   }
@@ -1237,7 +1445,8 @@ export class AgentChannel {
    */
   private syncRenameIntoName(): void {
     try {
-      const path = join(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      // WI cb376ece: a /rename after a /clear is written to the NEW transcript.
+      const path = join(this.projectsHashDir, `${this.liveTranscriptId()}.jsonl`);
       const { name, size } = readLatestRename(path, this.lastRenameScanSize);
       this.lastRenameScanSize = size;
       if (name && name !== this.selfSession.name) {
@@ -1389,7 +1598,11 @@ export class AgentChannel {
   private checkOwnTransport(): void {
     const owed = this.pendingEmitAt;
     if (owed !== null) {
-      const size = this.peerTranscriptSize(this.selfSession.session_id);
+      // WI cb376ece: measured on the transcript the harness writes NOW. Before
+      // this, a session that ran /clear measured a file that could never grow
+      // again, so this detector fired on it forever - and was right that its
+      // routing was broken, for a reason it could not name.
+      const size = this.peerTranscriptSize(this.liveTranscriptId());
       // Any growth since the emit proves the harness wrote it down, so the
       // transport carried it. Clearing here is what makes the detector
       // self-standing-down on recovery.
@@ -1516,7 +1729,13 @@ export class AgentChannel {
     // SA silently drops @SA-<selfid8> and @all traffic. The DB row (if present)
     // overwrites this seed below with the fresher name/current_task.
     current.set(this.selfSession.session_id, this.selfSession);
+    // WI cb376ece: rebuilt from EVERY row, fresh or not, so a peer held
+    // through the departure grace is still measured on the file it writes.
+    const transcripts = new Map<string, string>();
     for (const s of readSessions(this.projectStateDir)) {
+      if (s.transcript_id && s.transcript_id !== s.session_id) {
+        transcripts.set(s.session_id, s.transcript_id);
+      }
       if (s.session_id === this.selfSession.session_id) {
         current.set(s.session_id, s);
         continue;
@@ -1527,6 +1746,7 @@ export class AgentChannel {
       }
     }
     this.currentRoster = current;
+    this.transcriptBySession = transcripts;
 
     // Joined: a peer present now and not already known. Peers held through the
     // departure grace stay in knownSessions, so a reappearance is NOT a new
@@ -1578,7 +1798,7 @@ export class AgentChannel {
       // Egress-death detection (WI 0f9dcd95). Capture the peer's transcript size
       // the FIRST tick it goes absent; growth beyond that while its heartbeat
       // stays down = alive-but-unreachable (egress-dead), NOT gone.
-      const size = this.peerTranscriptSize(sid);
+      const size = this.peerTranscriptSize(this.transcriptFor(sid));
       if (!this.sizeAtStale.has(sid) && size != null) {
         this.sizeAtStale.set(sid, size);
       }
@@ -1792,6 +2012,142 @@ export class AgentChannel {
     }
   }
 
+  /** WI cb376ece: the lane name a transcript declares in its opening records
+   *  (`custom-title` / `agent-name`, which Claude Code writes first and carries
+   *  across /clear), or null. Reads at most the first 16 KB. */
+  private readTranscriptHeaderName(tid: string): string | null {
+    let fd: number | undefined;
+    try {
+      const path = join(this.projectsHashDir, `${tid}.jsonl`);
+      const length = Math.min(statSync(path).size, 16_384);
+      if (length <= 0) return null;
+      fd = openSync(path, "r");
+      const chunk = Buffer.allocUnsafe(length);
+      const n = readSync(fd, chunk, 0, length, 0);
+      const head = chunk.subarray(0, n).toString("utf8");
+      for (const line of head.split("\n")) {
+        let rec: any;
+        try {
+          rec = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const name =
+          rec?.type === "agent-name" ? rec.agentName :
+          rec?.type === "custom-title" ? rec.customTitle : undefined;
+        if (typeof name === "string" && name.trim()) return name.trim();
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+
+  private transcriptMtimeIso(tid: string): string | null {
+    try {
+      return new Date(
+        statSync(join(this.projectsHashDir, `${tid}.jsonl`)).mtimeMs,
+      ).toISOString();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * WI cb376ece: escalate a lane whose posts are being dropped.
+   *
+   * The signal: a transcript produced ROUTABLE lines that no row owns
+   * (unknown_sender), and its own header names a LIVE roster row. That is not
+   * a plain `claude` run in the same folder - those name no roster row - it is
+   * a lane that moved to a new file while its row still points at the old one.
+   * On 2026-09-27 PA's own watcher logged exactly this for ~23 hours and
+   * surfaced none of it.
+   *
+   * Why this and not "a live session's transcript stopped growing": an idle
+   * lane's transcript also stops growing while its heartbeat stays fresh, so
+   * that signal would page Jarid for every quiet lane. Here the broken lane's
+   * own words are the evidence - they are being written, to a file nobody
+   * routes.
+   *
+   * Surfaced by PA's watcher only (or any watcher when no PA is live), as a
+   * user escalation, once per transcript per 30 minutes (durable floor).
+   */
+  private detectUnroutedTranscripts(current: Map<string, SessionEntry>, now: number): void {
+    if (this.unroutedSeen.size === 0) return;
+    const primeLive = Array.from(current.values()).some(
+      (s) => s.role === "prime" && s.session_id !== this.selfSession.session_id,
+    );
+    if (this.selfSession.role !== "prime" && primeLive) return;
+    const identity = this.identityRoster();
+    for (const [tid, seen] of this.unroutedSeen) {
+      // Owned now (the lane followed its file, or re-registered): resolved.
+      if (identity.has(tid)) {
+        this.unroutedSeen.delete(tid);
+        continue;
+      }
+      const header = this.readTranscriptHeaderName(tid);
+      if (!header) continue;
+      const lane = Array.from(current.values()).find(
+        (s) => s.name === header && s.session_id !== tid,
+      );
+      if (!lane) continue;
+
+      // Durable floor (shared across processes and reloads) with an in-process
+      // copy that still holds if the registry cannot be read.
+      let lastEmit: number | undefined = seen.emittedAt;
+      try {
+        const durable = getAlertLastEmit(this.projectStateDir, "unrouted_transcript", tid);
+        if (durable !== undefined) lastEmit = Math.max(durable, lastEmit ?? 0);
+      } catch {
+        /* fall back to the in-process copy */
+      }
+      if (lastEmit !== undefined && now - lastEmit < CLIENT_ALERT_REFRACTORY_MS) continue;
+      seen.emittedAt = now;
+      try {
+        setAlertLastEmit(this.projectStateDir, "unrouted_transcript", tid, now);
+      } catch {
+        /* in-process copy above still holds this process to one emit */
+      }
+
+      const laneTid = this.transcriptFor(lane.session_id);
+      const detail =
+        `transcript ${tid.slice(0, 8)} names itself "${header}" (row ${lane.id8}, ` +
+        `routed ${laneTid.slice(0, 8)}); ${seen.count} routable line(s) dropped since ` +
+        `${seen.firstAt}`;
+      appendEmitLog(this.projectStateDir, {
+        ts: new Date(now).toISOString(),
+        event: "unrouted_transcript",
+        receiver_id8: this.selfSession.id8,
+        sender_id8: tid.slice(0, 8),
+        detail,
+      });
+      this.emit({
+        content: formatUnroutedTranscriptAlert({
+          laneName: lane.name,
+          laneId8: lane.id8,
+          laneTranscriptId: laneTid,
+          unroutedTranscriptId: tid,
+          unroutedMtime: this.transcriptMtimeIso(tid),
+          laneTranscriptMtime: this.transcriptMtimeIso(laneTid),
+          droppedLines: seen.count,
+          firstDroppedAt: seen.firstAt,
+        }),
+        meta: {
+          from_session: lane.session_id,
+          from_id8: lane.id8,
+          from_role: lane.role,
+          from_name: lane.name,
+          from_task: lane.current_task ?? null,
+          event_type: "unrouted_transcript",
+          escalate_to_user: true,
+          ts: new Date(now).toISOString(),
+        },
+      });
+    }
+  }
+
   /** Read the last INGRESS_TAIL_BYTES of a session's transcript, or null if
    *  absent/unreadable. Byte-positional read from (size - window); a partial
    *  leading line is tolerated by parseIngressTail's JSON.parse skip. */
@@ -1834,7 +2190,7 @@ export class AgentChannel {
       if (sid === this.selfSession.session_id) continue;
       try {
         peerTurnAges.push(
-          now - statSync(join(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs
+          now - statSync(join(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs
         );
       } catch {
         /* unreadable transcript tells us nothing either way - omit it */
@@ -1854,12 +2210,36 @@ export class AgentChannel {
         const since = entry.client_unreachable_since
           ? Date.parse(entry.client_unreachable_since)
           : NaN;
-        if (!Number.isNaN(since)) {
+        // WI cb376ece / KB 27f1613d: WHO surfaces it. Every watcher used to
+        // emit this into its own lane, so each firing cost every lane a turn
+        // (about 12 lane-turns an hour on 2026-09-27) and every lane reasoned
+        // it away. It is a user escalation now: PA surfaces it and relays it
+        // to Jarid. A subordinate surfaces it only when PA itself is the
+        // subject - PA's harness is then the broken path - or no PA is live.
+        const primeLive = Array.from(current.values()).some(
+          (s) => s.role === "prime" && s.session_id !== sid,
+        );
+        const surfaceHere =
+          this.selfSession.role === "prime" || entry.role === "prime" || !primeLive;
+        if (!Number.isNaN(since) && surfaceHere) {
           const lastEmit = this.clientTransportLastEmit.get(sid);
           if (lastEmit === undefined || now - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
             this.clientTransportLastEmit.set(sid, now);
             const waitMin = Math.round((now - since) / 60_000);
             const anchor = new Date(since).toISOString();
+            // The alert carries its own evidence (PA 01:39Z): the routed
+            // transcript's last write, measured NOW, next to the anchor.
+            const transcriptId = this.transcriptFor(sid);
+            let transcriptMtime: string | null = null;
+            let transcriptSize: number | null = null;
+            try {
+              const st = statSync(join(this.projectsHashDir, `${transcriptId}.jsonl`));
+              transcriptMtime = new Date(st.mtimeMs).toISOString();
+              transcriptSize = st.size;
+            } catch {
+              /* absent/unreadable - the alert says so rather than guessing */
+            }
+            const hb = Date.parse(entry.last_heartbeat_at);
             this.emit({
               // 0.69.3 (f7bc27b8): the wording lives in formatClientTransportAlert
               // so it can be asserted. Built inline, the one part of this alert
@@ -1869,6 +2249,11 @@ export class AgentChannel {
                 id8: entry.id8,
                 anchor,
                 waitMin,
+                transcriptId,
+                transcriptMtime,
+                transcriptSize,
+                heartbeatAgeSec: Number.isFinite(hb) ? Math.round((now - hb) / 1000) : null,
+                now: new Date(now).toISOString(),
               }),
               meta: {
                 from_session: entry.session_id,
@@ -1877,6 +2262,7 @@ export class AgentChannel {
                 from_name: entry.name,
                 from_task: entry.current_task ?? null,
                 event_type: "client_transport_suspect",
+                escalate_to_user: true,
                 ts: new Date(now).toISOString(),
               },
             });
@@ -1886,7 +2272,7 @@ export class AgentChannel {
         /* detector is best-effort; never break the tick */
       }
 
-      const tail = this.readTranscriptTail(sid);
+      const tail = this.readTranscriptTail(this.transcriptFor(sid));
       // Transient read failure (file lock / I/O blip): skip WITHOUT clearing the
       // dedup flag, so a momentary blip can't re-arm and double-emit the same
       // episode. Genuine departure clears the flag in the departed loop.
@@ -1898,7 +2284,7 @@ export class AgentChannel {
       let transcriptMtimeMs: number | null = null;
       try {
         transcriptMtimeMs = statSync(
-          join(this.projectsHashDir, `${sid}.jsonl`)
+          join(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)
         ).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
@@ -2097,7 +2483,7 @@ export class AgentChannel {
               `holding the refuting messages (e24d8156, firings #8 and #11); it does not ` +
               `feel like evidence because it is not a measurement, but it outranks one.\n` +
               `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime ` +
-              `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, costs ` +
+              `(~/.claude/projects/<hash>/${this.transcriptFor(sid)}.jsonl). Free, instant, costs ` +
               `nobody a turn. GROWTH proves alive and working, not parked.\n` +
               // 0.67.0: the sampling shape is corrected to the one firing #10
               // MEASURED. The old text said "sample twice a few seconds apart",
@@ -2178,6 +2564,9 @@ export class AgentChannel {
     // the live watcher then never sees. That is the entire bug.
     if (this.retired) return;
     try {
+      // WI cb376ece: first, so this tick already routes (and measures) the
+      // transcript we are writing now.
+      this.followLiveTranscript();
       this.detectSessionChanges();
       // Ingress-death scan (WI 19294811), throttled to INGRESS_CHECK_INTERVAL_MS
       // since its tail reads are heavier than the per-tick routing. Runs on the
@@ -2186,6 +2575,7 @@ export class AgentChannel {
       if (ingressNow - this.lastIngressCheckAt >= INGRESS_CHECK_INTERVAL_MS) {
         this.lastIngressCheckAt = ingressNow;
         this.detectIngress(this.currentRoster, ingressNow);
+        this.detectUnroutedTranscripts(this.currentRoster, ingressNow);
       }
       // Route on the FRESH roster (self + heartbeat-fresh peers), NOT
       // knownSessions - which now also holds peers held through the departure
@@ -2441,6 +2831,19 @@ export class AgentChannel {
     }
     for (const [sid, entry] of this.knownSessions) identity.set(sid, entry);
     for (const [sid, entry] of this.currentRoster) identity.set(sid, entry);
+    // WI cb376ece: a transcript a row DECLARES it is writing resolves to that
+    // row, so a lane's posts after /clear route under its unchanged address.
+    // A row whose own session_id IS that transcript wins: after a /mcp
+    // reconnect the new registration owns the file outright, and a stale alias
+    // on the departing row must not steal its lines during the reap grace.
+    const aliases: Array<[string, SessionEntry]> = [];
+    for (const entry of identity.values()) {
+      const tid = entry.transcript_id;
+      if (tid && tid !== entry.session_id) aliases.push([tid, entry]);
+    }
+    for (const [tid, entry] of aliases) {
+      if (!identity.has(tid)) identity.set(tid, entry);
+    }
     return identity;
   }
 
@@ -2705,7 +3108,7 @@ export class AgentChannel {
       // It sits BEFORE the sender lookup and the self-suppression return on
       // purpose: those correctly stop us ROUTING our own lines, but this is not
       // routing, it is observing our own inbox.
-      if (senderId === this.selfSession.session_id) {
+      if (senderId === this.liveTranscriptId() || senderId === this.selfSession.session_id) {
         const ids = raw?.message?.content;
         const body = typeof ids === "string" ? ids : "";
         if (body.includes("<channel")) {
@@ -2749,6 +3152,16 @@ export class AgentChannel {
         // session you know exists is now a real signal, not background.
         if (filterEvent(raw)) {
           this.discarded.set(senderId, (this.discarded.get(senderId) ?? 0) + 1);
+          // WI cb376ece: remembered so detectUnroutedTranscripts can ask
+          // whether this file is a LANE whose posts are being dropped.
+          const nowIso = new Date().toISOString();
+          const seen = this.unroutedSeen.get(senderId);
+          if (seen) {
+            seen.count += 1;
+            seen.lastAt = nowIso;
+          } else {
+            this.unroutedSeen.set(senderId, { count: 1, firstAt: nowIso, lastAt: nowIso });
+          }
           appendEmitLog(this.projectStateDir, {
             ts: new Date().toISOString(),
             event: "unknown_sender",

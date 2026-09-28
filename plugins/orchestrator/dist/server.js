@@ -24103,7 +24103,8 @@ function getDb(stateDir) {
     hot_path_status: "TEXT",
     keep_clean: "INTEGER",
     client_unreachable_since: "TEXT",
-    instance: "TEXT"
+    instance: "TEXT",
+    transcript_id: "TEXT"
   });
   dbCache.set(stateDir, db);
   return db;
@@ -24157,6 +24158,8 @@ function rowToEntry(r) {
     entry.client_unreachable_since = r.client_unreachable_since;
   if (r.instance !== null)
     entry.instance = r.instance;
+  if (r.transcript_id !== null)
+    entry.transcript_id = r.transcript_id;
   return entry;
 }
 function setClientUnreachableSince(stateDir, session_id, iso) {
@@ -24210,7 +24213,7 @@ function readSessions(stateDir) {
   const rows = prep(db, `SELECT session_id, id8, role, name, started_at, last_heartbeat_at,
             current_task, kind, warm_context, refs, liveness_state, liveness_ts,
             liveness_expires_at, hot_path_status, keep_clean, client_unreachable_since,
-            instance
+            instance, transcript_id
      FROM sessions`).all();
   return rows.map(rowToEntry);
 }
@@ -24219,8 +24222,9 @@ function writeSession(stateDir, entry) {
     return;
   const db = getDb(stateDir);
   prep(db, `INSERT INTO sessions
-       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (session_id, id8, role, name, started_at, last_heartbeat_at, current_task, kind, instance,
+        transcript_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
        id8 = excluded.id8,
        role = excluded.role,
@@ -24267,7 +24271,13 @@ function writeSession(stateDir, entry) {
        -- it, while an empty heartbeat can no longer erase one set out-of-band.
        current_task = COALESCE(excluded.current_task, sessions.current_task),
        kind = excluded.kind,
-       instance = excluded.instance`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null, entry.instance ?? null);
+       instance = excluded.instance,
+       -- WI cb376ece: a plain overwrite, NOT COALESCE. Only the row's own
+       -- process writes this, and it must be able to CLEAR it (a /resume back
+       -- to the original transcript). A stale alias would point peers' egress
+       -- and ingress checks at a file that has stopped growing. The owner
+       -- re-writes it on every heartbeat, so any clobber heals within 30s.
+       transcript_id = excluded.transcript_id`).run(entry.session_id, entry.id8, entry.role, entry.name, entry.started_at, entry.last_heartbeat_at, entry.current_task ?? null, entry.kind ?? null, entry.instance ?? null, entry.transcript_id ?? null);
 }
 function setWarmContext(stateDir, session_id, tags) {
   const db = getDb(stateDir);
@@ -25911,6 +25921,8 @@ function listRecentSessionNotes(db, sessionId, limit) {
        LIMIT ?`).all(sessionId, limit);
 }
 function handlePreCompact(ctx, args) {
+  if (isSubagentHook(args.agent_id))
+    return {};
   const sid = sanitizeSessionId(args.session_id);
   if (sid) {
     ctx.db.run(`INSERT OR REPLACE INTO plugin_state (key, value, updated_at) VALUES (?, ?, ?)`, [`compacting_${sid}`, String(Date.now()), now()]);
@@ -26079,7 +26091,13 @@ function buildPaCompactAdvisoryEvent(opts) {
     task: currentTask ?? ""
   };
 }
+function isSubagentHook(agentId) {
+  const v = (agentId ?? "").trim();
+  return v.length > 0 && !v.startsWith("${");
+}
 function handleSessionStartCompact(ctx, args) {
+  if (isSubagentHook(args.agent_id))
+    return {};
   const sid = sanitizeSessionId(args.session_id);
   let currentTask = null;
   try {
@@ -27402,15 +27420,33 @@ function deliveryObservedSince(size, baselineAtEmit) {
 }
 function formatClientTransportAlert(opts) {
   const { name, id8, anchor, waitMin } = opts;
-  return `[client_transport_suspect] ${name} (${id8}) - its MCP server is ` + `heartbeating, but ONE MESSAGE THIS SERVER QUEUED AT ${anchor} ` + `(${waitMin} min ago) has no delivery record: the transcript has not grown ` + `since that emit.
-` + `  WHAT IS KNOWN vs WHAT IS INFERRED: known = one queued message, no observed ` + `delivery, measured against a size baseline taken at ${anchor}. Inferred = a ` + `client-side transport drop. The second does not follow from the first, and ` + `this detector has been wrong about it far more often than right.
-` + `  BASE RATE: dozens of firings, ~zero confirmed - see work item cb376ece, and ` + `99c00385 for a documented benign cause. A tally of zero does not make THIS ` + `one false; it means check before you act.
-` + `  TWO FREE CHECKS, BOTH BEFORE YOU SPEND ANYONE'S TURN:
-` + `   1. Read this envelope's own from_task field. If it REACTS TO content that ` + `originated after ${anchor} - quotes a ruling, adopts a correction, names an ` + `item it was handed - the subject RECEIVED, and the delivery claim is refuted ` + `from inside this message at zero cost. MERE FRESHNESS PROVES ONLY THAT IT ` + `RAN: a fresh from_task means the subject executed update_session_task, which ` + `is tool-execution, not message-reception.
-` + `   2. Look for any channel message from the subject dated after ${anchor} in ` + `the context you already have.
-` + `  VANTAGE: if you are not PA, a NEGATIVE on check 2 is INCONCLUSIVE - no ` + `subordinate receives all channel traffic. Report "I did not receive one", ` + `never "they have not posted".
-` + `  ONLY IF BOTH ARE INCONCLUSIVE: /mcp in that terminal reconnects it. Note ` + `that a lane which has declared it will stay silent will not answer if you ` + `address it - do not read contractual silence as confirmation.
-` + `  Note the subject cannot see this message.`;
+  const tid = opts.transcriptId ?? "<unknown>";
+  const now3 = opts.now ?? new Date().toISOString();
+  let lastWrite;
+  if (opts.transcriptMtime) {
+    const ageMin = Math.round((Date.parse(now3) - Date.parse(opts.transcriptMtime)) / 60000);
+    const stoppedBeforeAnchor = Date.parse(opts.transcriptMtime) <= Date.parse(anchor);
+    lastWrite = `last written ${opts.transcriptMtime} (${ageMin} min ago), ` + `${opts.transcriptSize ?? "?"} bytes - ` + (stoppedBeforeAnchor ? `AT OR BEFORE the anchor: this transcript stopped growing while the session's server runs.` : `after the anchor, but not grown past the size baseline this server took at the emit.`);
+  } else {
+    lastWrite = `COULD NOT BE READ at fire time (absent or locked).`;
+  }
+  const hb = opts.heartbeatAgeSec === null || opts.heartbeatAgeSec === undefined ? "heartbeating" : `heartbeating (last heartbeat ${opts.heartbeatAgeSec}s ago)`;
+  return `[client_transport_suspect] USER ESCALATION - PA: relay this to Jarid in this ` + `turn, with the evidence below. Do not rule it false yourself.
+` + `${name} (${id8}): its MCP server is ${hb}, but a message its own server ` + `queued for it at ${anchor} (${waitMin} min ago) has no delivery record: the ` + `transcript it is routed through has not grown past its size baseline since that emit.
+` + `  EVIDENCE, measured at ${now3}:
+` + `    routed transcript: ${tid}.jsonl
+` + `    ${lastWrite}
+` + `  WHAT IT MEANS: messages to this lane may not be reaching it, OR its posts may ` + `not be reaching anyone. From here the two look the same, and either is broken.
+` + `  DO NOT RULE THIS FALSE FROM from_task, OR BECAUSE THE LANE QUOTES A RECENT ` + `RULING. Those prove only that messages reached the lane (INBOUND). They say ` + `nothing about whether its posts are routed (OUTBOUND). On 2026-09-27 that reading ` + `dismissed a TRUE alert about nine times while two lanes' posts were lost for ` + `~23 hours.
+` + `  THE DECIDING CHECK: ls -lt ~/.claude/projects/<hash>/*.jsonl - if a NEWER ` + `transcript is growing for this lane (its first lines carry the lane's name), ` + `the lane moved to a new file (after /clear) and the one above is not its own ` + `any more.
+` + `  REMEDY (Jarid's action): /mcp in that lane's terminal. Then have the lane ` + `post a unique token and confirm PA receives it through the channel.
+` + `  The subject cannot see this message.`;
+}
+function formatUnroutedTranscriptAlert(opts) {
+  return `[unrouted_transcript] USER ESCALATION - PA: relay this to Jarid in this turn. ` + `${opts.laneName} (${opts.laneId8}) is posting, and its posts are NOT reaching ` + `anyone.
+` + `  EVIDENCE: transcript ${opts.unroutedTranscriptId}.jsonl names itself ` + `"${opts.laneName}" in its first lines, belongs to no roster row, and has had ` + `${opts.droppedLines} routable line(s) dropped since ${opts.firstDroppedAt} ` + `(last written ${opts.unroutedMtime ?? "unknown"}). The roster row for that ` + `lane routes ${opts.laneTranscriptId}.jsonl (last written ` + `${opts.laneTranscriptMtime ?? "unknown"}).
+` + `  WHAT IT MEANS: the lane ran /clear (or /resume) and started a new transcript, ` + `and its MCP server did not follow it. Messages TO the lane still arrive, so its ` + `task line and its replies to rulings will look healthy. They prove nothing about ` + `its posts.
+` + `  REMEDY (Jarid's action): /mcp in that lane's terminal. On a plugin older than ` + `the transcript-following fix, the reconnect re-registers the lane under id8 ` + `${opts.unroutedTranscriptId.slice(0, 8)}, so tell its peers the new address. ` + `Until then, read ${opts.unroutedTranscriptId}.jsonl directly for anything it posts.`;
 }
 function formatSessionJoined(entry) {
   const head = `[session_joined] ${entry.name} (${entry.id8}, role=${entry.role})`;
@@ -27532,6 +27568,7 @@ class AgentChannel {
   permissionRelay;
   resolveTrueSessionId;
   hasClientHandshake;
+  resolveLiveTranscriptId;
   timer = null;
   heartbeatTimer = null;
   knownSessions = new Map;
@@ -27555,7 +27592,7 @@ class AgentChannel {
   selfSizeAtEmit = null;
   clientTransportLastEmit = new Map;
   heartbeatFailures = 0;
-  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay, resolveTrueSessionId, hasClientHandshake) {
+  constructor(projectStateDir, projectsHashDir, selfSession, rawEmit, permissionRelay, resolveTrueSessionId, hasClientHandshake, resolveLiveTranscriptId) {
     this.projectStateDir = projectStateDir;
     this.projectsHashDir = projectsHashDir;
     this.selfSession = selfSession;
@@ -27563,6 +27600,79 @@ class AgentChannel {
     this.permissionRelay = permissionRelay;
     this.resolveTrueSessionId = resolveTrueSessionId;
     this.hasClientHandshake = hasClientHandshake;
+    this.resolveLiveTranscriptId = resolveLiveTranscriptId;
+  }
+  foreignTranscriptLogged = false;
+  transcriptBySession = new Map;
+  unroutedSeen = new Map;
+  liveTranscriptId() {
+    return this.selfSession.transcript_id ?? this.selfSession.session_id;
+  }
+  transcriptFor(sid) {
+    if (sid === this.selfSession.session_id)
+      return this.liveTranscriptId();
+    return this.transcriptBySession.get(sid) ?? sid;
+  }
+  canonicalSessionId(id) {
+    if (id === this.selfSession.session_id)
+      return id;
+    if (id === this.liveTranscriptId())
+      return this.selfSession.session_id;
+    for (const [sid, tid] of this.transcriptBySession) {
+      if (tid === id)
+        return sid;
+    }
+    return id;
+  }
+  followLiveTranscript() {
+    if (!this.resolveLiveTranscriptId)
+      return;
+    let live;
+    try {
+      live = this.resolveLiveTranscriptId();
+    } catch {
+      return;
+    }
+    if (!live)
+      return;
+    const next = live === this.selfSession.session_id ? null : live;
+    const prev = this.selfSession.transcript_id ?? null;
+    if (next === prev)
+      return;
+    if (next !== null) {
+      try {
+        if (readSessions(this.projectStateDir).some((s) => s.session_id === next)) {
+          if (!this.foreignTranscriptLogged) {
+            this.foreignTranscriptLogged = true;
+            process.stderr.write(`agent-channel: NOT following transcript ${next.slice(0, 8)} - it is ` + `another registered session's address (WI cb376ece)
+`);
+          }
+          return;
+        }
+      } catch {
+        return;
+      }
+    }
+    this.selfSession = { ...this.selfSession, transcript_id: next };
+    this.lastRenameScanSize = undefined;
+    if (this.pendingEmitAt !== null)
+      this.selfSizeAtEmit = 0;
+    const was = prev ?? this.selfSession.session_id;
+    const now3 = next ?? this.selfSession.session_id;
+    appendEmitLog(this.projectStateDir, {
+      ts: new Date().toISOString(),
+      event: "transcript_followed",
+      receiver_id8: this.selfSession.id8,
+      detail: `now writing ${now3}.jsonl (was ${was}.jsonl); address ` + `${this.selfSession.id8} unchanged`
+    });
+    process.stderr.write(`agent-channel: transcript followed ${was.slice(0, 8)} -> ${now3.slice(0, 8)} ` + `(address ${this.selfSession.id8} unchanged, WI cb376ece)
+`);
+    try {
+      writeSession(this.projectStateDir, {
+        ...this.selfSession,
+        last_heartbeat_at: new Date().toISOString()
+      });
+    } catch {}
   }
   reconcileInertLogged = false;
   reconcileIdentity() {
@@ -27611,7 +27721,7 @@ class AgentChannel {
   emit(ev) {
     if (this.pendingEmitAt === null) {
       this.pendingEmitAt = Date.now();
-      this.selfSizeAtEmit = this.peerTranscriptSize(this.selfSession.session_id) ?? 0;
+      this.selfSizeAtEmit = this.peerTranscriptSize(this.liveTranscriptId()) ?? 0;
     }
     this.rawEmit(ev);
   }
@@ -27666,7 +27776,7 @@ class AgentChannel {
   }
   syncRenameIntoName() {
     try {
-      const path2 = join10(this.projectsHashDir, `${this.selfSession.session_id}.jsonl`);
+      const path2 = join10(this.projectsHashDir, `${this.liveTranscriptId()}.jsonl`);
       const { name, size } = readLatestRename(path2, this.lastRenameScanSize);
       this.lastRenameScanSize = size;
       if (name && name !== this.selfSession.name) {
@@ -27729,7 +27839,7 @@ class AgentChannel {
   checkOwnTransport() {
     const owed = this.pendingEmitAt;
     if (owed !== null) {
-      const size = this.peerTranscriptSize(this.selfSession.session_id);
+      const size = this.peerTranscriptSize(this.liveTranscriptId());
       if (deliveryObservedSince(size, this.selfSizeAtEmit)) {
         this.pendingEmitAt = null;
         this.selfSizeAtEmit = null;
@@ -27786,7 +27896,11 @@ class AgentChannel {
     const now3 = Date.now();
     const current = new Map;
     current.set(this.selfSession.session_id, this.selfSession);
+    const transcripts = new Map;
     for (const s of readSessions(this.projectStateDir)) {
+      if (s.transcript_id && s.transcript_id !== s.session_id) {
+        transcripts.set(s.session_id, s.transcript_id);
+      }
       if (s.session_id === this.selfSession.session_id) {
         current.set(s.session_id, s);
         continue;
@@ -27797,6 +27911,7 @@ class AgentChannel {
       }
     }
     this.currentRoster = current;
+    this.transcriptBySession = transcripts;
     for (const [sid, entry] of current) {
       if (sid === this.selfSession.session_id)
         continue;
@@ -27825,7 +27940,7 @@ class AgentChannel {
       if (current.has(sid))
         continue;
       this.ingressEmitted.delete(sid);
-      const size = this.peerTranscriptSize(sid);
+      const size = this.peerTranscriptSize(this.transcriptFor(sid));
       if (!this.sizeAtStale.has(sid) && size != null) {
         this.sizeAtStale.set(sid, size);
       }
@@ -27899,6 +28014,107 @@ class AgentChannel {
       return null;
     }
   }
+  readTranscriptHeaderName(tid) {
+    let fd;
+    try {
+      const path2 = join10(this.projectsHashDir, `${tid}.jsonl`);
+      const length = Math.min(statSync8(path2).size, 16384);
+      if (length <= 0)
+        return null;
+      fd = openSync3(path2, "r");
+      const chunk = Buffer.allocUnsafe(length);
+      const n = readSync3(fd, chunk, 0, length, 0);
+      const head = chunk.subarray(0, n).toString("utf8");
+      for (const line of head.split(`
+`)) {
+        let rec;
+        try {
+          rec = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const name = rec?.type === "agent-name" ? rec.agentName : rec?.type === "custom-title" ? rec.customTitle : undefined;
+        if (typeof name === "string" && name.trim())
+          return name.trim();
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined)
+        closeSync3(fd);
+    }
+  }
+  transcriptMtimeIso(tid) {
+    try {
+      return new Date(statSync8(join10(this.projectsHashDir, `${tid}.jsonl`)).mtimeMs).toISOString();
+    } catch {
+      return null;
+    }
+  }
+  detectUnroutedTranscripts(current, now3) {
+    if (this.unroutedSeen.size === 0)
+      return;
+    const primeLive = Array.from(current.values()).some((s) => s.role === "prime" && s.session_id !== this.selfSession.session_id);
+    if (this.selfSession.role !== "prime" && primeLive)
+      return;
+    const identity = this.identityRoster();
+    for (const [tid, seen] of this.unroutedSeen) {
+      if (identity.has(tid)) {
+        this.unroutedSeen.delete(tid);
+        continue;
+      }
+      const header = this.readTranscriptHeaderName(tid);
+      if (!header)
+        continue;
+      const lane = Array.from(current.values()).find((s) => s.name === header && s.session_id !== tid);
+      if (!lane)
+        continue;
+      let lastEmit = seen.emittedAt;
+      try {
+        const durable = getAlertLastEmit(this.projectStateDir, "unrouted_transcript", tid);
+        if (durable !== undefined)
+          lastEmit = Math.max(durable, lastEmit ?? 0);
+      } catch {}
+      if (lastEmit !== undefined && now3 - lastEmit < CLIENT_ALERT_REFRACTORY_MS)
+        continue;
+      seen.emittedAt = now3;
+      try {
+        setAlertLastEmit(this.projectStateDir, "unrouted_transcript", tid, now3);
+      } catch {}
+      const laneTid = this.transcriptFor(lane.session_id);
+      const detail = `transcript ${tid.slice(0, 8)} names itself "${header}" (row ${lane.id8}, ` + `routed ${laneTid.slice(0, 8)}); ${seen.count} routable line(s) dropped since ` + `${seen.firstAt}`;
+      appendEmitLog(this.projectStateDir, {
+        ts: new Date(now3).toISOString(),
+        event: "unrouted_transcript",
+        receiver_id8: this.selfSession.id8,
+        sender_id8: tid.slice(0, 8),
+        detail
+      });
+      this.emit({
+        content: formatUnroutedTranscriptAlert({
+          laneName: lane.name,
+          laneId8: lane.id8,
+          laneTranscriptId: laneTid,
+          unroutedTranscriptId: tid,
+          unroutedMtime: this.transcriptMtimeIso(tid),
+          laneTranscriptMtime: this.transcriptMtimeIso(laneTid),
+          droppedLines: seen.count,
+          firstDroppedAt: seen.firstAt
+        }),
+        meta: {
+          from_session: lane.session_id,
+          from_id8: lane.id8,
+          from_role: lane.role,
+          from_name: lane.name,
+          from_task: lane.current_task ?? null,
+          event_type: "unrouted_transcript",
+          escalate_to_user: true,
+          ts: new Date(now3).toISOString()
+        }
+      });
+    }
+  }
   readTranscriptTail(sid) {
     let fd;
     try {
@@ -27925,7 +28141,7 @@ class AgentChannel {
       if (sid === this.selfSession.session_id)
         continue;
       try {
-        peerTurnAges.push(now3 - statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs);
+        peerTurnAges.push(now3 - statSync8(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs);
       } catch {}
     }
     if (isFleetDormant(peerTurnAges))
@@ -27935,18 +28151,34 @@ class AgentChannel {
         continue;
       try {
         const since = entry.client_unreachable_since ? Date.parse(entry.client_unreachable_since) : NaN;
-        if (!Number.isNaN(since)) {
+        const primeLive = Array.from(current.values()).some((s) => s.role === "prime" && s.session_id !== sid);
+        const surfaceHere = this.selfSession.role === "prime" || entry.role === "prime" || !primeLive;
+        if (!Number.isNaN(since) && surfaceHere) {
           const lastEmit = this.clientTransportLastEmit.get(sid);
           if (lastEmit === undefined || now3 - lastEmit >= CLIENT_ALERT_REFRACTORY_MS) {
             this.clientTransportLastEmit.set(sid, now3);
             const waitMin = Math.round((now3 - since) / 60000);
             const anchor = new Date(since).toISOString();
+            const transcriptId = this.transcriptFor(sid);
+            let transcriptMtime = null;
+            let transcriptSize = null;
+            try {
+              const st = statSync8(join10(this.projectsHashDir, `${transcriptId}.jsonl`));
+              transcriptMtime = new Date(st.mtimeMs).toISOString();
+              transcriptSize = st.size;
+            } catch {}
+            const hb = Date.parse(entry.last_heartbeat_at);
             this.emit({
               content: formatClientTransportAlert({
                 name: entry.name,
                 id8: entry.id8,
                 anchor,
-                waitMin
+                waitMin,
+                transcriptId,
+                transcriptMtime,
+                transcriptSize,
+                heartbeatAgeSec: Number.isFinite(hb) ? Math.round((now3 - hb) / 1000) : null,
+                now: new Date(now3).toISOString()
               }),
               meta: {
                 from_session: entry.session_id,
@@ -27955,19 +28187,20 @@ class AgentChannel {
                 from_name: entry.name,
                 from_task: entry.current_task ?? null,
                 event_type: "client_transport_suspect",
+                escalate_to_user: true,
                 ts: new Date(now3).toISOString()
               }
             });
           }
         }
       } catch {}
-      const tail = this.readTranscriptTail(sid);
+      const tail = this.readTranscriptTail(this.transcriptFor(sid));
       if (tail == null)
         continue;
       const { oldestOrphanEnqueueTs, lastRealIsMidTurn } = parseIngressTail(tail);
       let transcriptMtimeMs = null;
       try {
-        transcriptMtimeMs = statSync8(join10(this.projectsHashDir, `${sid}.jsonl`)).mtimeMs;
+        transcriptMtimeMs = statSync8(join10(this.projectsHashDir, `${this.transcriptFor(sid)}.jsonl`)).mtimeMs;
       } catch {
         transcriptMtimeMs = null;
       }
@@ -28014,7 +28247,7 @@ class AgentChannel {
 ` + INGRESS_ACTIVE_PROBE_NOTE + `
 ` + `TRIAGE - DO THE FREE CHECK FIRST, then branch on what you need:
 ` + `  * FIRST, FREE, AND OFTEN DECISIVE -> did this session POST to the channel ` + `AFTER the alert timestamp above? You already have those messages; no command ` + `needed. If yes it is reachable and you are DONE - a session that cannot see ` + `the channel cannot post to it. Two readers have skipped this step while ` + `holding the refuting messages (e24d8156, firings #8 and #11); it does not ` + `feel like evidence because it is not a measurement, but it outranks one.
-` + `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime ` + `(~/.claude/projects/<hash>/${entry.session_id}.jsonl). Free, instant, costs ` + `nobody a turn. GROWTH proves alive and working, not parked.
+` + `  * NEED ONLY TO KNOW IT IS ALIVE -> check its transcript mtime ` + `(~/.claude/projects/<hash>/${this.transcriptFor(sid)}.jsonl). Free, instant, costs ` + `nobody a turn. GROWTH proves alive and working, not parked.
 ` + `    SAMPLING SHAPE MATTERS: three or more readings across 40-60 SECONDS, ` + `with an INDEPENDENT third session as a live control (not just your own - ` + `your own transcript can be frozen for your whole turn while you are ` + `demonstrably alive). A short flat window is NOT a finding, it means the ` + `instrument was too small; widen it or switch. Growth anywhere = alive, ` + `conclusive, done.
 ` + `    IT ONLY PROVES ONE DIRECTION. A FROZEN transcript does NOT prove parked ` + `- a session whose MCP transport has dropped is healthy, working and frozen ` + `too (measured: 11.37h, 2026-08-09). Frozen means "still unknown", never ` + `"confirmed parked".
 ` + `    AND IT IS TRIAGE ONLY, NEVER A GATE ON THIS ALERT. Emit-time gating on ` + `mtime is contaminated by construction - the enqueue itself writes into the ` + `target's transcript - so it would silently disable this detector rather than ` + `sharpen it. Grep MTIME_DELIBERATELY_UNUSED before proposing it; it has been ` + `re-derived twice.
@@ -28053,11 +28286,13 @@ class AgentChannel {
     if (this.retired)
       return;
     try {
+      this.followLiveTranscript();
       this.detectSessionChanges();
       const ingressNow = Date.now();
       if (ingressNow - this.lastIngressCheckAt >= INGRESS_CHECK_INTERVAL_MS) {
         this.lastIngressCheckAt = ingressNow;
         this.detectIngress(this.currentRoster, ingressNow);
+        this.detectUnroutedTranscripts(this.currentRoster, ingressNow);
       }
       const sessions = Array.from(this.currentRoster.values());
       const identity = this.identityRoster();
@@ -28192,6 +28427,16 @@ class AgentChannel {
       identity.set(sid, entry);
     for (const [sid, entry] of this.currentRoster)
       identity.set(sid, entry);
+    const aliases = [];
+    for (const entry of identity.values()) {
+      const tid = entry.transcript_id;
+      if (tid && tid !== entry.session_id)
+        aliases.push([tid, entry]);
+    }
+    for (const [tid, entry] of aliases) {
+      if (!identity.has(tid))
+        identity.set(tid, entry);
+    }
     return identity;
   }
   processFile(file, sessions, identity, overrideState, offsets) {
@@ -28301,7 +28546,7 @@ class AgentChannel {
           continue;
       }
       const senderId = file.split(/[\\/]/).pop().replace(/\.jsonl$/, "");
-      if (senderId === this.selfSession.session_id) {
+      if (senderId === this.liveTranscriptId() || senderId === this.selfSession.session_id) {
         const ids = raw?.message?.content;
         const body = typeof ids === "string" ? ids : "";
         if (body.includes("<channel")) {
@@ -28325,6 +28570,14 @@ class AgentChannel {
       if (!sender) {
         if (filterEvent(raw)) {
           this.discarded.set(senderId, (this.discarded.get(senderId) ?? 0) + 1);
+          const nowIso = new Date().toISOString();
+          const seen = this.unroutedSeen.get(senderId);
+          if (seen) {
+            seen.count += 1;
+            seen.lastAt = nowIso;
+          } else {
+            this.unroutedSeen.set(senderId, { count: 1, firstAt: nowIso, lastAt: nowIso });
+          }
           appendEmitLog(this.projectStateDir, {
             ts: new Date().toISOString(),
             event: "unknown_sender",
@@ -28869,6 +29122,40 @@ function readAuthoritativeSessionId() {
     }
   } catch {}
   return;
+}
+var liveTranscriptPid;
+var liveTranscriptCache = null;
+function readLiveTranscriptId() {
+  if (liveTranscriptPid === undefined) {
+    const envPid = Number.parseInt(process.env.CLAUDE_PID ?? "", 10);
+    liveTranscriptPid = Number.isFinite(envPid) && envPid > 0 ? envPid : findClaudeAncestorPid();
+  }
+  if (!liveTranscriptPid)
+    return;
+  const projectDir = process.env.ORCHESTRATOR_PROJECT_ROOT || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const perPidFile = join11(projectDir, ".orchestrator-state", `active-session-${liveTranscriptPid}`);
+  let mtimeMs;
+  try {
+    mtimeMs = statSync9(perPidFile).mtimeMs;
+  } catch {
+    return;
+  }
+  if (liveTranscriptCache && liveTranscriptCache.mtimeMs === mtimeMs) {
+    return liveTranscriptCache.id;
+  }
+  let id;
+  try {
+    const raw = readFileSync7(perPidFile, "utf8").trim();
+    if (raw && /^[a-zA-Z0-9_-]+$/.test(raw))
+      id = raw;
+  } catch {
+    id = undefined;
+  }
+  const envId = process.env.CLAUDE_CODE_SESSION_ID || process.env.CLAUDE_SESSION_ID;
+  if (id && mtimeMs < PROCESS_START_MS && id !== envId)
+    id = undefined;
+  liveTranscriptCache = { mtimeMs, id };
+  return id;
 }
 function resolveSessionId(explicit) {
   return explicit ?? getFallbackSessionId();
@@ -30563,7 +30850,8 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
   hot_path_status: exports_external.string().max(80).optional(),
   keep_clean: exports_external.boolean().optional()
 }, async (args) => {
-  const sid = resolveSessionId(args.session_id);
+  const resolved = resolveSessionId(args.session_id);
+  const sid = resolved && agentChannel ? agentChannel.canonicalSessionId(resolved) : resolved;
   if (!sid || !sessionTracker) {
     return {
       content: [
@@ -30589,7 +30877,8 @@ server.tool("update_session_task", "Broadcast what you're currently working on. 
       keep_clean: args.keep_clean
     });
   }
-  return { content: [{ type: "text", text }] };
+  const note = resolved && sid !== resolved ? ` (written to your roster address ${sid.slice(0, 8)}; ${resolved.slice(0, 8)} is the transcript you are writing since /clear or /resume)` : "";
+  return { content: [{ type: "text", text: text + note }] };
 });
 server.tool("_hook_event", "Internal: dispatcher invoked from Claude Code hooks via type:'mcp_tool'. Routes per event_name. Returns hookSpecificOutput-shaped JSON. Agents should not call this directly.", {
   event: exports_external.enum(HOOK_EVENTS),
@@ -30751,7 +31040,7 @@ function startAgentChannel() {
         process.stderr.write(`agent-channel: notification failed (event suppressed): ${msg}
 `);
       });
-    }, permissionRelay ?? undefined, readAuthoritativeSessionId, () => clientHandshakeComplete);
+    }, permissionRelay ?? undefined, readAuthoritativeSessionId, () => clientHandshakeComplete, readLiveTranscriptId);
     agentChannel.start();
     process.stderr.write(`agent-channel: started as ${role} session_id=${sessionId} id8=${self.id8} name=${name} state_dir=${stateDir} projects_hash_dir=${projectsHashDir}
 `);

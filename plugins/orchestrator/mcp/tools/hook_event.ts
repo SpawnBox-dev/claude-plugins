@@ -2540,6 +2540,9 @@ function listRecentSessionNotes(
 }
 
 function handlePreCompact(ctx: HookCtx, args: HookEventArgs): HookEventResponse {
+  // WI cb376ece: a subagent compacting must not stamp the PARENT's
+  // compaction state or bank a snapshot for it (see handleSessionStartCompact).
+  if (isSubagentHook(args.agent_id)) return {};
   const sid = sanitizeSessionId(args.session_id);
   if (sid) {
     // Store numeric epoch ms (not the ISO string from now()) so the
@@ -3105,10 +3108,33 @@ export function buildPaCompactAdvisoryEvent(opts: {
   };
 }
 
+/**
+ * PURE: did this hook fire inside a SUBAGENT rather than the session's main
+ * thread? Claude Code documents `agent_id` as "present only when the hook
+ * fires inside a subagent call. Use this to distinguish subagent hook calls
+ * from main-thread calls." An empty value, or an unsubstituted `${agent_id}`
+ * template, is the main thread.
+ *
+ * Exported for tests.
+ */
+export function isSubagentHook(agentId: string | undefined | null): boolean {
+  const v = (agentId ?? "").trim();
+  return v.length > 0 && !v.startsWith("${");
+}
+
 function handleSessionStartCompact(
   ctx: HookCtx,
   args: HookEventArgs
 ): HookEventResponse {
+  // WI cb376ece (2026-09-28): a SUBAGENT compacting is not the session
+  // compacting. A subagent's hooks carry its PARENT's session_id, so when PA's
+  // context-warden compacted at 2026-09-27T22:26:25.897Z (its own transcript,
+  // subagents/agent-a0c5ead8e79e88f21.jsonl, holds the SessionStart:compact
+  // attachment) this handler read it as PA compacting and sent every lane a
+  // pa_compact_recovery advisory. PA's own transcript has no compact_boundary
+  // between 22:16:57Z and 23:26:54Z. The other three signals that night each
+  // sat 7-9s before a real boundary, so the main-thread path is untouched.
+  if (isSubagentHook(args.agent_id)) return {};
   const sid = sanitizeSessionId(args.session_id);
 
   let currentTask: string | null = null;

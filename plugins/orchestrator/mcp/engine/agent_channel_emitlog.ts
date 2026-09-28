@@ -176,7 +176,21 @@ export type EmitLogEvent =
    * clientless server the plugin-manager race just spawned, and the session
    * goes silent with every other instrument still green.
    */
-  | "retire_deferred";
+  | "retire_deferred"
+  /**
+   * This session started writing a DIFFERENT transcript file while its MCP
+   * server (and so its address) stayed up - `/clear`, or an in-process
+   * `/resume` (WI cb376ece). The row now carries `transcript_id`, so peers
+   * route the new file under the unchanged address. `detail` names both files.
+   */
+  | "transcript_followed"
+  /**
+   * A transcript is producing routable lines that no registered session owns,
+   * and its own header names a LIVE roster row - the shape of a lane whose
+   * posts are being dropped because its row still points at an older file
+   * (WI cb376ece). Escalated to the user through PA; `detail` names the row.
+   */
+  | "unrouted_transcript";
 
 export interface EmitLogRecord {
   ts: string;
