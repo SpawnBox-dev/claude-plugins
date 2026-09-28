@@ -27019,6 +27019,7 @@ function parseAddressing(content, sender, sessions) {
   const targets = new Set;
   const unresolved = [];
   let pa_addressed = false;
+  let all_addressed = false;
   let had_address_syntax = false;
   if (PA_PREFIX_RE.test(content)) {
     had_address_syntax = true;
@@ -27038,6 +27039,7 @@ function parseAddressing(content, sender, sessions) {
         pa_addressed = true;
       }
     } else if (tag === "all") {
+      all_addressed = true;
       for (const s of sessions) {
         if (s.session_id !== sender.session_id)
           targets.add(s.session_id);
@@ -27056,6 +27058,7 @@ function parseAddressing(content, sender, sessions) {
     targets: Array.from(targets),
     pa_addressed,
     had_address_syntax,
+    all_addressed,
     override_command,
     unresolved_addresses: unresolved
   };
@@ -27644,23 +27647,30 @@ function parseIngressTail(tail) {
     lastRealIsMidTurn
   };
 }
-function decorateChannelContent(content, sender, eventType, addrTargets, paAddressed, sessions) {
+function decorateChannelContent(content, sender, eventType, addrTargets, paAddressed, sessions, allAddressed = false) {
   if (!paAddressed && addrTargets.length === 0) {
     return content;
   }
   const senderLabel = sender.role === "prime" ? "PA" : `SA-${sender.id8}`;
   const evtSuffix = eventType === "assistant_text" ? "" : `\xB7${eventType}`;
   let targetLabels;
-  if (paAddressed) {
-    const pa = sessions.find((s) => s.role === "prime");
-    targetLabels = [pa ? `@PA-${pa.id8}` : `@PA`];
+  if (allAddressed) {
+    targetLabels = ["@all"];
   } else {
-    targetLabels = addrTargets.map((sid) => {
+    targetLabels = [];
+    if (paAddressed) {
+      const pa = sessions.find((s) => s.role === "prime");
+      targetLabels.push(pa ? `@PA-${pa.id8}` : `@PA`);
+    }
+    for (const sid of addrTargets) {
       const s = sessions.find((x) => x.session_id === sid);
       if (!s)
-        return `@${sid.slice(0, 8)}`;
-      return s.role === "prime" ? `@PA-${s.id8}` : `@SA-${s.id8}`;
-    });
+        targetLabels.push(`@${sid.slice(0, 8)}`);
+      else if (s.role !== "prime")
+        targetLabels.push(`@SA-${s.id8}`);
+      else if (!paAddressed)
+        targetLabels.push(`@PA-${s.id8}`);
+    }
   }
   return `[${senderLabel}${evtSuffix}] ${targetLabels.join(",")} | ${content}`;
 }
@@ -28777,7 +28787,7 @@ class AgentChannel {
       targets: emitTargets.length
     });
     this.emit({
-      content: decorateChannelContent(emitContent, sender, ev.event_type, emitTargets, fullAddr.pa_addressed, sessions),
+      content: decorateChannelContent(emitContent, sender, ev.event_type, emitTargets, fullAddr.pa_addressed, sessions, fullAddr.all_addressed),
       meta: {
         from_session: sender.session_id,
         from_id8: sender.id8,

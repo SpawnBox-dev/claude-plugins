@@ -812,13 +812,14 @@ export function parseIngressTail(tail: string): {
  * Session join/depart and override events emit hand-crafted short labels
  * and skip this wrapper.
  */
-function decorateChannelContent(
+export function decorateChannelContent(
   content: string,
   sender: SessionEntry,
   eventType: string,
   addrTargets: string[],
   paAddressed: boolean,
   sessions: SessionEntry[],
+  allAddressed = false,
 ): string {
   // No addressing → pass content through raw, save the tokens.
   if (!paAddressed && addrTargets.length === 0) {
@@ -829,16 +830,29 @@ function decorateChannelContent(
   const evtSuffix = eventType === "assistant_text" ? "" : `·${eventType}`;
 
   // Resolve target session_ids to display labels.
+  //
+  // 🔴 LIST EVERY AUDIENCE, NOT JUST PA (WI 2292ba6c). This used to render
+  // `@PA-<id8>` alone whenever PA was addressed, dropping the SA targets and
+  // @all. Measured 2026-09-28: a handoff opened `@SA-89c514ba,@PA,@all`, was
+  // routed correctly to all seven sessions, and every one of them - including
+  // the lane being handed the work - was shown a header naming only PA. The
+  // header exists so a receiver can tell "directed at me" from "observing";
+  // a PA-only label says the opposite of the truth to every named SA.
   let targetLabels: string[];
-  if (paAddressed) {
-    const pa = sessions.find((s) => s.role === "prime");
-    targetLabels = [pa ? `@PA-${pa.id8}` : `@PA`];
+  if (allAddressed) {
+    targetLabels = ["@all"];
   } else {
-    targetLabels = addrTargets.map((sid) => {
+    targetLabels = [];
+    if (paAddressed) {
+      const pa = sessions.find((s) => s.role === "prime");
+      targetLabels.push(pa ? `@PA-${pa.id8}` : `@PA`);
+    }
+    for (const sid of addrTargets) {
       const s = sessions.find((x) => x.session_id === sid);
-      if (!s) return `@${sid.slice(0, 8)}`;
-      return s.role === "prime" ? `@PA-${s.id8}` : `@SA-${s.id8}`;
-    });
+      if (!s) targetLabels.push(`@${sid.slice(0, 8)}`);
+      else if (s.role !== "prime") targetLabels.push(`@SA-${s.id8}`);
+      else if (!paAddressed) targetLabels.push(`@PA-${s.id8}`);
+    }
   }
 
   return `[${senderLabel}${evtSuffix}] ${targetLabels.join(",")} | ${content}`;
@@ -3362,6 +3376,7 @@ export class AgentChannel {
         emitTargets,
         fullAddr.pa_addressed,
         sessions,
+        fullAddr.all_addressed,
       ),
       meta: {
         from_session: sender.session_id,

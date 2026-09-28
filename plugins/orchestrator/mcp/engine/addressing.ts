@@ -48,6 +48,11 @@ export interface AddressingResult {
    *  an unaddressed continuation that rides it - the 7ff34714 live-fail
    *  class (WI 96798325). */
   had_address_syntax: boolean;
+  /** True if an `@all` token appeared in an addressing context. Carried
+   *  separately because `targets` cannot tell "everyone, by name" from
+   *  "everyone, by @all", and the receiver's header should say which
+   *  (WI 2292ba6c). */
+  all_addressed: boolean;
   /** Override command if recognized. */
   override_command: "pause" | "resume" | null;
   /** id8s that didn't resolve to a known session - dropped from targets. */
@@ -92,6 +97,7 @@ export function parseAddressing(
   const targets = new Set<string>();
   const unresolved: string[] = [];
   let pa_addressed = false;
+  let all_addressed = false;
   // Set whenever a recognized addressing FORM is present, BEFORE/independent
   // of the self-exclusion + resolution guards below. This is what lets the
   // cascade router distinguish an empty-resolving addressed paragraph (a
@@ -122,6 +128,7 @@ export function parseAddressing(
         pa_addressed = true;
       }
     } else if (tag === "all") {
+      all_addressed = true;
       for (const s of sessions) {
         if (s.session_id !== sender.session_id) targets.add(s.session_id);
       }
@@ -140,6 +147,7 @@ export function parseAddressing(
     targets: Array.from(targets),
     pa_addressed,
     had_address_syntax,
+    all_addressed,
     override_command,
     unresolved_addresses: unresolved,
   };
