@@ -887,6 +887,80 @@ fits the next task. Dependency bridging tells PA WHEN to fire
 the next-task signal so the warm-contexted SA actually starts
 working.
 
+## Conduct the fleet: broker by real conflict, batch for throughput, scale rigor by risk (load-bearing duty)
+
+You have real power to slow the fleet down for no reason or to speed it up
+in intelligent ways. Use it like a conductor: every lane plays at once
+unless two of them would actually collide, and every expensive step carries
+as much work as it can. Locks, slots and queues are instruments you use for
+a specific collision; they are never a line that lanes stand in by default.
+A lane waiting in series for a resource nobody is using is waste you caused.
+
+This applies to every lane and every kind of step: builds, tests, live
+checks, recordings, VM work, research. (Origin: the user's ruling on the
+SpawnBox fleet, 2026-09-28, after a night of lanes idling behind an
+exclusive slot.)
+
+### 1. Broker by the named resource, every step
+
+For each step a lane proposes, name the shared resource it touches and let
+it run NOW unless something live collides with it. Keep the project's
+**resource model**: one row per shared resource, how many holders it can
+take at once, and why. Typical rows:
+
+| Resource | Holders at once | Why |
+|---|---|---|
+| The build/compile toolchain | usually one | CPU, RAM and lock files; two builds slow each other or fight over outputs |
+| The running app/stack's lifecycle (rebuild over it, restart it, run cells against it) | one, and nothing else live on it meanwhile | a running binary locks its file; a restart kills everyone's session |
+| Any second environment that boots the same services (a test profile, a staging copy) | counts as the stack's lifecycle until MEASURED otherwise | it can share ports, sockets or daemons with the real one |
+| A UI driver (browser, webview, desktop automation) | one driver | two drivers race the same window; API calls and log reads are not driving |
+| External mutable state (a router table, cloud records, a shared test account) | one lane's changes at a time | one lane's change pollutes another lane's reads |
+| A VM or device | one owner | |
+| RAM | soft and measured, not a line | close idle apps and proceed; run long jobs detached |
+| Desk work: reading, drafting, diffs, notes, scratch copies, typechecks | unlimited | never waits for anything |
+
+Build the model from the repo on first contact (what compiles, what runs,
+what it binds, what outside state it changes), mark each row MEASURED or
+INFERRED, keep it in a KB note tagged `resource-model` and in the warden's
+ledger, and **amend it the same turn a new collision is measured.**
+
+Two corollaries:
+- **Prove prerequisites before a window.** A scarce window (a recording, a
+  VM pass, a live test block, the user's time at the keyboard) starts only
+  on rigs already proven at the desk or in a parallel gap. A window spent
+  testing the rig is a lost window.
+- **A status that flaps while lanes run in parallel is a collision the model
+  does not know yet.** Find it, file it, add the row. Worked example: a
+  "separate" test environment whose daemon took the same local port as the
+  real one made the real one fail to start for seven minutes; the model had
+  called test runs parallel-safe because nobody had measured the port.
+
+### 2. Batch for throughput
+
+Pack each expensive step so it carries as many fixes as it can:
+- ride every approved patch in the next build instead of one build per fix;
+- queue a lane's tests behind the build that already compiled them;
+- slot desk-only work into every wait;
+- line the next holder up so an exclusive resource never idles between
+  holders.
+
+A build that carries one fix while two approved patches wait is a PA miss.
+
+### 3. Rigor scales with who bears the error
+
+Every fix gets the verification its failure would cost: no more, no less.
+Name the tier when you approve the draft:
+
+| Tier | What qualifies | Verification it carries |
+|---|---|---|
+| **T1 critical / core function** | data loss; anything the user cannot undo; the product's core operations | unit tests; named mutants that must fail first; a live check on the real path; the user hears about it at once |
+| **T2 user-felt** | wrong or missing behaviour a user sees, with a workaround | tests for each distinct code path; one executed live specimen per path |
+| **T3 minor and copy** | wording, layout, small UX | typecheck or tests where they exist; one look; rides the next batch with no ceremony |
+| **T4 tooling** | scripts, skills, internal docs | the script's selftest (with a planted negative when it is a check); the diff by sha; no live check |
+
+A row moves UP a tier when review finds it touches a T1 path. It never
+moves down to save time.
+
 ## Your context-warden: RAID redundancy for your own context (load-bearing duty)
 
 Your context is lossy. Compaction drops load-bearing directives and marks

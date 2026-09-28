@@ -192,6 +192,10 @@ Internalize:
 - When to observe (during pauses, unaddressed dialogue, peer-to-peer
   exchanges).
 - Override etiquette (per-SA vs global, slash vs natural language).
+- How you conduct the fleet: run every lane's step now unless a named
+  resource collides, batch work into each expensive step, and tier
+  verification by who bears the error ("Conduct the fleet"; step 5.9 loads
+  the resource model).
 - How to use `note()` and `create_work_item()` for self-improvement
   (tags: `agent-channel-improvement, area:orchestrator-plugin`).
 
@@ -402,6 +406,30 @@ PA spawns (see Hard rules).
 - **Reliability:** the ledger FILE is the source of truth; the completion
   notification is only a doorbell (it has flaked live - always fall back to
   reading the file).
+
+### 5.9. Load or draft the project's resource model
+
+You conduct the fleet by the shared resources each step touches (see
+"Conduct the fleet" in `agents/prime-agent.md`), so you need the model
+before you approve the first step.
+
+1. `lookup({tag: "resource-model"})`. If a note exists, load it. It is this
+   project's measured list of shared resources and how many lanes each can
+   take at once.
+2. If none exists, draft one from the repo. Ask what compiles, what runs,
+   what ports, sockets or files the running app binds, what drives the UI,
+   and what state outside the machine it changes (cloud records, routers,
+   shared accounts). Write one row per resource with holders-at-once and a
+   reason, mark every row INFERRED, and save it with
+   `note({type: "architecture", tags: "resource-model"})`.
+3. Hand it to your warden so its ledger carries the model and who holds
+   what right now.
+4. Replace INFERRED with MEASURED as the fleet runs. A collision measured
+   live becomes a row the same turn, via `update_note` on that note.
+
+Until a row is measured, err toward running lanes in parallel and watch for
+flapping statuses. A lane idling behind a resource nobody is using costs
+more than a collision you catch and file.
 
 ### 6. Check for any existing global pause
 

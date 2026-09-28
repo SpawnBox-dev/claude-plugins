@@ -1470,6 +1470,9 @@ describe("WI 2ad3240e: role-aware symmetric post-compact recovery", () => {
       const lc = msg.toLowerCase();
       expect(lc).toContain("fleet check-in");
       expect(lc).toContain("poll every active subordinate");
+      // The conductor duty (prime-agent.md "Conduct the fleet"): a compacted PA
+      // re-derives resource holders before approving any step.
+      expect(lc).toContain("re-derive who holds which resource");
       // (b) recent completions WITH ids requested
       expect(lc).toContain("recent completions");
       // roster with both SAs; null task rendered safely

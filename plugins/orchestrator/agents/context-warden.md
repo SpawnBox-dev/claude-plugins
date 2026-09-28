@@ -217,6 +217,11 @@ Keep the ledger structured so PA can scan it in seconds:
 - **Open gates** - what PA is gating (publishes, reviews, ships awaiting
   PA's go), and what each is waiting on. A compacted PA must not drop a
   gate on the floor or re-approve something already approved.
+- **Resources and holders** - the project's resource model (the
+  `resource-model` note: each shared resource and how many lanes it takes
+  at once), plus who holds each one right now and since when, read from the
+  lanes' own posts. A compacted PA brokers from this. Flag a resource held
+  with no visible activity, and a lane waiting on a resource nobody holds.
 - **Watch-for** - dependency bridges + expected signals PA queued
   ("@SA-B goes when SA-A ships X"; "warden: tell PA when the CI run
   lands"). Flag the moment a watched signal appears.
